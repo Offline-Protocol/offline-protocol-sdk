@@ -212,6 +212,9 @@ PLATFORM: frozenset[str] = frozenset(
         # Bluetooth LE driver
         "ble_peer_discovered",
         "ble_peer_lost",
+        "ble_peer_rssi",
+        "ble_node_hash",
+        "set_peer_rssi_events",
         "ble_status_changed",
         "ble_fragment_received",
         "ble_get_next_fragment",

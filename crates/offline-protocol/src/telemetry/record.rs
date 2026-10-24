@@ -117,6 +117,7 @@ pub(crate) mod tests {
         "protocol.relay.demoted",
         "protocol.neighbor.discovered",
         "protocol.neighbor.lost",
+        "protocol.neighbor.rssi",
         "protocol.identity.ready",
         "protocol.network.metrics",
         "protocol.file.progress",
@@ -305,6 +306,7 @@ pub(crate) mod tests {
             | Event::RelayDemoted { .. }
             | Event::NeighborDiscovered { .. }
             | Event::NeighborLost { .. }
+            | Event::PeerRssi { .. }
             | Event::IdentityReady { .. }
             | Event::NetworkMetrics { .. }
             | Event::FileProgress { .. }
@@ -460,6 +462,11 @@ pub(crate) mod tests {
             },
             Event::NeighborLost {
                 peer_id: String::new(),
+            },
+            Event::PeerRssi {
+                peer_id: String::new(),
+                transport: String::new(),
+                rssi: 0,
             },
             Event::IdentityReady {
                 address: String::new(),

@@ -451,6 +451,8 @@ public class BleManager: NSObject, TransportManager {
     private var lastProactiveScanRefresh: Date?
     /// Tracks recently seen advertisement hashes to avoid duplicate processing
     private var recentAdvertisementHashes: [UUID: (hash: Int, timestamp: Date)] = [:]
+    /// When each peripheral last fed a reading to the core; main thread only.
+    private var lastRssiFeedAt: [UUID: Date] = [:]
     /// Initial aggressive discovery phase duration - more frequent scanning initially
     private let AGGRESSIVE_DISCOVERY_PHASE: TimeInterval = 30.0
     /// Tracks when aggressive discovery phase started
@@ -3219,6 +3221,30 @@ extension BleManager: CBCentralManagerDelegate {
         // Adaptive scanning: track discoveries for density estimation
         recordDiscoveryForDensity(now: now)
         
+        // Live signal strength, above the duplicate check: that check skips a
+        // repeat within the same 5 dB bucket for a second, which sheds work
+        // but would also bias the readings toward bucket changes. The policy's
+        // own throttle keeps this to about four calls a second per peripheral.
+        // The core attributes the reading to a linked peer, by this link or by
+        // the node hash an Android peer carries in its scan response (Android
+        // re-advertises from a new address on every link change, so its
+        // advertisements soon match no link of ours), and drops anything
+        // else, so no mesh gate is needed in
+        // front of it. Off the main thread, like every protocol call here.
+        let linkedPeerId = connections.peripheralDeviceId(for: peripheral.identifier)
+        let advertisedHash = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[SERVICE_UUID]
+        if PeerRssiFeedPolicy.admit(&lastRssiFeedAt, id: peripheral.identifier, now: now,
+                                    linked: linkedPeerId != nil, hasServiceData: advertisedHash != nil) {
+            let reading = rssiValue
+            onProtocolQueue { [weak self] in
+                self?.protocolInstance.blePeerRssi(
+                    peerId: linkedPeerId,
+                    nodeHash: advertisedHash.map { [UInt8]($0) },
+                    rssi: reading
+                )
+            }
+        }
+
         // Duplicate advertisement detection - avoid processing identical advertisements
         // This improves performance in dense networks where the same device may be seen many times
         let advertHash = computeAdvertisementHash(peripheral: peripheral, advertisementData: advertisementData, rssi: rssiValue)

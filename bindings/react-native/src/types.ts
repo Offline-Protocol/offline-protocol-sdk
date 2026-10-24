@@ -388,6 +388,22 @@ export interface NetworkConfig {
 export interface BleTransportConfig {
   /** Enable BLE transport */
   enabled: boolean;
+  /**
+   * Android only, default `false`. Carry an 8-byte digest of this device's
+   * address in its scan response, so an iPhone can attribute `peer_rssi`
+   * readings to this phone. Without it an iPhone rarely can: Android
+   * advertises from a new Bluetooth address each time it restarts
+   * advertising, which it does on every link change, so the advertisement
+   * soon stops matching any link the iPhone holds, whichever side opened
+   * it.
+   *
+   * The privacy cost is two exposures (threat model R29). The digest never
+   * changes, so any scanner in radio range can follow this phone across
+   * Bluetooth address rotation, knowing nothing about it; and anyone who
+   * knows its address (contacts, group members, relay operators) can
+   * identify it without connecting. iOS cannot advertise it.
+   */
+  advertiseNodeHash?: boolean;
 }
 
 /**
@@ -1449,6 +1465,26 @@ export interface NeighborDiscoveredEvent extends BaseEvent {
 export interface NeighborLostEvent extends BaseEvent {
   type: 'neighbor_lost';
   peer_id: string;
+}
+
+/**
+ * A live signal-strength reading for a linked Bluetooth LE neighbor.
+ *
+ * Delivered only while at least one `on('peer_rssi', ...)` listener is
+ * registered (an `'all'` listener does not turn it on), at most four a second
+ * per peer. Only a peer that has proved its address on a link is named.
+ *
+ * `rssi` is raw dBm and swings several dB between samples; smooth it for a
+ * proximity display, for example `next = 0.7 * prev + 0.3 * rssi`.
+ */
+export interface PeerRssiEvent extends BaseEvent {
+  type: 'peer_rssi';
+  /** The peer's canonical address (`off1…`), as in `neighbor_discovered`. */
+  peer_id: string;
+  /** Transport the reading came from: `'BLE'`. */
+  transport: string;
+  /** Received signal strength in dBm. */
+  rssi: number;
 }
 
 /**
@@ -2941,6 +2977,7 @@ export type ProtocolEvent =
   | RelayDemotedBatteryEvent
   | NeighborDiscoveredEvent
   | NeighborLostEvent
+  | PeerRssiEvent
   | IdentityReadyEvent
   | NetworkMetricsEvent
   | FileProgressEvent

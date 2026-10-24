@@ -763,7 +763,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         // reach JS in the order they were given out. See `eventSeq`.
         eventSeqLock.lock()
         defer { eventSeqLock.unlock() }
-        if eventName == Events.onEvent, var numbered = body as? [String: Any] {
+        // An unnumbered event reaches JS without a `seq`, which JS dispatches
+        // without gap tracking. See `EventReplayRing.isReplayed`.
+        if eventName == Events.onEvent, var numbered = body as? [String: Any],
+           EventReplayRing.isReplayed(numbered["eventJson"] as? String) {
             numbered[Self.eventSeqField] = eventSeq
             if let eventJson = numbered["eventJson"] as? String {
                 eventReplay.record(seq: eventSeq, eventJson: eventJson)
@@ -1191,6 +1194,15 @@ class OfflineProtocolModule: RCTEventEmitter {
                                    resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {
         protocolInstance?.setTelemetryEnabled(enabled: enabled)
+        resolver(nil)
+    }
+
+    /// `peer_rssi` events, which the TypeScript layer turns on while it has a
+    /// listener for them. Off by default, and off the core ignores readings.
+    @objc func setPeerRssiEvents(_ enabled: Bool,
+                                 resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        protocolInstance?.setPeerRssiEvents(enabled: enabled)
         resolver(nil)
     }
 

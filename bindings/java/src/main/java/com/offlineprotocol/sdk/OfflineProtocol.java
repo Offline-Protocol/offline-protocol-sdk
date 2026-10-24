@@ -306,6 +306,37 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public java.util.List<java.lang.Byte> bleNodeHash()  {
+            try {
+                return FfiConverterOptionalSequenceByte.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash(_allocator, _uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public void blePeerDiscovered(java.lang.String peerId, short rssi) throws ProtocolException {
             try {
                 
@@ -361,6 +392,36 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
                 if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
                     throw (ProtocolException)_uniffi_ex.getCause();
                 }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void blePeerRssi(java.lang.String peerId, java.util.List<java.lang.Byte> nodeHash, short rssi)  {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi(_uniffiHandle,
+            FfiConverterOptionalString.INSTANCE.lower(peerId), FfiConverterOptionalSequenceByte.INSTANCE.lower(nodeHash), rssi, _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
                 
                 if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
                     throw (InternalException)_uniffi_ex.getCause();
@@ -5118,6 +5179,36 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
     UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
         UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(_uniffiHandle,
             FfiConverterTypeNostrTransportCallback.INSTANCE.lower(callback), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void setPeerRssiEvents(boolean enabled)  {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events(_uniffiHandle,
+            FfiConverterBoolean.INSTANCE.lower(enabled), _status);
     });
     } catch (java.lang.RuntimeException _uniffi_ex) {
             throw _uniffi_ex;

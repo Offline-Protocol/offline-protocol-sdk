@@ -6338,12 +6338,20 @@ module UniFFILib
     [:uint64, RustCallStatus.by_ref],
     :uint32
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash,
+    [:uint64, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered,
     [:uint64, RustBuffer.by_value, :int16, RustCallStatus.by_ref],
     :void
   
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost,
     [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
+    :void
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi,
+    [:uint64, RustBuffer.by_value, RustBuffer.by_value, :int16, RustCallStatus.by_ref],
     :void
   
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count,
@@ -6938,6 +6946,10 @@ module UniFFILib
     [:uint64, :uint64, RustCallStatus.by_ref],
     :void
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events,
+    [:uint64, :int8, RustCallStatus.by_ref],
+    :void
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority,
     [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
@@ -7466,11 +7478,19 @@ module UniFFILib
     [],
     :uint16
   
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash,
+    [],
+    :uint16
+  
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered,
     [],
     :uint16
   
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi,
     [],
     :uint16
   
@@ -8063,6 +8083,10 @@ module UniFFILib
     :uint16
   
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events,
     [],
     :uint16
   
@@ -10955,6 +10979,10 @@ end
     result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_peer_count,uniffi_clone_handle(),)
     return result.to_i
   end
+  def ble_node_hash()
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash,uniffi_clone_handle(),)
+    return result.consume_into_OptionalSequenceu8
+  end
   def ble_peer_discovered(peer_id, rssi)
         peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
         
@@ -10967,6 +10995,16 @@ end
         peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
         
       ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost,uniffi_clone_handle(),RustBuffer.alloc_from_string(peer_id))
+  end
+  
+  def ble_peer_rssi(peer_id, node_hash, rssi)
+        peer_id = (peer_id ? ::OfflineProtocol::uniffi_utf8(peer_id) : nil)
+        RustBuffer.check_lower_Optionalstring(peer_id)
+        node_hash = (node_hash ? node_hash.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) } : nil)
+        RustBuffer.check_lower_OptionalSequenceu8(node_hash)
+        rssi = ::OfflineProtocol::uniffi_in_range(rssi, "i16", -2**15, 2**15)
+        
+      ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi,uniffi_clone_handle(),RustBuffer.alloc_from_Optionalstring(peer_id),RustBuffer.alloc_from_OptionalSequenceu8(node_hash),rssi)
   end
   
   def ble_recipient_not_among_peers_count()
@@ -11883,6 +11921,12 @@ end
         callback = callback
         
       ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback,uniffi_clone_handle(),(CallbackInterfaceNostrTransportCallbackFfiConverter.lower callback))
+  end
+  
+  def set_peer_rssi_events(enabled)
+        enabled = enabled ? true : false
+        
+      ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events,uniffi_clone_handle(),(enabled ? 1 : 0))
   end
   
   def set_relay_priority(priority)

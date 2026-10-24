@@ -541,7 +541,7 @@ this chapter asserts it.
 | `initialize_mls`, `initialize_mls_with_file_stores`, `close_file_stores` | The identity's storage is attached once, by the process that holds the store key |
 | `enable_telemetry`, `disable_telemetry`, `set_telemetry_enabled`, `flush_telemetry`, `flush_telemetry_blocking`, `telemetry_stats`, `end_telemetry_session`, `notify_app_state`, `telemetry_install_id` | The binding fills the platform fields and owns the session boundary ([C12](../bridges/README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform)); the server is the binding |
 | `set_ble_transport_callback`, `set_wifi_direct_transport_callback`, `set_reticulum_transport_callback`, `set_nostr_transport_callback` | A callback interface has no JSON form, and each installs the driver of a carrier |
-| `ble_peer_discovered`, `ble_peer_lost`, `ble_status_changed`, `ble_fragment_received`, `ble_get_next_fragment`, `ble_return_fragment`, `ble_get_peer_count`, `ble_set_peer_mtu`, `ble_clear_peer_mtu`, `ble_undersized_mtu_reports`, `ble_fragment_fallback_count`, `ble_recipient_not_among_peers_count`, `protocol_lock_diagnostics` | The Bluetooth LE driver's feed and drain, and the host's lock diagnostics |
+| `ble_peer_discovered`, `ble_peer_lost`, `ble_peer_rssi`, `ble_node_hash`, `set_peer_rssi_events`, `ble_status_changed`, `ble_fragment_received`, `ble_get_next_fragment`, `ble_return_fragment`, `ble_get_peer_count`, `ble_set_peer_mtu`, `ble_clear_peer_mtu`, `ble_undersized_mtu_reports`, `ble_fragment_fallback_count`, `ble_recipient_not_among_peers_count`, `protocol_lock_diagnostics` | The Bluetooth LE driver's feed and drain, its signal readings and the switch the binding flips for them, and the host's lock diagnostics |
 | `internet_status_changed`, `internet_message_received`, `internet_get_next_message`, `internet_confirm_sent`, `internet_send_failed`, `internet_send_failed_with_reason`, `internet_peer_presence`, `internet_presence_watchlist`, `internet_relay_capabilities`, `internet_group_report_received`, `internet_address_declared`, `internet_address_declaration_refused` | The relay client's feed and drain, including the dedicated entry points the threat model's boundary 2 requires |
 | `wifi_direct_status_changed`, `wifi_direct_message_received`, `wifi_direct_get_next_message`, `wifi_direct_peer_connected`, `wifi_direct_peer_disconnected` | The peer-stream driver's feed and drain |
 | `reticulum_status_changed`, `reticulum_message_received`, `reticulum_get_next_message`, `reticulum_confirm_sent`, `reticulum_send_failed`, `reticulum_send_failed_with_reason`, `reticulum_address_declared`, `reticulum_address_declaration_refused`, `reticulum_gateway_capabilities`, `reticulum_peer_presence`, `reticulum_presence_watchlist` | The gateway client's feed and drain |
@@ -638,6 +638,7 @@ and is the one a client is written against.
 | `relay_demoted` | `reason` | `all` |
 | `neighbor_discovered` | `peer_id`, `transport`, `rssi #?` | `all` |
 | `neighbor_lost` | `peer_id` | `all` |
+| `peer_rssi` | `peer_id`, `transport`, `rssi #` | `all` |
 | `identity_ready` | `address` | `all` |
 | `network_metrics` | `neighbor_count #`, `relay_count #`, `delivery_ratio #`, `avg_latency_ms #` | `all` |
 | `file_progress` | `file_id`, `chunks_sent #`, `total_chunks #`, `percentage #` | `file_id` |
@@ -747,9 +748,9 @@ both. `message_received`, `message_delivered`, the DORS events and a
 `transport_switched` the engine emits carry the transport's label: `ble`,
 `wifiDirect`, `internet`, `reticulum`, `nostr`, or `delayed` on a
 `message_received` for a message that was held and decrypted later.
-`neighbor_discovered`, and a `transport_switched` the FFI layer emits when a
-carrier's status changes, carry the casing the platform bridge passes as a
-string: `BLE`, `WiFiDirect`, `Internet`, `Reticulum`, `Nostr`, and on that
+`neighbor_discovered`, `peer_rssi`, and a `transport_switched` the FFI layer
+emits when a carrier's status changes, carry the casing the platform bridge
+passes as a string: `BLE`, `WiFiDirect`, `Internet`, `Reticulum`, `Nostr`, and on that
 `transport_switched` the literal `None` as `to` when a carrier disconnects
 and nothing takes over. Neither spelling is the interface definition's enum
 (`Ble`), and `wifi_direct` never occurs. The `priority` string is spelled

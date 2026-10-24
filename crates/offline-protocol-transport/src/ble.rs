@@ -48,6 +48,26 @@ pub struct FragmentEvictionInfo {
 /// Callback invoked when a fragment assembly is evicted from the reassembly cache.
 pub type FragmentEvictionCallback = Arc<dyn Fn(FragmentEvictionInfo) + Send + Sync>;
 
+/// Length of [`node_hash`].
+pub const NODE_HASH_LEN: usize = 8;
+
+/// The digest of an address that a device advertises over Bluetooth LE: the
+/// first eight bytes of SHA-256 over the address string.
+///
+/// It exists so a scanner can name the advertiser of a reading. Without it
+/// iOS rarely can: a link runs under one CoreBluetooth identifier, and an
+/// Android peer re-advertises from a new address on every link change, so its
+/// advertisements soon match no link the iPhone holds. It is matched only against
+/// peers that already proved their address on a link, so it never names
+/// anyone new.
+pub fn node_hash(address: &str) -> [u8; NODE_HASH_LEN] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(address.as_bytes());
+    let mut out = [0u8; NODE_HASH_LEN];
+    out.copy_from_slice(&digest[..NODE_HASH_LEN]);
+    out
+}
+
 /// Peer device information
 #[derive(Debug, Clone)]
 pub struct PeerDevice {
@@ -386,6 +406,28 @@ impl BleTransport {
     pub fn on_peer_lost(&self, device_id: &str) {
         self.peers.lock_or_recover().remove(device_id);
         self.peer_mtus.lock_or_recover().remove(device_id);
+    }
+
+    /// Records a signal reading for a linked peer, and returns whether the
+    /// peer is one (a reading for anyone else is dropped, so it never
+    /// introduces a peer). Attribution, by link or by [`node_hash`], is the
+    /// caller's: the FFI layer does it under its own lock, so a reading that
+    /// names nobody never reaches the engine.
+    ///
+    /// The stored value is smoothed (`0.7 * stored + 0.3 * reading`), not
+    /// replaced. It is what the mesh relay ranks fan-out targets by, and a raw
+    /// reading swings about ±8 dB from one sample to the next, which would
+    /// hand the retransmissions of one frame to different neighbours. Smoothed,
+    /// that swing shrinks to under 2 dB and the ranking follows only a lasting
+    /// change in signal. The caller reports the raw reading to the app.
+    pub fn on_peer_rssi(&self, peer_id: &str, rssi: i16) -> bool {
+        let mut peers = self.peers.lock_or_recover();
+        let Some(peer) = peers.get_mut(peer_id) else {
+            return false;
+        };
+        peer.rssi = ((7 * i32::from(peer.rssi) + 3 * i32::from(rssi)) as f32 / 10.0).round() as i16;
+        peer.last_seen = SystemTime::now();
+        true
     }
 
     /// Called when a message is received from a peer.
@@ -1434,6 +1476,77 @@ mod tests {
             AppId::new("app").unwrap(),
             "hi",
         )
+    }
+
+    #[test]
+    fn a_reading_moves_only_a_linked_peer_and_is_smoothed() {
+        // SHA-256("abc") begins ba7816bf 8f01cfea: the digest is the standard
+        // one, so any platform can compute it without this crate.
+        assert_eq!(
+            node_hash("abc"),
+            [0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea]
+        );
+
+        let transport = BleTransport::new("me");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("carol"));
+
+        assert!(transport.on_peer_rssi("carol", -41));
+        assert_eq!(
+            transport.get_peer("carol").unwrap().rssi,
+            -54,
+            "0.7 * -60 + 0.3 * -41, rounded"
+        );
+        assert_eq!(
+            transport
+                .connected_peers()
+                .iter()
+                .find(|l| l.peer_id == "carol")
+                .unwrap()
+                .rssi,
+            Some(-54)
+        );
+        assert!(
+            !transport.on_peer_rssi("eve", -30),
+            "never introduces a peer"
+        );
+        assert!(transport.get_peer("eve").is_none());
+    }
+
+    /// Raw readings swing about ±8 dB between samples. Two links 10 dB apart
+    /// must keep their order through that noise, or the mesh relay hands the
+    /// retransmissions of one frame to different neighbours.
+    #[test]
+    fn reading_noise_does_not_reorder_links() {
+        let transport = BleTransport::new("me");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("strong"));
+        transport.on_peer_discovered(peer_device("weak"));
+        let quality = |id: &str| {
+            let link = transport
+                .connected_peers()
+                .into_iter()
+                .find(|l| l.peer_id == id)
+                .unwrap();
+            link.link_quality().value()
+        };
+        for i in 0..60 {
+            // Opposite phases, so the two readings cross every sample.
+            let swing = if i % 2 == 0 { 8 } else { -8 };
+            transport.on_peer_rssi("strong", -60 + swing);
+            transport.on_peer_rssi("weak", -70 - swing);
+            if i >= 10 {
+                assert!(
+                    quality("strong") > quality("weak"),
+                    "reordered at sample {i}"
+                );
+            }
+        }
+        // A lasting change still moves the ranking.
+        for _ in 0..30 {
+            transport.on_peer_rssi("weak", -45);
+        }
+        assert!(quality("weak") > quality("strong"));
     }
 
     #[test]

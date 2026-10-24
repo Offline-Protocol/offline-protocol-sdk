@@ -2245,6 +2245,25 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             target.ble_peer_discovered(arg_peer_id, arg_rssi)?;
             Ok(Value::Null)
         }
+        "ble_peer_rssi" => {
+            let arg_peer_id = args.take("peer_id")?;
+            let arg_node_hash = args.take("node_hash")?;
+            let arg_rssi = args.take("rssi")?;
+            args.finish()?;
+            target.ble_peer_rssi(arg_peer_id, arg_node_hash, arg_rssi);
+            Ok(Value::Null)
+        }
+        "set_peer_rssi_events" => {
+            let arg_enabled = args.take("enabled")?;
+            args.finish()?;
+            target.set_peer_rssi_events(arg_enabled);
+            Ok(Value::Null)
+        }
+        "ble_node_hash" => {
+            args.finish()?;
+            let result = target.ble_node_hash();
+            Ok(result.encode())
+        }
         "ble_peer_lost" => {
             let arg_peer_id = args.take("peer_id")?;
             args.finish()?;

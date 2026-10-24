@@ -1250,6 +1250,59 @@ most sixteen answered sessions every two minutes, which equals the engine's
 link ceiling: a leaked code can occupy every link the host has, though MLS
 admits none of those joiners to anything until the host invites them.
 
+### R29. The Bluetooth LE scan response names the device, and RSSI is unauthenticated
+
+An Android device whose application sets `transports.ble.advertiseNodeHash`
+(off by default) advertises the first eight bytes of SHA-256 over its own
+address, as service data under the mesh UUID in its scan response. It is
+how a scanner attributes a signal reading to a linked peer whose
+advertisement no longer matches the link: on iOS a link runs under a
+CoreBluetooth identifier, and Android re-advertises from a new address on
+every link change, so the advertisement soon shares no identifier with any
+link the iPhone holds. The digest is stable across
+restarts and unsalted, so any device in radio range that sends a scan
+request (A1) can follow the phone across Bluetooth address rotation, and
+anyone who knows the address can recognise it: every contact and group
+member, and every relay operator that has carried its traffic. Signal strength itself carries no proof of who transmitted
+it: a device that advertises another peer's digest, or answers on a link's
+address, has its readings attributed to that peer, which moves the peer's
+`peer_rssi` and, while that application takes live readings, the link
+quality the relay ranks neighbours by.
+
+**Why it stands:** the address is already served to anyone who connects,
+in the `DEVICE_ID` characteristic, and is stable and linkable like the app
+tag beside it ([R15](#r15-the-bluetooth-le-app-tag-is-unsigned-and-readable)).
+The digest makes that passive, which is the cost, and why an application
+opts in: one that builds no proximity feature never pays it. Two
+alternatives were weighed. A digest rotating on a schedule would close
+tracking by strangers but not recognition by anyone who knows the address,
+and means re-advertising on a schedule every scanner shares, against an
+advertising duty cycle tuned for discovery. A random token per transport
+start, handed to each linked peer over the link, would close recognition
+and tracking across restarts, leaving only tracking within one run. It is
+the better design and the upgrade path, and it was deferred, not rejected,
+because it changes what every bridge says on a link: the only signed field
+the link carries today is the identity assertion's `signed_data`, whose
+content the bridges define and the verifier does not return, so a token
+needs a new field there (and in the browser engine and the leaf, which
+share the codec) or a new control frame. A token would be advertised at 9
+to 18 bytes, which current scanners ignore: 8 is read as this digest and
+19 or more as mesh metadata
+([BLE framing](../spec/ble-framing.md#the-node-hash-in-the-scan-response)).
+
+**What bounds it:** a reading is attributed only to a peer that already
+proved its address on a link, so a forged digest never introduces anyone.
+What it can do is move that peer's place in relay ranking, which chooses
+the neighbours a frame fans out to when there are more neighbours than
+slots: a sustained forged signal can push the peer out of the fan-out or
+into it. Readings are smoothed and taken at most four a second per peer,
+however many advertisers carry its hash, so moving the ranking takes
+seconds of forged signal, not a burst. Ranking
+never decides whether a frame is sent at all, the frame still goes to the
+other neighbours, and every frame is still authenticated above this
+layer. An application must not treat `peer_rssi`
+as evidence of who is physically near.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

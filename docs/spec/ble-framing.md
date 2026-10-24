@@ -142,6 +142,34 @@ The hello carries the same static assertion as Identity, with the same limits
 below: it proves possession of the key once, and a device that copied a
 peer's assertion can label its own link with that peer's address.
 
+### The node hash in the scan response
+
+A device MAY carry, as service data under the Service UUID, exactly eight
+bytes: the first eight of SHA-256 over its `off1…` address as UTF-8
+(`offline_protocol_transport::node_hash`). It names the advertiser of a
+signal reading only, and a scanner MUST match it only against peers that
+already proved their address on a link: it proves nothing itself, and it
+never starts a link or names a new peer. A scanner MUST NOT read service data
+of any other length under this UUID as a node hash. Service data of 19 bytes
+or more under this UUID is already read by the shipped scanners as mesh
+metadata (`MeshAdvertisementData`, version byte `0x02`), so the lengths a
+current scanner ignores are 1 to 7 and 9 to 18. A later form (a token per
+transport start, delivered over the link, as
+[R29](../security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)
+describes) MUST use one of those, 9 to 18 bytes, so that no current scanner
+misreads it.
+
+The shipped Android peripheral puts it in its scan response when the
+application sets `transports.ble.advertiseNodeHash` (off by default) and its
+identity is open, as the 26-byte service data structure (2 + 16 + 8) in place
+of the 18-byte Service UUID list, because both do not fit in 31 bytes; the
+main advertisement still lists the UUID, and the shipped scanners accept
+either as a mesh device. Service data under this 128-bit UUID needs no
+Bluetooth SIG assignment, which a 16-bit service UUID or a company id for
+manufacturer data would. iOS cannot advertise service data, so an iPhone
+carries no node hash. The exposure is
+[R29](../security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated).
+
 ### Several instances behind one link
 
 **One link carries one peer.** A phone that runs several applications on this

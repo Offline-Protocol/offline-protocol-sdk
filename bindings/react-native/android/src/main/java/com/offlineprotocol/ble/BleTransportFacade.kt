@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 import com.offlineprotocol.BleAppTag
 import com.offlineprotocol.BleDensityPolicy
 import com.offlineprotocol.BleDiscoveryBootstrapPolicy
+import com.offlineprotocol.PeerRssiFeedPolicy
 import com.offlineprotocol.TransportException
 import com.offlineprotocol.TransportManager
 import com.offlineprotocol.TransportManagerListener
@@ -164,6 +165,11 @@ class BleTransportFacade(
     private val protocol: OfflineProtocol,
     private val deviceId: String,
     appId: String,
+    // Whether the scan response carries this device's node hash. Off unless
+    // the app sets `transports.ble.advertiseNodeHash`: the hash never
+    // changes, so any scanner in range can follow the phone across address
+    // rotation, and anyone who knows its address can identify it (R29).
+    private val advertiseNodeHash: Boolean = false,
     private val diagnosticEmitter: ((String, String, Map<String, Any?>) -> Unit)? = null
 ) : TransportManager {
 
@@ -632,6 +638,12 @@ class BleTransportFacade(
     @Volatile
     private var cachedLocalAddress: String? = null
 
+    // The core's digest of [cachedLocalAddress], carried in the scan response
+    // so a scanner can attribute its RSSI readings to us. Primed with it, and
+    // only when [advertiseNodeHash] is on.
+    @Volatile
+    private var cachedNodeHash: ByteArray? = null
+
     // Backoff state for updateSignedIdentity retries when MLS is not yet
     // initialized or signing fails. BLE-thread only.
     private var identityRefreshRetryScheduled: Boolean = false
@@ -805,6 +817,9 @@ class BleTransportFacade(
     /** Tracks recently seen advertisements to avoid duplicate processing (hash, timestamp) */
     private data class AdvertisementCacheEntry(val hash: Int, val timestamp: Long)
     private val recentAdvertisementHashes = ConcurrentHashMap<String, AdvertisementCacheEntry>()
+
+    // When each address last fed a reading to the core. BLE-thread only.
+    private val lastRssiFeedAt = HashMap<String, Long>()
     /** Negative cache: devices verified via GATT as non-mesh (address -> timestamp) */
     private val verifiedNonMeshDevices = ConcurrentHashMap<String, Long>()
     /** Counter for consecutive scan restarts without discoveries */
@@ -1666,6 +1681,9 @@ class BleTransportFacade(
             // `localAddress()` as `Message.sender` — also made our own control
             // frames fail the receiver's `validate_transport_sender`.
             cachedLocalAddress = protocol.localAddress()
+            if (advertiseNodeHash) {
+                cachedNodeHash = protocol.bleNodeHash()?.map { it.toByte() }?.toByteArray()
+            }
 
             val publicKey = protocol.getIdentityPublicKey()
             val meshData = meshController.toAdvertisement()
@@ -2324,19 +2342,13 @@ class BleTransportFacade(
     }
     
     /**
-     * Builds the scan response data for BLE advertising.
-     * 
-     * iOS's CoreBluetooth actively queries for scan responses during BLE scanning.
-     * Including the service UUID in the scan response makes Android devices more
-     * reliably visible to iOS devices, which have known issues recognizing 128-bit
-     * service UUIDs from Android's main advertisement packet format.
+     * Builds the scan response data for BLE advertising: the service UUID,
+     * or, once the app opted in ([advertiseNodeHash]) and the identity is
+     * open, the node hash as service data under it. See
+     * [PeerRssiFeedPolicy.scanResponse] for the byte budget and why.
      */
-    private fun buildScanResponse(): AdvertiseData {
-        return AdvertiseData.Builder()
-            .setIncludeDeviceName(false)
-            .addServiceUuid(ParcelUuid(SERVICE_UUID))
-            .build()
-    }
+    private fun buildScanResponse(): AdvertiseData =
+        PeerRssiFeedPolicy.scanResponse(SERVICE_UUID, cachedNodeHash)
     
     private fun handleScanResult(result: ScanResult) {
         // Scan results are posted here from a binder thread, so one produced
@@ -2362,6 +2374,19 @@ class BleTransportFacade(
         if (!adapterWasOff) {
             bleRecoveryScheduler.resetBackoff()
             reportBleAvailability(true, "scan_result")
+        }
+
+        // Live signal strength, above the duplicate check: that check skips a
+        // repeat within the same 5 dB bucket for a second, which sheds work
+        // but would also bias the readings toward bucket changes. The policy's
+        // own throttle keeps this to about four calls a second per address.
+        // The core attributes the reading to a linked peer, by this address's
+        // link or by the node hash an Android peer's scan response carries,
+        // and drops anything else, so no mesh gate is needed in front of it.
+        val linkedPeerId = connections.deviceIdForAddress(address)
+        val advertisedHash = result.scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
+        if (PeerRssiFeedPolicy.admit(lastRssiFeedAt, address, now, linkedPeerId != null, advertisedHash != null)) {
+            protocol.blePeerRssi(linkedPeerId, advertisedHash?.map { it.toUByte() }, rssi.toShort())
         }
 
         // Duplicate advertisement detection - avoid processing identical advertisements

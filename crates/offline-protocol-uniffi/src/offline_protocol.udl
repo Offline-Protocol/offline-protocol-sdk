@@ -1268,6 +1268,25 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     void ble_peer_discovered(string peer_id, i16 rssi);
 
+    // A signal reading from an advertisement, for every scan result. Pass
+    // the peer the link to that advertiser names, and the service data the
+    // advertisement carried under the mesh service UUID, whichever are
+    // known. No key exchange, no outbox flush, and while readings are off,
+    // or when it names no peer announced through `ble_peer_discovered`, it
+    // returns without taking the protocol lock. Such a reading is dropped,
+    // so this never introduces a peer and is outside the identity contract
+    // above.
+    void ble_peer_rssi(string? peer_id, sequence<u8>? node_hash, i16 rssi);
+
+    // Live readings, off by default: `PeerRssi` events and the link
+    // quality they keep current. Off, `ble_peer_rssi` returns at once.
+    void set_peer_rssi_events(boolean enabled);
+
+    // What this device advertises as service data under the mesh service
+    // UUID, so a scanner can attribute its readings. Null until the
+    // identity is open.
+    sequence<u8>? ble_node_hash();
+
     [Throws=ProtocolError]
     void ble_peer_lost(string peer_id);
     

@@ -57,7 +57,8 @@ pub mod types;
 pub mod wifi_direct;
 
 pub use ble::{
-    BleTransport, BleTransportBuilder, FragmentEvictionCallback, FragmentEvictionInfo, PeerDevice,
+    node_hash, BleTransport, BleTransportBuilder, FragmentEvictionCallback, FragmentEvictionInfo,
+    PeerDevice, NODE_HASH_LEN,
 };
 pub use constants::DEFAULT_MAX_MESSAGE_SIZE;
 pub use error::{Error, Result};

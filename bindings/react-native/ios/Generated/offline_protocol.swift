@@ -1385,9 +1385,13 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func bleGetPeerCount()  -> UInt32
     
+    func bleNodeHash()  -> [UInt8]?
+    
     func blePeerDiscovered(peerId: String, rssi: Int16) throws 
     
     func blePeerLost(peerId: String) throws 
+    
+    func blePeerRssi(peerId: String?, nodeHash: [UInt8]?, rssi: Int16) 
     
     func bleRecipientNotAmongPeersCount()  -> UInt64
     
@@ -1685,6 +1689,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func setNostrTransportCallback(callback: NostrTransportCallback) 
     
+    func setPeerRssiEvents(enabled: Bool) 
+    
     func setRelayPriority(priority: RelayPriority) throws 
     
     func setReticulumTransportCallback(callback: ReticulumTransportCallback) 
@@ -1856,6 +1862,15 @@ open func bleGetPeerCount() -> UInt32  {
 })
 }
     
+open func bleNodeHash() -> [UInt8]?  {
+    return try!  FfiConverterOptionSequenceUInt8.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func blePeerDiscovered(peerId: String, rssi: Int16)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered(
@@ -1871,6 +1886,17 @@ open func blePeerLost(peerId: String)throws   {try rustCallWithError(FfiConverte
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(peerId),uniffiCallStatus
+    )
+}
+}
+    
+open func blePeerRssi(peerId: String?, nodeHash: [UInt8]?, rssi: Int16)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(peerId),
+        FfiConverterOptionSequenceUInt8.lower(nodeHash),
+        FfiConverterInt16.lower(rssi),uniffiCallStatus
     )
 }
 }
@@ -3301,6 +3327,15 @@ open func setNostrTransportCallback(callback: NostrTransportCallback)  {try! rus
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(
             self.uniffiCloneHandle(),
         FfiConverterCallbackInterfaceNostrTransportCallback_lower(callback),uniffiCallStatus
+    )
+}
+}
+    
+open func setPeerRssiEvents(enabled: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(enabled),uniffiCallStatus
     )
 }
 }
@@ -10497,10 +10532,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() != 11879) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash() != 1579) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() != 26789) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 22804) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi() != 9983) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 42065) {
@@ -10945,6 +10986,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 36253) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events() != 39361) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 26597) {

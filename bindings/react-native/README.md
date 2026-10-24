@@ -925,6 +925,52 @@ interface NeighborLostEvent {
 }
 ```
 
+#### peer_rssi
+
+```typescript
+interface PeerRssiEvent {
+  type: 'peer_rssi';
+  peer_id: string;   // canonical address, as in neighbor_discovered
+  transport: string; // 'BLE'
+  rssi: number;      // dBm, raw
+}
+```
+
+Live signal strength to a linked Bluetooth LE peer, for proximity features
+such as "who is closest". Readings come from the scans the SDK already runs,
+so they cost no extra radio time.
+
+- **Opt-in by listening.** The engine emits it only while at least one
+  `on('peer_rssi', ...)` listener is registered; an `'all'` listener does not
+  turn it on. With no listener nothing crosses the bridge.
+- **Bounded.** At most four a second per peer, sampled evenly rather than
+  only when the signal changes. iOS reports advertisements less often than
+  Android, so expect fewer there.
+- **Only linked peers.** A reading is named only for a peer that proved its
+  address on a link, matched by that link or by a digest of its address the
+  peer advertises. In practice an iPhone names an Android peer only when
+  that app sets `transports.ble.advertiseNodeHash: true` (off by default;
+  see the cost below): Android advertises from a new
+  Bluetooth address each time it restarts advertising, which it does on every
+  link change, so the iPhone's link soon stops matching the advertisement,
+  whichever side opened it. iOS cannot advertise a digest, so an iPhone
+  linked to another iPhone as central is not named on that side.
+- **What the digest costs.** It never changes, so any scanner in range can
+  follow a phone that advertises it across Bluetooth address rotation,
+  knowing nothing about it, and anyone who knows its address (contacts,
+  group members, relay operators) can identify it without connecting
+  ([R29](../../docs/security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)).
+- **Raw.** Readings swing by about ±8 dB between samples. Smooth them for a
+  display, for example with an exponential moving average:
+
+```typescript
+const smoothed = new Map<string, number>();
+protocol.on('peer_rssi', ({ peer_id, rssi }) => {
+  const prev = smoothed.get(peer_id);
+  smoothed.set(peer_id, prev === undefined ? rssi : 0.7 * prev + 0.3 * rssi);
+});
+```
+
 #### network_metrics
 
 ```typescript

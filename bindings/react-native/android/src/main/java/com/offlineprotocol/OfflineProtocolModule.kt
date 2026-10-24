@@ -196,6 +196,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     private var currentConfig: ProtocolConfig? = null
 
+    // `transports.ble.advertiseNodeHash`, off by default: whether the
+    // facade puts this device's node hash in its scan response (R29).
+    private var bleAdvertiseNodeHash = false
+
     companion object {
         const val NAME = "OfflineProtocolModule"
         const val EVENT_NAME = "OfflineProtocol_Event"
@@ -620,6 +624,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val config = parsed.coreConfig
             val proto = OfflineProtocol(config)
             currentConfig = config
+            bleAdvertiseNodeHash = parsed.rawJson.optJSONObject("transports")
+                ?.optJSONObject("ble")?.optBoolean("advertiseNodeHash", false) ?: false
             emitDiagnostic("info", "Protocol core created", mapOf(
                 "appId" to config.appId,
                 "userId" to config.profile,
@@ -675,6 +681,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     proto,
                     config.profile,
                     config.appId,
+                    advertiseNodeHash = bleAdvertiseNodeHash,
                 ) { level, message, context ->
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
@@ -863,14 +870,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // handed nothing over, and the one-shot hold redelivers it later, so
         // consuming its number would report a gap for an event never lost.
         return synchronized(eventSeqLock) {
-            val numbered = eventName == EVENT_NAME && params is WritableMap
             // Read before the emit: the map is handed over by transfer, and a
             // consumed native map cannot be read back afterwards.
-            var replayJson: String? = null
+            val map = params as? WritableMap
+            val replayJson = if (eventName == EVENT_NAME && map?.hasKey("eventJson") == true) {
+                map.getString("eventJson")
+            } else {
+                null
+            }
+            // An unnumbered event reaches JS without a `seq`, which JS
+            // dispatches without gap tracking. See [EventReplayRing.isReplayed].
+            val numbered = eventName == EVENT_NAME && map != null &&
+                EventReplayRing.isReplayed(replayJson)
             if (numbered) {
-                val map = params as WritableMap
-                replayJson = if (map.hasKey("eventJson")) map.getString("eventJson") else null
-                map.putInt(EVENT_SEQ_FIELD, eventSeq)
+                map!!.putInt(EVENT_SEQ_FIELD, eventSeq)
             }
             try {
                 reactApplicationContext
@@ -1289,6 +1302,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("TELEMETRY_SET_ENABLED_FAILED", e.message, e)
+        }
+    }
+
+    /**
+     * `peer_rssi` events, which the TypeScript layer turns on while it has a
+     * listener for them. Off by default, and off the core ignores readings.
+     */
+    @ReactMethod
+    fun setPeerRssiEvents(enabled: Boolean, promise: Promise) {
+        try {
+            protocol?.setPeerRssiEvents(enabled)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("PEER_RSSI_EVENTS_FAILED", e.message, e)
         }
     }
 
@@ -2576,6 +2603,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                             proto,
                             currentConfig?.profile ?: "unknown",
                             currentConfig?.appId ?: "",
+                            advertiseNodeHash = bleAdvertiseNodeHash,
                         ) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
