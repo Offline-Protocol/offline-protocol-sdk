@@ -75,11 +75,14 @@ android {
             java {
                 srcDirs bridgeJava, 'src/main/kotlin'
             }
+            // The libraries the release stages into the plugin win, but only
+            // when one is there: an ABI directory with no library in it would
+            // ship an AAR with no native code and never fall back.
             def stagedJni = file('src/main/jniLibs')
             def rnJni = file(bridgeDir.path + '/src/main/jniLibs')
-            jniLibs.srcDirs(
-                (stagedJni.exists() && stagedJni.list()?.length > 0) ? stagedJni : rnJni
-            )
+            def stagedHasLibrary = stagedJni.exists() &&
+                project.fileTree(stagedJni).files.any { it.name == 'libuniffi_offline_protocol.so' }
+            jniLibs.srcDirs(stagedHasLibrary ? stagedJni : rnJni)
         }
     }
 }
