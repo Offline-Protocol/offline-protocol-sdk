@@ -95,9 +95,11 @@ function post(message) {
 }
 
 const handlers = {
-  async start({ appId, profile, storage = "durable", tabs = true, instance }) {
+  async start({ appId, profile, storage = "durable", tabs = true, instance, wasm }) {
     if (engine) throw new Error("this worker already runs a node");
-    await init();
+    // A host that cannot serve the module beside this file (an editor
+    // plugin, an extension) hands over its bytes or a compiled module.
+    await init(wasm === undefined ? undefined : { module_or_path: wasm });
     // Nothing is kept from a start that fails: no engine, and no lock or
     // handle, so the page can start the node again once the cause is gone.
     let address;
@@ -171,6 +173,13 @@ const handlers = {
   },
   inviteToGroup({ groupId, member }) {
     engine.inviteToGroup(groupId, member);
+  },
+  removeFromGroup({ groupId, member }) {
+    engine.removeFromGroup(groupId, member);
+  },
+  groupInfo({ groupId }) {
+    const info = engine.groupInfo(groupId);
+    return info === undefined ? null : JSON.parse(info);
   },
   // Signalling through Nostr (W11). The page holds the relay sockets; these
   // build and open what crosses them.

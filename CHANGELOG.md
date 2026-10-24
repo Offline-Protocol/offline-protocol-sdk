@@ -15,6 +15,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The browser can remove a group member.** `OfflineNode.removeFromGroup`
+  removes a member from a group this device administers: the others move to
+  a new epoch whose keys the removed member never holds, and the removed
+  member gets `group_member_removed`. `OfflineNode.groupInfo` returns a
+  group's members and epoch, or null for a group the device does not hold.
+  Until now a browser could create and administer a group but never shrink
+  it ([web bridge](docs/bridges/web.md)).
+- **The browser engine can start from bytes.** `OfflineNode.start` takes
+  `wasm` (the module's bytes or a compiled module) for a host that cannot
+  serve the module beside `worker.js`, such as an editor plugin whose worker
+  starts from a Blob URL.
+
 - **Live Bluetooth LE signal strength.** A new `peer_rssi` event
   (`{ peer_id, transport, rssi }`) reports a linked peer's RSSI from every
   scan, at most four a second per peer, and only while the app listens for

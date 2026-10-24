@@ -254,6 +254,19 @@ impl WebEngine {
         self.node.invite_to_group(group_id, member).map_err(js)
     }
 
+    /// Removes a member from a group this device administers.
+    #[wasm_bindgen(js_name = removeFromGroup)]
+    pub fn remove_from_group(&mut self, group_id: &str, member: &str) -> Result<(), JsError> {
+        self.node.remove_from_group(group_id, member).map_err(js)
+    }
+
+    /// A group's members and epoch as JSON, or nothing for a group this
+    /// device does not hold.
+    #[wasm_bindgen(js_name = groupInfo)]
+    pub fn group_info(&self, group_id: &str) -> Result<Option<String>, JsError> {
+        self.node.group_info(group_id).map_err(js)
+    }
+
     /// Sends to a group; returns the per-member message ids as JSON.
     /// `ephemeral` as for [`WebEngine::send_message`].
     #[wasm_bindgen(js_name = sendGroupMessage)]

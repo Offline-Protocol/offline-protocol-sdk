@@ -19,6 +19,22 @@ export interface StartOptions {
   tabs?: boolean;
   /** Where worker.js is served, if not beside this module. */
   workerUrl?: string | URL;
+  /**
+   * The engine module, for a host that cannot serve it beside worker.js:
+   * its bytes or a compiled module. By default the worker fetches it.
+   */
+  wasm?: BufferSource | WebAssembly.Module;
+}
+
+/** A group as this device holds it. */
+export interface GroupInfo {
+  group_id: string;
+  name: string | null;
+  members: string[];
+  members_count: number;
+  /** Advances on every membership change; a removed member never holds the next one's keys. */
+  epoch: number;
+  [field: string]: unknown;
 }
 
 export interface SendOptions {
@@ -67,6 +83,13 @@ export class OfflineNode extends EventTarget {
   sendMessage(to: string, content: string, options?: SendOptions): Promise<string>;
   createGroup(name: string): Promise<{ group_id: string; [field: string]: unknown }>;
   inviteToGroup(groupId: string, member: string): Promise<void>;
+  /**
+   * Removes a member from a group this device administers. The others move
+   * to a new epoch; the removed member gets `group_member_removed`.
+   */
+  removeFromGroup(groupId: string, member: string): Promise<void>;
+  /** The group's members and epoch, or null for a group this device does not hold. */
+  groupInfo(groupId: string): Promise<GroupInfo | null>;
   /** `ephemeral` as for sendMessage, to every member holding a live link. */
   sendGroupMessage(groupId: string, content: string, options?: SendOptions): Promise<string[]>;
   /** The durable logs' costs, or null for a node in memory. */
