@@ -49,6 +49,7 @@ export class OfflineNode extends EventTarget {
     storage = "durable",
     tabs = true,
     workerUrl,
+    wasm,
   } = {}) {
     if (!appId) throw new Error("appId is required");
     if (storage === "durable") {
@@ -63,7 +64,7 @@ export class OfflineNode extends EventTarget {
     const instance = crypto.randomUUID();
     const node = new OfflineNode(new Worker(url, { type: "module" }), { appId, instance, tabs });
     try {
-      node.address = await node.#call("start", { appId, profile, storage, tabs, instance });
+      node.address = await node.#call("start", { appId, profile, storage, tabs, instance, wasm });
     } catch (error) {
       // The worker kept nothing (no engine, lock or handle), but it is still
       // a running worker with a module in it.
@@ -88,6 +89,18 @@ export class OfflineNode extends EventTarget {
 
   inviteToGroup(groupId, member) {
     return this.#call("inviteToGroup", { groupId, member });
+  }
+
+  /// Removes a member from a group this device administers. The others move
+  /// to a new epoch the removed member holds no keys for.
+  removeFromGroup(groupId, member) {
+    return this.#call("removeFromGroup", { groupId, member });
+  }
+
+  /// The group's members and epoch, or null for a group this device does
+  /// not hold.
+  groupInfo(groupId) {
+    return this.#call("groupInfo", { groupId });
   }
 
   /// `ephemeral` as for sendMessage, to every member holding a live link.

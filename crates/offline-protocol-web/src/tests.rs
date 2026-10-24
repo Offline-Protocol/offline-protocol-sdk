@@ -129,6 +129,68 @@ fn a_group_message_reaches_an_invited_member() {
 }
 
 #[test]
+fn a_removed_member_is_told_and_the_group_moves_to_a_new_epoch() {
+    let (mut a, mut b) = (peer("owner"), peer("guest"));
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "secure_session_established", "peer_id", &b_addr)
+    }));
+    let info: serde_json::Value =
+        serde_json::from_str(&a.node.create_group("folder").expect("group")).expect("json");
+    let group = info["group_id"].as_str().expect("group id").to_string();
+    let mut invited = false;
+    assert!(run_until(&mut a, &mut b, |_, _| true));
+    for _ in 0..40 {
+        if a.node.invite_to_group(&group, &b_addr).is_ok() {
+            invited = true;
+            break;
+        }
+        run_until(&mut a, &mut b, |_, _| true);
+    }
+    assert!(invited, "the invite never found the member's key package");
+    assert!(run_until(&mut a, &mut b, |_, b| saw(
+        b,
+        "group_member_added",
+        "group_id",
+        &group
+    )));
+    let before: serde_json::Value = serde_json::from_str(
+        &a.node
+            .group_info(&group)
+            .expect("info")
+            .expect("the owner holds the group"),
+    )
+    .expect("json");
+    assert!(before["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .any(|m| m == b_addr.as_str()));
+
+    a.node.remove_from_group(&group, &b_addr).expect("remove");
+    assert!(run_until(&mut a, &mut b, |_, b| {
+        b.events.iter().any(|e| {
+            e["type"] == "group_member_removed" && e["group_id"] == group && e["user_id"] == b_addr
+        })
+    }));
+    let after: serde_json::Value = serde_json::from_str(
+        &a.node
+            .group_info(&group)
+            .expect("info")
+            .expect("the owner still holds the group"),
+    )
+    .expect("json");
+    assert!(after["epoch"].as_u64() > before["epoch"].as_u64());
+    assert!(!after["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .any(|m| m == b_addr.as_str()));
+    // The removed member no longer holds the group's keys.
+    assert_eq!(b.node.group_info(&group).expect("info"), None);
+}
+
+#[test]
 fn a_second_link_proving_an_announced_address_is_refused() {
     let (mut a, mut b) = (peer("alice"), peer("bob"));
     let b_addr = b.address.clone();

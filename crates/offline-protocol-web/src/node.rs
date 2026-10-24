@@ -397,6 +397,25 @@ impl Node {
         Ok(())
     }
 
+    /// Removes `member` from `group_id`, which this device administers. The
+    /// remaining members move to a new epoch whose keys the removed member
+    /// never holds, and the removed member is told it was removed.
+    pub fn remove_from_group(&mut self, group_id: &str, member: &str) -> NodeResult<()> {
+        self.protocol.remove_from_group(group_id, member)?;
+        Ok(())
+    }
+
+    /// A group this device belongs to, as JSON: its members and its current
+    /// epoch. `None` for a group this device does not hold.
+    pub fn group_info(&self, group_id: &str) -> NodeResult<Option<String>> {
+        let Some(info) = self.protocol.get_group_info(group_id)? else {
+            return Ok(None);
+        };
+        serde_json::to_string(&info)
+            .map(Some)
+            .map_err(|e| NodeError(e.to_string()))
+    }
+
     /// Sends to every member of `group_id`; returns the per-member ids as a
     /// JSON array. `ephemeral` as for [`Self::send_message`], to every member
     /// holding a live link.

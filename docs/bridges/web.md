@@ -339,6 +339,10 @@ sent never sees it.
   `NostrSignaller` room and the relays it names), and the joining address
   shown to the people involved before anything is shared with it (R27, R28).
 - Its own STUN or TURN servers, if links must cross networks (W9).
+- The engine module where the worker can fetch it: beside `worker.js`, or
+  handed to `OfflineNode.start({ wasm })` by a host whose worker starts from
+  a Blob URL (an editor plugin, an extension), where a relative fetch has
+  nothing to resolve against.
 - Nothing about framing, identity, encryption or storage: those are the
   engine's. The client posts `stop` to the worker on `pagehide` itself.
 
