@@ -149,6 +149,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **An old group message no longer blocks every later message to that
+  device.** A group frame further behind the receiver's ratchet than the
+  out-of-order window can never decrypt, and the sender resends the same
+  ciphertext, because it never re-seals a group frame. The receiver buffered
+  it as "may decrypt later" and withheld its ACK, so the sender kept
+  resending it for the outbox lifetime of seven days, and a restart or
+  relink reset its retry budget. Each such frame held one of the sixteen
+  slots in that peer's send window. Between a Mac and a phone that had been
+  through a day of app kills and restarts, sixteen of them filled the window,
+  and for three and a half hours nothing else got through, a join request
+  included. The receiver now acknowledges such a frame from a group member
+  and drops it. From anyone else it stays unanswered, as before.
 - **A browser device can link again after the other one restarts.** The
   WebRTC carrier closed a connection only on `failed` or `closed`, and a
   browser need never get there: Android's WebView was seen to sit in
