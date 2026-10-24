@@ -42,6 +42,8 @@ const CHUNK_BYTES = 16 * 1024;
 const GATHER_MS = 5000;
 // How long a connection may stay "disconnected" before it is closed.
 const DISCONNECTED_MS = 15000;
+// The longest delay a browser timer honours; a longer one fires at once.
+const MAX_TIMER_MS = 0x7fffffff;
 // Above this many bytes buffered on the channel, sends wait for it to drain.
 const HIGH_WATER_BYTES = 1024 * 1024;
 // Above this many bytes waiting behind the channel, the peer is not keeping
@@ -146,8 +148,13 @@ class Connection {
   }
 
   #expire() {
-    if (this.#stale !== null || !Number.isFinite(this.#disconnectedMs)) return;
-    this.#stale = setTimeout(() => this.close(), this.#disconnectedMs);
+    if (this.#stale !== null || this.#disconnectedMs === Infinity) return;
+    // The state is read again at the deadline: a recovery whose change event
+    // is still queued behind this timer must not be closed.
+    this.#stale = setTimeout(() => {
+      this.#stale = null;
+      if (this.#pc.connectionState === "disconnected") this.close();
+    }, Math.min(this.#disconnectedMs, MAX_TIMER_MS));
   }
 
   #recovered() {
@@ -298,7 +305,9 @@ export class WebRtcCarrier extends EventTarget {
   /// leaves it to the browser, which may never decide.
   constructor(node, { iceServers = [], disconnectedMs = DISCONNECTED_MS } = {}) {
     super();
-    if (!(disconnectedMs > 0)) throw new Error("disconnectedMs must be a positive number of milliseconds");
+    if (typeof disconnectedMs !== "number" || !(disconnectedMs > 0)) {
+      throw new Error("disconnectedMs must be a positive number of milliseconds");
+    }
     this.#node = node;
     this.#iceServers = iceServers;
     this.#disconnectedMs = disconnectedMs;

@@ -9,7 +9,8 @@
 // what each costs the durable store), that the carrier reports the connection's
 // state and reports nothing for a call that rejects, and that closing the
 // connection reports the peer lost, and that a connection the browser leaves
-// "disconnected" is closed so the same two devices can link again. The title ends as PASS or FAIL: <step>.
+// "disconnected" is closed so the same two devices can link again. The title
+// ends as PASS or FAIL: <step>.
 import { OfflineNode, WebRtcCarrier } from "../src/index.js";
 import { log, waitFor, invite, run } from "./common.js";
 
@@ -153,6 +154,18 @@ await run(async (step) => {
   // address, so a connection left there would refuse every new link from
   // the same device. The page plays the browser: it makes one end's
   // RTCPeerConnection read "disconnected" and announces the change.
+  // The deadline must be a number of milliseconds; a numeric string would
+  // silently turn it off.
+  for (const bad of ["1000", 0, -1, NaN]) {
+    let refused = false;
+    try {
+      new WebRtcCarrier(a, { disconnectedMs: bad });
+    } catch {
+      refused = true;
+    }
+    if (!refused) throw new Error(`disconnectedMs ${JSON.stringify(bad)} was accepted`);
+  }
+  new WebRtcCarrier(a, { disconnectedMs: Infinity }).close();
   const made = [];
   const NativePeerConnection = globalThis.RTCPeerConnection;
   globalThis.RTCPeerConnection = class extends NativePeerConnection {
@@ -191,6 +204,14 @@ await run(async (step) => {
   pretend(null);
   await new Promise((r) => setTimeout(r, 1000));
   if (states.includes("closed")) throw new Error("a connection that recovered inside the deadline was closed");
+  // A recovery whose change event has not run yet when the deadline passes
+  // is not closed either: the deadline reads the state again.
+  pretend("disconnected");
+  await new Promise((r) => setTimeout(r, 500));
+  Object.defineProperty(pc, "connectionState", { get: () => "connected", configurable: true });
+  await new Promise((r) => setTimeout(r, 1000));
+  pretend(null);
+  if (states.includes("closed")) throw new Error("a recovery not yet announced was closed at the deadline");
   // One that stays "disconnected" is closed at the deadline, and the peer is
   // reported lost at both ends.
   const gone = Promise.all([
