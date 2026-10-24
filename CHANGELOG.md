@@ -22,6 +22,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `scripts/check-binding-generators.sh` keep Kotlin and Swift adapters in sync
   ([C9b](docs/bridges/README.md#c9b-shared-engine-bridge-generators-and-rn-promise-codes)).
 
+- **Native packages after the shared engine bridge.** SwiftPM and the Android
+  library omit React-only bridge files (`ProtocolEngineHostBridgeReactNative`,
+  bridge argument/result maps, and the RN module). The Flutter iOS pod and
+  Android Gradle build use the same leave-out lists and pick staged UniFFI
+  artifacts only when a real library is present ([ADR 0025](docs/adr/0025-native-packages-are-assembled-in-place.md)).
+
 - **The browser can remove a group member.** `OfflineNode.removeFromGroup`
   removes a member from a group this device administers: the others move to
   a new epoch whose keys the removed member never holds, and the removed
