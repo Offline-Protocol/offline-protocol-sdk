@@ -389,7 +389,12 @@ with the one you changed.
 React Native delegates the 107 methods listed in
 `tools/gen_protocol_engine_host_bridge.py` through
 `ProtocolEngineHostBridge` plus thin adapters
-(`ProtocolEngineHostBridgeReactNative.{swift,kt}`). Generators must stay in sync:
+(`ProtocolEngineHostBridgeReactNative.{swift,kt}`). The Flutter plugin adds
+171 method-channel names in
+`bindings/flutter/offline_protocol/method_channel_methods.txt`, generated into
+`FlutterEngineChannel`, `EngineMethodHandlers`, and `MeshSdk` by
+`tools/gen_flutter_{engine_bridge,swift_bridge}.py`, `tools/gen_engine_method_handlers.py`,
+and `tools/gen_mesh_sdk_dart.py`. Generators must stay in sync:
 
 ```bash
 bash scripts/check-binding-generators.sh --check   # CI gate
