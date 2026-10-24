@@ -547,6 +547,18 @@ enum GroupDecryptOutcome {
         /// User ids the refused commit would have removed, sorted.
         removed: Vec<String>,
     },
+    /// The ciphertext's ratchet generation is further behind this
+    /// receiver's than the out-of-order window (`too_distant_in_the_past`).
+    /// The window only moves forward and a sender never re-seals a group
+    /// frame, so every resend of it fails the same way. It is a frame
+    /// delivered long ago whose ACK was lost, or one lost for good; either
+    /// way, the sender can only stop.
+    ///
+    /// A used generation (`secret_reuse`) stays [`Self::Retriable`]: a copy
+    /// refused under SEC-M1 spends exactly the generation of the genuine
+    /// copy behind it, and acknowledging that copy would report delivered a
+    /// message no one received.
+    Spent,
     /// Permanently failed; not worth retrying.
     Failed,
 }
@@ -1328,7 +1340,18 @@ impl OfflineProtocol {
                 self.group_mesh.message_dedup.remove(&message.id.as_str());
                 InternalMessageResult::SecurityRejected
             }
-            GroupDecryptOutcome::Retriable => {
+            // Consumed, so the receive loop ACKs it and the sender stops
+            // resending a frame that cannot decrypt here.
+            GroupDecryptOutcome::Spent
+                if self.is_group_roster_member(&payload.group_id, sender) =>
+            {
+                InternalMessageResult::Consumed
+            }
+            // Anyone holding an old ciphertext can replay it under their own
+            // wire identity, and an ACK would tell them this device is up
+            // (invariant I4). Only a member, who is answered anyway, gets
+            // one; anyone else's copy is buffered unanswered, as before.
+            GroupDecryptOutcome::Retriable | GroupDecryptOutcome::Spent => {
                 let group_id = payload.group_id.clone();
                 self.buffer_pending_group_message(
                     &group_id,
@@ -1495,6 +1518,16 @@ impl OfflineProtocol {
                     );
                     GroupDecryptOutcome::NotMlsCiphertext
                 }
+            }
+            Err(ref e @ offline_protocol_mls::MlsError::Decryption(_))
+                if e.decryption_detail() == Some("too_distant_in_the_past") =>
+            {
+                debug!(
+                    group_id = %group_id,
+                    error = %e,
+                    "Group message is behind the out-of-order window and can never decrypt"
+                );
+                GroupDecryptOutcome::Spent
             }
             Err(
                 e @ (offline_protocol_mls::MlsError::Decryption(_)
@@ -2879,7 +2912,19 @@ impl OfflineProtocol {
                         ));
                         self.ack_drained_group_message(&ack_sender, &ack_message_id, received_via);
                     }
-                    GroupDecryptOutcome::Retriable => {
+                    // A member is still owed the deferred ACK, or it keeps
+                    // resending a frame that never decrypts here. Anyone
+                    // else's copy stays buffered unanswered, as on arrival.
+                    GroupDecryptOutcome::Spent
+                        if self.is_group_roster_member(group_id, &entry.sender) =>
+                    {
+                        self.ack_drained_group_message(
+                            &entry.sender,
+                            &entry.message_id,
+                            entry.received_via,
+                        );
+                    }
+                    GroupDecryptOutcome::Retriable | GroupDecryptOutcome::Spent => {
                         still_pending.push_back(entry);
                     }
                     GroupDecryptOutcome::NonApplication => {
@@ -5536,13 +5581,19 @@ impl OfflineProtocol {
         Ok(info.epoch)
     }
 
+    /// Whether `sender` is on the roster of `group_id`. False when the roster
+    /// cannot be read: an unanswered frame is resent, a wrong answer is not.
+    fn is_group_roster_member(&mut self, group_id: &str, sender: &str) -> bool {
+        self.group_roster(group_id)
+            .is_ok_and(|members| members.iter().any(|m| m == sender))
+    }
+
     /// The roster of a group this device is a member of, cache first.
     ///
     /// The cache is authoritative when populated and empty after a restart,
     /// so a miss is not an answer: MLS is consulted and the cache filled,
     /// which is the same fallback [`Self::send_group_message_inner`] makes
     /// for the same reason.
-    #[cfg_attr(not(feature = "data"), allow(dead_code))]
     pub(crate) fn group_roster(&mut self, group_id: &str) -> Result<Vec<String>> {
         if let Some(members) = self.group_mesh.members.get(group_id) {
             return Ok(members.clone());
@@ -6513,7 +6564,9 @@ impl OfflineProtocol {
                     );
                 }
             },
-            GroupDecryptOutcome::Retriable => {
+            // The relay sender waits for no ACK, so a frame behind the window
+            // is buffered as before; it ages out unanswered.
+            GroupDecryptOutcome::Retriable | GroupDecryptOutcome::Spent => {
                 self.buffer_pending_group_message(
                     group_id,
                     PendingGroupMessage {

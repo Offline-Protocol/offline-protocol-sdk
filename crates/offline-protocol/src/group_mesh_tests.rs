@@ -993,6 +993,111 @@ fn test_group_mls_duplicate_message_rejected() {
     );
 }
 
+/// Wraps a group ciphertext in the mesh frame `sender` sends to bob.
+fn group_frame(
+    sender: &str,
+    group_id: &str,
+    encrypted: &offline_protocol_mls::EncryptedMessage,
+) -> (offline_protocol_core::Message, String) {
+    let payload = serde_json::to_string(&GroupMlsMessagePayload {
+        message_id: None,
+        group_id: group_id.to_string(),
+        ciphertext: base64_encode(&encrypted.ciphertext),
+        epoch: encrypted.epoch,
+        reply_to: None,
+        forward_info: None,
+    })
+    .unwrap();
+    let message = make_message(
+        sender,
+        &id("bob"),
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
+    );
+    (message, payload)
+}
+
+/// Alice's first frame, and her frame that moves bob's ratchet for her past
+/// the out-of-order window, so the first can never decrypt at bob again.
+fn frame_behind_the_window(
+    alice: &OfflineProtocol,
+    group_id: &str,
+) -> (
+    offline_protocol_mls::EncryptedMessage,
+    offline_protocol_mls::EncryptedMessage,
+) {
+    let mls = alice.mls_manager_for_testing().read().unwrap();
+    let gid = offline_protocol_mls::GroupId::new(group_id).unwrap();
+    let old = mls.encrypt_for_group(&gid, b"old").unwrap();
+    let mut newest = None;
+    for _ in 0..=offline_protocol_mls::group::SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE + 1 {
+        newest = Some(mls.encrypt_for_group(&gid, b"newer").unwrap());
+    }
+    (old, newest.unwrap())
+}
+
+/// A member's resend of a group frame that is behind the receiver's
+/// out-of-order window. It can never decrypt, and a sender never re-seals a
+/// group frame, so every resend fails the same way. Deferring it withheld
+/// the ACK the sender waits for: the sender retransmitted it for the outbox
+/// lifetime, and each such frame held a slot of that peer's send window.
+/// Sixteen of them wedged every later message between two devices.
+#[test]
+fn test_group_mls_member_frame_behind_the_window_is_acked_not_deferred() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Behind The Window");
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    let (old, newest) = frame_behind_the_window(&alice, &group_id);
+    let (newest, _) = group_frame(&id("alice"), &group_id, &newest);
+    let first = bob.process_internal_message(&newest);
+    assert!(matches!(first, Some(InternalMessageResult::Consumed)));
+
+    let (old, _) = group_frame(&id("alice"), &group_id, &old);
+    let resend = bob.process_internal_message(&old);
+    assert!(
+        matches!(resend, Some(InternalMessageResult::Consumed)),
+        "a member's frame behind the window must be ACKed, got {resend:?}"
+    );
+    assert!(
+        bob.group_mesh.pending_group_messages.is_empty(),
+        "a frame that can never decrypt must not be buffered"
+    );
+    let received = bob_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::GroupMessageReceived { .. }))
+        .count();
+    assert_eq!(received, 1, "only the newest frame is delivered");
+}
+
+/// The same old ciphertext replayed by someone who is not a member, under
+/// their own wire identity. Answering it would tell them this device is up
+/// (invariant I4), so it gets what it got before the fix: buffered, no ACK.
+#[test]
+fn test_group_mls_non_member_frame_behind_the_window_is_not_acked() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Replayed Behind The Window");
+    let (old, newest) = frame_behind_the_window(&alice, &group_id);
+    let (newest, _) = group_frame(&id("alice"), &group_id, &newest);
+    bob.process_internal_message(&newest);
+
+    let (replay, payload) = group_frame(&id("mallory"), &group_id, &old);
+    let res = bob.handle_group_mls_msg(&replay, &id("mallory"), &payload);
+    assert!(
+        matches!(res, InternalMessageResult::Deferred),
+        "a non-member's replay must stay unanswered, got {res:?}"
+    );
+    // Its replay must defer too, rather than read as delivered and be ACKed.
+    let res = bob.handle_group_mls_msg(&replay, &id("mallory"), &payload);
+    assert!(
+        matches!(res, InternalMessageResult::Deferred),
+        "a non-member's second replay must stay unanswered, got {res:?}"
+    );
+}
+
 #[test]
 fn test_group_mls_leave_non_member_rejected() {
     let (mut protocol, events) = setup_started_with_events();
