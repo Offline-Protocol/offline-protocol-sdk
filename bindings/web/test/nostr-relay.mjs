@@ -4,8 +4,12 @@
 // own code (signal.rs) is what refuses a forged event, and a relay that
 // forwards anything is the stricter test of that. A client that connects on
 // the path `/silent` is never answered: the relay that accepts a socket and
-// never confirms a subscription. Node's standard library only, so the test
-// runner installs nothing.
+// never confirms a subscription. One on `/once` confirms its first
+// subscription and then goes quiet, answering and forwarding nothing more:
+// a socket the network lost without closing it. On `/first/<token>` the
+// first socket for a token is served and every later one is silent: a relay
+// that answered before a network change and now accepts and ignores a
+// redial. Node's standard library only, so the test runner installs nothing.
 //
 // Usage: node test/nostr-relay.mjs <port>
 
@@ -15,6 +19,8 @@ import { createHash } from "node:crypto";
 const port = Number(process.argv[2] ?? 8766);
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const clients = new Set();
+// The `/first/<token>` paths a socket has already connected on.
+const served = new Set();
 
 function frame(text) {
   const payload = Buffer.from(text);
@@ -51,15 +57,20 @@ class Client {
   #buffer = Buffer.alloc(0);
   #fragments = [];
 
-  constructor(socket, silent) {
+  constructor(socket, mode) {
     this.socket = socket;
-    this.silent = silent;
+    this.mode = mode;
     socket.on("data", (chunk) => this.#read(chunk));
     socket.on("close", () => clients.delete(this));
     socket.on("error", () => clients.delete(this));
   }
 
+  get silent() {
+    return this.mode === "silent" || this.mode === "quiet";
+  }
+
   send(message) {
+    if (this.mode === "quiet") return;
     if (!this.socket.destroyed) this.socket.write(frame(JSON.stringify(message)));
   }
 
@@ -121,6 +132,7 @@ class Client {
       const [id, ...filters] = rest;
       this.subscriptions.set(id, filters);
       this.send(["EOSE", id]);
+      if (this.mode === "once") this.mode = "quiet";
     } else if (type === "CLOSE") {
       this.subscriptions.delete(rest[0]);
     } else if (type === "EVENT") {
@@ -144,6 +156,11 @@ server.on("upgrade", (request, socket) => {
     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
       `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
   );
-  clients.add(new Client(socket, request.url === "/silent"));
+  let mode = { "/silent": "silent", "/once": "once" }[request.url] ?? "open";
+  if (request.url.startsWith("/first/")) {
+    mode = served.has(request.url) ? "silent" : "open";
+    served.add(request.url);
+  }
+  clients.add(new Client(socket, mode));
 });
 server.listen(port, "127.0.0.1", () => console.log(`nostr test relay on ${port}`));

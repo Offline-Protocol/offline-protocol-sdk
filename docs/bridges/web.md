@@ -223,20 +223,31 @@ bound. Closing loses nothing the engine promised: an acknowledged message
 waits in its outbox for the next link, and an unacknowledged one (W10) was
 never promised.
 
-A connection closes on `failed` or `closed`, never on `disconnected`, which
-the WebRTC specification lets recover on its own: closing there would turn a
-Wi-Fi blip into two new codes typed by hand. Chrome reaches `disconnected`
-5 seconds after the last answered connectivity check and `failed` 15 seconds
-after it (Firefox later), and only `failed` reaches the engine as a lost
-peer. So the carrier dispatches a `connection` event for every change,
-`connected`, `disconnected` and `closed`, naming the object `offer()` or
-`answer()` resolved to. A page that waits for `neighbor_lost` alone looks
-connected for those seconds, and a page that watches for it on one side only
-looks connected for ever: the lobby's player did, over a frozen court, until
-the [two-device run](web-devices.md#results) found it. Events start once
-`offer()` or `answer()` has resolved: a call that rejects, including one
-whose connection closed while it gathered, reports nothing, as an event
-naming an object the page never received matches nothing it holds.
+A connection closes on `failed` or `closed`, or once it has stayed
+`disconnected` for 15 seconds (`disconnectedMs`). `disconnected` may recover
+on its own, which the WebRTC specification allows, and closing on it at once
+would turn a Wi-Fi blip into two new codes typed by hand. But nothing obliges
+a browser to move on to `failed`, and Android's WebView was seen to sit in
+`disconnected` for good after the other device restarted. The engine takes
+one link per address (W3), so that dead link refused every new link from the
+same device, and the two never met again until a page reloaded. The deadline
+is longer than Chrome's own, so in Chrome it changes nothing: Chrome reaches
+`disconnected` 5 seconds after the last answered connectivity check and
+`failed` 15 seconds after it. Firefox and WebKit get there later, so in them
+a blip that lasts longer than 15 seconds now closes where it might have
+recovered: that is the price of a link a WebView would otherwise never
+release. The deadline reads the state again when it fires, so a recovery
+whose change event has not run yet is not closed. Either way, a close is what
+reaches the engine as a lost peer. So the carrier dispatches a `connection`
+event for every change, `connected`, `disconnected` and `closed`, naming the
+object `offer()` or `answer()` resolved to. A page that waits for
+`neighbor_lost` alone looks connected for those seconds, and a page that
+watches for it on one side only looks connected for ever: the lobby's player
+did, over a frozen court, until the [two-device run](web-devices.md#results)
+found it. Events start once `offer()` or `answer()` has resolved: a call that
+rejects, including one whose connection closed while it gathered, reports
+nothing, as an event naming an object the page never received matches nothing
+it holds.
 
 Signalling needs no network. Each side's description waits for ICE gathering
 to finish, so one code carries every candidate, and the two codes cross by
@@ -314,6 +325,29 @@ new event every two seconds until an answer for its session arrives or its
 deadline passes, because a host that subscribed after an ephemeral event was
 sent never sees it.
 
+**A hosted room stays reachable until it is closed.** `host()` resolves once
+a relay confirms the subscription, and a room is meant to be held for as long
+as the device wants to be found, which on a phone spans sleeps and network
+changes. A relay socket that closes is dialled again, after one second,
+doubling to thirty. A live one is asked to confirm its subscription every
+`keepAliveMs` (default sixty seconds): NIP-01 lets a REQ under an open
+subscription's id replace it, and the relay answers with EOSE again. A socket
+that has not answered within ten seconds (or `keepAliveMs`, if shorter) of
+being dialled or asked is dropped and dialled again, because a socket the
+network lost without a word still reads as open until TCP gives up, minutes
+later, and a relay that accepts a redial and says nothing would otherwise
+hold its place for good. A relay waits on one confirmation at a time: a probe
+is never sent while another is unanswered. Browsers run an interval's next
+tick ahead of a deadline of the same length set inside it, so a probe that
+reset the last one's state made an answer read as silence and dropped a
+relay that had answered. The page coming back online or into view probes at
+once and cuts every backoff short, and a room whose node stops closes
+itself. Before this, a room whose sockets had
+dropped answered nobody, while `host()` had long since resolved and the page
+had no way to tell: a phone that had slept was unreachable until the app
+restarted. A join keeps none of this; it lasts seconds, and fails on its
+deadline.
+
 ## Which shared rules apply
 
 | Rule | How it reaches the web binding |
@@ -384,17 +418,27 @@ start there, because Firefox answers it by asking the user.
   message that crosses in chunks, a group at 10 Hz sent acknowledged and
   then ephemeral, each with its delivery latency and the sender's store
   flushes (the ephemeral phase must cost fewer), and a loss when the
-  connection closes (W9, W10). Chromium runs with `WebRtcHideLocalIpsWithMdns`
+  connection closes (W9, W10). Then a connection the page makes read
+  `disconnected`: a blip shorter than `disconnectedMs` leaves it up, one that
+  stays is closed and reported lost at both ends, and the same two devices
+  link again. Chromium runs with `WebRtcHideLocalIpsWithMdns`
   off and Firefox with `media.peerconnection.ice.obfuscate_host_addresses`
   off, so the candidates are addresses a runner can reach. WebKit has no such
   switch and gathers `.local` names.
 - `nostr-signal.html`: two nodes that share only a room code meet through
   a Nostr relay, link over WebRTC and send an ephemeral direct message. A
   join to a room nobody hosts gives up at its deadline, and a call to a
-  stopped node rejects instead of hanging (W10, W11). The relay is
-  `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard library that
-  stores and verifies nothing, so the page's own checks are what refuse a
-  forged event.
+  stopped node rejects instead of hanging (W10, W11). A hosted room whose
+  relay sockets the page closes must still answer a later join, and one on a
+  relay that confirms its first subscription and then goes quiet (the relay's
+  `/once` path) must drop that socket at its next probe and dial another.
+  A relay that answers every probe of a half-second keep-alive keeps its one
+  socket, coming back `online` redials ahead of the backoff, and a redial
+  the relay accepts and never confirms (its `/first/<token>` path) is
+  dropped and dialled again.
+  The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
+  library that stores and verifies nothing, so the page's own checks are what
+  refuse a forged event.
 
 `scripts/test-conformance.sh` runs
 `crates/offline-protocol-web/tests/browser_conformance.rs` in a dedicated
