@@ -78,6 +78,7 @@ class ProtocolEngineHost(
                 proto,
                 config.profile,
                 config.appId,
+                advertiseNodeHash = false,
                 onDiagnostic,
             ).also { manager ->
                 manager.listener = transportListener(manager)
@@ -294,6 +295,7 @@ class ProtocolEngineHost(
                         proto,
                         currentConfig?.profile ?: "unknown",
                         currentConfig?.appId ?: "",
+                        advertiseNodeHash = false,
                         onDiagnostic,
                     )
                     onDiagnostic("info", "BLE manager created on demand", emptyMap())

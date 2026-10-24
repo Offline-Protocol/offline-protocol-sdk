@@ -1239,6 +1239,13 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(nil)
     }
 
+    @objc func setPeerRssiEvents(_ enabled: Bool,
+                                 resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        protocolInstance?.setPeerRssiEvents(enabled: enabled)
+        resolver(nil)
+    }
+
     @objc func telemetryInstallId(_ resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {

@@ -55,7 +55,7 @@ HARNESS_MODULE="OfflineProtocol"
 # list of what to leave out, not of what to take, so a new bridge source is in
 # the package without being added anywhere, and one that imports React is
 # refused below by name.
-REACT_ONLY=(OfflineProtocolModule.swift)
+REACT_ONLY=(OfflineProtocolModule.swift ProtocolEngineHostBridgeReactNative.swift)
 
 # The directories of sources, the ones the podspec takes whole. A source in a
 # new directory is in neither until it is named in both.

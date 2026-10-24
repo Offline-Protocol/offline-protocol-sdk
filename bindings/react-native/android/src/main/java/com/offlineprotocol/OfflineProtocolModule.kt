@@ -1183,6 +1183,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun setPeerRssiEvents(enabled: Boolean, promise: Promise) {
+        try {
+            protocol?.setPeerRssiEvents(enabled)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("PEER_RSSI_EVENTS_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
     fun telemetryInstallId(promise: Promise) {
         val proto = protocol
         if (proto == null) {

@@ -12934,17 +12934,18 @@ mod tests {
         );
 
         // --- Edge 2: the two modules that produce those strings ------------
-        let kotlin_src = read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt");
+        let kotlin_src =
+            read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt");
         let kotlin = code_only(slice_between(
             &kotlin_src,
             "fun getState(",
-            "promise.resolve(stateString)",
+            "fun getTopology(",
         ));
         let swift_src = read("ios/ProtocolEngineHostBridge.swift");
         let swift = code_only(slice_between(
             &swift_src,
-            "func getState(",
-            "resolver(stateString)",
+            "static func getState(",
+            "static func localAddress(",
         ));
 
         for state in VARIANTS {
@@ -12957,7 +12958,7 @@ mod tests {
                  a name that disagrees with types.ts is invisible to tsc and to a bindings regen"
             );
 
-            let swift_arm = format!("case .{}: stateString = \"{name}\"", swift_spelling(name));
+            let swift_arm = format!("case .{}: return \"{name}\"", swift_spelling(name));
             assert!(
                 swift.contains(&swift_arm),
                 "ProtocolEngineHostBridge.swift getState must resolve `{swift_arm}`; \
@@ -12973,7 +12974,7 @@ mod tests {
             "ProtocolEngineHostBridge.kt getState must fall back to \"Stopped\""
         );
         assert!(
-            swift.contains("@unknown default: stateString = \"Stopped\""),
+            swift.contains("@unknown default: return \"Stopped\""),
             "ProtocolEngineHostBridge.swift getState must fall back to \"Stopped\", matching Android"
         );
     }
@@ -13508,7 +13509,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
         };
 
-        let swift = code_only(&read("ios/ProtocolEngineHostBridge.swift"));
+        let swift = code_only(&read("ios/OfflineProtocolModule.swift"));
 
         // --- The precondition exists, and is composed with the listener flag -
         assert!(
@@ -15991,7 +15992,7 @@ mod tests {
         );
         let kotlin_ring =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/EventReplayRing.kt");
-        let swift = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
         let swift_bridge = rn_source_code_only("ios/OfflineProtocolModule.m");
         let swift_ring = rn_source_code_only("ios/EventReplayRing.swift");
         let podspec = rn_source_code_only("MeshSdk.podspec");
@@ -16183,7 +16184,7 @@ mod tests {
             swift_buffer.contains("static let defaultMaxEntries = 256"),
             "the iOS inbound buffer must be capped at 256"
         );
-        let swift_module = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");
+        let swift_module = rn_source_code_only("ios/OfflineProtocolModule.swift");
         assert!(
             swift_module.contains("emitter.holdInboundEventIfBuffered(eventJson, generation: generation)"),
             "EventCallbackImpl.onEvent must hold a buffered inbound event when sendEventToJS refuses it"
@@ -16988,15 +16989,14 @@ mod tests {
             !rn_fn.is_empty(),
             "OfflineProtocolModule.configureAndStartInternet not found: the guard needs a stable anchor"
         );
+        assert!(
+            rn_fn.contains("InternetTransportBootstrap.configureAndStart"),
+            "OfflineProtocolModule.configureAndStartInternet must delegate to InternetTransportBootstrap"
+        );
         for marker in INTERNET_CONFIGURE_MARKERS {
             assert!(
                 bootstrap.contains(marker),
                 "InternetTransportBootstrap.kt missing `{marker}`"
-            );
-            assert!(
-                rn_fn.contains(marker),
-                "OfflineProtocolModule.configureAndStartInternet missing `{marker}`: \
-                 update InternetTransportBootstrap.kt or restore RN parity"
             );
         }
     }
@@ -17453,7 +17453,7 @@ mod tests {
         }
 
         let objc = rn_source_code_only("ios/OfflineProtocolModule.m");
-        let swift = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
         let js = rn_source_code_only("src/index.ts");
 
         let objc_declarations = objc_methods(&objc);
@@ -17641,6 +17641,8 @@ mod tests {
         // every file that still narrows JavaScript numbers must stay bounded.
         const SWIFT_JS_NUMERIC_SOURCES: &[&str] = &[
             "ios/OfflineProtocolModule.swift",
+            "ios/ProtocolEngineHostBridge.swift",
+            "ios/BridgeArgumentMaps.swift",
             "ios/ProtocolConfigParser.swift",
             "ios/InitialRuntimeConfigApplier.swift",
         ];
