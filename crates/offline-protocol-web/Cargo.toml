@@ -52,10 +52,13 @@ js-sys = "0.3.82"
 # wasm32-unknown-unknown and fails, at build time or on first use, unless its
 # JavaScript backend is named. getrandom 0.3 also needs the
 # `getrandom_backend="wasm_js"` cfg, which `.cargo/config.toml` sets for this
-# target: a library cannot set it for its consumers.
+# target: a library cannot set it for its consumers. getrandom 0.4 needs only
+# its feature; it arrives with the RustCrypto 0.14 family (crypto-bigint 0.7,
+# crypto-common 0.2) under k256 0.14.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 uuid = { workspace = true, features = ["js"] }
 openmls = { workspace = true, features = ["js"] }
 

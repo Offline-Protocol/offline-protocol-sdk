@@ -116,12 +116,12 @@ impl ConversationKey {
     pub(crate) fn derive(secret: &SigningKey, peer_xonly: &[u8]) -> Result<Self> {
         // SECURITY: check the length before the curve decoder sees it. This key
         // comes straight off the wire — it is a relay event's `pubkey` field,
-        // and anyone may publish an event — but `VerifyingKey::from_bytes`
-        // takes a fixed-size array internally and *panics* on any other length
-        // rather than returning an error. Without this, one malformed record at
-        // a public routing tag takes the process down. Rejecting it here makes
-        // a malformed key an ordinary decrypt failure, which every caller
-        // already handles.
+        // and anyone may publish an event. k256 0.13's slice constructor
+        // *panicked* on any other length, so one malformed record at a public
+        // routing tag took the process down. `VerifyingKey::from_slice` in
+        // 0.14 returns an error instead, but the screen stays: it keeps a
+        // malformed key an ordinary decrypt failure whatever the decoder under
+        // it does, and every caller already handles that failure.
         if peer_xonly.len() != 32 {
             return Err(Error::CryptoError(
                 "NIP-44: peer public key must be 32 bytes".to_string(),
@@ -129,7 +129,7 @@ impl ConversationKey {
         }
 
         // Rejects off-curve x values; `lift_x` picks the even-y point, per BIP-340.
-        let peer = VerifyingKey::from_bytes(peer_xonly).map_err(|_| {
+        let peer = VerifyingKey::from_slice(peer_xonly).map_err(|_| {
             Error::CryptoError("NIP-44: peer public key is not a valid curve point".to_string())
         })?;
 
@@ -455,7 +455,7 @@ mod tests {
 
     /// x-only public key for a hex-encoded secret key.
     fn pubkey_of(sec_hex: &str) -> [u8; 32] {
-        let sk = SigningKey::from_bytes(&hex::decode(sec_hex).expect("hex")).expect("valid sec");
+        let sk = SigningKey::from_slice(&hex::decode(sec_hex).expect("hex")).expect("valid sec");
         let mut out = [0u8; 32];
         out.copy_from_slice(&sk.verifying_key().to_bytes());
         out
@@ -480,7 +480,7 @@ mod tests {
             let pub2 = case["pub2"].as_str().unwrap();
             let expected = case["conversation_key"].as_str().unwrap();
 
-            let sk = SigningKey::from_bytes(&hex::decode(sec1).unwrap()).unwrap();
+            let sk = SigningKey::from_slice(&hex::decode(sec1).unwrap()).unwrap();
             let key = ConversationKey::derive(&sk, &hex::decode(pub2).unwrap()).unwrap();
             assert_eq!(hex::encode(key.0), expected, "conversation_key vector {i}");
         }
@@ -539,7 +539,7 @@ mod tests {
             let payload = case["payload"].as_str().unwrap();
 
             // Sender: conv(sec1, pub2), then encrypt to the exact payload.
-            let sk1 = SigningKey::from_bytes(&hex::decode(sec1).unwrap()).unwrap();
+            let sk1 = SigningKey::from_slice(&hex::decode(sec1).unwrap()).unwrap();
             let key1 = ConversationKey::derive(&sk1, &pubkey_of(sec2)).unwrap();
             assert_eq!(hex::encode(key1.0), expected_ck, "sender key, vector {i}");
             assert_eq!(
@@ -551,7 +551,7 @@ mod tests {
             // Receiver: the mirrored derivation must land on the same key and
             // recover the plaintext. This is what proves `conv(a,B) == conv(b,A)`
             // survives BIP-340's even-y normalization of the scalar.
-            let sk2 = SigningKey::from_bytes(&hex::decode(sec2).unwrap()).unwrap();
+            let sk2 = SigningKey::from_slice(&hex::decode(sec2).unwrap()).unwrap();
             let key2 = ConversationKey::derive(&sk2, &pubkey_of(sec1)).unwrap();
             assert_eq!(hex::encode(key2.0), expected_ck, "receiver key, vector {i}");
             assert_eq!(
@@ -612,7 +612,7 @@ mod tests {
 
             let derived = hex::decode(sec1)
                 .ok()
-                .and_then(|b| SigningKey::from_bytes(&b).ok())
+                .and_then(|b| SigningKey::from_slice(&b).ok())
                 .and_then(|sk| {
                     hex::decode(pub2)
                         .ok()
@@ -741,8 +741,8 @@ mod tests {
         // UTF-8 strings, but every step below the API is byte-oriented, so
         // this must work — and it is the common case once binary wire is
         // negotiated.
-        let alice = SigningKey::from_bytes(&[3u8; 32]).unwrap();
-        let bob = SigningKey::from_bytes(&[5u8; 32]).unwrap();
+        let alice = SigningKey::from_slice(&[3u8; 32]).unwrap();
+        let bob = SigningKey::from_slice(&[5u8; 32]).unwrap();
         let key_a = ConversationKey::derive(&alice, &bob.verifying_key().to_bytes()).unwrap();
         let key_b = ConversationKey::derive(&bob, &alice.verifying_key().to_bytes()).unwrap();
 
@@ -758,8 +758,8 @@ mod tests {
         // Nonce reuse under one conversation key makes both messages
         // decryptable, so identical plaintexts must not produce identical
         // payloads.
-        let sk = SigningKey::from_bytes(&[9u8; 32]).unwrap();
-        let peer = SigningKey::from_bytes(&[11u8; 32]).unwrap();
+        let sk = SigningKey::from_slice(&[9u8; 32]).unwrap();
+        let peer = SigningKey::from_slice(&[11u8; 32]).unwrap();
         let key = ConversationKey::derive(&sk, &peer.verifying_key().to_bytes()).unwrap();
 
         let a = encrypt(b"same plaintext", &key).unwrap();
@@ -771,9 +771,9 @@ mod tests {
     fn wrong_key_fails_on_the_mac_not_the_padding() {
         // Fail-closed ordering: a forged or misaddressed payload must be
         // rejected by the MAC, before any plaintext bytes exist to act on.
-        let sk = SigningKey::from_bytes(&[13u8; 32]).unwrap();
-        let peer = SigningKey::from_bytes(&[17u8; 32]).unwrap();
-        let stranger = SigningKey::from_bytes(&[19u8; 32]).unwrap();
+        let sk = SigningKey::from_slice(&[13u8; 32]).unwrap();
+        let peer = SigningKey::from_slice(&[17u8; 32]).unwrap();
+        let stranger = SigningKey::from_slice(&[19u8; 32]).unwrap();
 
         let key = ConversationKey::derive(&sk, &peer.verifying_key().to_bytes()).unwrap();
         let wrong = ConversationKey::derive(&sk, &stranger.verifying_key().to_bytes()).unwrap();
@@ -788,8 +788,8 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_is_rejected() {
-        let sk = SigningKey::from_bytes(&[23u8; 32]).unwrap();
-        let peer = SigningKey::from_bytes(&[29u8; 32]).unwrap();
+        let sk = SigningKey::from_slice(&[23u8; 32]).unwrap();
+        let peer = SigningKey::from_slice(&[29u8; 32]).unwrap();
         let key = ConversationKey::derive(&sk, &peer.verifying_key().to_bytes()).unwrap();
 
         let payload = encrypt(b"authentic message", &key).unwrap();
@@ -832,7 +832,7 @@ mod tests {
     /// a remote crash.
     #[test]
     fn derive_rejects_a_peer_key_that_is_not_32_bytes() {
-        let sk = SigningKey::from_bytes(&[7u8; 32]).unwrap();
+        let sk = SigningKey::from_slice(&[7u8; 32]).unwrap();
         for len in [0usize, 1, 31, 33, 64] {
             let peer = vec![0xaau8; len];
             assert!(

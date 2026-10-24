@@ -34,6 +34,31 @@ ignore = [
     { id = "RUSTSEC-2026-0207", reason = "libcrux-sha3 incremental SHAKE squeeze bug; SHAKE unreachable with our classical MLS ciphersuite; no hpke-rs-0.6-compatible fix exists" },
     { id = "RUSTSEC-2026-0208", reason = "libcrux-sha3 AVX2 SHAKE-256 panic; same unreachable SHAKE path, same missing upstream fix" },
     { id = "RUSTSEC-2026-0212", reason = "libcrux-secrets aarch64 swap/select; only used beneath the unreachable SHAKE/ML-KEM path, same missing upstream fix" },
+    # Timing leaks in crypto-bigint below 0.7.6 (secret-dependent branches in
+    # subtraction, zero counting, division and Montgomery multiplication).
+    # Upstream fixed only the 0.7 line. Our own secp256k1 code, the Nostr
+    # transport's Schnorr signing and NIP-44 ECDH, is on k256 0.14 and so on
+    # crypto-bigint 0.7.6. It was on k256 0.13 and crypto-bigint 0.5.5 before
+    # this waiver was written, which made that path reachable on a secret key.
+    #
+    # What still locks 0.5.5 is elliptic-curve 0.13, under p256/p384 from
+    # openmls_basic_credential, openmls_rust_crypto, hpke-rs-rust-crypto 0.6
+    # and mls-rs-crypto-rustcrypto, and under k256 0.13 from
+    # hpke-rs-rust-crypto. That code is compiled but no secret of ours ever
+    # reaches it: the engine's only ciphersuite is
+    # MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519 (DEFAULT_CIPHERSUITE in
+    # offline-protocol-mls) and the leaf enables only CURVE25519_AES128, so
+    # every private key we hold is X25519 or Ed25519. A peer naming a NIST or
+    # secp256k1 suite can make these crates verify a public signature, which
+    # is not secret-dependent.
+    #
+    # No release clears it: openmls_rust_crypto 0.6.0, openmls_basic_credential
+    # 0.6.0 and mls-rs-crypto-rustcrypto 0.22.1 (the latest) still require
+    # p256/p384 ^0.13. Drop this waiver when they move to elliptic-curve 0.14.
+    # Never keep it if `cargo tree -i k256@0.13.4` shows anything but
+    # hpke-rs-rust-crypto, or if a ciphersuite other than X25519/Ed25519 is
+    # added. Mirrored in .cargo/audit.toml.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint <0.7.6 timing leaks; our secp256k1 (Nostr) code is on k256 0.14 / crypto-bigint 0.7.6; 0.5.5 remains only under elliptic-curve 0.13 in the MLS/HPKE crates' P-256, P-384 and secp256k1 suites, which hold none of our secrets (X25519/Ed25519 only); no upstream release leaves elliptic-curve 0.13" },
     # Unmaintained-crate notice for atomic-polyfill, which enters the lockfile
     # under heapless 0.7 -> postcard's default `heapless-cas` feature, pulled
     # in by the CRDT engine's serde_columnar. It is never compiled for any

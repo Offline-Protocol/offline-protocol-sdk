@@ -116,7 +116,7 @@ unicode-normalization = "0.1"
 # Crypto
 # `ecdh` backs the NIP-44 v2 conversation key (secp256k1 ECDH, x-coordinate
 # only, deliberately unhashed) used to seal Nostr gift wraps.
-k256 = { version = "0.13", features = ["schnorr", "ecdh"] }
+k256 = { version = "0.14", features = ["schnorr", "ecdh"] }
 sha2 = "0.10"
 hkdf = "0.12"
 # NIP-44 v2 is encrypt-then-MAC over a raw ChaCha20 stream — not an AEAD — so

@@ -117,11 +117,12 @@ acknowledged, and a node in memory comes back as a new one.
 
 ### W6. Entropy comes from the browser
 
-`getrandom` 0.2 and 0.3, `uuid` and OpenMLS each select a JavaScript backend
-only when told to. The crate names each one for this target, and
+`getrandom` 0.2, 0.3 and 0.4, `uuid` and OpenMLS each select a JavaScript
+backend only when told to. The crate names each one for this target, and
 `.cargo/config.toml` sets the `getrandom_backend="wasm_js"` cfg that
-getrandom 0.3 also requires (only the final build can set it). Without them
-the build fails, which is the safe direction.
+getrandom 0.3 also requires (only the final build can set it); 0.4 needs only
+its feature. Without them the build fails, which is the safe direction, so a
+dependency that brings in a new getrandom major shows up here first.
 
 ### W7. The wasm-bindgen versions agree
 

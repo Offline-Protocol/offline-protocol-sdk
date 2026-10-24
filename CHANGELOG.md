@@ -215,6 +215,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   that took the connection and never confirmed the subscription left its
   socket open after `host()` rejected.
 
+### Security
+
+- **Nostr signing and NIP-44 key agreement no longer run on a timing-leaky
+  big-integer library.** RUSTSEC-2026-0387 reports secret-dependent branches
+  in `crypto-bigint` below 0.7.6, which `k256` 0.13 builds its scalar
+  arithmetic on, so the Nostr transport's Schnorr signatures and its NIP-44
+  conversation keys did that arithmetic on the identity's secret key. The
+  workspace now takes `k256` 0.14, on `crypto-bigint` 0.7.6. Keys, routing
+  tags, discovery tags and record seal keys are unchanged: the golden values
+  and the official NIP-44 vectors pass as before. `crypto-bigint` 0.5.5
+  stays in the build only under the MLS and HPKE libraries' P-256, P-384 and
+  secp256k1 suites, which hold none of the SDK's keys (every key is X25519 or
+  Ed25519), and is waived in `deny.toml` until those libraries move to
+  `elliptic-curve` 0.14.
+
 ## [0.30.0] — 2026-10-21
 
 > **Update if you enable telemetry.** The telemetry uploader in 0.26.0 to

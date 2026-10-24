@@ -143,7 +143,7 @@ impl NostrKeypair {
             hkdf.expand(&info, &mut *candidate)
                 .map_err(|e| Error::CryptoError(format!("HKDF expand failed: {}", e)))?;
 
-            if let Ok(signing_key) = SigningKey::from_bytes(&*candidate) {
+            if let Ok(signing_key) = SigningKey::from_slice(&*candidate) {
                 let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
                 return Ok(Self {
                     signing_key,
@@ -233,7 +233,7 @@ pub fn record_seal_keypair_for_address(address: &Address) -> Result<NostrKeypair
         hkdf.expand(&info, &mut *candidate)
             .map_err(|e| Error::CryptoError(format!("HKDF expand failed: {}", e)))?;
 
-        if let Ok(signing_key) = SigningKey::from_bytes(&*candidate) {
+        if let Ok(signing_key) = SigningKey::from_slice(&*candidate) {
             let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
             return Ok(NostrKeypair {
                 signing_key,
@@ -310,7 +310,7 @@ pub(crate) fn now_unix_secs() -> i64 {
 pub fn routing_tag_for_address(address: &Address) -> Result<String> {
     let address = address.to_string();
     let tag_scalar = Sha256::digest(address.as_bytes());
-    let tag_key = SigningKey::from_bytes(tag_scalar.as_slice())
+    let tag_key = SigningKey::from_slice(tag_scalar.as_slice())
         .map_err(|e| Error::CryptoError(format!("Invalid routing tag for address: {}", e)))?;
     Ok(hex::encode(tag_key.verifying_key().to_bytes()))
 }
@@ -352,7 +352,7 @@ pub fn discovery_tag_for_username(username: &Username) -> Result<String> {
     preimage.extend_from_slice(username.as_str().as_bytes());
 
     let tag_scalar = Sha256::digest(&preimage);
-    let tag_key = SigningKey::from_bytes(tag_scalar.as_slice())
+    let tag_key = SigningKey::from_slice(tag_scalar.as_slice())
         .map_err(|e| Error::CryptoError(format!("Invalid discovery tag for username: {}", e)))?;
     Ok(hex::encode(tag_key.verifying_key().to_bytes()))
 }
@@ -401,7 +401,7 @@ pub fn discovery_seal_keypair_for_username(username: &Username) -> Result<NostrK
         hkdf.expand(&info, &mut *candidate)
             .map_err(|e| Error::CryptoError(format!("HKDF expand failed: {}", e)))?;
 
-        if let Ok(signing_key) = SigningKey::from_bytes(&*candidate) {
+        if let Ok(signing_key) = SigningKey::from_slice(&*candidate) {
             let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
             return Ok(NostrKeypair {
                 signing_key,
@@ -1044,9 +1044,10 @@ pub(crate) fn event_is_authentic(event: &serde_json::Value) -> bool {
     // Decoded before it is interpolated below: this both rejects a key no
     // curve can accept and guarantees the string is pure hex, so it cannot
     // carry a quote into the canonical serialization. The length check is
-    // load-bearing for a second reason — `VerifyingKey::from_bytes` *panics*
-    // on any other length rather than erroring, and this value comes straight
-    // off a public tag. See `ConversationKey::derive`.
+    // load-bearing for a second reason: this value comes straight off a
+    // public tag, and k256 0.13's slice constructor *panicked* on any other
+    // length. 0.14's `VerifyingKey::from_slice` errors instead; the screen
+    // keeps that true whatever the decoder does. See `ConversationKey::derive`.
     let Ok(pubkey_bytes) = hex::decode(pubkey) else {
         return false;
     };
@@ -1067,7 +1068,7 @@ pub(crate) fn event_is_authentic(event: &serde_json::Value) -> bool {
         return false;
     }
 
-    let Ok(vk) = VerifyingKey::from_bytes(&pubkey_bytes) else {
+    let Ok(vk) = VerifyingKey::from_slice(&pubkey_bytes) else {
         return false;
     };
     let Ok(sig_bytes) = hex::decode(sig) else {
@@ -1226,7 +1227,7 @@ mod tests {
         // What the tag would have been without the domain separator.
         let bare_scalar = Sha256::digest(b"alice");
         let bare = hex::encode(
-            SigningKey::from_bytes(bare_scalar.as_slice())
+            SigningKey::from_slice(bare_scalar.as_slice())
                 .expect("scalar")
                 .verifying_key()
                 .to_bytes(),
@@ -2059,9 +2060,9 @@ mod tests {
         assert!(!event_is_authentic(&forged));
     }
 
-    /// The length screen in front of `VerifyingKey::from_bytes`, which panics
-    /// rather than erroring on a key of the wrong size. The value arrives off a
-    /// public tag, so this is reachable by anyone.
+    /// The length screen in front of `VerifyingKey::from_slice`. k256 0.13
+    /// panicked on a key of the wrong size, and the value arrives off a public
+    /// tag, so a regression here is reachable by anyone.
     #[test]
     fn test_event_is_authentic_refuses_malformed_pubkeys_without_panicking() {
         let keypair = NostrKeypair::generate_ephemeral().expect("keypair");

@@ -72,6 +72,21 @@ ignore = [
     # used only beneath the unreachable SHAKE/ML-KEM path.
     "RUSTSEC-2026-0212",
 
+    # Mirrors deny.toml, where the full rationale is. crypto-bigint below
+    # 0.7.6 has secret-dependent timing in several arithmetic operations. Our
+    # own secp256k1 code (Nostr signing and NIP-44 ECDH) is on k256 0.14 and
+    # crypto-bigint 0.7.6. The 0.5.5 still locked arrives only through
+    # elliptic-curve 0.13 in the MLS/HPKE crates' P-256, P-384 and secp256k1
+    # suites, and every private key we hold is X25519 or Ed25519. Verify
+    # before renewing:
+    #
+    #     cargo tree --workspace --target all -i k256@0.13.4
+    #
+    # must show hpke-rs-rust-crypto alone.
+    #
+    # RUSTSEC-2026-0387: crypto-bigint timing variability.
+    "RUSTSEC-2026-0387",
+
     # --- Build-time only ---------------------------------------------------
     #
     # Mirrors deny.toml. Unmaintained notice for a proc-macro pulled in by
