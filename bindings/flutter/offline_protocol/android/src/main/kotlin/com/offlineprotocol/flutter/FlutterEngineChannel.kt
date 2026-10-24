@@ -18,6 +18,7 @@ object FlutterEngineChannel {
         val startOnEngine: () -> Unit,
         val stopOnEngine: () -> Unit,
         val seedAppState: () -> uniffi.offline_protocol.AppState,
+        /** Clears a held one-shot event (e.g. after re-enabling internet). */
         val discardOneShotEvent: (key: String) -> Unit,
     )
 

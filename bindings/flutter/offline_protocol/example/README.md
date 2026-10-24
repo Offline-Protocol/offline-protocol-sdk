@@ -1,9 +1,8 @@
 # Offline Protocol Flutter example
 
-Minimal app: boot the engine, listen for core events, print this device’s
-`off1…` address.
+Minimal app: start the engine, listen for events, print this device’s `off1…` address.
 
-Build native libraries first ([bindings/flutter/README.md](../../README.md)).
+For native library setup, see [bindings/flutter/README.md](../../README.md).
 
 ## Android
 
@@ -14,7 +13,7 @@ flutter run -d android
 
 ## iOS
 
-The Xcode `Runner` project is not committed. Generate it once:
+Generate the Xcode `Runner` project once (not committed):
 
 ```bash
 ../../scripts/bootstrap-example-platforms.sh
@@ -22,9 +21,4 @@ flutter pub get
 flutter run -d <device-or-simulator-id>
 ```
 
-After bootstrap, merge Bluetooth `Info.plist` keys from
-[React Native iOS permissions](../../../react-native/README.md#ios-permissions)
-if you enable BLE in your own config (the example smoke config does not start BLE).
-
-For iOS pods and the `BridgeRN` copy step, see
-[bindings/flutter/README.md](../../README.md).
+To enable BLE in your own config, add the Bluetooth keys from [React Native iOS permissions](../../../react-native/README.md#ios-permissions). The example smoke config does not start BLE.

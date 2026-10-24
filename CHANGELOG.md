@@ -40,6 +40,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `scripts/check-binding-generators.sh` gates the Flutter generators
   ([docs/bridges/flutter.md](docs/bridges/flutter.md)).
 
+- **Flutter binding parity and iOS CI.** Rust guards pin React Native parity
+  for mesh foreground keep-alive, sticky one-shot events, and inbound event
+  buffering on Android and iOS. GitHub Actions runs
+  `bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh` on macOS to
+  typecheck the Flutter pod against shared bridge Swift and simulator UniFFI.
+
 - **The browser can remove a group member.** `OfflineNode.removeFromGroup`
   removes a member from a group this device administers: the others move to
   a new epoch whose keys the removed member never holds, and the removed

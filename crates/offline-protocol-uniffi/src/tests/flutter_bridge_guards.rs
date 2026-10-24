@@ -376,6 +376,16 @@ fn flutter_binding_ci_job_is_wired_in_workflow() {
             ".github/workflows/ci.yml Flutter Binding job must reference `{needle}`"
         );
     }
+    for needle in [
+        "flutter-binding-ios:",
+        "ci-typecheck-flutter-ios-bridge.sh",
+        "flutter_ios:",
+    ] {
+        assert!(
+            ci.contains(needle),
+            ".github/workflows/ci.yml must wire Flutter iOS bridge CI (`{needle}`)"
+        );
+    }
 }
 
 #[test]
@@ -403,6 +413,119 @@ fn flutter_aar_baseline_json_is_well_formed() {
     assert!(
         tol > 0,
         "tolerance_bytes must be > 0 for regression headroom"
+    );
+}
+
+#[test]
+fn flutter_docs_describe_ios_bridge_ci() {
+    let changelog = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../CHANGELOG.md"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read CHANGELOG.md: {e}"));
+    assert!(
+        !changelog.contains("nothing in CI compiles the iOS plugin yet"),
+        "CHANGELOG must describe the Flutter iOS bridge CI job, not claim iOS is unchecked"
+    );
+    assert!(
+        changelog.contains("ci-typecheck-flutter-ios-bridge.sh"),
+        "CHANGELOG must name the iOS bridge typecheck script"
+    );
+    let bridge_doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/flutter.md"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read docs/bridges/flutter.md: {e}"));
+    assert!(
+        !bridge_doc.contains("nothing in CI compiles the iOS plugin yet")
+            && !bridge_doc.contains("No CI job compiles the iOS plugin yet"),
+        "docs/bridges/flutter.md must describe Flutter Binding (iOS bridge)"
+    );
+    assert!(
+        bridge_doc.contains("Flutter Binding (iOS bridge)"),
+        "docs/bridges/flutter.md must name the iOS CI job"
+    );
+}
+
+#[test]
+fn flutter_android_hosts_mesh_foreground_keep_alive() {
+    let flutter = flutter_plugin_dir();
+    let gradle = std::fs::read_to_string(flutter.join("android/build.gradle"))
+        .unwrap_or_else(|e| panic!("cannot read android/build.gradle: {e}"));
+    assert!(
+        !gradle.contains("MeshForegroundService.kt"),
+        "Flutter must compile MeshForegroundService, not exclude it"
+    );
+    let plugin_kt = std::fs::read_to_string(
+        flutter
+            .join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.kt: {e}"));
+    assert!(
+        plugin_kt.contains("FlutterMeshForegroundKeepAlive.start")
+            && plugin_kt.contains("FlutterMeshForegroundKeepAlive.stop"),
+        "Flutter start/stop must drive the shared mesh foreground service"
+    );
+    assert!(
+        plugin_kt.contains("StickyEventDispatcher")
+            && plugin_kt.contains("sendStickyOneShotEvent")
+            && plugin_kt.contains("mesh_stopped_by_user")
+            && plugin_kt.contains("SupersededLatchPolicy.EVENT_TYPE"),
+        "Flutter must sticky-deliver one-shot events like React Native"
+    );
+    assert!(
+        plugin_kt.contains("holdInboundEventIfBuffered")
+            && plugin_kt.contains("INBOUND_EVENT_BUFFER_CAPACITY = 256")
+            && plugin_kt.contains("message_received")
+            && plugin_kt.contains("inboundEvents.flush()"),
+        "Flutter Android must buffer inbound core events like React Native"
+    );
+    assert!(
+        std::fs::read_to_string(
+            flutter.join(
+                "android/src/main/kotlin/com/offlineprotocol/flutter/FlutterEngineChannel.kt"
+            ),
+        )
+        .unwrap_or_else(|e| panic!("cannot read FlutterEngineChannel.kt: {e}"))
+        .contains("discardOneShotEvent"),
+        "Flutter enableTransport must discard held internet_session_superseded"
+    );
+    assert!(
+        !gradle.contains("StickyEventDispatcher.kt"),
+        "Flutter must compile StickyEventDispatcher for one-shot redelivery"
+    );
+    let manifest = std::fs::read_to_string(flutter.join("android/src/main/AndroidManifest.xml"))
+        .unwrap_or_else(|e| panic!("cannot read plugin AndroidManifest.xml: {e}"));
+    assert!(
+        manifest.contains("MeshForegroundService"),
+        "Flutter plugin manifest must declare MeshForegroundService"
+    );
+    let flutter_ios_plugin =
+        std::fs::read_to_string(flutter.join("ios/Classes/OfflineProtocolPlugin.swift"))
+            .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
+    assert!(
+        flutter_ios_plugin.contains("restateInternetSupersededIfNeeded()")
+            && flutter_ios_plugin.contains("supersedeRestatementJson()"),
+        "Flutter iOS must restate internet_session_superseded on foreground like React Native"
+    );
+    assert!(
+        flutter_ios_plugin.contains("holdInboundEventIfBuffered")
+            && flutter_ios_plugin.contains("flushInboundEvents()")
+            && flutter_ios_plugin.contains("InboundEventBuffer()"),
+        "Flutter iOS must buffer inbound core events like React Native"
+    );
+    assert!(
+        !std::fs::read_to_string(flutter.join("ios/offline_protocol.podspec"))
+            .unwrap_or_default()
+            .contains("InboundEventBuffer.swift"),
+        "Flutter must compile InboundEventBuffer.swift, not exclude it"
+    );
+    let ci_script = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read ci-typecheck-flutter-ios-bridge.sh: {e}"));
+    assert!(
+        !ci_script.contains("ReticulumManager.swift") && !ci_script.contains("NostrManager.swift"),
+        "Flutter iOS typecheck must compile Reticulum/Nostr managers with ProtocolEngineHost"
     );
 }
 
