@@ -1294,8 +1294,10 @@ to 18 bytes, which current scanners ignore: 8 is read as this digest and
 proved its address on a link, so a forged digest never introduces anyone.
 What it can do is move that peer's place in relay ranking, which chooses
 the neighbours a frame fans out to when there are more neighbours than
-slots: a sustained forged signal (the transport smooths readings, so one
-spike does not) can push the peer out of the fan-out or into it. Ranking
+slots: a sustained forged signal can push the peer out of the fan-out or
+into it. Readings are smoothed and taken at most four a second per peer,
+however many advertisers carry its hash, so moving the ranking takes
+seconds of forged signal, not a burst. Ranking
 never decides whether a frame is sent at all, the frame still goes to the
 other neighbours, and every frame is still authenticated above this
 layer. An application must not treat `peer_rssi`

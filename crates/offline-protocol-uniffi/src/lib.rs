@@ -2609,7 +2609,10 @@ struct BleState {
     node_hashes: HashMap<[u8; offline_protocol_transport::NODE_HASH_LEN], String>,
     /// Whether `PeerRssi` is emitted at all (`set_peer_rssi_events`).
     rssi_events: bool,
-    /// When each peer's last `PeerRssi` went out, for the per-peer rate cap.
+    /// When each peer's last reading was taken, for the per-peer rate cap. It
+    /// caps link quality as well as the event: smoothing is per sample, so
+    /// without it whoever fed the most readings (several advertisers carrying
+    /// one peer's hash) would set how fast ranking moves.
     rssi_emitted: HashMap<String, offline_protocol_core::time::Instant>,
 }
 
@@ -4258,7 +4261,7 @@ impl OfflineProtocol {
         if rssi == 127 {
             return;
         }
-        let (peer_id, emit) = {
+        let peer_id = {
             let mut ble = recover_mutex(&self.ble_state, "ble_state");
             if !ble.rssi_events {
                 return;
@@ -4277,14 +4280,15 @@ impl OfflineProtocol {
                 return;
             };
             let now = offline_protocol_core::time::Instant::now();
-            let emit = !ble
+            if ble
                 .rssi_emitted
                 .get(&peer_id)
-                .is_some_and(|at| now.duration_since(*at) < PEER_RSSI_INTERVAL);
-            if emit {
-                ble.rssi_emitted.insert(peer_id.clone(), now);
+                .is_some_and(|at| now.duration_since(*at) < PEER_RSSI_INTERVAL)
+            {
+                return;
             }
-            (peer_id, emit)
+            ble.rssi_emitted.insert(peer_id.clone(), now);
+            peer_id
         };
         let deliver = {
             let protocol = self.lock_inner_recovering();
@@ -4300,7 +4304,7 @@ impl OfflineProtocol {
                         .is_some_and(|ble| ble.on_peer_rssi(&peer_id, rssi))
                 });
             // Suppressed like `NeighborDiscovered`: the app blocked this peer.
-            emit && linked && !protocol.is_user_blocked(&peer_id)
+            linked && !protocol.is_user_blocked(&peer_id)
         };
         if !deliver {
             return;
@@ -10744,9 +10748,13 @@ mod tests {
             got[0].contains("\"peer_id\":\"near\"") && got[0].contains("\"rssi\":-44"),
             "the event carries the raw reading: {got:?}"
         );
-        assert!(
-            link_rssi(&protocol) > smoothed,
-            "the cap is on events, not on readings"
+        // The cap holds link quality to one step per interval as well, so a
+        // burst (several advertisers carrying one hash) cannot outrun it.
+        let one_step = ((7 * i32::from(smoothed) + 3 * -44) as f32 / 10.0).round() as i16;
+        assert_eq!(
+            link_rssi(&protocol),
+            one_step,
+            "only the first reading of the interval moved link quality"
         );
 
         // The link wins over a hash naming someone else, a malformed hash

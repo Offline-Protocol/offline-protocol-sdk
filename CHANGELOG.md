@@ -30,8 +30,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   it ([R29](docs/security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)).
   While the app listens, readings also keep each link's quality current,
   smoothed so that one reading's noise does not reorder neighbours; the mesh
-  relay ranks neighbours by it. An app that does not listen keeps the
-  discovery-time reading, as before.
+  relay ranks neighbours by it, at most four readings a second per peer. An
+  app that never listens keeps the discovery-time reading, as before; once
+  the last listener goes, each link keeps its last smoothed reading.
 
 - **The engine runs in a browser (experimental).** `offline-protocol-web`
   compiles the full engine, MLS included, for `wasm32-unknown-unknown`, and
