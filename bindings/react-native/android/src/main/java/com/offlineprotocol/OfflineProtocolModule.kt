@@ -2,6 +2,7 @@ package com.offlineprotocol
 
 import android.app.Activity
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -12,9 +13,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 import com.offlineprotocol.ble.BleTransportFacade
@@ -47,19 +45,56 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * `create`, skip the background notification, and leave open the
      * telemetry session that notification would have closed.
      */
-    @Volatile
-    private var protocol: OfflineProtocol? = null
-    private var meshServices: MeshServices? = null
-    private var dataStore: DataStore? = null
-    private var bleTransport: BleTransportFacade? = null
-    private var internetManager: InternetManager? = null
-    // Volatile: the core's Wi-Fi Direct callback reads it from whichever
-    // thread queued the body (see wireTransportCallbacks).
-    @Volatile
-    private var wifiDirectManager: WifiDirectManager? = null
-    private var reticulumManager: ReticulumManager? = null
-    private var nostrManager: NostrManager? = null
-    private var processScheduler: ScheduledExecutorService? = null
+    internal val engineHost by lazy {
+        ProtocolEngineHost(logTag = NAME) { level, message, context ->
+            emitDiagnostic(level, message, context)
+        }
+    }
+
+    /** React context for shared bridge adapters (same module, not subclass-accessible). */
+    internal val bridgeContext: Context
+        get() = reactApplicationContext
+
+    private var protocol: OfflineProtocol?
+        get() = engineHost.protocol
+        set(value) {
+            engineHost.protocol = value
+        }
+    private var meshServices: MeshServices?
+        get() = engineHost.meshServices
+        set(value) {
+            engineHost.meshServices = value
+        }
+    private var dataStore: DataStore?
+        get() = engineHost.dataStore
+        set(value) {
+            engineHost.dataStore = value
+        }
+    private var bleTransport: BleTransportFacade?
+        get() = engineHost.bleTransport
+        set(value) {
+            engineHost.bleTransport = value
+        }
+    private var internetManager: InternetManager?
+        get() = engineHost.internetManager
+        set(value) {
+            engineHost.internetManager = value
+        }
+    private var wifiDirectManager: WifiDirectManager?
+        get() = engineHost.wifiDirectManager
+        set(value) {
+            engineHost.wifiDirectManager = value
+        }
+    private var reticulumManager: ReticulumManager?
+        get() = engineHost.reticulumManager
+        set(value) {
+            engineHost.reticulumManager = value
+        }
+    private var nostrManager: NostrManager?
+        get() = engineHost.nostrManager
+        set(value) {
+            engineHost.nostrManager = value
+        }
 
     /**
      * Our registration in [MeshForegroundService]'s process-global stop slot,
@@ -194,11 +229,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         installProcessLifecycleWatcher()
     }
 
-    private var currentConfig: ProtocolConfig? = null
-
-    // `transports.ble.advertiseNodeHash`, off by default: whether the
-    // facade puts this device's node hash in its scan response (R29).
-    private var bleAdvertiseNodeHash = false
+    private var currentConfig: ProtocolConfig?
+        get() = engineHost.currentConfig
+        set(value) {
+            engineHost.currentConfig = value
+        }
 
     companion object {
         const val NAME = "OfflineProtocolModule"
@@ -316,7 +351,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             reactApplicationContext.removeLifecycleEventListener(this)
         }
         teardown.step("process lifecycle watcher") { removeProcessLifecycleWatcher() }
-        teardown.step("process scheduler") { stopProcessScheduler() }
+        teardown.step("process scheduler") { engineHost.backgroundProcessor.stopProcessScheduler() }
 
         // The null-outs sit outside their steps so a transport that throws on
         // stop is still released.
@@ -603,6 +638,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * (see ProtocolErrorBridge.kt), otherwise with the method's legacy
      * fallback code and "$fallbackMessage: <cause>".
      */
+    internal fun rejectBridgePromise(
+        promise: Promise,
+        error: Throwable,
+        fallbackCode: String,
+        fallbackMessage: String,
+    ) {
+        rejectWithProtocolError(promise, error, fallbackCode, fallbackMessage)
+    }
+
     private fun rejectWithProtocolError(
         promise: Promise,
         error: Throwable,
@@ -620,190 +664,34 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun create(configJson: String, promise: Promise) {
         try {
-            val parsed = ProtocolConfigParser.parse(configJson)
-            val config = parsed.coreConfig
-            val proto = OfflineProtocol(config)
-            currentConfig = config
-            bleAdvertiseNodeHash = parsed.rawJson.optJSONObject("transports")
-                ?.optJSONObject("ble")?.optBoolean("advertiseNodeHash", false) ?: false
-            emitDiagnostic("info", "Protocol core created", mapOf(
-                "appId" to config.appId,
-                "userId" to config.profile,
-                "bleEnabled" to config.bleEnabled,
-                "wifiDirectEnabled" to config.wifiDirectEnabled,
-                "internetEnabled" to config.internetEnabled,
-                "reticulumEnabled" to config.reticulumEnabled
-            ))
-            
-            // Set up event callback
-            proto.setEventCallback(object : EventCallback {
-                override fun onEvent(eventJson: String) {
-                    // Held on the emit's own answer rather than on a gate read
-                    // taken before it, so an emit that fails with the gate open
-                    // is held too, as on iOS. The type/id parse that decides
-                    // whether to hold still runs only after a refusal.
-                    //
-                    // Nothing may escape this method. UniFFI turns an
-                    // exception thrown here into a panic in the core, which
-                    // isolates it and logs it where no device log shows it,
-                    // after the core has already acted on what the event
-                    // reports (#514). Caught here it is logged by type, never
-                    // by content, and a per-message event is still held.
-                    try {
-                        if (!sendEvent(EVENT_NAME, eventParams(eventJson))) {
-                            holdInboundEventIfBuffered(eventJson)
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e(NAME, "Core event not handed to JS: ${eventTypeOf(eventJson)}", e)
+            val internetHandlers = ProtocolEngineHost.InternetTransportEventHandlers(
+                serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) },
+                connectionStatusEmitter = { connected, authenticated ->
+                    emitInternetStatusEvent(connected, authenticated)
+                },
+                supersededEmitter = { reason -> emitInternetSupersededEvent(reason) },
+            )
+            engineHost.create(
+                reactApplicationContext,
+                configJson,
+                object : EventCallback {
+                    override fun onEvent(eventJson: String) {
                         try {
-                            holdInboundEventIfBuffered(eventJson)
-                        } catch (held: Exception) {
-                            android.util.Log.e(NAME, "Core event could not be held either", held)
+                            if (!sendEvent(EVENT_NAME, eventParams(eventJson))) {
+                                holdInboundEventIfBuffered(eventJson)
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e(NAME, "Core event not handed to JS: ${eventTypeOf(eventJson)}", e)
+                            try {
+                                holdInboundEventIfBuffered(eventJson)
+                            } catch (held: Exception) {
+                                android.util.Log.e(NAME, "Core event could not be held either", held)
+                            }
                         }
                     }
-                }
-            })
-
-            applyInitialRuntimeConfig(proto, parsed.rawJson)
-
-            protocol = proto
-            meshServices = MeshServices(proto)
-            // Constructed unconditionally, like MeshServices: the store is
-            // inert until the config enables it, and every method answers
-            // DataDisabled until then. Constructing lazily would only move
-            // that check somewhere less obvious.
-            dataStore = DataStore(proto)
-
-            // Initialize BLE manager if BLE is enabled
-            if (config.bleEnabled) {
-                bleTransport = BleTransportFacade(
-                    reactApplicationContext,
-                    proto,
-                    config.profile,
-                    config.appId,
-                    advertiseNodeHash = bleAdvertiseNodeHash,
-                ) { level, message, context ->
-                    emitDiagnostic(level, message, context)
-                }.also { manager ->
-                    manager.listener = object : TransportManagerListener {
-                        override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
-                            emitDiagnostic("info", "BLE transport state changed", mapOf(
-                                "state" to state.name.lowercase()
-                            ))
-                        }
-
-                        override fun onTransportError(manager: TransportManager, error: Throwable) {
-                            emitDiagnostic("error", "BLE transport error", mapOf(
-                                "message" to (error.message ?: "unknown"),
-                                "exception" to error.javaClass.simpleName
-                            ))
-                        }
-
-                        override fun onTransportDiagnostic(
-                            manager: TransportManager,
-                            level: String,
-                            message: String,
-                            context: Map<String, Any?>
-                        ) {
-                            emitDiagnostic(level, message, context)
-                        }
-                    }
-                }
-                android.util.Log.i(NAME, "BLE Manager initialized for user: ${config.profile}")
-                emitDiagnostic("info", "BLE manager initialized", mapOf(
-                    "userId" to config.profile
-                ))
-            } else {
-                emitDiagnostic("warning", "BLE disabled in configuration", mapOf(
-                    "userId" to config.profile
-                ))
-            }
-            
-            // Initialize Internet manager if internet is enabled
-            if (config.internetEnabled) {
-                internetManager = InternetManager(reactApplicationContext, proto, config.profile, config.appId) { level, message, context ->
-                    emitDiagnostic(level, message, context)
-                }.also { manager ->
-                    manager.serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) }
-                    manager.connectionStatusEmitter = { connected, authenticated ->
-                        emitInternetStatusEvent(connected, authenticated)
-                    }
-                    manager.supersededEmitter = { reason -> emitInternetSupersededEvent(reason) }
-                    manager.listener = object : TransportManagerListener {
-                        override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
-                            emitDiagnostic("info", "Internet transport state changed", mapOf(
-                                "transport" to manager.transportId,
-                                "state" to state.name.lowercase()
-                            ))
-                        }
-
-                        override fun onTransportError(manager: TransportManager, error: Throwable) {
-                            emitDiagnostic("error", "Internet transport error", mapOf(
-                                "transport" to manager.transportId,
-                                "message" to (error.message ?: "unknown"),
-                                "exception" to error.javaClass.simpleName
-                            ))
-                        }
-
-                        override fun onTransportDiagnostic(
-                            manager: TransportManager,
-                            level: String,
-                            message: String,
-                            context: Map<String, Any?>
-                        ) {
-                            val enrichedContext = context.toMutableMap()
-                            enrichedContext["transport"] = manager.transportId
-                            emitDiagnostic(level, message, enrichedContext)
-                        }
-                    }
-                }
-                android.util.Log.i(NAME, "Internet Manager initialized for user: ${config.profile}")
-                emitDiagnostic("info", "Internet manager initialized", mapOf(
-                    "userId" to config.profile
-                ))
-            } else {
-                emitDiagnostic("info", "Internet disabled in configuration", mapOf(
-                    "userId" to config.profile
-                ))
-            }
-
-            // Initialize Reticulum manager if reticulum is enabled
-            if (config.reticulumEnabled) {
-                reticulumManager = createReticulumManager(proto, config.profile)
-                android.util.Log.i(NAME, "Reticulum Manager initialized for user: ${config.profile}")
-                emitDiagnostic("info", "Reticulum manager initialized", mapOf(
-                    "userId" to config.profile
-                ))
-            } else {
-                emitDiagnostic("info", "Reticulum disabled in configuration", mapOf(
-                    "userId" to config.profile
-                ))
-            }
-
-            // Initialize Nostr manager if nostr is enabled
-            if (config.nostrEnabled) {
-                nostrManager = createNostrManager(proto)
-                android.util.Log.i(NAME, "Nostr Manager initialized for user: ${config.profile}")
-                emitDiagnostic("info", "Nostr manager initialized", mapOf(
-                    "userId" to config.profile
-                ))
-            } else {
-                emitDiagnostic("info", "Nostr disabled in configuration", mapOf(
-                    "userId" to config.profile
-                ))
-            }
-
-            // Wire Rust transport callbacks for event-driven sending.
-            // These replace the 100ms polling loops; the Rust core calls back into
-            // Kotlin when outgoing data is enqueued, and the manager drains the queue
-            // immediately. Requires regenerated UniFFI Android bindings that include
-            // BleTransportCallback / WifiDirectTransportCallback interfaces.
-            wireTransportCallbacks(proto)
-
-            // Start process scheduler
-            startProcessScheduler()
-            emitDiagnostic("info", "Protocol process scheduler started")
-            
+                },
+                internetHandlers,
+            )
             promise.resolve(null)
         } catch (e: Exception) {
             emitDiagnostic("error", "Failed to create protocol", mapOf(
@@ -870,20 +758,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // handed nothing over, and the one-shot hold redelivers it later, so
         // consuming its number would report a gap for an event never lost.
         return synchronized(eventSeqLock) {
+            val numbered = eventName == EVENT_NAME && params is WritableMap
             // Read before the emit: the map is handed over by transfer, and a
             // consumed native map cannot be read back afterwards.
-            val map = params as? WritableMap
-            val replayJson = if (eventName == EVENT_NAME && map?.hasKey("eventJson") == true) {
-                map.getString("eventJson")
-            } else {
-                null
-            }
-            // An unnumbered event reaches JS without a `seq`, which JS
-            // dispatches without gap tracking. See [EventReplayRing.isReplayed].
-            val numbered = eventName == EVENT_NAME && map != null &&
-                EventReplayRing.isReplayed(replayJson)
+            var replayJson: String? = null
             if (numbered) {
-                map!!.putInt(EVENT_SEQ_FIELD, eventSeq)
+                val map = params as WritableMap
+                replayJson = if (map.hasKey("eventJson")) map.getString("eventJson") else null
+                map.putInt(EVENT_SEQ_FIELD, eventSeq)
             }
             try {
                 reactApplicationContext
@@ -1230,10 +1112,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            val cfg = parseTelemetryConfig(configMap)
-            // The application state right now, measured the way the
-            // session boundaries are measured; see [seedAppState].
-            proto.enableTelemetry(cfg, seedAppState())
+            engineHost.enableTelemetry(BridgeArgumentMaps.readableMapToMap(configMap), seedAppState())
             promise.resolve(null)
         } catch (e: Exception) {
             val mapped = mapProtocolBridgeError(e)
@@ -1253,9 +1132,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            // Blocks for the final flush (at most three seconds); React
-            // Native runs this on its native-modules thread, never the UI.
-            proto.disableTelemetry()
+            engineHost.disableTelemetry()
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("TELEMETRY_DISABLE", "Failed to disable telemetry: ${e.message}", e)
@@ -1265,7 +1142,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun flushTelemetry(promise: Promise) {
         try {
-            protocol?.flushTelemetry()
+            engineHost.flushTelemetry()
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("TELEMETRY_FLUSH_FAILED", e.message, e)
@@ -1275,7 +1152,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun telemetryStats(promise: Promise) {
         try {
-            val stats = protocol?.telemetryStats()
+            val stats = engineHost.telemetryStats()
             promise.resolve(stats?.let { encodeTelemetryStats(it) })
         } catch (e: Exception) {
             promise.reject("TELEMETRY_STATS_FAILED", e.message, e)
@@ -1288,7 +1165,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // Blocks for the flush (at most three seconds), off the UI
             // thread, but on the single native-modules thread: every other
             // native call queues behind it for that long.
-            protocol?.endTelemetrySession()
+            engineHost.endTelemetrySession()
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("TELEMETRY_END_SESSION_FAILED", e.message, e)
@@ -1298,17 +1175,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun setTelemetryEnabled(enabled: Boolean, promise: Promise) {
         try {
-            protocol?.setTelemetryEnabled(enabled)
+            engineHost.setTelemetryEnabled(enabled)
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("TELEMETRY_SET_ENABLED_FAILED", e.message, e)
         }
     }
 
-    /**
-     * `peer_rssi` events, which the TypeScript layer turns on while it has a
-     * listener for them. Off by default, and off the core ignores readings.
-     */
     @ReactMethod
     fun setPeerRssiEvents(enabled: Boolean, promise: Promise) {
         try {
@@ -1327,7 +1200,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            promise.resolve(proto.telemetryInstallId())
+            promise.resolve(engineHost.telemetryInstallId())
         } catch (e: Exception) {
             promise.reject("TELEMETRY_INSTALL_ID", "Failed to read telemetry install id: ${e.message}", e)
         }
@@ -1469,57 +1342,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @Synchronized
     private fun stopTransportsAndProtocol() {
-        val teardown = TeardownSequence()
-
-        teardown.step("process scheduler") { stopProcessScheduler() }
-
-        teardown.step("BLE manager") {
-            bleTransport?.stop()
-            android.util.Log.i(NAME, "BLE Manager stopped")
-            emitDiagnostic("info", "BLE manager stopped")
-        }
-
-        teardown.step("Internet manager") {
-            internetManager?.stop()
-            android.util.Log.i(NAME, "Internet Manager stopped")
-            emitDiagnostic("info", "Internet manager stopped")
-        }
-
-        teardown.step("WiFi Direct manager") {
-            wifiDirectManager?.stop()
-            android.util.Log.i(NAME, "WiFi Direct Manager stopped")
-            emitDiagnostic("info", "WiFi Direct manager stopped")
-        }
-
-        teardown.step("Reticulum manager") {
-            reticulumManager?.stop()
-            android.util.Log.i(NAME, "Reticulum Manager stopped")
-            emitDiagnostic("info", "Reticulum manager stopped")
-        }
-
-        teardown.step("Nostr manager") {
-            nostrManager?.stop()
-            android.util.Log.i(NAME, "Nostr Manager stopped")
-            emitDiagnostic("info", "Nostr manager stopped")
-        }
-
-        teardown.step("mesh foreground service") { stopForegroundService() }
-
-        teardown.step("protocol core") {
-            protocol?.stop()
-            emitDiagnostic("info", "Protocol stopped")
-        }
-
-        for (failure in teardown.failures) {
-            android.util.Log.e(NAME, "Teardown step failed: ${failure.step}", failure.cause)
-            emitDiagnostic("error", "Teardown step failed", mapOf(
-                "step" to failure.step,
-                "message" to (failure.cause.message ?: "unknown"),
-                "exception" to failure.cause.javaClass.simpleName
-            ))
-        }
-
-        teardown.firstFailureOrNull()?.let { throw it }
+        engineHost.stopTransportsAndProtocol { stopForegroundService() }
     }
 
     /**
@@ -1596,7 +1419,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun pause(promise: Promise) {
         try {
             // Stop the process scheduler so process() doesn't tick while paused
-            stopProcessScheduler()
+            engineHost.backgroundProcessor.stopProcessScheduler()
 
             // Pause all transports consistently
             val teardown = TeardownSequence()
@@ -1641,7 +1464,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // Restart the process scheduler
             teardown.step("process scheduler") {
                 if (protocol?.getState() == ProtocolState.RUNNING) {
-                    startProcessScheduler()
+                    engineHost.backgroundProcessor.startProcessScheduler()
                 }
             }
             teardown.firstFailureOrNull()?.let { throw it }
@@ -1655,16 +1478,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun sendMessage(recipient: String, content: String, priority: Int, replyToMsg: String?, promise: Promise) {
         try {
-            val msgPriority = when (priority) {
-                0 -> MessagePriority.LOW
-                1 -> MessagePriority.MEDIUM
-                2 -> MessagePriority.HIGH
-                3 -> MessagePriority.CRITICAL
-                else -> MessagePriority.MEDIUM
-            }
-            
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val messageId = proto.sendMessage(recipient, content, msgPriority, replyToMsg)
+            val messageId = engineHost.sendMessage(recipient, content, priority, replyToMsg)
             promise.resolve(messageId)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_SEND", "Failed to send message")
@@ -1678,30 +1492,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun sendMessageRich(recipient: String, content: String, priority: Int, replyToMsg: String?, options: ReadableMap?, promise: Promise) {
-        try {
-            val msgPriority = when (priority) {
-                0 -> MessagePriority.LOW
-                1 -> MessagePriority.MEDIUM
-                2 -> MessagePriority.HIGH
-                3 -> MessagePriority.CRITICAL
-                else -> MessagePriority.MEDIUM
-            }
-
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val sendOptions = SendMessageOptions(
-                priority = msgPriority,
-                replyToMsg = replyToMsg,
-                contentType = options?.getString("content_type")?.let { parseContentType(it) },
-                replyContext = parseReplyContext(options?.getMap("reply_context")),
-                mediaMetadata = parseRichMediaMetadata(options?.getMap("media_metadata")),
-                forwardInfo = parseForwardInfo(options?.getMap("forward_info")),
-                appId = options?.getString("app_id")
-            )
-            val messageId = proto.sendMessageRich(recipient, content, sendOptions)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_SEND", "Failed to send rich message")
-        }
+        ProtocolEngineHostBridgeReactNative.sendMessageRich(this, recipient, content, priority, replyToMsg, options, promise)
     }
 
     private fun parseReplyContext(map: ReadableMap?): ReplyContext? {
@@ -1754,177 +1545,66 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun forwardMessage(originalMessageJson: String, newRecipient: String, priority: Int, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val msgPriority = when (priority) {
-                0 -> MessagePriority.LOW
-                1 -> MessagePriority.MEDIUM
-                2 -> MessagePriority.HIGH
-                3 -> MessagePriority.CRITICAL
-                else -> MessagePriority.MEDIUM
-            }
-            val messageId = proto.forwardMessage(originalMessageJson, newRecipient, msgPriority)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_FORWARD", "Failed to forward message")
-        }
+        ProtocolEngineHostBridgeReactNative.forwardMessage(this, originalMessageJson, newRecipient, priority, promise)
     }
 
     @ReactMethod
     fun sendConnectionRequest(recipient: String, senderName: String, keyPackage: ReadableArray?, initialMessage: String?, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val keyPackageData = if (keyPackage != null) {
-                val data = mutableListOf<UByte>()
-                for (i in 0 until keyPackage.size()) {
-                    data.add(keyPackage.getInt(i).toUByte())
-                }
-                data
-            } else {
-                null
-            }
-            val messageId = proto.sendConnectionRequest(recipient, senderName, keyPackageData, initialMessage)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to send connection request")
-        }
+        ProtocolEngineHostBridgeReactNative.sendConnectionRequest(this, recipient, senderName, keyPackage, initialMessage, promise)
     }
 
     @ReactMethod
     fun acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: ReadableArray?, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val keyPackageData = if (keyPackage != null) {
-                val data = mutableListOf<UByte>()
-                for (i in 0 until keyPackage.size()) {
-                    data.add(keyPackage.getInt(i).toUByte())
-                }
-                data
-            } else {
-                null
-            }
-            val messageId = proto.acceptConnectionRequest(recipient, accepterName, keyPackageData)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to accept connection request")
-        }
+        ProtocolEngineHostBridgeReactNative.acceptConnectionRequest(this, recipient, accepterName, keyPackage, promise)
     }
 
     @ReactMethod
     fun rejectConnectionRequest(recipient: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val messageId = proto.rejectConnectionRequest(recipient)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to reject connection request")
-        }
+        ProtocolEngineHostBridgeReactNative.rejectConnectionRequest(this, recipient, promise)
     }
 
     @ReactMethod
     fun cancelConnectionRequest(recipient: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val messageId = proto.cancelConnectionRequest(recipient)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to cancel connection request")
-        }
+        ProtocolEngineHostBridgeReactNative.cancelConnectionRequest(this, recipient, promise)
     }
 
     // User Blocking
 
     @ReactMethod
     fun blockUser(userId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.blockUser(userId)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_BLOCK_USER", "Failed to block user: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.blockUser(this, userId, promise)
     }
 
     @ReactMethod
     fun unblockUser(userId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.unblockUser(userId)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_UNBLOCK_USER", "Failed to unblock user: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.unblockUser(this, userId, promise)
     }
 
     @ReactMethod
     fun getBlockedUsers(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val blocked = proto.getBlockedUsers()
-            val array = Arguments.createArray()
-            blocked.forEach { array.pushString(it) }
-            promise.resolve(array)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GET_BLOCKED", "Failed to get blocked users: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getBlockedUsers(this, promise)
     }
 
     @ReactMethod
     fun isUserBlocked(userId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val isBlocked = proto.isUserBlocked(userId)
-            promise.resolve(isBlocked)
-        } catch (e: Exception) {
-            promise.reject("ERROR_IS_BLOCKED", "Failed to check blocked status: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.isUserBlocked(this, userId, promise)
     }
 
     // ─── Presence, Typing, Read Receipts ───────────────────────
 
     @ReactMethod
     fun sendPresenceUpdate(recipient: String, status: Int, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val presenceStatus = when (status) {
-                0 -> uniffi.offline_protocol.PresenceStatus.ONLINE
-                1 -> uniffi.offline_protocol.PresenceStatus.AWAY
-                2 -> uniffi.offline_protocol.PresenceStatus.OFFLINE
-                else -> uniffi.offline_protocol.PresenceStatus.ONLINE
-            }
-            val messageId = proto.sendPresenceUpdate(recipient, presenceStatus)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_PRESENCE_UPDATE", "Failed to send presence update")
-        }
+        ProtocolEngineHostBridgeReactNative.sendPresenceUpdate(this, recipient, status, promise)
     }
 
     @ReactMethod
     fun sendTypingIndicator(recipient: String, conversationId: String, isTyping: Boolean, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val messageId = proto.sendTypingIndicator(recipient, conversationId, isTyping)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_TYPING_INDICATOR", "Failed to send typing indicator")
-        }
+        ProtocolEngineHostBridgeReactNative.sendTypingIndicator(this, recipient, conversationId, isTyping, promise)
     }
 
     @ReactMethod
     fun sendReadReceipt(recipient: String, messageIds: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val msgIds = (0 until messageIds.size())
-                .mapNotNull { messageIds.getString(it)?.takeIf(String::isNotEmpty) }
-            if (msgIds.isEmpty()) {
-                promise.reject("ERROR_READ_RECEIPT", "No valid message IDs provided", null)
-                return
-            }
-            val messageId = proto.sendReadReceipt(recipient, msgIds)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_READ_RECEIPT", "Failed to send read receipt")
-        }
+        ProtocolEngineHostBridgeReactNative.sendReadReceipt(this, recipient, messageIds, promise)
     }
 
 
@@ -1941,8 +1621,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataCreateDoc(spaceId: String, docId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.createDoc(spaceId, docId)
+            engineHost.dataCreateDoc(spaceId, docId)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATACREATEDOC", "createDoc failed")
@@ -1952,8 +1631,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataDeleteDoc(spaceId: String, docId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.deleteDoc(spaceId, docId)
+            engineHost.dataDeleteDoc(spaceId, docId)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATADELETEDOC", "deleteDoc failed")
@@ -1963,8 +1641,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataRemoveDoc(spaceId: String, docId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.removeDoc(spaceId, docId)
+            engineHost.dataRemoveDoc(spaceId, docId)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAREMOVEDOC", "removeDoc failed")
@@ -1974,8 +1651,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataRemoveSpace(spaceId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.removeSpace(spaceId)
+            engineHost.dataRemoveSpace(spaceId)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAREMOVESPACE", "removeSpace failed")
@@ -1985,8 +1661,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataFetchAttachmentFrom(spaceId: String, peerId: String, hash: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.fetchAttachmentFrom(spaceId, peerId, hash)
+            engineHost.dataFetchAttachmentFrom(spaceId, peerId, hash)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(
@@ -1998,7 +1673,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataSetInterest(spaceId: String, patterns: ReadableArray, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
             // An empty list is a real answer here ("send me nothing"), so it
             // is passed through rather than rejected the way an empty id
             // list is elsewhere in this bridge.
@@ -2009,7 +1683,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // document name, so the core refuses the call and the mistake
             // is reported where it was made.
             val list = (0 until patterns.size()).map { patterns.getString(it) ?: "" }
-            store.setInterest(spaceId, list)
+            engineHost.dataSetInterest(spaceId, list)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATASETINTEREST", "setInterest failed")
@@ -2019,9 +1693,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataListDocs(spaceId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            val values = store.listDocs(spaceId)
-            promise.resolve(JSONArray(values).toString())
+            promise.resolve(engineHost.dataListDocs(spaceId))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATALISTDOCS", "listDocs failed")
         }
@@ -2030,9 +1702,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataListSpaces(promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            val values = store.listSpaces()
-            promise.resolve(JSONArray(values).toString())
+            promise.resolve(engineHost.dataListSpaces())
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATALISTSPACES", "listSpaces failed")
         }
@@ -2041,8 +1711,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataMapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.mapSet(spaceId, docId, collection, key, valueJson)
+            engineHost.dataMapSet(spaceId, docId, collection, key, valueJson)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAMAPSET", "mapSet failed")
@@ -2052,8 +1721,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataMapDelete(spaceId: String, docId: String, collection: String, key: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.mapDelete(spaceId, docId, collection, key)
+            engineHost.dataMapDelete(spaceId, docId, collection, key)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAMAPDELETE", "mapDelete failed")
@@ -2063,8 +1731,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataMapGetJson(spaceId: String, docId: String, collection: String, key: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            promise.resolve(store.mapGetJson(spaceId, docId, collection, key))
+            promise.resolve(engineHost.dataMapGetJson(spaceId, docId, collection, key))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAMAPGETJSON", "mapGet failed")
         }
@@ -2073,8 +1740,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataListPush(spaceId: String, docId: String, collection: String, valueJson: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.listPush(spaceId, docId, collection, valueJson)
+            engineHost.dataListPush(spaceId, docId, collection, valueJson)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATALISTPUSH", "listPush failed")
@@ -2084,8 +1750,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataListDelete(spaceId: String, docId: String, collection: String, index: Double, count: Double, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.listDelete(spaceId, docId, collection, index.toUInt(), count.toUInt())
+            engineHost.dataListDelete(spaceId, docId, collection, index, count)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATALISTDELETE", "listDelete failed")
@@ -2095,8 +1760,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataListLen(spaceId: String, docId: String, collection: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            promise.resolve(store.listLen(spaceId, docId, collection).toDouble())
+            promise.resolve(engineHost.dataListLen(spaceId, docId, collection))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATALISTLEN", "listLength failed")
         }
@@ -2105,8 +1769,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataTextInsert(spaceId: String, docId: String, collection: String, position: Double, text: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.textInsert(spaceId, docId, collection, position.toUInt(), text)
+            engineHost.dataTextInsert(spaceId, docId, collection, position, text)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATATEXTINSERT", "textInsert failed")
@@ -2116,8 +1779,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataTextDelete(spaceId: String, docId: String, collection: String, position: Double, count: Double, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.textDelete(spaceId, docId, collection, position.toUInt(), count.toUInt())
+            engineHost.dataTextDelete(spaceId, docId, collection, position, count)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATATEXTDELETE", "textDelete failed")
@@ -2127,8 +1789,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataTextValue(spaceId: String, docId: String, collection: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            promise.resolve(store.textValue(spaceId, docId, collection))
+            promise.resolve(engineHost.dataTextValue(spaceId, docId, collection))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATATEXTVALUE", "textValue failed")
         }
@@ -2137,8 +1798,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataCounterIncrement(spaceId: String, docId: String, collection: String, amount: Double, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.counterIncrement(spaceId, docId, collection, amount)
+            engineHost.dataCounterIncrement(spaceId, docId, collection, amount)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATACOUNTERINCREMENT", "counterIncrement failed")
@@ -2148,8 +1808,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataCounterValue(spaceId: String, docId: String, collection: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            promise.resolve(store.counterValue(spaceId, docId, collection))
+            promise.resolve(engineHost.dataCounterValue(spaceId, docId, collection))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATACOUNTERVALUE", "counterValue failed")
         }
@@ -2158,8 +1817,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataDocJson(spaceId: String, docId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            promise.resolve(store.docJson(spaceId, docId))
+            promise.resolve(engineHost.dataDocJson(spaceId, docId))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATADOCJSON", "docJson failed")
         }
@@ -2168,8 +1826,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataExportRaw(spaceId: String, docId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            promise.resolve(android.util.Base64.encodeToString(store.exportRaw(spaceId, docId), android.util.Base64.NO_WRAP))
+            promise.resolve(
+                android.util.Base64.encodeToString(
+                    engineHost.dataExportRaw(spaceId, docId),
+                    android.util.Base64.NO_WRAP,
+                ),
+            )
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAEXPORTRAW", "exportRaw failed")
         }
@@ -2178,8 +1840,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataFlush(spaceId: String, docId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.flush(spaceId, docId)
+            engineHost.dataFlush(spaceId, docId)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAFLUSH", "flush failed")
@@ -2189,8 +1850,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataFlushAll(promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.flushAll()
+            engineHost.dataFlushAll()
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAFLUSHALL", "flushAll failed")
@@ -2200,8 +1860,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataDocSize(spaceId: String, docId: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            promise.resolve(store.docSize(spaceId, docId))
+            promise.resolve(engineHost.dataDocSize(spaceId, docId))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATADOCSIZE", "docSize failed")
         }
@@ -2216,9 +1875,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataAttachmentHash(bytesBase64: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            val bytes = android.util.Base64.decode(bytesBase64, android.util.Base64.DEFAULT)
-            promise.resolve(store.attachmentHash(bytes))
+            promise.resolve(engineHost.dataAttachmentHash(bytesBase64))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAATTACHMENTHASH", "attachmentHash failed")
         }
@@ -2227,8 +1884,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataFetchAttachment(spaceId: String, hash: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.fetchAttachment(spaceId, hash)
+            engineHost.dataFetchAttachment(spaceId, hash)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAFETCHATTACHMENT", "fetchAttachment failed")
@@ -2238,9 +1894,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataProvideAttachment(spaceId: String, peerId: String, hash: String, bytesBase64: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            val bytes = android.util.Base64.decode(bytesBase64, android.util.Base64.DEFAULT)
-            store.provideAttachment(spaceId, peerId, hash, bytes)
+            engineHost.dataProvideAttachment(spaceId, peerId, hash, bytesBase64)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAPROVIDEATTACHMENT", "provideAttachment failed")
@@ -2250,8 +1904,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataDeclineAttachment(spaceId: String, peerId: String, hash: String, promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.declineAttachment(spaceId, peerId, hash)
+            engineHost.dataDeclineAttachment(spaceId, peerId, hash)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATADECLINEATTACHMENT", "declineAttachment failed")
@@ -2261,8 +1914,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun dataWipeAll(promise: Promise) {
         try {
-            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
-            store.wipeAll()
+            engineHost.dataWipeAll()
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_DATAWIPEALL", "wipeAll failed")
@@ -2273,64 +1925,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun registerService(serviceId: String, version: String, capabilitiesJson: String, promise: Promise) {
-        try {
-            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
-            val capabilities = mutableMapOf<String, String>()
-            try {
-                val json = JSONObject(capabilitiesJson)
-                json.keys().forEach { key -> capabilities[key] = json.getString(key) }
-            } catch (parseErr: Exception) {
-                android.util.Log.w("OfflineProtocol", "Failed to parse capabilities JSON, registering with empty capabilities: ${parseErr.message}")
-            }
-            svc.registerService(serviceId, version, capabilities)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_REGISTER_SERVICE", "Failed to register service: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.registerService(this, serviceId, version, capabilitiesJson, promise)
     }
 
     @ReactMethod
     fun unregisterService(serviceId: String, promise: Promise) {
-        try {
-            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
-            val removed = svc.unregisterService(serviceId)
-            promise.resolve(removed)
-        } catch (e: Exception) {
-            promise.reject("ERROR_UNREGISTER_SERVICE", "Failed to unregister service: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.unregisterService(this, serviceId, promise)
     }
 
     @ReactMethod
     fun discoverServices(serviceId: String?, promise: Promise) {
-        try {
-            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
-            val queryId = svc.discoverServices(serviceId)
-            promise.resolve(queryId)
-        } catch (e: Exception) {
-            promise.reject("ERROR_DISCOVER_SERVICES", "Failed to discover services: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.discoverServices(this, serviceId, promise)
     }
 
     @ReactMethod
     fun sendServiceRequest(provider: String, serviceId: String, method: String, body: String, promise: Promise) {
-        try {
-            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
-            val requestId = svc.sendServiceRequest(provider, serviceId, method, body)
-            promise.resolve(requestId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_SERVICE_REQUEST", "Failed to send service request")
-        }
+        ProtocolEngineHostBridgeReactNative.sendServiceRequest(this, provider, serviceId, method, body, promise)
     }
 
     @ReactMethod
     fun respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String, promise: Promise) {
-        try {
-            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
-            val messageId = svc.respondToServiceRequest(requestId, requester, serviceId, status, body)
-            promise.resolve(messageId)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_SERVICE_RESPONSE", "Failed to respond to service request")
-        }
+        ProtocolEngineHostBridgeReactNative.respondToServiceRequest(this, requestId, requester, serviceId, status, body, promise)
     }
 
     @ReactMethod
@@ -2364,46 +1979,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
 
             releaseForegroundStopCallback()
-            bleTransport = null
-            internetManager = null
-            wifiDirectManager = null
-            reticulumManager = null
-            nostrManager = null
-            // Frees the Rust object now rather than at some later GC. It
-            // holds the telemetry pipe, whose uploader thread and 30 s timer
-            // live for as long as it does: without this the thread outlives a
-            // logout-and-recreate until a collection happens to run, and two
-            // pipes can be awake at once. Dropping it signals the pipe's
-            // final flush and detaches the worker without blocking here.
-            // Idempotent, and safe at this point because every caller into
-            // the protocol — the process scheduler and all five transports —
-            // has been stopped above.
-            // The field is cleared *before* the handle is destroyed, not
-            // after. The process lifecycle watcher reads it on the main
-            // thread while this runs on the native-modules thread, and a
-            // destroyed handle throws; publishing the null first means the
-            // widest that race can be is one already-in-flight call, which
-            // [notifyAppStateQuietly] absorbs.
-            // The data store holds a strong reference to the engine, so it is
-            // released first and explicitly: left set, every data call after
-            // destroy() reached the stopped engine instead of rejecting with
-            // "DataStore not initialized", and its reference kept the engine
-            // alive until the collector got to it.
-            val store = dataStore
-            dataStore = null
-            try {
-                store?.destroy()
-            } catch (e: Exception) {
-                android.util.Log.w(NAME, "Releasing the data store handle failed", e)
-            }
-            val handle = protocol
-            protocol = null
-            try {
-                handle?.destroy()
-            } catch (e: Exception) {
-                android.util.Log.w(NAME, "Releasing the protocol handle failed", e)
-            }
-            meshServices = null
+            engineHost.releaseHandlesAfterStop()
             // [listenerCount] is deliberately *not* reset here. React Native
             // owns it through addListener/removeListeners, and this module is a
             // singleton per React instance while `OfflineProtocol` is not: an
@@ -2458,47 +2034,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun wipePersistedState(appId: String, profile: String, promise: Promise) {
-        try {
-            val namespace = StorageNamespace.account(appId, profile)
-            val live = currentConfig
-            if (live != null && StorageNamespace.account(live.appId, live.profile) == namespace) {
-                promise.reject(
-                    "ERROR_WIPE_STATE",
-                    "Refusing to wipe storage for the account this instance is " +
-                        "running. Call destroy() first."
-                )
-                return
-            }
-
-            // Secure storage first: it holds the key every sealed protocol-state
-            // record is written under, so an interrupted wipe leaves the
-            // remainder as ciphertext nobody can open rather than readable
-            // state.
-            var firstError: Exception? = null
-            try {
-                MlsSecureStorage.wipeAccount(reactApplicationContext, namespace)
-            } catch (error: Exception) {
-                firstError = error
-            }
-            try {
-                AppContainerProtocolStateStorage.wipeAccount(
-                    reactApplicationContext,
-                    namespace
-                )
-            } catch (error: Exception) {
-                if (firstError == null) {
-                    firstError = error
-                }
-            }
-            firstError?.let { throw it }
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject(
-                "ERROR_WIPE_STATE",
-                "Failed to wipe persisted state: ${e.message}",
-                e
-            )
-        }
+        ProtocolEngineHostBridgeReactNative.wipePersistedState(this, appId, profile, promise)
     }
 
     // ========================================================================
@@ -2508,149 +2044,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun enableTransport(type: String, config: ReadableMap?, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            when (type.lowercase()) {
-                "internet" -> {
-                    // Configure and start Internet transport via InternetManager
-                    if (internetManager == null) {
-                        // The manager's identity must be the real user id: the
-                        // control-op translator filters self out of member
-                        // deltas and gates LeaveGroup on it, so a placeholder
-                        // would silently corrupt relay group state.
-                        val coreConfig = currentConfig
-                            ?: throw IllegalStateException("Cannot enable Internet transport before initialize(config)")
-                        val userId = coreConfig.profile
-                        internetManager = InternetManager(reactApplicationContext, proto, userId, coreConfig.appId) { level, message, context ->
-                            emitDiagnostic(level, message, context)
-                        }.also { manager ->
-                            manager.serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) }
-                            manager.connectionStatusEmitter = { connected, authenticated ->
-                                emitInternetStatusEvent(connected, authenticated)
-                            }
-                            manager.supersededEmitter = { reason -> emitInternetSupersededEvent(reason) }
-                        }
-                        emitDiagnostic("info", "Internet manager created on demand")
-                    }
-                    
-                    val manager = internetManager
-                        ?: throw IllegalStateException("Failed to create Internet manager")
-                    
-                    // Stop the manager first if it's active (to ensure clean
-                    // restart). STARTING counts: a manager mid-handshake holds
-                    // a live OkHttp client and an isConnecting latch — starting
-                    // over it would leak the client and silently drop the new
-                    // configuration (connect() early-returns on the latch, so
-                    // the old handshake to the old URL would just continue).
-                    if (manager.state == TransportState.RUNNING ||
-                        manager.state == TransportState.STARTING) {
-                        manager.stop()
-                    }
-
-                    configureAndStartInternet(manager, config)
-                    // Starting the manager clears its supersede latch, which is
-                    // what makes a held internet_session_superseded stale: the
-                    // event reports a relay session that this call has just
-                    // replaced. Held, it would redeliver on the next subscribe
-                    // or foreground and tell an app with a live relay socket
-                    // that it is connected elsewhere, with nothing to correct
-                    // it — the inverted failure the generation stamp exists to
-                    // prevent, reached through a transition inside one session
-                    // that the generation cannot see.
-                    stickyEvents.discard(EVENT_INTERNET_SESSION_SUPERSEDED)
-                    emitDiagnostic("info", "Internet transport enabled")
-                }
-                "wifidirect", "wifi_direct" -> {
-                    // Configure and start WiFi Direct transport via WifiDirectManager
-                    if (wifiDirectManager == null) {
-                        // Create manager if not already created
-                        wifiDirectManager = WifiDirectManager(
-                            reactApplicationContext,
-                            proto,
-                            currentConfig?.profile ?: "unknown",
-                            appId = currentConfig?.appId ?: "",
-                        ) { level, message, context ->
-                            emitDiagnostic(level, message, context)
-                        }
-                        emitDiagnostic("info", "WiFi Direct manager created on demand")
-                    }
-                    
-                    val manager = wifiDirectManager
-                        ?: throw IllegalStateException("Failed to create WiFi Direct manager")
-                    // `autoAccept` is the documented switch for forming groups
-                    // without the system settings; see WifiDirectGroupFormation.
-                    // Read before the stop, applied after it: stop() undoes the
-                    // run that is ending, and a config that does not name the
-                    // key (the guide's enableTransport('wifiDirect') after a
-                    // permission grant) keeps the current setting.
-                    val autoAccept = config?.takeIf { it.hasKey("autoAccept") && !it.isNull("autoAccept") }
-                        ?.getBoolean("autoAccept")
-                    
-                    // Stop the manager first if it's running (to ensure clean restart)
-                    if (manager.state == TransportState.RUNNING) {
-                        manager.stop()
-                    }
-                    manager.formGroups =
-                        WifiDirectGroupFormation.formGroupsAfterEnable(manager.formGroups, autoAccept)
-                    
-                    manager.start()
-                    emitDiagnostic("info", "WiFi Direct transport enabled")
-                }
-                "ble" -> {
-                    // Start BLE manager if stopped
-                    if (bleTransport == null) {
-                        bleTransport = BleTransportFacade(
-                            reactApplicationContext,
-                            proto,
-                            currentConfig?.profile ?: "unknown",
-                            currentConfig?.appId ?: "",
-                            advertiseNodeHash = bleAdvertiseNodeHash,
-                        ) { level, message, context ->
-                            emitDiagnostic(level, message, context)
-                        }
-                        emitDiagnostic("info", "BLE manager created on demand")
-                    }
-
-                    val manager = bleTransport
-                        ?: throw IllegalStateException("Failed to create BLE manager")
-
-                    if (manager.state != TransportState.RUNNING) {
-                        manager.start()
-                        emitDiagnostic("info", "BLE transport enabled")
-                    }
-                }
-                "reticulum" -> {
-                    if (reticulumManager == null) {
-                        reticulumManager = createReticulumManager(proto, currentConfig?.profile ?: "unknown")
-                        emitDiagnostic("info", "Reticulum manager created on demand")
-                    }
-
-                    val manager = reticulumManager
-                        ?: throw IllegalStateException("Failed to create Reticulum manager")
-
-                    if (manager.state == TransportState.RUNNING) {
-                        manager.stop()
-                    }
-
-                    configureAndStartReticulum(manager, config)
-                    emitDiagnostic("info", "Reticulum transport enabled")
-                }
-                "nostr" -> {
-                    if (nostrManager == null) {
-                        nostrManager = createNostrManager(proto)
-                        emitDiagnostic("info", "Nostr manager created on demand")
-                    }
-
-                    val manager = nostrManager
-                        ?: throw IllegalStateException("Failed to create Nostr manager")
-
-                    if (manager.state == TransportState.RUNNING) {
-                        manager.stop()
-                    }
-
-                    configureAndStartNostr(manager, config)
-                    emitDiagnostic("info", "Nostr transport enabled")
-                }
-                else -> throw IllegalArgumentException("Unsupported transport type: $type")
+            engineHost.enableTransport(
+                reactApplicationContext,
+                type,
+                BridgeArgumentMaps.readableMapToJsonObject(config),
+                internetTransportEventHandlers(),
+            ) {
+                stickyEvents.discard(EVENT_INTERNET_SESSION_SUPERSEDED)
             }
             promise.resolve(null)
         } catch (e: ProtocolException) {
@@ -2659,368 +2059,69 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_TRANSPORT_ENABLE", "Failed to enable transport: ${e.message}", e)
         }
     }
-    
+
+    private fun internetTransportEventHandlers(): ProtocolEngineHost.InternetTransportEventHandlers =
+        ProtocolEngineHost.InternetTransportEventHandlers(
+            serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) },
+            connectionStatusEmitter = { connected, authenticated ->
+                emitInternetStatusEvent(connected, authenticated)
+            },
+            supersededEmitter = { reason -> emitInternetSupersededEvent(reason) },
+        )
+
+    /**
+     * Delegates to [InternetTransportBootstrap]; kept so legacy call sites and
+     * docs that name this helper stay valid. All enable paths use the bootstrap.
+     */
     private fun configureAndStartInternet(manager: InternetManager, config: ReadableMap?) {
-        val serverAddress = config?.getString("serverAddress")
-            ?: config?.getString("server_url")
-            ?: throw IllegalArgumentException("Internet transport requires a serverAddress")
-        
-        // Build WebSocket URL
-        var wsUrl = serverAddress.trim()
-        if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://")) {
-            // Default to wss:// for secure connection
-            wsUrl = "wss://$wsUrl"
-        }
-        
-        // Append port if specified (safely check for key existence first)
-        val port = when {
-            config?.hasKey("port") == true -> config.getDouble("port").toInt()
-            config?.hasKey("serverPort") == true -> config.getDouble("serverPort").toInt()
-            else -> null
-        }
-        if (port != null && port > 0) {
-            // Check if URL already has a port
-            val uri = java.net.URI(wsUrl)
-            if (uri.port == -1) {
-                wsUrl = "$wsUrl:$port"
-            }
-        }
-        
-        val autoReconnect = if (config?.hasKey("autoReconnect") == true) {
-            config.getBoolean("autoReconnect")
-        } else {
-            true
-        }
-        val maxRetries = if (config?.hasKey("maxReconnectAttempts") == true) {
-            config.getDouble("maxReconnectAttempts").toInt()
-        } else {
-            0
-        }
-        
-        // Set auth token if provided in config
-        val authToken = config?.getString("authToken")
-        if (authToken != null) {
-            manager.setAuthToken(authToken)
-        }
-        
-        // Internet transport is already registered during protocol initialization
-        // Just configure and start the WebSocket manager
-        manager.configure(wsUrl, autoReconnect, maxRetries)
-        manager.start()
-        
+        val json = BridgeArgumentMaps.readableMapToJsonObject(config) ?: org.json.JSONObject()
+        InternetTransportBootstrap.configureAndStart(manager, json)
         emitDiagnostic("info", "Internet transport enabled", mapOf(
-            "serverUrl" to wsUrl,
-            "autoReconnect" to autoReconnect,
-            "hasAuthToken" to (authToken != null)
-        ))
-    }
-
-    private fun createReticulumManager(proto: OfflineProtocol, userId: String): ReticulumManager {
-        return ReticulumManager(reactApplicationContext, proto, userId) { level, message, context ->
-            emitDiagnostic(level, message, context)
-        }.also { manager ->
-            manager.listener = object : TransportManagerListener {
-                override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
-                    emitDiagnostic("info", "Reticulum transport state changed", mapOf(
-                        "transport" to manager.transportId,
-                        "state" to state.name.lowercase()
-                    ))
-                }
-
-                override fun onTransportError(manager: TransportManager, error: Throwable) {
-                    emitDiagnostic("error", "Reticulum transport error", mapOf(
-                        "transport" to manager.transportId,
-                        "message" to (error.message ?: "unknown"),
-                        "exception" to error.javaClass.simpleName
-                    ))
-                }
-
-                override fun onTransportDiagnostic(
-                    manager: TransportManager,
-                    level: String,
-                    message: String,
-                    context: Map<String, Any?>
-                ) {
-                    val enrichedContext = context.toMutableMap()
-                    enrichedContext["transport"] = manager.transportId
-                    emitDiagnostic(level, message, enrichedContext)
-                }
-            }
-        }
-    }
-
-    private fun configureAndStartReticulum(manager: ReticulumManager, config: ReadableMap?) {
-        val daemonAddress = config?.getString("daemonAddress")
-            ?: config?.getString("daemon_address")
-            ?: "localhost:4242"
-
-        val autoReconnect = if (config?.hasKey("autoReconnect") == true) {
-            config.getBoolean("autoReconnect")
-        } else {
-            true
-        }
-        val maxRetries = if (config?.hasKey("maxReconnectAttempts") == true) {
-            config.getDouble("maxReconnectAttempts").toInt()
-        } else {
-            0
-        }
-
-        manager.configure(daemonAddress, autoReconnect, maxRetries)
-        manager.start()
-
-        emitDiagnostic("info", "Reticulum transport enabled", mapOf(
-            "daemonAddress" to daemonAddress,
-            "autoReconnect" to autoReconnect
-        ))
-    }
-
-    private fun createNostrManager(proto: OfflineProtocol): NostrManager {
-        return NostrManager(reactApplicationContext, proto) { level, message, context ->
-            emitDiagnostic(level, message, context)
-        }.also { manager ->
-            manager.listener = object : TransportManagerListener {
-                override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
-                    emitDiagnostic("info", "Nostr transport state changed", mapOf(
-                        "transport" to manager.transportId,
-                        "state" to state.name.lowercase()
-                    ))
-                }
-
-                override fun onTransportError(manager: TransportManager, error: Throwable) {
-                    emitDiagnostic("error", "Nostr transport error", mapOf(
-                        "transport" to manager.transportId,
-                        "message" to (error.message ?: "unknown"),
-                        "exception" to error.javaClass.simpleName
-                    ))
-                }
-
-                override fun onTransportDiagnostic(
-                    manager: TransportManager,
-                    level: String,
-                    message: String,
-                    context: Map<String, Any?>
-                ) {
-                    val enrichedContext = context.toMutableMap()
-                    enrichedContext["transport"] = manager.transportId
-                    emitDiagnostic(level, message, enrichedContext)
-                }
-            }
-        }
-    }
-
-    private fun configureAndStartNostr(manager: NostrManager, config: ReadableMap?) {
-        val relayUrls = mutableListOf<String>()
-        if (config?.hasKey("relayUrls") == true) {
-            val arr = config.getArray("relayUrls")
-            if (arr != null) {
-                for (i in 0 until arr.size()) {
-                    arr.getString(i)?.let { relayUrls.add(it) }
-                }
-            }
-        }
-        if (config?.hasKey("relay_urls") == true && relayUrls.isEmpty()) {
-            val arr = config.getArray("relay_urls")
-            if (arr != null) {
-                for (i in 0 until arr.size()) {
-                    arr.getString(i)?.let { relayUrls.add(it) }
-                }
-            }
-        }
-
-        if (relayUrls.isEmpty()) {
-            throw IllegalArgumentException("Nostr transport requires at least one relay URL")
-        }
-
-        val autoReconnect = if (config?.hasKey("autoReconnect") == true) {
-            config.getBoolean("autoReconnect")
-        } else {
-            true
-        }
-        val maxRetries = if (config?.hasKey("maxReconnectAttempts") == true) {
-            config.getDouble("maxReconnectAttempts").toInt()
-        } else {
-            0
-        }
-
-        manager.configure(relayUrls, autoReconnect, maxRetries)
-        manager.start()
-
-        emitDiagnostic("info", "Nostr transport enabled", mapOf(
-            "relayCount" to relayUrls.size,
-            "autoReconnect" to autoReconnect
+            "serverUrl" to json.optString("serverAddress", json.optString("server_url", "")),
+            "autoReconnect" to json.optBooleanCompat("autoReconnect", "auto_reconnect"),
+            "hasAuthToken" to json.has("authToken"),
         ))
     }
 
     @ReactMethod
     fun disableTransport(type: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            
-            // Stop corresponding transport manager and mark transport as unavailable
-            // Note: We don't remove the transport from the Rust protocol anymore
-            // because that prevents re-enabling it. Instead, we just stop the manager
-            // and the transport status will be updated to unavailable/disconnected.
-            when (type.lowercase()) {
-                "internet" -> {
-                    internetManager?.stop()
-                    // Notify the protocol that internet is disconnected
-                    try {
-                        proto.internetStatusChanged(false)
-                    } catch (e: Exception) {
-                        android.util.Log.w(NAME, "Failed to notify internet status change: ${e.message}")
-                    }
-                    emitDiagnostic("info", "Internet transport disabled (manager stopped)")
-                }
-                "wifidirect", "wifi_direct" -> {
-                    wifiDirectManager?.stop()
-                    emitDiagnostic("info", "WiFi Direct transport disabled (manager stopped)")
-                }
-                "ble" -> {
-                    bleTransport?.stop()
-                    try {
-                        proto.bleStatusChanged(false)
-                    } catch (e: Exception) {
-                        android.util.Log.w(NAME, "Failed to notify BLE status change: ${e.message}")
-                    }
-                    emitDiagnostic("info", "BLE transport disabled (manager stopped)")
-                }
-                "reticulum" -> {
-                    reticulumManager?.stop()
-                    try {
-                        proto.reticulumStatusChanged(false)
-                    } catch (e: Exception) {
-                        android.util.Log.w(NAME, "Failed to notify reticulum status change: ${e.message}")
-                    }
-                    emitDiagnostic("info", "Reticulum transport disabled (manager stopped)")
-                }
-                "nostr" -> {
-                    nostrManager?.stop()
-                    try {
-                        proto.nostrStatusChanged(false)
-                    } catch (e: Exception) {
-                        android.util.Log.w(NAME, "Failed to notify nostr status change: ${e.message}")
-                    }
-                    emitDiagnostic("info", "Nostr transport disabled (manager stopped)")
-                }
-                else -> throw IllegalArgumentException("Unsupported transport type: $type")
-            }
-
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.disableTransport(this, type, promise)
     }
     
     
     @ReactMethod
     fun isBluetoothEnabled(promise: Promise) {
-        try {
-            val bluetoothManager = reactApplicationContext.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
-            val adapter = bluetoothManager?.adapter
-            val enabled = adapter?.isEnabled == true
-            promise.resolve(enabled)
-        } catch (e: Exception) {
-            // If we can't check, assume enabled and let the protocol handle it
-            promise.resolve(true)
-        }
+        ProtocolEngineHostBridgeReactNative.isBluetoothEnabled(this, promise)
     }
 
     @ReactMethod
     fun requestEnableBluetooth(promise: Promise) {
-        try {
-            val bluetoothManager = reactApplicationContext.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
-            val adapter = bluetoothManager?.adapter
-            
-            if (adapter == null) {
-                promise.reject("ERROR_BLUETOOTH", "Bluetooth not available on this device", null)
-                return
-            }
-            
-            if (adapter.isEnabled) {
-                promise.resolve(true)
-                return
-            }
-            
-            // Request to enable Bluetooth via intent
-            val enableBtIntent = android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)
-            val activity = reactApplicationContext.currentActivity
-            if (activity != null) {
-                @Suppress("DEPRECATION")
-                activity.startActivityForResult(enableBtIntent, 1001)
-                // Note: We can't wait for the result in a synchronous way
-                // The user will need to re-try after enabling
-                promise.resolve(false)
-            } else {
-                promise.reject("ERROR_BLUETOOTH", "No activity available to show Bluetooth enable dialog", null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_BLUETOOTH", "Failed to request Bluetooth enable: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.requestEnableBluetooth(this, promise)
     }
 
     @ReactMethod
     fun getTopology(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val topology = proto.getTopology()
-            val topologyJson = buildTopologyJson(topology)
-            promise.resolve(topologyJson)
-        } catch (e: Exception) {
-            promise.reject("ERROR_TOPOLOGY", "Failed to get topology: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getTopology(this, promise)
     }
 
     @ReactMethod
     fun getMessageStats(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val stats = proto.getMessageStats()
-            val statsJson = buildMessageStatsJson(stats)
-            promise.resolve(statsJson)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MESSAGE_STATS", "Failed to get message stats: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getMessageStats(this, promise)
     }
 
     @ReactMethod
     fun getDeliverySuccessRate(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val rate = proto.getDeliverySuccessRate().toDouble()
-            promise.resolve(rate)
-        } catch (e: Exception) {
-            promise.reject("ERROR_DELIVERY_RATE", "Failed to get delivery success rate: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getDeliverySuccessRate(this, promise)
     }
 
     @ReactMethod
     fun getMedianLatency(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val latency = proto.getMedianLatency().toLong()
-            if (latency == 0L) {
-                promise.resolve(null)
-            } else {
-                promise.resolve(latency)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_MEDIAN_LATENCY", "Failed to get median latency: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getMedianLatency(this, promise)
     }
 
     @ReactMethod
     fun getMedianHops(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val hops = proto.getMedianHops().toInt()
-            if (hops == 0) {
-                promise.resolve(null)
-            } else {
-                promise.resolve(hops)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_MEDIAN_HOPS", "Failed to get median hops: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getMedianHops(this, promise)
     }
 
     @ReactMethod
@@ -3043,59 +2144,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     // Rust reads and chunks the file on its own heap.
     @ReactMethod
     fun sendFileFromPath(recipient: String, filePath: String, fileName: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val id = proto.sendFileFromPath(recipient, filePath, fileName)
-            promise.resolve(id)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_SEND_FILE", "Failed to send file from path")
-        }
+        ProtocolEngineHostBridgeReactNative.sendFileFromPath(this, recipient, filePath, fileName, promise)
     }
 
     @ReactMethod
     fun sendMedia(recipient: String, fileData: String, fileName: String, contentType: String, mediaMetadata: ReadableMap?, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val bytes = android.util.Base64.decode(fileData, android.util.Base64.DEFAULT)
-            val ct = parseContentType(contentType)
-            val meta = mediaMetadata?.let { map ->
-                MediaMetadata(
-                    mimeType = map.getString("mime_type") ?: "",
-                    fileName = map.getString("file_name") ?: fileName,
-                    fileSize = map.getDouble("file_size").toULong(),
-                    durationMs = if (map.hasKey("duration_ms")) map.getDouble("duration_ms").toULong() else null,
-                    width = if (map.hasKey("width")) map.getInt("width").toUInt() else null,
-                    height = if (map.hasKey("height")) map.getInt("height").toUInt() else null,
-                    thumbnailBase64 = map.getString("thumbnail_base64")
-                )
-            }
-            val id = proto.sendMedia(recipient, bytes.map { it.toUByte() }, fileName, ct, meta)
-            promise.resolve(id)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_SEND_MEDIA", "Failed to send media")
-        }
+        ProtocolEngineHostBridgeReactNative.sendMedia(this, recipient, fileData, fileName, contentType, mediaMetadata, promise)
     }
 
     @ReactMethod
     fun sendMediaRich(recipient: String, fileData: String, fileName: String, contentType: String, options: ReadableMap?, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val bytes = android.util.Base64.decode(fileData, android.util.Base64.DEFAULT)
-            val ct = parseContentType(contentType)
-            val sendOptions = MediaSendOptions(
-                mediaMetadata = parseRichMediaMetadata(options?.getMap("media_metadata")),
-                caption = options?.getString("caption"),
-                replyToMsg = options?.getString("reply_to_msg"),
-                replyContext = parseReplyContext(options?.getMap("reply_context")),
-                forwardInfo = parseForwardInfo(options?.getMap("forward_info")),
-                fileId = options?.getString("file_id"),
-                appId = options?.getString("app_id")
-            )
-            val id = proto.sendMediaRich(recipient, bytes.map { it.toUByte() }, fileName, ct, sendOptions)
-            promise.resolve(id)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_SEND_MEDIA", "Failed to send media")
-        }
+        ProtocolEngineHostBridgeReactNative.sendMediaRich(this, recipient, fileData, fileName, contentType, options, promise)
     }
 
     private fun parseContentType(value: String): ContentType {
@@ -3115,40 +2174,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun getFileProgress(fileId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val progress = proto.getFileProgress(fileId)
-            if (progress != null) {
-                val map = Arguments.createMap().apply {
-                    putString("file_id", progress.fileId)
-                    putInt("chunks_sent", progress.chunksSent.toInt())
-                    putInt("total_chunks", progress.totalChunks.toInt())
-                    putInt("percentage", progress.percentage.toInt())
-                }
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_FILE_PROGRESS", "Failed to get file progress: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getFileProgress(this, fileId, promise)
     }
 
     @ReactMethod
     fun cancelFileTransfer(fileId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.cancelFileTransfer(fileId)
-            promise.resolve(true)
-        } catch (e: ProtocolException) {
-            if (e.message?.contains("not found", ignoreCase = true) == true) {
-                promise.resolve(false)
-            } else {
-                promise.reject("ERROR_FILE_CANCEL", "Failed to cancel file transfer: ${e.message}", e)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_FILE_CANCEL", "Failed to cancel file transfer: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.cancelFileTransfer(this, fileId, promise)
     }
     
     // ========================================================================
@@ -3226,8 +2257,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     
     @ReactMethod
     fun bleGetPeerCount(promise: Promise) {
-        val count = protocol?.bleGetPeerCount()?.toInt() ?: 0
-        promise.resolve(count)
+        ProtocolEngineHostBridgeReactNative.bleGetPeerCount(this, promise)
     }
 
     /**
@@ -3241,101 +2271,51 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun bleGetDiagnostics(promise: Promise) {
-        val map = Arguments.createMap()
-        map.putDouble("fragmentFallbacks", (protocol?.bleFragmentFallbackCount() ?: 0uL).toDouble())
-        map.putDouble(
-            "recipientNotAmongPeers",
-            (protocol?.bleRecipientNotAmongPeersCount() ?: 0uL).toDouble()
-        )
-        map.putDouble(
-            "undersizedMtuReports",
-            (protocol?.bleUndersizedMtuReports() ?: 0uL).toDouble()
-        )
-        promise.resolve(map)
+        ProtocolEngineHostBridgeReactNative.bleGetDiagnostics(this, promise)
     }
     
     @ReactMethod
     fun getActiveTransports(promise: Promise) {
-        val transports = protocol?.getActiveTransports() ?: emptyList<String>()
-        promise.resolve(Arguments.fromList(transports))
+        ProtocolEngineHostBridgeReactNative.getActiveTransports(this, promise)
     }
     
     @ReactMethod
     fun getState(promise: Promise) {
-        val state = protocol?.getState()
-        val stateString = when (state) {
-            uniffi.offline_protocol.ProtocolState.STOPPED -> "Stopped"
-            uniffi.offline_protocol.ProtocolState.RUNNING -> "Running"
-            uniffi.offline_protocol.ProtocolState.PAUSED -> "Paused"
-            else -> "Stopped"
-        }
-        promise.resolve(stateString)
+        ProtocolEngineHostBridgeReactNative.getState(this, promise)
     }
     
     // MARK: - Battery Management
     
     @ReactMethod
     fun setBatteryLevel(level: Int, promise: Promise) {
-        try {
-            protocol?.setBatteryLevel(level.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte())
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_BATTERY", "Failed to set battery level: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.setBatteryLevel(this, level, promise)
     }
 
     @ReactMethod
     fun setBatteryState(level: Int, isCharging: Boolean, promise: Promise) {
-        try {
-            protocol?.setBatteryState(
-                level.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte(),
-                isCharging
-            )
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_BATTERY", "Failed to set battery state: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.setBatteryState(this, level, isCharging, promise)
     }
 
     @ReactMethod
     fun getBatteryLevel(promise: Promise) {
-        val level = protocol?.getBatteryLevel()
-        if (level != null) {
-            promise.resolve(level.toInt())
-        } else {
-            promise.resolve(null)
-        }
+        ProtocolEngineHostBridgeReactNative.getBatteryLevel(this, promise)
     }
 
     @ReactMethod
     fun getIsCharging(promise: Promise) {
-        promise.resolve(protocol?.getIsCharging() ?: false)
+        ProtocolEngineHostBridgeReactNative.getIsCharging(this, promise)
     }
 
     // MARK: - Relay Management
 
     @ReactMethod
     fun setRelayPriority(priorityString: String, promise: Promise) {
-        try {
-            val priority = normalizeRelayPriority(priorityString)
-            if (priority == null) {
-                promise.reject("ERROR_RELAY", "Invalid relay priority: $priorityString")
-                return
-            }
-            protocol?.setRelayPriority(priority)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_RELAY", "Failed to set relay priority: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.setRelayPriority(this, priorityString, promise)
     }
 
     @ReactMethod
     fun getRelayPriority(promise: Promise) {
-        try {
-            promise.resolve(relayPriorityName(protocol?.getRelayPriority()))
-        } catch (e: Exception) {
-            promise.resolve("auto")
-        }
+        ProtocolEngineHostBridgeReactNative.getRelayPriority(this, promise)
     }
 
     /**
@@ -3345,108 +2325,36 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun updateRelayConfig(configJson: String, promise: Promise) {
-        try {
-            val proto = protocol
-            if (proto == null) {
-                promise.reject("ERROR_RELAY", "Protocol not initialized")
-                return
-            }
-            val json = JSONObject(configJson)
-            val current = proto.getRelayConfig()
-            val priority = normalizeRelayPriority(
-                json.safeOptString("relayPriority", json.safeOptString("relay_priority"))
-            ) ?: current.relayPriority
-            proto.updateRelayConfig(
-                RelayConfig(
-                    minBatteryForRelay = json.optIntCompat("minBatteryForRelay", "min_battery_for_relay")
-                        ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)?.toUByte()
-                        ?: current.minBatteryForRelay,
-                    allowRelay = json.optBooleanCompat("allowRelay", "allow_relay") ?: current.allowRelay,
-                    relayPriority = priority
-                )
-            )
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_RELAY", "Failed to update relay config: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.updateRelayConfig(this, configJson, promise)
     }
 
     @ReactMethod
     fun getRelayConfig(promise: Promise) {
-        try {
-            val config = protocol?.getRelayConfig()
-            if (config == null) {
-                promise.reject("ERROR_RELAY", "Protocol not initialized")
-                return
-            }
-            promise.resolve(
-                JSONObject().apply {
-                    put("minBatteryForRelay", config.minBatteryForRelay.toInt())
-                    put("allowRelay", config.allowRelay)
-                    put("relayPriority", relayPriorityName(config.relayPriority))
-                }.toString()
-            )
-        } catch (e: Exception) {
-            promise.reject("ERROR_RELAY", "Failed to read relay config: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getRelayConfig(this, promise)
     }
 
     @ReactMethod
     fun isRelay(promise: Promise) {
-        val isRelay = protocol?.isRelay() ?: false
-        promise.resolve(isRelay)
+        ProtocolEngineHostBridgeReactNative.isRelay(this, promise)
     }
     
     // MARK: - Transport Metrics
     
     @ReactMethod
     fun getTransportMetrics(transportType: String, promise: Promise) {
-        try {
-            // One mapper for every transport name that crosses this bridge
-            // (`mapTransportType`); pinned by the Rust guard
-            // `react_native_transport_name_mappers_know_every_transport`. This
-            // used to match three names and default the rest to BLE, so a
-            // metrics read for any other carrier answered for the radio.
-            val type = mapTransportType(transportType)
-            
-            val metrics = protocol?.getTransportMetrics(type)
-            if (metrics != null) {
-                val map = Arguments.createMap()
-                map.putInt("packetsSent", metrics.packetsSent.toInt())
-                map.putInt("packetsReceived", metrics.packetsReceived.toInt())
-                map.putInt("bytesSent", metrics.bytesSent.toInt())
-                map.putInt("bytesReceived", metrics.bytesReceived.toInt())
-                map.putDouble("errorRate", metrics.errorRate.toDouble())
-                map.putInt("avgLatencyMs", metrics.avgLatencyMs.toInt())
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_METRICS", "Failed to get transport metrics: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getTransportMetrics(this, transportType, promise)
     }
     
     // MARK: - Manual Transport Control
     
     @ReactMethod
     fun forceTransport(transportType: String, promise: Promise) {
-        try {
-            // See getTransportMetrics: one mapper. This used to default an
-            // unknown name to BLE, so forceTransport("nostr") forced the radio.
-            val type = mapTransportType(transportType)
-            
-            protocol?.forceTransport(type)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_TRANSPORT", "Failed to force transport: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.forceTransport(this, transportType, promise)
     }
     
     @ReactMethod
     fun releaseTransportLock(promise: Promise) {
-        protocol?.releaseTransportLock()
-        promise.resolve(null)
+        ProtocolEngineHostBridgeReactNative.releaseTransportLock(this, promise)
     }
     
     // MARK: - DORS Configuration
@@ -3465,156 +2373,34 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun updateDorsConfig(configJson: String, promise: Promise) {
-        try {
-            val proto = protocol
-            if (proto == null) {
-                promise.reject("ERROR_CONFIG", "Protocol not initialized")
-                return
-            }
-            val json = JSONObject(configJson)
-            val current = proto.getDorsConfig()
-            val dorsConfig = DorsConfig(
-                preferOnline = json.optBoolean("preferOnline", current.preferOnline),
-                switchHysteresis = json.optDouble("switchHysteresis", current.switchHysteresis.toDouble()).toFloat().coerceAtLeast(0f),
-                switchCooldownSecs = json.optLong("switchCooldownSecs", current.switchCooldownSecs.toLong()).coerceAtLeast(0).toULong(),
-                bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", current.bleToWifiRetryThreshold.toInt()).toUInt(),
-                minSuccessRateBeforeEscalation = json.optDouble("minSuccessRateBeforeEscalation", current.minSuccessRateBeforeEscalation.toDouble()).toFloat().coerceIn(0f, 1f),
-                minBleSamplesBeforeSuccessRateEscalation = json.optLong("minBleSamplesBeforeSuccessRateEscalation", current.minBleSamplesBeforeSuccessRateEscalation.toLong()).coerceAtLeast(0).toULong(),
-                rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", current.rssiSwitchThreshold.toInt()).toShort(),
-                congestionQueueThreshold = json.optLong("congestionQueueThreshold", current.congestionQueueThreshold.toLong()).toULong(),
-                stabilityWindowSecs = json.optLong("stabilityWindowSecs", current.stabilityWindowSecs.toLong()).toULong(),
-                poorSignalDurationSecs = json.optLong("poorSignalDurationSecs", current.poorSignalDurationSecs.toLong()).toULong(),
-                ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", current.ttlEscalationThreshold.toInt()).toUByte(),
-                congestionDurationSecs = json.optLong("congestionDurationSecs", current.congestionDurationSecs.toLong()).coerceAtLeast(0).toULong(),
-                ttlEscalationHoldSecs = json.optLong("ttlEscalationHoldSecs", current.ttlEscalationHoldSecs.toLong()).coerceAtLeast(1).toULong(),
-                historyWindowSize = json.optLong("historyWindowSize", current.historyWindowSize.toLong()).let { max(Constants.MIN_HISTORY_WINDOW, min(Constants.MAX_HISTORY_WINDOW, it)) }.toULong(),
-                queueRecoveryRatio = json.optDouble("queueRecoveryRatio", current.queueRecoveryRatio.toDouble()).toFloat().coerceIn(0f, 1f),
-                lowBatteryThreshold = json.optInt("lowBatteryThreshold", current.lowBatteryThreshold.toInt())
-                    .coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte(),
-                relayMinBatteryLevel = json.optInt("relayMinBatteryLevel", current.relayMinBatteryLevel.toInt())
-                    .coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte(),
-                relayOptimalConnectionCount = json.optInt("relayOptimalConnectionCount", current.relayOptimalConnectionCount.toInt())
-                    .coerceIn(0, UByte.MAX_VALUE.toInt()).toUByte()
-            )
-
-            proto.updateDorsConfig(dorsConfig)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_CONFIG", "Failed to update DORS config: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.updateDorsConfig(this, configJson, promise)
     }
     
     @ReactMethod
     fun getDorsConfig(promise: Promise) {
-        try {
-            val config = protocol?.getDorsConfig()
-            if (config != null) {
-                // DORS config fields are u64 in the core but serialized as Int for the RN bridge; values must be in Int range (e.g. minBleSamplesBeforeSuccessRateEscalation, sample counts).
-                val map = Arguments.createMap()
-                map.putBoolean("preferOnline", config.preferOnline)
-                map.putDouble("switchHysteresis", config.switchHysteresis.toDouble())
-                map.putInt("switchCooldownSecs", config.switchCooldownSecs.toInt())
-                map.putInt("bleToWifiRetryThreshold", config.bleToWifiRetryThreshold.toInt())
-                map.putDouble("minSuccessRateBeforeEscalation", config.minSuccessRateBeforeEscalation.toDouble())
-                map.putInt("minBleSamplesBeforeSuccessRateEscalation", config.minBleSamplesBeforeSuccessRateEscalation.toInt())
-                map.putInt("rssiSwitchThreshold", config.rssiSwitchThreshold.toInt())
-                map.putInt("congestionQueueThreshold", config.congestionQueueThreshold.toInt())
-                map.putInt("stabilityWindowSecs", config.stabilityWindowSecs.toInt())
-                map.putInt("poorSignalDurationSecs", config.poorSignalDurationSecs.toInt())
-                map.putInt("ttlEscalationThreshold", config.ttlEscalationThreshold.toInt())
-                map.putInt("congestionDurationSecs", config.congestionDurationSecs.toInt())
-                map.putInt("ttlEscalationHoldSecs", config.ttlEscalationHoldSecs.toInt())
-                map.putInt("historyWindowSize", config.historyWindowSize.toInt())
-                map.putDouble("queueRecoveryRatio", config.queueRecoveryRatio.toDouble())
-                map.putInt("lowBatteryThreshold", config.lowBatteryThreshold.toInt())
-                map.putInt("relayMinBatteryLevel", config.relayMinBatteryLevel.toInt())
-                map.putInt("relayOptimalConnectionCount", config.relayOptimalConnectionCount.toInt())
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_CONFIG", "Failed to get DORS config: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getDorsConfig(this, promise)
     }
     
     // MARK: - Reliability Configuration
     
     @ReactMethod
     fun updateAckConfig(configJson: String, promise: Promise) {
-        try {
-            val json = JSONObject(configJson)
-            val ackConfig = AckConfig(
-                defaultTimeoutMs = json.optLong("defaultTimeoutMs", 10000).toULong(),
-                maxPendingAcks = json.optLong("maxPendingAcks", 1000).toULong()
-            )
-            
-            protocol?.updateAckConfig(ackConfig)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_CONFIG", "Failed to update ACK config: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.updateAckConfig(this, configJson, promise)
     }
     
     @ReactMethod
     fun updateRetryConfig(configJson: String, promise: Promise) {
-        try {
-            val json = JSONObject(configJson)
-            // Fallbacks must mirror the Rust defaults in
-            // offline-protocol-reliability/src/constants.rs: a partial config
-            // rebuilds the whole RetryConfig, so a stale fallback silently
-            // overrides the SDK default for every field the app didn't set.
-            val retryConfig = RetryConfig(
-                maxRetries = json.optInt("maxRetries", 10).toUInt(),
-                initialDelayMs = json.optLong("initialDelayMs", 1000).toULong(),
-                maxDelayMs = json.optLong("maxDelayMs", 300000).toULong(),
-                backoffMultiplier = json.optDouble("backoffMultiplier", 2.0).toFloat(),
-                outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 604800000).toULong(),
-                pendingMessageMaxLifetimeMs =
-                    json.optLong("pendingMessageMaxLifetimeMs", 604800000).toULong(),
-                edgeDrivenUnreachableDm = json.optBoolean("edgeDrivenUnreachableDm", false)
-            )
-            
-            protocol?.updateRetryConfig(retryConfig)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_CONFIG", "Failed to update retry config: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.updateRetryConfig(this, configJson, promise)
     }
     
     @ReactMethod
     fun updateDedupConfig(configJson: String, promise: Promise) {
-        try {
-            val json = JSONObject(configJson)
-            val dedupConfig = DedupConfig(
-                maxTrackedMessages = json.optLong("maxTrackedMessages", 5000).toULong(),
-                retentionTimeSecs = json.optLong("retentionTimeSecs", 604800).toULong()
-            )
-            
-            protocol?.updateDedupConfig(dedupConfig)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_CONFIG", "Failed to update dedup config: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.updateDedupConfig(this, configJson, promise)
     }
     
     @ReactMethod
     fun getDedupStats(promise: Promise) {
-        try {
-            val stats = protocol?.getDedupStats()
-            if (stats != null) {
-                val map = Arguments.createMap()
-                map.putDouble("totalTracked", stats.totalTracked.toDouble())
-                map.putDouble("recentTracked", stats.recentTracked.toDouble())
-                map.putInt("capacityUsedPercent", stats.capacityUsedPercent.toInt())
-                map.putString("mode", stats.mode)
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_STATS", "Failed to get dedup stats: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getDedupStats(this, promise)
     }
     
     /**
@@ -3626,30 +2412,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun getMeshRelayStats(promise: Promise) {
-        try {
-            val stats = protocol?.getMeshRelayStats()
-            if (stats != null) {
-                val map = Arguments.createMap()
-                map.putDouble("forwarded", stats.forwarded.toDouble())
-                map.putDouble("transmissions", stats.transmissions.toDouble())
-                map.putDouble("queued", stats.queued.toDouble())
-                map.putDouble("awaitingTransmission", stats.awaitingTransmission.toDouble())
-                map.putDouble("duplicatesSuppressed", stats.duplicatesSuppressed.toDouble())
-                map.putDouble("coveredByANeighbor", stats.coveredByANeighbor.toDouble())
-                map.putDouble("peerRateLimited", stats.peerRateLimited.toDouble())
-                map.putDouble("refusedQueueFull", stats.refusedQueueFull.toDouble())
-                map.putDouble("rateDeferred", stats.rateDeferred.toDouble())
-                map.putDouble("abandonedOverdue", stats.abandonedOverdue.toDouble())
-                map.putDouble("hopLimitReached", stats.hopLimitReached.toDouble())
-                map.putDouble("reachClamped", stats.reachClamped.toDouble())
-                map.putDouble("droppedForCapacity", stats.droppedForCapacity.toDouble())
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_STATS", "Failed to get mesh relay stats: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getMeshRelayStats(this, promise)
     }
 
     /**
@@ -3660,71 +2423,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun getMeshRelayTunables(promise: Promise) {
-        try {
-            val tunables = protocol?.getMeshRelayTunables()
-            if (tunables != null) {
-                val map = Arguments.createMap()
-                map.putInt("maxTtl", tunables.maxTtl.toInt())
-                map.putInt("denseMaxTtl", tunables.denseMaxTtl.toInt())
-                map.putDouble("denseDegree", tunables.denseDegree.toDouble())
-                map.putDouble("fanout", tunables.fanout.toDouble())
-                map.putDouble("jitterMinMs", tunables.jitterMinMs.toDouble())
-                map.putDouble("jitterMaxMs", tunables.jitterMaxMs.toDouble())
-                map.putDouble("ratePerSec", tunables.ratePerSec.toDouble())
-                map.putDouble("burst", tunables.burst.toDouble())
-                map.putDouble("peerRatePerSec", tunables.peerRatePerSec.toDouble())
-                map.putDouble("peerBurst", tunables.peerBurst.toDouble())
-                map.putDouble("queueCapacity", tunables.queueCapacity.toDouble())
-                map.putDouble("biasMinScale", tunables.biasMinScale.toDouble())
-                map.putDouble("biasMaxHandicapMs", tunables.biasMaxHandicapMs.toDouble())
-                map.putDouble("activityWindowMs", tunables.activityWindowMs.toDouble())
-                map.putDouble("activityMinForwards", tunables.activityMinForwards.toDouble())
-                map.putDouble("activityIdleWindows", tunables.activityIdleWindows.toDouble())
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_STATS", "Failed to get mesh relay tunables: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getMeshRelayTunables(this, promise)
     }
 
     // Custody counters, read through to the Rust core (docs/spec/custody.md).
     @ReactMethod
     fun getCustodyStats(promise: Promise) {
-        try {
-            val stats = protocol?.getCustodyStats()
-            if (stats != null) {
-                val map = Arguments.createMap()
-                map.putDouble("held", stats.held.toDouble())
-                map.putDouble("heldBytes", stats.heldBytes.toDouble())
-                map.putDouble("accepted", stats.accepted.toDouble())
-                map.putDouble("delivered", stats.delivered.toDouble())
-                map.putDouble("reOriginated", stats.reOriginated.toDouble())
-                map.putDouble("expired", stats.expired.toDouble())
-                map.putDouble("duplicates", stats.duplicates.toDouble())
-                map.putDouble("evicted", stats.evicted.toDouble())
-                map.putDouble("receiptsSent", stats.receiptsSent.toDouble())
-                map.putDouble("receiptsDropped", stats.receiptsDropped.toDouble())
-                map.putDouble("receiptsReceived", stats.receiptsReceived.toDouble())
-                map.putDouble("receiptsIgnored", stats.receiptsIgnored.toDouble())
-                map.putDouble("refusedDisabled", stats.refusedDisabled.toDouble())
-                map.putDouble("refusedNoRequest", stats.refusedNoRequest.toDouble())
-                map.putDouble("refusedUnknownClass", stats.refusedUnknownClass.toDouble())
-                map.putDouble("refusedNotSealed", stats.refusedNotSealed.toDouble())
-                map.putDouble("refusedUnprovenPeer", stats.refusedUnprovenPeer.toDouble())
-                map.putDouble("refusedNotDepositor", stats.refusedNotDepositor.toDouble())
-                map.putDouble("refusedStranger", stats.refusedStranger.toDouble())
-                map.putDouble("refusedDepositorFull", stats.refusedDepositorFull.toDouble())
-                map.putDouble("refusedStoreFull", stats.refusedStoreFull.toDouble())
-                map.putDouble("refusedBattery", stats.refusedBattery.toDouble())
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_STATS", "Failed to get custody stats: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getCustodyStats(this, promise)
     }
 
     // Drops every held frame and resets the custody counters. The data
@@ -3732,33 +2437,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     // verb.
     @ReactMethod
     fun eraseCustody(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.eraseCustody()
-            promise.resolve(null)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_ERASECUSTODY", "eraseCustody failed")
-        }
+        ProtocolEngineHostBridgeReactNative.eraseCustody(this, promise)
     }
 
     @ReactMethod
     fun getPendingAckCount(promise: Promise) {
-        try {
-            val count = protocol?.getPendingAckCount() ?: 0UL
-            promise.resolve(count.toDouble())
-        } catch (e: Exception) {
-            promise.reject("ERROR_STATS", "Failed to get pending ACK count: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getPendingAckCount(this, promise)
     }
     
     @ReactMethod
     fun getRetryQueueSize(promise: Promise) {
-        try {
-            val size = protocol?.getRetryQueueSize() ?: 0UL
-            promise.resolve(size.toDouble())
-        } catch (e: Exception) {
-            promise.reject("ERROR_STATS", "Failed to get retry queue size: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getRetryQueueSize(this, promise)
     }
 
     // ========================================================================
@@ -3767,13 +2456,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun shouldEscalateToWifi(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val shouldEscalate = proto.shouldEscalateToWifi()
-            promise.resolve(shouldEscalate)
-        } catch (e: Exception) {
-            promise.reject("ERROR_DORS", "Failed to check escalation: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.shouldEscalateToWifi(this, promise)
     }
 
     // ========================================================================
@@ -3782,30 +2465,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun processFileChunk(fileId: String, chunkIndex: Int, totalChunks: Int, fileSize: Double, fileName: String, fileChecksum: String, data: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val bytes = mutableListOf<UByte>()
-            for (i in 0 until data.size()) {
-                bytes.add(data.getInt(i).toUByte())
-            }
-            proto.processFileChunk(fileId, chunkIndex.toUInt(), totalChunks.toUInt(), fileSize.toULong(), fileName, fileChecksum, bytes)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_FILE", "Failed to process file chunk")
-        }
+        ProtocolEngineHostBridgeReactNative.processFileChunk(this, fileId, chunkIndex, totalChunks, fileSize, fileName, fileChecksum, data, promise)
     }
 
     @ReactMethod
     fun finalizeFile(fileId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.finalizeFile(fileId)
-            promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_FILE", "Failed to finalize file: ${e.message}", e)
-        } catch (e: Exception) {
-            promise.reject("ERROR_FILE", "Failed to finalize file: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.finalizeFile(this, fileId, promise)
     }
 
     // ========================================================================
@@ -3814,78 +2479,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun wifiDirectStatusChanged(isConnected: Boolean, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.wifiDirectStatusChanged(isConnected)
-            promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct status changed failed: ${e.message}", e)
-        } catch (e: Exception) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct status changed failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectStatusChanged(this, isConnected, promise)
     }
 
     @ReactMethod
     fun wifiDirectMessageReceived(senderId: String, data: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val bytes = mutableListOf<UByte>()
-            for (i in 0 until data.size()) {
-                bytes.add(data.getInt(i).toUByte())
-            }
-            proto.wifiDirectMessageReceived(senderId, bytes)
-            promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct message received failed: ${e.message}", e)
-        } catch (e: Exception) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct message received failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectMessageReceived(this, senderId, data, promise)
     }
 
     @ReactMethod
     fun wifiDirectGetNextMessage(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val message = proto.wifiDirectGetNextMessage()
-            if (message != null) {
-                val map = Arguments.createMap()
-                map.putString("recipientId", message.recipientId)
-                val array = Arguments.createArray()
-                message.data.forEach { array.pushInt(it.toInt()) }
-                map.putArray("data", array)
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct get next message failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectGetNextMessage(this, promise)
     }
 
     @ReactMethod
     fun wifiDirectPeerConnected(peerId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.wifiDirectPeerConnected(peerId)
-            promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct peer connected failed: ${e.message}", e)
-        } catch (e: Exception) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct peer connected failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectPeerConnected(this, peerId, promise)
     }
 
     @ReactMethod
     fun wifiDirectPeerDisconnected(peerId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.wifiDirectPeerDisconnected(peerId)
-            promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct peer disconnected failed: ${e.message}", e)
-        } catch (e: Exception) {
-            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct peer disconnected failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectPeerDisconnected(this, peerId, promise)
     }
 
     // ========================================================================
@@ -3894,75 +2508,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun internetStatusChanged(isConnected: Boolean, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.internetStatusChanged(isConnected)
-            promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_INTERNET", "Internet status changed failed: ${e.message}", e)
-        } catch (e: Exception) {
-            promise.reject("ERROR_INTERNET", "Internet status changed failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.internetStatusChanged(this, isConnected, promise)
     }
 
     @ReactMethod
     fun internetMessageReceived(senderId: String, data: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val bytes = mutableListOf<UByte>()
-            for (i in 0 until data.size()) {
-                bytes.add(data.getInt(i).toUByte())
-            }
-            proto.internetMessageReceived(senderId, bytes)
-            promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_INTERNET", "Internet message received failed: ${e.message}", e)
-        } catch (e: Exception) {
-            promise.reject("ERROR_INTERNET", "Internet message received failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.internetMessageReceived(this, senderId, data, promise)
     }
 
     @ReactMethod
     fun internetGetNextMessage(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val message = proto.internetGetNextMessage()
-            if (message != null) {
-                val map = Arguments.createMap()
-                map.putString("messageId", message.messageId)
-                map.putString("recipientId", message.recipientId)
-                val array = Arguments.createArray()
-                message.data.forEach { array.pushInt(it.toInt()) }
-                map.putArray("data", array)
-                promise.resolve(map)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_INTERNET", "Internet get next message failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.internetGetNextMessage(this, promise)
     }
 
     @ReactMethod
     fun internetConfirmSent(messageId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.internetConfirmSent(messageId)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_INTERNET", "Internet confirm sent failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.internetConfirmSent(this, messageId, promise)
     }
 
     @ReactMethod
     fun internetSendFailed(messageId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.internetSendFailed(messageId)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_INTERNET", "Internet send failed report failed: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.internetSendFailed(this, messageId, promise)
     }
 
     // ========================================================================
@@ -4030,12 +2596,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun isMlsInitialized(promise: Promise) {
-        val proto = protocol
-        if (proto == null) {
-            promise.resolve(false)
-            return
-        }
-        promise.resolve(proto.isMlsInitialized())
+        ProtocolEngineHostBridgeReactNative.isMlsInitialized(this, promise)
     }
 
     // ========================================================================
@@ -4047,13 +2608,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun getIdentityPublicKey(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val publicKey = proto.getIdentityPublicKey()
-            promise.resolve(Arguments.fromList(publicKey.map { it.toInt() }))
-        } catch (e: Exception) {
-            promise.reject("ERROR_CRYPTO", "Failed to get identity public key: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.getIdentityPublicKey(this, promise)
     }
 
     /**
@@ -4080,12 +2635,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun deriveAddress(publicKey: ReadableArray, promise: Promise) {
-        try {
-            val publicKeyBytes = (0 until publicKey.size()).map { publicKey.getInt(it).toUByte() }
-            promise.resolve(uniffi.offline_protocol.deriveAddress(publicKeyBytes))
-        } catch (e: Exception) {
-            promise.reject("ERROR_CRYPTO", "Failed to derive address: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.deriveAddress(this, publicKey, promise)
     }
 
     /**
@@ -4098,24 +2648,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun parseInvite(blob: String, promise: Promise) {
-        try {
-            val invite = uniffi.offline_protocol.parseInvite(blob)
-            val publicKey = Arguments.createArray().apply {
-                invite.publicKey.forEach { pushInt(it.toInt()) }
-            }
-            promise.resolve(Arguments.createMap().apply {
-                putString("address", invite.address)
-                putArray("public_key", publicKey)
-                if (invite.petname != null) {
-                    putString("petname", invite.petname)
-                } else {
-                    putNull("petname")
-                }
-                putBoolean("signed", invite.signed)
-            })
-        } catch (e: Exception) {
-            promise.reject("ERROR_INVALID_INVITE", "Invite did not verify: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.parseInvite(this, blob, promise)
     }
 
     /**
@@ -4126,12 +2659,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun createInvite(petname: String?, signed: Boolean, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            promise.resolve(proto.createInvite(petname, signed))
-        } catch (e: Exception) {
-            promise.reject("ERROR_CRYPTO", "Failed to create invite: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.createInvite(this, petname, signed, promise)
     }
 
     /**
@@ -4143,18 +2671,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun resolveUsername(username: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            promise.resolve(proto.resolveUsername(username))
-        } catch (e: Exception) {
-            // Mapped rather than flattened: the three refusals mean different
-            // things to a caller. InvalidConfiguration is "discovery is off",
-            // InvalidState is "too many lookups in flight, retry", and
-            // InvalidArgument is "that is not a claimable name". Reporting them
-            // all as one code leaves an app either retrying forever or giving
-            // up on a lookup that was one drain away from working.
-            rejectWithProtocolError(promise, e, "ERROR_INVALID_ARGUMENT", "Failed to resolve username")
-        }
+        ProtocolEngineHostBridgeReactNative.resolveUsername(this, username, promise)
     }
 
     /**
@@ -4165,14 +2682,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun deriveUserIdFromPublicKey(publicKey: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val publicKeyBytes = (0 until publicKey.size()).map { publicKey.getInt(it).toUByte() }
-            val userId = proto.deriveUserIdFromPublicKey(publicKeyBytes)
-            promise.resolve(userId)
-        } catch (e: Exception) {
-            promise.reject("ERROR_CRYPTO", "Failed to derive user ID: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.deriveUserIdFromPublicKey(this, publicKey, promise)
     }
 
     /**
@@ -4180,14 +2690,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun signData(data: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val dataBytes = (0 until data.size()).map { data.getInt(it).toUByte() }
-            val signature = proto.signData(dataBytes)
-            promise.resolve(Arguments.fromList(signature.map { it.toInt() }))
-        } catch (e: Exception) {
-            promise.reject("ERROR_CRYPTO", "Failed to sign data: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.signData(this, data, promise)
     }
 
     /**
@@ -4200,19 +2703,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun signDataBase64(dataBase64: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val data = try {
-                android.util.Base64.decode(dataBase64, android.util.Base64.DEFAULT)
-            } catch (e: IllegalArgumentException) {
-                promise.reject("ERROR_CRYPTO", "signDataBase64: invalid base64 input", e)
-                return
-            }
-            val signature = proto.signDataBytes(data)
-            promise.resolve(android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP))
-        } catch (e: Exception) {
-            promise.reject("ERROR_CRYPTO", "Failed to sign data: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.signDataBase64(this, dataBase64, promise)
     }
 
     /**
@@ -4220,16 +2711,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun verifySignature(publicKey: ReadableArray, data: ReadableArray, signature: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val publicKeyBytes = (0 until publicKey.size()).map { publicKey.getInt(it).toUByte() }
-            val dataBytes = (0 until data.size()).map { data.getInt(it).toUByte() }
-            val signatureBytes = (0 until signature.size()).map { signature.getInt(it).toUByte() }
-            val isValid = proto.verifySignature(publicKeyBytes, dataBytes, signatureBytes)
-            promise.resolve(isValid)
-        } catch (e: Exception) {
-            promise.reject("ERROR_CRYPTO", "Failed to verify signature: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.verifySignature(this, publicKey, data, signature, promise)
     }
 
     /**
@@ -4238,20 +2720,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun verifySignatureBase64(publicKeyBase64: String, dataBase64: String, signatureBase64: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val decoded = try {
-                listOf(publicKeyBase64, dataBase64, signatureBase64).map {
-                    android.util.Base64.decode(it, android.util.Base64.DEFAULT)
-                }
-            } catch (e: IllegalArgumentException) {
-                promise.reject("ERROR_CRYPTO", "verifySignatureBase64: invalid base64 input", e)
-                return
-            }
-            promise.resolve(proto.verifySignatureBytes(decoded[0], decoded[1], decoded[2]))
-        } catch (e: Exception) {
-            promise.reject("ERROR_CRYPTO", "Failed to verify signature: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.verifySignatureBase64(this, publicKeyBase64, dataBase64, signatureBase64, promise)
     }
 
     /**
@@ -4259,23 +2728,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsGenerateKeyPackage(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val bundle = proto.mlsGenerateKeyPackage()
-            val result = Arguments.createMap().apply {
-                putString("packageId", bundle.packageId)
-                putString("userId", bundle.userId)
-                val dataArray = Arguments.createArray()
-                bundle.keyPackageData.forEach { dataArray.pushInt(it.toInt()) }
-                putArray("keyPackageData", dataArray)
-                putDouble("createdAtMs", bundle.createdAtMs.toDouble())
-                putDouble("expiresAtMs", bundle.expiresAtMs.toDouble())
-                putBoolean("synced", bundle.synced)
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to generate key package: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsGenerateKeyPackage(this, promise)
     }
 
     /**
@@ -4283,23 +2736,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsGetOrCreateKeyPackage(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val bundle = proto.mlsGetOrCreateKeyPackage()
-            val result = Arguments.createMap().apply {
-                putString("packageId", bundle.packageId)
-                putString("userId", bundle.userId)
-                val dataArray = Arguments.createArray()
-                bundle.keyPackageData.forEach { dataArray.pushInt(it.toInt()) }
-                putArray("keyPackageData", dataArray)
-                putDouble("createdAtMs", bundle.createdAtMs.toDouble())
-                putDouble("expiresAtMs", bundle.expiresAtMs.toDouble())
-                putBoolean("synced", bundle.synced)
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to get key package: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsGetOrCreateKeyPackage(this, promise)
     }
 
     /**
@@ -4307,29 +2744,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsGetPendingKeyPackages(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val bundles = proto.mlsGetPendingKeyPackages()
-            val resultArray = Arguments.createArray()
-            
-            bundles.forEach { bundle ->
-                val map = Arguments.createMap().apply {
-                    putString("packageId", bundle.packageId)
-                    putString("userId", bundle.userId)
-                    val dataArray = Arguments.createArray()
-                    bundle.keyPackageData.forEach { dataArray.pushInt(it.toInt()) }
-                    putArray("keyPackageData", dataArray)
-                    putDouble("createdAtMs", bundle.createdAtMs.toDouble())
-                    putDouble("expiresAtMs", bundle.expiresAtMs.toDouble())
-                    putBoolean("synced", bundle.synced)
-                }
-                resultArray.pushMap(map)
-            }
-            
-            promise.resolve(resultArray)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to get pending key packages: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsGetPendingKeyPackages(this, promise)
     }
 
     /**
@@ -4337,13 +2752,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsMarkKeyPackageSynced(packageId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.mlsMarkKeyPackageSynced(packageId)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to mark key package synced: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsMarkKeyPackageSynced(this, packageId, promise)
     }
 
     /**
@@ -4351,22 +2760,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsCreateSession(otherUserId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val welcome = proto.mlsCreateSession(otherUserId)
-            val result = Arguments.createMap().apply {
-                putString("groupId", welcome.groupId)
-                val welcomeDataArray = Arguments.createArray()
-                welcome.welcomeData.forEach { welcomeDataArray.pushInt(it.toInt()) }
-                putArray("welcomeData", welcomeDataArray)
-                putString("inviterId", welcome.inviterId)
-                putString("groupName", welcome.groupName)
-                putDouble("timestampMs", welcome.timestampMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to create session: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsCreateSession(this, otherUserId, promise)
     }
 
     /**
@@ -4374,40 +2768,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsJoinSession(welcomeJson: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = JSONObject(welcomeJson)
-            
-            val welcomeDataArray = json.optJSONArray("welcomeData") ?: JSONArray()
-            val welcomeData = mutableListOf<UByte>()
-            for (i in 0 until welcomeDataArray.length()) {
-                welcomeData.add(welcomeDataArray.getInt(i).toUByte())
-            }
-            
-            val welcome = MlsWelcomeMessage(
-                groupId = json.safeOptString("groupId"),
-                welcomeData = welcomeData,
-                inviterId = json.safeOptString("inviterId"),
-                groupName = json.optNullableString("groupName"),
-                timestampMs = json.optLong("timestampMs", 0).toULong()
-            )
-
-            val info = proto.mlsJoinSession(welcome)
-            val result = Arguments.createMap().apply {
-                putString("groupId", info.groupId)
-                putString("name", info.name)
-                val members = Arguments.createArray()
-                info.members.forEach { members.pushString(it) }
-                putArray("members", members)
-                putDouble("epoch", info.epoch.toDouble())
-                putBoolean("isSession", info.isSession)
-                putDouble("createdAtMs", info.createdAtMs.toDouble())
-                putDouble("lastActivityMs", info.lastActivityMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to join session: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsJoinSession(this, welcomeJson, promise)
     }
 
     /**
@@ -4415,36 +2776,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsDecryptFromUser(encryptedJson: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = JSONObject(encryptedJson)
-            
-            val ciphertextArray = json.optJSONArray("ciphertext") ?: JSONArray()
-            val ciphertext = mutableListOf<UByte>()
-            for (i in 0 until ciphertextArray.length()) {
-                ciphertext.add(ciphertextArray.getInt(i).toUByte())
-            }
-            
-            val encrypted = MlsEncryptedMessage(
-                groupId = json.safeOptString("groupId"),
-                messageType = json.safeOptString("messageType", "Application"),
-                epoch = json.optLong("epoch", 0).toULong(),
-                ciphertext = ciphertext,
-                senderId = json.safeOptString("senderId"),
-                timestampMs = json.optLong("timestampMs", 0).toULong()
-            )
-
-            val plaintext = proto.mlsDecryptFromUser(encrypted)
-            if (plaintext != null) {
-                val result = Arguments.createArray()
-                plaintext.forEach { result.pushInt(it.toInt()) }
-                promise.resolve(result)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to decrypt message from user: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsDecryptFromUser(this, encryptedJson, promise)
     }
 
     /**
@@ -4452,13 +2784,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsDeleteSession(otherUserId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.mlsDeleteSession(otherUserId)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to delete session: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsDeleteSession(this, otherUserId, promise)
     }
 
     /**
@@ -4466,17 +2792,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsImportKeyPackage(userId: String, keyPackageData: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val data = mutableListOf<UByte>()
-            for (i in 0 until keyPackageData.size()) {
-                data.add(keyPackageData.getInt(i).toUByte())
-            }
-            proto.mlsImportKeyPackage(userId, data)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to import key package: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsImportKeyPackage(this, userId, keyPackageData, promise)
     }
 
     /**
@@ -4484,12 +2800,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsHasSession(otherUserId: String, promise: Promise) {
-        val proto = protocol
-        if (proto == null) {
-            promise.resolve(false)
-            return
-        }
-        promise.resolve(proto.mlsHasSession(otherUserId))
+        ProtocolEngineHostBridgeReactNative.mlsHasSession(this, otherUserId, promise)
     }
 
     /**
@@ -4497,12 +2808,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun hasPendingKeyPackage(peerId: String, promise: Promise) {
-        val proto = protocol
-        if (proto == null) {
-            promise.resolve(false)
-            return
-        }
-        promise.resolve(proto.hasPendingKeyPackage(peerId))
+        ProtocolEngineHostBridgeReactNative.hasPendingKeyPackage(this, peerId, promise)
     }
 
     /**
@@ -4510,19 +2816,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun getEstablishmentState(peerId: String, promise: Promise) {
-        val proto = protocol
-        if (proto == null) {
-            promise.resolve("NoKeyPackage")
-            return
-        }
-        val state = proto.getEstablishmentState(peerId)
-        val stateString = when (state) {
-            EstablishmentState.NO_KEY_PACKAGE -> "NoKeyPackage"
-            EstablishmentState.HAVE_KEY_PACKAGE -> "HaveKeyPackage"
-            EstablishmentState.SESSION_PENDING -> "SessionPending"
-            EstablishmentState.SESSION_CONFIRMED -> "SessionConfirmed"
-        }
-        promise.resolve(stateString)
+        ProtocolEngineHostBridgeReactNative.getEstablishmentState(this, peerId, promise)
     }
 
     /**
@@ -4530,27 +2824,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun establishSecureSession(peerId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val welcome = proto.establishSecureSession(peerId)
-            if (welcome != null) {
-                val result = Arguments.createMap().apply {
-                    putString("groupId", welcome.groupId)
-                    val welcomeDataArray = Arguments.createArray()
-                    welcome.welcomeData.forEach { welcomeDataArray.pushInt(it.toInt()) }
-                    putArray("welcomeData", welcomeDataArray)
-                    putString("inviterId", welcome.inviterId)
-                    putString("groupName", welcome.groupName)
-                    putDouble("timestampMs", welcome.timestampMs.toDouble())
-                }
-                promise.resolve(result)
-            } else {
-                // Session already exists
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to establish secure session: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.establishSecureSession(this, peerId, promise)
     }
 
     /**
@@ -4567,12 +2841,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun rekeySession(peerId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            promise.resolve(proto.rekeySession(peerId))
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to rotate session: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.rekeySession(this, peerId, promise)
     }
 
     /**
@@ -4580,27 +2849,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsEncryptForUser(otherUserId: String, plaintext: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val data = mutableListOf<UByte>()
-            for (i in 0 until plaintext.size()) {
-                data.add(plaintext.getInt(i).toUByte())
-            }
-            val encrypted = proto.mlsEncryptForUser(otherUserId, data)
-            val result = Arguments.createMap().apply {
-                putString("groupId", encrypted.groupId)
-                putString("messageType", encrypted.messageType)
-                putDouble("epoch", encrypted.epoch.toDouble())
-                val ciphertextArray = Arguments.createArray()
-                encrypted.ciphertext.forEach { ciphertextArray.pushInt(it.toInt()) }
-                putArray("ciphertext", ciphertextArray)
-                putString("senderId", encrypted.senderId)
-                putDouble("timestampMs", encrypted.timestampMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to encrypt message: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsEncryptForUser(this, otherUserId, plaintext, promise)
     }
 
     /**
@@ -4608,36 +2857,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsDecrypt(encryptedJson: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = JSONObject(encryptedJson)
-            
-            val ciphertextArray = json.optJSONArray("ciphertext") ?: JSONArray()
-            val ciphertext = mutableListOf<UByte>()
-            for (i in 0 until ciphertextArray.length()) {
-                ciphertext.add(ciphertextArray.getInt(i).toUByte())
-            }
-            
-            val encrypted = MlsEncryptedMessage(
-                groupId = json.safeOptString("groupId"),
-                messageType = json.safeOptString("messageType", "Application"),
-                epoch = json.optLong("epoch", 0).toULong(),
-                ciphertext = ciphertext,
-                senderId = json.safeOptString("senderId"),
-                timestampMs = json.optLong("timestampMs", 0).toULong()
-            )
-
-            val plaintext = proto.mlsDecrypt(encrypted)
-            if (plaintext != null) {
-                val result = Arguments.createArray()
-                plaintext.forEach { result.pushInt(it.toInt()) }
-                promise.resolve(result)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to decrypt message: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsDecrypt(this, encryptedJson, promise)
     }
 
     /**
@@ -4645,13 +2865,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsListSessions(promise: Promise) {
-        val proto = protocol
-        if (proto == null) {
-            promise.resolve(Arguments.createArray())
-            return
-        }
-        val sessions = proto.mlsListSessions()
-        promise.resolve(Arguments.fromList(sessions))
+        ProtocolEngineHostBridgeReactNative.mlsListSessions(this, promise)
     }
 
     /**
@@ -4659,45 +2873,26 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun mlsProcessWelcome(welcomeJson: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = JSONObject(welcomeJson)
-            
-            val welcomeDataArray = json.optJSONArray("welcomeData") ?: JSONArray()
-            val welcomeData = mutableListOf<UByte>()
-            for (i in 0 until welcomeDataArray.length()) {
-                welcomeData.add(welcomeDataArray.getInt(i).toUByte())
-            }
-            
-            val welcome = MlsWelcomeMessage(
-                groupId = json.safeOptString("groupId"),
-                welcomeData = welcomeData,
-                inviterId = json.safeOptString("inviterId"),
-                groupName = json.optNullableString("groupName"),
-                timestampMs = json.optLong("timestampMs", 0).toULong()
-            )
-
-            val info = proto.mlsProcessWelcome(welcome)
-            val result = Arguments.createMap().apply {
-                putString("groupId", info.groupId)
-                putString("name", info.name)
-                val members = Arguments.createArray()
-                info.members.forEach { members.pushString(it) }
-                putArray("members", members)
-                putDouble("epoch", info.epoch.toDouble())
-                putBoolean("isSession", info.isSession)
-                putDouble("createdAtMs", info.createdAtMs.toDouble())
-                putDouble("lastActivityMs", info.lastActivityMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to process welcome message: ${e.message}", e)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsProcessWelcome(this, welcomeJson, promise)
     }
 
     // ========================================================================
     // GROUP MANAGEMENT (MESH / MLS PROTOCOL-LEVEL)
     // ========================================================================
+
+    private fun meshGroupInfoWritableMap(info: Map<String, Any?>): WritableMap =
+        Arguments.createMap().apply {
+            putString("groupId", info["groupId"] as? String)
+            putString("name", info["name"] as? String)
+            val members = Arguments.createArray()
+            @Suppress("UNCHECKED_CAST")
+            (info["members"] as? List<String>)?.forEach { members.pushString(it) }
+            putArray("members", members)
+            putDouble("epoch", (info["epoch"] as? Double) ?: 0.0)
+            putBoolean("isSession", info["isSession"] as? Boolean ?: false)
+            putDouble("createdAtMs", (info["createdAtMs"] as? Double) ?: 0.0)
+            putDouble("lastActivityMs", (info["lastActivityMs"] as? Double) ?: 0.0)
+        }
 
     /**
      * Create a new MLS group via the mesh transport.
@@ -4705,20 +2900,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshCreateGroup(name: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val info = proto.createGroup(name)
-            val result = Arguments.createMap().apply {
-                putString("groupId", info.groupId)
-                putString("name", info.name)
-                val members = Arguments.createArray()
-                info.members.forEach { members.pushString(it) }
-                putArray("members", members)
-                putDouble("epoch", info.epoch.toDouble())
-                putBoolean("isSession", info.isSession)
-                putDouble("createdAtMs", info.createdAtMs.toDouble())
-                putDouble("lastActivityMs", info.lastActivityMs.toDouble())
-            }
-            promise.resolve(result)
+            promise.resolve(meshGroupInfoWritableMap(engineHost.meshCreateGroup(name)))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to create mesh group")
         }
@@ -4730,8 +2912,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshInviteToGroup(groupId: String, inviteeUserId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.inviteToGroup(groupId, inviteeUserId)
+            engineHost.meshInviteToGroup(groupId, inviteeUserId)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to invite to mesh group")
@@ -4744,17 +2925,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshSendGroupMessage(groupId: String, content: String, priority: String?, replyToMsg: String?, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val msgPriority = priority?.let {
-                when (it.lowercase()) {
-                    "low" -> MessagePriority.LOW
-                    "medium" -> MessagePriority.MEDIUM
-                    "high" -> MessagePriority.HIGH
-                    "critical" -> MessagePriority.CRITICAL
-                    else -> null
-                }
-            }
-            val messageIds = proto.sendGroupMessage(groupId, content, msgPriority, replyToMsg)
+            val messageIds = engineHost.meshSendGroupMessage(groupId, content, priority, replyToMsg)
             val result = Arguments.createArray()
             messageIds.forEach { result.pushString(it) }
             promise.resolve(result)
@@ -4769,17 +2940,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshForwardMessageToGroup(originalMessageJson: String, groupId: String, priority: String?, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val msgPriority = priority?.let {
-                when (it.lowercase()) {
-                    "low" -> MessagePriority.LOW
-                    "medium" -> MessagePriority.MEDIUM
-                    "high" -> MessagePriority.HIGH
-                    "critical" -> MessagePriority.CRITICAL
-                    else -> null
-                }
-            }
-            val messageIds = proto.forwardMessageToGroup(originalMessageJson, groupId, msgPriority)
+            val messageIds = engineHost.meshForwardMessageToGroup(originalMessageJson, groupId, priority)
             val result = Arguments.createArray()
             messageIds.forEach { result.pushString(it) }
             promise.resolve(result)
@@ -4794,8 +2955,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshRemoveFromGroup(groupId: String, memberId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.removeFromGroup(groupId, memberId)
+            engineHost.meshRemoveFromGroup(groupId, memberId)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to remove from mesh group")
@@ -4808,8 +2968,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshLeaveGroup(groupId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.leaveGroup(groupId)
+            engineHost.meshLeaveGroup(groupId)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to leave mesh group")
@@ -4822,10 +2981,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshListGroups(promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val groups = proto.listGroups()
             val result = Arguments.createArray()
-            groups.forEach { result.pushString(it) }
+            engineHost.meshListGroups().forEach { result.pushString(it) }
             promise.resolve(result)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to list mesh groups")
@@ -4838,24 +2995,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshGetGroupInfo(groupId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val info = proto.getGroupInfo(groupId)
-            if (info != null) {
-                val result = Arguments.createMap().apply {
-                    putString("groupId", info.groupId)
-                    putString("name", info.name)
-                    val members = Arguments.createArray()
-                    info.members.forEach { members.pushString(it) }
-                    putArray("members", members)
-                    putDouble("epoch", info.epoch.toDouble())
-                    putBoolean("isSession", info.isSession)
-                    putDouble("createdAtMs", info.createdAtMs.toDouble())
-                    putDouble("lastActivityMs", info.lastActivityMs.toDouble())
-                }
-                promise.resolve(result)
-            } else {
-                promise.resolve(null)
-            }
+            val info = engineHost.meshGetGroupInfo(groupId)
+            promise.resolve(info?.let { meshGroupInfoWritableMap(it) })
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get group info")
         }
@@ -4868,12 +3009,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshGroupRichReadiness(groupId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val readiness = proto.groupRichReadiness(groupId)
+            val readiness = engineHost.meshGroupRichReadiness(groupId)
             val result = Arguments.createMap().apply {
-                putBoolean("ready", readiness.ready)
+                putBoolean("ready", readiness["ready"] as? Boolean ?: false)
                 val unknownMembers = Arguments.createArray()
-                readiness.unknownMembers.forEach { unknownMembers.pushString(it) }
+                @Suppress("UNCHECKED_CAST")
+                (readiness["unknownMembers"] as? List<String>)?.forEach { unknownMembers.pushString(it) }
                 putArray("unknownMembers", unknownMembers)
             }
             promise.resolve(result)
@@ -4890,8 +3031,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshGroupRelaySyncState(groupId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            promise.resolve(proto.groupRelaySyncState(groupId).name.lowercase())
+            promise.resolve(engineHost.meshGroupRelaySyncState(groupId))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get relay sync state")
         }
@@ -4907,8 +3047,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshRequestGroupRelayRegistration(groupId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            promise.resolve(proto.requestGroupRelayRegistration(groupId))
+            promise.resolve(engineHost.meshRequestGroupRelayRegistration(groupId))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to request relay registration")
         }
@@ -4917,8 +3056,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshSetMemberRole(groupId: String, userId: String, role: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.setMemberRole(groupId, userId, role)
+            engineHost.meshSetMemberRole(groupId, userId, role)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to set member role")
@@ -4928,9 +3066,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshGetMemberRole(groupId: String, userId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val role = proto.getMemberRole(groupId, userId)
-            promise.resolve(role)
+            promise.resolve(engineHost.meshGetMemberRole(groupId, userId))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get member role")
         }
@@ -4939,10 +3075,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshGetGroupRoles(groupId: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val roles = proto.getGroupRoles(groupId)
             val result = Arguments.createMap()
-            roles.forEach { (userId, role) -> result.putString(userId, role) }
+            engineHost.meshGetGroupRoles(groupId).forEach { (userId, role) -> result.putString(userId, role) }
             promise.resolve(result)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get group roles")
@@ -4952,8 +3086,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun meshRenameGroup(groupId: String, newName: String, promise: Promise) {
         try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.renameGroup(groupId, newName)
+            engineHost.meshRenameGroup(groupId, newName)
             promise.resolve(null)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to rename group")
@@ -4969,13 +3102,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun checkInternetPresence(userId: String, options: ReadableMap, promise: Promise) {
-        try {
-            val manager = internetManager ?: throw IllegalStateException("Internet transport not initialized")
-            val force = options.hasKey("force") && options.getBoolean("force")
-            manager.checkPresence(userId, force) { written -> promise.resolve(written) }
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_INTERNET", "Failed to query presence")
-        }
+        ProtocolEngineHostBridgeReactNative.checkInternetPresence(this, userId, options, promise)
     }
 
     /**
@@ -4986,12 +3113,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun internetSendRawCommand(json: String, promise: Promise) {
-        try {
-            val manager = internetManager ?: throw IllegalStateException("Internet transport not initialized")
-            promise.resolve(manager.sendRawCommand(json))
-        } catch (e: Exception) {
-            rejectWithProtocolError(promise, e, "ERROR_INTERNET", "Failed to send raw server command")
-        }
+        ProtocolEngineHostBridgeReactNative.internetSendRawCommand(this, json, promise)
     }
 
     /**
@@ -5002,7 +3124,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun internetIsReady(promise: Promise) {
-        promise.resolve(internetManager?.isReady() ?: false)
+        ProtocolEngineHostBridgeReactNative.internetIsReady(this, promise)
     }
 
     /**
@@ -5024,7 +3146,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun internetIsSuperseded(promise: Promise) {
-        promise.resolve(internetManager?.isSessionSuperseded() ?: false)
+        ProtocolEngineHostBridgeReactNative.internetIsSuperseded(this, promise)
     }
 
     /**
@@ -5039,105 +3161,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun internetForceReconnect(promise: Promise) {
-        val manager = internetManager
-        if (manager == null) {
-            promise.resolve(false)
-            return
-        }
-        manager.forceReconnect()
-        promise.resolve(true)
-    }
-
-    /**
-     * Wire event-driven transport callbacks using direct typed UniFFI calls.
-     * Each callback fires when Rust enqueues outgoing data, accelerating the
-     * manager's polling loop.
-     *
-     * These do NOT replace the polling loops, and the logs below deliberately
-     * no longer say they do. Registration happens here, at create time, which
-     * is before `initializeMlsWithSecureStorage` derives this device's address
-     * and rebuilds the transports against it — so a successful call proves the
-     * callback was *accepted*, never that it is live. Rust now retains each
-     * callback and re-applies it after that rebuild, which is what makes them
-     * actually fire; before that fix every one of these was dropped, and Nostr
-     * (which has no transport until the rebuild) never landed at all.
-     *
-     * The polling loops stay regardless: they are the correctness floor, and
-     * these callbacks are latency optimisation on top. Do not delete a polling
-     * loop on the strength of one of these log lines.
-     */
-    private fun wireTransportCallbacks(proto: OfflineProtocol) {
-        // BLE callback
-        bleTransport?.let { manager ->
-            try {
-                proto.setBleTransportCallback(object : uniffi.offline_protocol.BleTransportCallback {
-                    override fun onFragmentsAvailable() {
-                        manager.onFragmentsAvailable()
-                    }
-                })
-                android.util.Log.i(NAME, "BLE transport callback registered (re-applied after identity rebuild; polling remains the floor)")
-                emitDiagnostic("info", "BLE transport callback wired")
-            } catch (e: Throwable) {
-                android.util.Log.w(NAME, "BLE transport callback not available; using fallback polling", e)
-                emitDiagnostic("warning", "BLE callback wiring skipped (regenerate UniFFI bindings)")
-            }
-        }
-
-        // WiFi Direct callback. Registered on the slot, not on a manager:
-        // the manager is only ever built later, by enableTransport, so a
-        // registration that waited for one never happened, and every body
-        // and every acknowledgement on this transport waited for the 2s poll
-        // (a median of about three seconds per delivery on two phones, against
-        // under a tenth of a second with it). The callback finds whichever
-        // manager is current when it fires, so a manager that enableTransport
-        // replaces needs no second registration. The peer-stream transport
-        // behind the slot exists when the slot is enabled, and wakes this
-        // only for a body queued toward an address a stream proved.
-        if (currentConfig?.wifiDirectEnabled == true) {
-            try {
-                proto.setWifiDirectTransportCallback(object : uniffi.offline_protocol.WifiDirectTransportCallback {
-                    override fun onMessagesAvailable() {
-                        wifiDirectManager?.onMessagesAvailable()
-                    }
-                })
-                emitDiagnostic("info", "WiFi Direct transport callback registered")
-            } catch (e: Throwable) {
-                android.util.Log.w(NAME, "WiFi Direct transport callback not available; using fallback polling", e)
-                emitDiagnostic("warning", "WiFi Direct callback wiring skipped (regenerate UniFFI bindings)")
-            }
-        }
-
-        // Reticulum callback
-        reticulumManager?.let { manager ->
-            try {
-                proto.setReticulumTransportCallback(object : uniffi.offline_protocol.ReticulumTransportCallback {
-                    override fun onMessagesAvailable() {
-                        manager.onMessagesAvailable()
-                    }
-                })
-                android.util.Log.i(NAME, "Reticulum transport callback registered (re-applied after identity rebuild; polling remains the floor)")
-                emitDiagnostic("info", "Reticulum transport callback wired")
-            } catch (e: Throwable) {
-                android.util.Log.w(NAME, "Reticulum transport callback not available; using fallback polling", e)
-                emitDiagnostic("warning", "Reticulum callback wiring skipped (regenerate UniFFI bindings)")
-            }
-        }
-
-        // Nostr callback
-        nostrManager?.let { manager ->
-            try {
-                proto.setNostrTransportCallback(object : uniffi.offline_protocol.NostrTransportCallback {
-                    override fun onMessagesAvailable() {
-                        manager.onMessagesAvailable()
-                    }
-                })
-                android.util.Log.i(NAME, "Nostr transport callback registered (installed at the identity rebuild; polling remains the floor)")
-                emitDiagnostic("info", "Nostr transport callback wired")
-            } catch (e: Throwable) {
-                android.util.Log.w(NAME, "Nostr transport callback not available; using fallback polling", e)
-                emitDiagnostic("warning", "Nostr callback wiring skipped (regenerate UniFFI bindings)")
-            }
-        }
+        ProtocolEngineHostBridgeReactNative.internetForceReconnect(this, promise)
     }
 
     /**
@@ -5182,91 +3206,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             emitDiagnostic("info", "Mesh foreground service stopped")
         } catch (e: Exception) {
             android.util.Log.w(NAME, "Failed to stop foreground service: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Start background process scheduler.
-     * Uses [Constants.PROCESS_INTERVAL_MS] as a fallback tick; latency-sensitive
-     * work is driven by transport callbacks (event-driven), not by this timer.
-     *
-     * Fixed *delay*, not fixed rate. `scheduleAtFixedRate` targets a constant
-     * frequency, so when a tick overruns the period the executor makes up the
-     * lost ground by running the next ones back-to-back with no gap. Every tick
-     * takes the core protocol mutex for its whole body — `process()` plus a
-     * `receiveMessage()` drain, both of which re-enter the JVM through
-     * `MlsSecureStorage` and so through AndroidKeyStore — so an overrunning tick
-     * on a slow device holds that mutex essentially continuously and starves
-     * every other FFI caller, the BLE fragment drain included (OFF-2123).
-     * Fixed delay guarantees a full [Constants.PROCESS_INTERVAL_MS] of slack
-     * between ticks no matter how long one takes, which is the property this
-     * scheduler actually needs: it is a fallback, and nothing reads its cadence
-     * as a timing guarantee.
-     */
-    private fun startProcessScheduler() {
-        stopProcessScheduler()
-
-        processScheduler = Executors.newSingleThreadScheduledExecutor().apply {
-            scheduleWithFixedDelay({
-                processProtocol()
-            }, 0, Constants.PROCESS_INTERVAL_MS, TimeUnit.MILLISECONDS)
-        }
-    }
-
-    /**
-     * Stop background process scheduler
-     */
-    private fun stopProcessScheduler() {
-        val scheduler = processScheduler
-        processScheduler = null
-        scheduler?.shutdown()
-        // `shutdown()` only refuses *new* work; a tick already running keeps
-        // going, and `processProtocol` persists (outbox entries, retry
-        // lifecycles). `destroy` must not return while one is still writing, or
-        // a wipe that follows it races a straggler and leaves a repopulated
-        // container. Bounded so a wedged tick cannot hang the bridge — the tick
-        // itself is short, and the timeout is far longer than one takes.
-        try {
-            scheduler?.awaitTermination(
-                PROCESS_SHUTDOWN_TIMEOUT_MS,
-                TimeUnit.MILLISECONDS
-            )
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-    }
-
-    /**
-     * Call protocol.process() to handle background tasks
-     */
-    private fun processProtocol() {
-        try {
-            val instance = protocol ?: return
-            
-            if (System.currentTimeMillis() % Constants.LOG_INTERVAL_MS < Constants.LOG_INTERVAL_THRESHOLD_MS) {
-                android.util.Log.d(NAME, "Processing protocol...")
-            }
-            
-            instance.process()
-            var drained = 0
-            while (drained < Constants.MAX_RECEIVE_DRAIN_PER_TICK) {
-                val message = instance.receiveMessage() ?: break
-                drained++
-                if (System.currentTimeMillis() % Constants.LOG_INTERVAL_MS < Constants.LOG_INTERVAL_THRESHOLD_MS) {
-                    android.util.Log.d(NAME, "Drained protocol message #$drained: $message")
-                }
-            }
-            if (drained >= Constants.MAX_RECEIVE_DRAIN_PER_TICK) {
-                emitDiagnostic("warning", "Capped receiveMessage drain for this process tick", mapOf(
-                    "maxBatch" to Constants.MAX_RECEIVE_DRAIN_PER_TICK
-                ))
-            }
-        } catch (e: Exception) {
-            android.util.Log.e(NAME, "Process error: ${e.message}", e)
-            emitDiagnostic("error", "Protocol process error", mapOf(
-                "error" to (e.message ?: "unknown"),
-                "exception" to e.javaClass.simpleName
-            ))
         }
     }
 

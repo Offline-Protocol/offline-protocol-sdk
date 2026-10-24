@@ -77,6 +77,8 @@ build_fixture() {
     >"$ios/InternetManager.swift"
   printf 'import Foundation\nimport React\nclass OfflineProtocolModule {}\n' \
     >"$ios/OfflineProtocolModule.swift"
+  printf 'import Foundation\nimport React\nenum ProtocolEngineHostBridgeReactNative {}\n' \
+    >"$ios/ProtocolEngineHostBridgeReactNative.swift"
   # What sits beside the sources and is not one.
   echo "// the harness manifest" >"$ios/Package.swift"
   echo "objective c" >"$ios/OfflineProtocolModule.m"

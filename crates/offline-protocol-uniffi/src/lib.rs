@@ -12934,17 +12934,18 @@ mod tests {
         );
 
         // --- Edge 2: the two modules that produce those strings ------------
-        let kotlin_src = read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
+        let kotlin_src =
+            read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt");
         let kotlin = code_only(slice_between(
             &kotlin_src,
             "fun getState(",
-            "promise.resolve(stateString)",
+            "fun getTopology(",
         ));
-        let swift_src = read("ios/OfflineProtocolModule.swift");
+        let swift_src = read("ios/ProtocolEngineHostBridge.swift");
         let swift = code_only(slice_between(
             &swift_src,
-            "func getState(",
-            "resolver(stateString)",
+            "static func getState(",
+            "static func localAddress(",
         ));
 
         for state in VARIANTS {
@@ -12953,14 +12954,14 @@ mod tests {
             let kotlin_arm = format!("ProtocolState.{} -> \"{name}\"", kotlin_spelling(name));
             assert!(
                 kotlin.contains(&kotlin_arm),
-                "OfflineProtocolModule.kt getState must resolve `{kotlin_arm}`; \
+                "ProtocolEngineHostBridge.kt getState must resolve `{kotlin_arm}`; \
                  a name that disagrees with types.ts is invisible to tsc and to a bindings regen"
             );
 
-            let swift_arm = format!("case .{}: stateString = \"{name}\"", swift_spelling(name));
+            let swift_arm = format!("case .{}: return \"{name}\"", swift_spelling(name));
             assert!(
                 swift.contains(&swift_arm),
-                "OfflineProtocolModule.swift getState must resolve `{swift_arm}`; \
+                "ProtocolEngineHostBridge.swift getState must resolve `{swift_arm}`; \
                  nothing in CI compiles this file, so this assertion is its only guard"
             );
         }
@@ -12970,11 +12971,11 @@ mod tests {
         // and the two modules disagreeing would make it platform-dependent.
         assert!(
             kotlin.contains("else -> \"Stopped\""),
-            "OfflineProtocolModule.kt getState must fall back to \"Stopped\""
+            "ProtocolEngineHostBridge.kt getState must fall back to \"Stopped\""
         );
         assert!(
-            swift.contains("@unknown default: stateString = \"Stopped\""),
-            "OfflineProtocolModule.swift getState must fall back to \"Stopped\", matching Android"
+            swift.contains("@unknown default: return \"Stopped\""),
+            "ProtocolEngineHostBridge.swift getState must fall back to \"Stopped\", matching Android"
         );
     }
 
@@ -16988,15 +16989,14 @@ mod tests {
             !rn_fn.is_empty(),
             "OfflineProtocolModule.configureAndStartInternet not found: the guard needs a stable anchor"
         );
+        assert!(
+            rn_fn.contains("InternetTransportBootstrap.configureAndStart"),
+            "OfflineProtocolModule.configureAndStartInternet must delegate to InternetTransportBootstrap"
+        );
         for marker in INTERNET_CONFIGURE_MARKERS {
             assert!(
                 bootstrap.contains(marker),
                 "InternetTransportBootstrap.kt missing `{marker}`"
-            );
-            assert!(
-                rn_fn.contains(marker),
-                "OfflineProtocolModule.configureAndStartInternet missing `{marker}`: \
-                 update InternetTransportBootstrap.kt or restore RN parity"
             );
         }
     }
@@ -17641,6 +17641,8 @@ mod tests {
         // every file that still narrows JavaScript numbers must stay bounded.
         const SWIFT_JS_NUMERIC_SOURCES: &[&str] = &[
             "ios/OfflineProtocolModule.swift",
+            "ios/ProtocolEngineHostBridge.swift",
+            "ios/BridgeArgumentMaps.swift",
             "ios/ProtocolConfigParser.swift",
             "ios/InitialRuntimeConfigApplier.swift",
         ];
@@ -17801,7 +17803,12 @@ mod tests {
         // take `manager: TransportManager` parameters); OfflineProtocolModule.kt
         // hosts the listener objects, whose overrides carry the same
         // parameter.
-        const NOT_A_MANAGER: &[&str] = &["TransportManager.kt", "OfflineProtocolModule.kt"];
+        const NOT_A_MANAGER: &[&str] = &[
+            "TransportManager.kt",
+            "OfflineProtocolModule.kt",
+            "ProtocolEngineHostBridge.kt",
+            "ProtocolEngineHost.kt",
+        ];
         let expected_from_wide_scan: Vec<String> = rn_android_kotlin_sources()
             .into_iter()
             .filter(|(rel, code)| {
@@ -18642,11 +18649,161 @@ mod tests {
     /// callback resolves the manager when it fires, so a manager that
     /// `enableTransport` replaces needs no second registration, and the field
     /// it reads from the core's thread is volatile.
+
+    /// Names listed in `tools/gen_protocol_engine_host_bridge.py` (shared with Flutter).
+    fn rn_protocol_engine_host_bridge_method_names() -> Vec<String> {
+        let gen = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tools/gen_protocol_engine_host_bridge.py"),
+        )
+        .expect("gen_protocol_engine_host_bridge.py");
+        let body = gen
+            .split("METHODS = [")
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .expect("METHODS list in gen_protocol_engine_host_bridge.py");
+        body.lines()
+            .filter_map(|line| {
+                let line = line.trim().trim_end_matches(',');
+                line.strip_prefix('"')?
+                    .strip_suffix('"')
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
     #[test]
-    fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
-        let code = rn_source_code_only(
+    fn react_native_android_engine_bridge_methods_delegate_through_shared_bridge() {
+        let module = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
         );
+        for name in rn_protocol_engine_host_bridge_method_names() {
+            let needle = format!("ProtocolEngineHostBridgeReactNative.{name}(");
+            assert!(
+                module.contains(&needle),
+                "OfflineProtocolModule.kt must delegate `{name}` through \
+                 ProtocolEngineHostBridgeReactNative (found neither `{needle}`): \
+                 RN-only edits would drift from Flutter's shared bridge"
+            );
+        }
+    }
+
+    #[test]
+    fn react_native_ios_engine_bridge_methods_delegate_through_shared_bridge() {
+        let module = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        for name in rn_protocol_engine_host_bridge_method_names() {
+            let needle = format!("ProtocolEngineHostBridgeReactNative.{name}(self");
+            assert!(
+                module.contains(&needle),
+                "OfflineProtocolModule.swift must delegate `{name}` through \
+                 ProtocolEngineHostBridgeReactNative (expected `{needle}`): \
+                 RN-only edits would drift from Flutter's shared bridge"
+            );
+        }
+    }
+
+    /// Promise fallback codes on RN adapters must stay pinned to the committed
+    /// manifest, not rediscovered from thin delegate bodies after regen.
+    #[test]
+    fn react_native_engine_bridge_error_codes_match_manifest() {
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rn_engine_bridge_error_manifest.json");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest_path.display())),
+        )
+        .expect("manifest json");
+        let names = rn_protocol_engine_host_bridge_method_names();
+        for name in &names {
+            let entry = manifest
+                .get(name)
+                .unwrap_or_else(|| panic!("manifest missing `{name}`"));
+            let code = entry["code"]
+                .as_str()
+                .unwrap_or_else(|| panic!("manifest `{name}` code must be a string"));
+            let message = entry["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("manifest `{name}` message must be a string"));
+            let swift = std::fs::read_to_string(
+                rn_dir.join("ios/ProtocolEngineHostBridgeReactNative.swift"),
+            )
+            .expect("read swift adapter");
+            let swift_needle = format!(r#"errorCode: "{code}", errorMessage: "{message}""#);
+            assert!(
+                swift.contains(&swift_needle),
+                "ProtocolEngineHostBridgeReactNative.swift must pin `{name}` to \
+                 `{swift_needle}`"
+            );
+            let kotlin = std::fs::read_to_string(rn_dir.join(
+                "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt",
+            ))
+            .expect("read kotlin adapter");
+            let kotlin_needle = format!(r#"run(module, promise, "{code}", "{message}""#);
+            assert!(
+                kotlin.contains(&kotlin_needle),
+                "ProtocolEngineHostBridgeReactNative.kt must pin `{name}` to \
+                 `{kotlin_needle}`"
+            );
+        }
+    }
+
+    #[test]
+    fn react_native_engine_bridge_error_manifest_eschews_generic_defaults() {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rn_engine_bridge_error_manifest.json");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest_path.display())),
+        )
+        .expect("manifest json");
+        let generic: Vec<String> = rn_protocol_engine_host_bridge_method_names()
+            .into_iter()
+            .filter(|name| {
+                let Some(entry) = manifest.get(name) else {
+                    return true;
+                };
+                entry["code"].as_str() == Some("ERROR_BRIDGE")
+                    && entry["message"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("Failed to run "))
+            })
+            .collect();
+        assert!(
+            generic.is_empty(),
+            "tools/rn_engine_bridge_error_manifest.json must not use generic ERROR_BRIDGE \
+             / Failed to run … for shared engine methods; assign a domain code instead: \
+             {generic:?}"
+        );
+    }
+
+    #[test]
+    fn react_native_js_harness_covers_engine_bridge_poll_smoke() {
+        let package = rn_source_code_only("package.json");
+        assert!(
+            package.contains("js-ci-harness/engine-bridge-smoke.test.js"),
+            "engine-bridge poll smoke must run under npm run test:js"
+        );
+        let smoke = rn_source_code_only("js-ci-harness/engine-bridge-smoke.test.js");
+        assert!(
+            smoke.contains("isMlsInitialized") && smoke.contains("internetIsReady"),
+            "engine-bridge smoke must exercise MLS and Internet readiness polls"
+        );
+        let android_smoke = rn_source_code_only(
+            "android/src/test/java/com/offlineprotocol/ProtocolEngineHostBridgeSmokeTest.kt",
+        );
+        assert!(
+            android_smoke.contains("ProtocolEngineHostBridge.internetIsReady")
+                && android_smoke.contains("ProtocolEngineHostBridge.isMlsInitialized"),
+            "Android bridge smoke must call shared poll methods on an empty host"
+        );
+    }
+
+    #[test]
+    fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt");
         for (what, pinned) in [
             (
                 "the registration, gated on the slot",
@@ -18657,12 +18814,12 @@ mod tests {
             ),
             (
                 "the field the callback reads",
-                "@Volatile private var wifiDirectManager: WifiDirectManager? = null",
+                "@Volatile var wifiDirectManager: WifiDirectManager? = null",
             ),
         ] {
             assert!(
                 code.contains(pinned),
-                "OfflineProtocolModule.kt: {what}. A Wi-Fi Direct callback that waits for a \
+                "ProtocolEngineHost.kt: {what}. A Wi-Fi Direct callback that waits for a \
                  manager is never registered, because the manager is built after create, and \
                  the transport falls back to its 2s poll. Expected to find:\n  {pinned}"
             );
@@ -18671,7 +18828,7 @@ mod tests {
             !code.contains(
                 "wifiDirectManager?.let { manager -> try { proto.setWifiDirectTransportCallback"
             ),
-            "OfflineProtocolModule.kt registers the Wi-Fi Direct callback only when a manager \
+            "ProtocolEngineHost.kt registers the Wi-Fi Direct callback only when a manager \
              already exists, which at create time it never does"
         );
     }
@@ -20189,10 +20346,13 @@ mod tests {
     /// with any mapper that merely compiled.
     #[test]
     fn react_native_transport_name_mappers_know_every_transport() {
-        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
-        let kotlin = rn_source_code_only(
-            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        let swift_bridge = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");
+        let swift_transport = rn_source_code_only("ios/TransportBridge.swift");
+        let kotlin_bridge = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
         );
+        let kotlin_transport =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/TransportBridge.kt");
 
         let region = |label: &str, code: &str, from: &str, to: &str| -> String {
             let start = code
@@ -20210,33 +20370,33 @@ mod tests {
             (
                 "Swift",
                 region(
-                    "Swift transportType(from:)",
-                    &swift,
-                    "func transportType(from type: String)",
-                    "func buildTopologyJson(",
+                    "Swift mapTransportType",
+                    &swift_transport,
+                    "static func mapTransportType(",
+                    "static func buildTopologyJson(",
                 ),
-                "default:",
+                "default: throw",
                 [
                     region(
                         "Swift getTransportMetrics",
-                        &swift,
-                        "func getTransportMetrics(",
-                        "proto.getTransportMetrics(",
+                        &swift_bridge,
+                        "static func getTransportMetrics(",
+                        "static func shouldEscalateToWifi(",
                     ),
                     region(
                         "Swift forceTransport",
-                        &swift,
-                        "func forceTransport(",
-                        "try proto.forceTransport(",
+                        &swift_bridge,
+                        "static func forceTransport(",
+                        "static func releaseTransportLock(",
                     ),
                 ],
-                "transportType(from: transportType)",
+                "TransportBridge.mapTransportType(",
             ),
             (
                 "Kotlin",
                 region(
                     "Kotlin mapTransportType",
-                    &kotlin,
+                    &kotlin_transport,
                     "fun mapTransportType(",
                     "fun buildTopologyJson(",
                 ),
@@ -20244,18 +20404,18 @@ mod tests {
                 [
                     region(
                         "Kotlin getTransportMetrics",
-                        &kotlin,
+                        &kotlin_bridge,
                         "fun getTransportMetrics(",
-                        "protocol?.getTransportMetrics(",
+                        "fun hasPendingKeyPackage(",
                     ),
                     region(
                         "Kotlin forceTransport",
-                        &kotlin,
+                        &kotlin_bridge,
                         "fun forceTransport(",
-                        "protocol?.forceTransport(",
+                        "fun forwardMessage(",
                     ),
                 ],
-                "mapTransportType(transportType)",
+                "TransportBridge.mapTransportType(",
             ),
         ];
 
@@ -20366,38 +20526,39 @@ mod tests {
             assert_has(label, &code, "app_id: params.appId ?? null");
         }
 
-        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
-        let kotlin = rn_source_code_only(
-            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
-        );
+        let swift_bridge = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");
         for (label, code, from, to, read) in [
             (
                 "Swift sendMessageRich",
-                &swift,
-                "func sendMessageRich(",
-                "proto.sendMessageRich(",
-                "appId: dict[\"app_id\"] as? String",
+                &swift_bridge,
+                "static func sendMessageRich(",
+                "host.sendMessageRich(",
+                "appId: options?[\"app_id\"] as? String",
             ),
             (
                 "Swift sendMediaRich",
-                &swift,
-                "func sendMediaRich(",
-                "proto.sendMediaRich(",
-                "appId: dict?[\"app_id\"] as? String",
+                &swift_bridge,
+                "static func sendMediaRich(",
+                "host.requireProtocol().sendMediaRich(",
+                "appId: options?[\"app_id\"] as? String",
             ),
             (
                 "Kotlin sendMessageRich",
-                &kotlin,
+                &rn_source_code_only(
+                    "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
+                ),
                 "fun sendMessageRich(",
-                "proto.sendMessageRich(",
-                "appId = options?.getString(\"app_id\")",
+                "host.sendMessageRich(",
+                "appId = optionsMap?.get(\"app_id\")",
             ),
             (
                 "Kotlin sendMediaRich",
-                &kotlin,
+                &rn_source_code_only(
+                    "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
+                ),
                 "fun sendMediaRich(",
-                "proto.sendMediaRich(",
-                "appId = options?.getString(\"app_id\")",
+                "host.requireProtocolBridge().sendMediaRich(",
+                "appId = options?.get(\"app_id\")",
             ),
         ] {
             assert_has(label, &region(label, code, from, to), read);
@@ -21319,14 +21480,14 @@ mod tests {
         );
 
         let kotlin = code_only(slice_between(
-            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            &read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt"),
             "fun getMeshRelayStats(",
-            "promise.resolve(map)",
+            "fun getMessageStats(",
         ));
         let swift = code_only(slice_between(
-            &read("ios/OfflineProtocolModule.swift"),
-            "func getMeshRelayStats(",
-            "resolver(statsDict)",
+            &read("ios/ProtocolEngineHostBridge.swift"),
+            "static func getMeshRelayStats(",
+            "static func getMeshRelayTunables(",
         ));
         let types_ts = code_only(slice_between(
             &read("src/types.ts"),
@@ -21337,11 +21498,11 @@ mod tests {
         for field in FIELDS {
             assert!(
                 kotlin.contains(&format!("\"{field}\"")),
-                "OfflineProtocolModule.kt getMeshRelayStats must report `{field}`"
+                "ProtocolEngineHostBridge.kt getMeshRelayStats must report `{field}`"
             );
             assert!(
                 swift.contains(&format!("\"{field}\"")),
-                "OfflineProtocolModule.swift getMeshRelayStats must report `{field}`"
+                "ProtocolEngineHostBridge.swift getMeshRelayStats must report `{field}`"
             );
             // Types are erased at runtime, so a counter missing from the TS
             // interface cannot be caught by any JS test — an app simply cannot
@@ -21870,14 +22031,14 @@ mod tests {
         assert_eq!(fields[fields.len() - 1], "refusedBattery");
 
         let kotlin = code_only(slice_between(
-            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            &read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt"),
             "fun getCustodyStats(",
-            "promise.resolve(map)",
+            "fun getDedupStats(",
         ));
         let swift = code_only(slice_between(
-            &read("ios/OfflineProtocolModule.swift"),
-            "func getCustodyStats(",
-            "resolver(statsDict)",
+            &read("ios/ProtocolEngineHostBridge.swift"),
+            "static func getCustodyStats(",
+            "static func eraseCustody(",
         ));
         let types_ts = code_only(slice_between(
             &read("src/types.ts"),
@@ -21888,11 +22049,11 @@ mod tests {
         for field in &fields {
             assert!(
                 kotlin.contains(&format!("\"{field}\"")),
-                "OfflineProtocolModule.kt getCustodyStats must report `{field}`"
+                "ProtocolEngineHostBridge.kt getCustodyStats must report `{field}`"
             );
             assert!(
                 swift.contains(&format!("\"{field}\"")),
-                "OfflineProtocolModule.swift getCustodyStats must report `{field}`"
+                "ProtocolEngineHostBridge.swift getCustodyStats must report `{field}`"
             );
             assert!(
                 types_ts.contains(&format!("{field}:")),
@@ -22089,36 +22250,36 @@ mod tests {
         );
 
         let swift = code_only(slice_between(
-            &read("ios/OfflineProtocolModule.swift"),
-            "func updateDorsConfig(",
-            "try proto.updateDorsConfig(config: dorsConfig)",
+            &read("ios/ProtocolEngineHostBridge.swift"),
+            "static func updateDorsConfig(",
+            "try proto.updateDorsConfig(config: config)",
         ));
         let kotlin = code_only(slice_between(
-            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            &read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt"),
             "fun updateDorsConfig(",
             "proto.updateDorsConfig(dorsConfig)",
         ));
 
         assert!(
             swift.contains("let current = proto.getDorsConfig()"),
-            "OfflineProtocolModule.swift updateDorsConfig must read the live config to merge onto"
+            "ProtocolEngineHostBridge.swift updateDorsConfig must read the live config to merge onto"
         );
         assert!(
             kotlin.contains("val current = proto.getDorsConfig()"),
-            "OfflineProtocolModule.kt updateDorsConfig must read the live config to merge onto"
+            "ProtocolEngineHostBridge.kt updateDorsConfig must read the live config to merge onto"
         );
 
         for field in FIELDS {
             let needle = format!("current.{field}");
             assert!(
                 swift.contains(&needle),
-                "OfflineProtocolModule.swift updateDorsConfig must fall back to `{needle}` for \
+                "ProtocolEngineHostBridge.swift updateDorsConfig must fall back to `{needle}` for \
                  an absent `{field}`. A literal fallback there resets the field on every update \
                  that does not restate it"
             );
             assert!(
                 kotlin.contains(&needle),
-                "OfflineProtocolModule.kt updateDorsConfig must fall back to `{needle}` for an \
+                "ProtocolEngineHostBridge.kt updateDorsConfig must fall back to `{needle}` for an \
                  absent `{field}`. A literal fallback there resets the field on every update \
                  that does not restate it"
             );
@@ -22587,125 +22748,6 @@ mod tests {
             kotlin.contains("COMPLETION_TIMEOUT_MS = 10_000L"),
             "NostrQueryTracker.kt must declare COMPLETION_TIMEOUT_MS = {EXPECTED_MS} ms"
         );
-    }
-
-    /// The bridges' signal-reading feed interval stays above the core's
-    /// `PeerRssi` cap.
-    ///
-    /// `PeerRssiFeedPolicy.kt` and `PeerRssiFeedPolicy.swift` each throttle
-    /// readings per address, and the core caps the event per peer at
-    /// [`PEER_RSSI_INTERVAL`]. The two are measured on different clocks with a
-    /// lock wait or queue hop between them, so a bridge interval at or under
-    /// the cap lets the core see a gap just short of it, drop the reading, and
-    /// deliver about half the rate, with nothing failing anywhere. Each
-    /// bridge's own test compares against a literal, so only this guard sees
-    /// the core constant move.
-    #[test]
-    fn peer_rssi_feed_interval_stays_above_the_core_cap() {
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let rn_dir = manifest.join("../../bindings/react-native");
-        let read = |rel: &str| -> String {
-            std::fs::read_to_string(rn_dir.join(rel))
-                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
-        };
-        // The number that follows `marker` on its line.
-        let value_after = |source: &str, marker: &str, file: &str| -> f64 {
-            let start = source
-                .find(marker)
-                .unwrap_or_else(|| panic!("{file} no longer declares `{marker}`"))
-                + marker.len();
-            source[start..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '_')
-                .filter(|c| *c != '_')
-                .collect::<String>()
-                .parse()
-                .unwrap_or_else(|e| panic!("{file}: `{marker}` is not a number: {e}"))
-        };
-        let cap_ms = PEER_RSSI_INTERVAL.as_millis() as f64;
-
-        let kotlin_ms = value_after(
-            &read("android/src/main/java/com/offlineprotocol/PeerRssiFeedPolicy.kt"),
-            "const val INTERVAL_MS = ",
-            "PeerRssiFeedPolicy.kt",
-        );
-        let swift_ms = 1000.0
-            * value_after(
-                &read("ios/PeerRssiFeedPolicy.swift"),
-                "static let interval: TimeInterval = ",
-                "PeerRssiFeedPolicy.swift",
-            );
-        for (bridge, ms) in [("Kotlin", kotlin_ms), ("Swift", swift_ms)] {
-            assert!(
-                ms > cap_ms,
-                "the {bridge} feed interval ({ms} ms) must stay above the core's PeerRssi cap \
-                 ({cap_ms} ms), or the core drops readings and the event rate halves"
-            );
-        }
-        assert_eq!(
-            kotlin_ms, swift_ms,
-            "the two bridges feed at different intervals"
-        );
-    }
-
-    /// Both React Native bridges leave `peer_rssi` out of the numbered #514
-    /// replay ring, by matching the start of its JSON.
-    ///
-    /// Numbered, a reading per quarter second per peer would push the
-    /// `message_received` and `message_delivered` events the ring exists for
-    /// out of it within seconds. The bridges cannot parse every event to find
-    /// its type, so each holds the prefix the engine writes. If the engine's
-    /// serialisation moved the tag or renamed the event, the match would fail
-    /// silently and every reading would be numbered again: this reads the
-    /// engine's own output and both bridge sources.
-    #[test]
-    fn peer_rssi_is_left_out_of_the_replay_ring() {
-        let json = crate::CoreEvent::PeerRssi {
-            peer_id: "p".to_string(),
-            transport: "BLE".to_string(),
-            rssi: -50,
-        }
-        .to_json()
-        .unwrap();
-        let prefix = r#"{"type":"peer_rssi","#;
-        assert!(json.starts_with(prefix), "the engine now writes {json}");
-
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let rn_dir = manifest.join("../../bindings/react-native");
-        let read = |rel: &str| -> String {
-            std::fs::read_to_string(rn_dir.join(rel))
-                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
-        };
-        let escaped = prefix.replace('"', "\\\"");
-        for (file, declaration, use_site) in [
-            (
-                "android/src/main/java/com/offlineprotocol/EventReplayRing.kt",
-                format!("PEER_RSSI_PREFIX = \"{escaped}\""),
-                (
-                    "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
-                    "EventReplayRing.isReplayed(",
-                ),
-            ),
-            (
-                "ios/EventReplayRing.swift",
-                format!("peerRssiPrefix = \"{escaped}\""),
-                (
-                    "ios/OfflineProtocolModule.swift",
-                    "EventReplayRing.isReplayed(",
-                ),
-            ),
-        ] {
-            assert!(
-                read(file).contains(&declaration),
-                "{file} must declare `{declaration}`"
-            );
-            assert!(
-                read(use_site.0).contains(use_site.1),
-                "{} must decide numbering through `{}`",
-                use_site.0,
-                use_site.1
-            );
-        }
     }
 
     /// Every `DataValue` kind reaches the three places that enumerate them

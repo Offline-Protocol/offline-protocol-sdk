@@ -20,14 +20,56 @@ import React
 
 @objc(OfflineProtocolModule)
 class OfflineProtocolModule: RCTEventEmitter {
-    private var protocolInstance: OfflineProtocol?
-    private var meshServicesInstance: MeshServices?
-    private var dataStoreInstance: DataStore?
-    private var bleManager: BleManager?
-    private var internetManager: InternetManager?
-    private var wifiDirectManager: WifiDirectManager?
-    private var reticulumManager: ReticulumManager?
-    private var nostrManager: NostrManager?
+    /// Shared engine host for Flutter-parity bridge delegation (ADR 0025).
+    /// Module state forwards here, matching Android `OfflineProtocolModule.engineHost`.
+    lazy var engineHost: ProtocolEngineHost = {
+        ProtocolEngineHost(onDiagnostic: { [weak self] level, message, context in
+            self?.emitDiagnostic(level: level, message: message, context: context)
+        })
+    }()
+
+    private var protocolInstance: OfflineProtocol? {
+        get { engineHost.protocolInstance }
+        set { engineHost.protocolInstance = newValue }
+    }
+    private var meshServicesInstance: MeshServices? {
+        get { engineHost.meshServices }
+        set { engineHost.meshServices = newValue }
+    }
+    private var dataStoreInstance: DataStore? {
+        get { engineHost.dataStore }
+        set { engineHost.dataStore = newValue }
+    }
+    private var bleManager: BleManager? {
+        get { engineHost.bleManager }
+        set { engineHost.bleManager = newValue }
+    }
+    private var internetManager: InternetManager? {
+        get { engineHost.internetManager }
+        set { engineHost.internetManager = newValue }
+    }
+    private var wifiDirectManager: WifiDirectManager? {
+        get { engineHost.wifiDirectManager }
+        set { engineHost.wifiDirectManager = newValue }
+    }
+    private var reticulumManager: ReticulumManager? {
+        get { engineHost.reticulumManager }
+        set { engineHost.reticulumManager = newValue }
+    }
+    private var nostrManager: NostrManager? {
+        get { engineHost.nostrManager }
+        set { engineHost.nostrManager = newValue }
+    }
+
+    func rejectBridgePromise(
+        _ rejecter: @escaping RCTPromiseRejectBlock,
+        error: Error,
+        code: String,
+        message: String
+    ) {
+        rejecter(code, "\(message): \(error.localizedDescription)", error)
+    }
+
 
     /// Whether React Native currently has a JS subscription on this module.
     ///
@@ -142,7 +184,10 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// cancel it. An uncancelled one re-enters the protocol up to a second after
     /// the module was torn down.
     private var bleStatusBackupWorkItem: DispatchWorkItem?
-    private var currentConfig: ProtocolConfig?
+    private var currentConfig: ProtocolConfig? {
+        get { engineHost.currentConfig }
+        set { engineHost.currentConfig = newValue }
+    }
     private var internetServerUrl: String?
     private var internetAutoReconnect: Bool = true
     
@@ -763,10 +808,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         // reach JS in the order they were given out. See `eventSeq`.
         eventSeqLock.lock()
         defer { eventSeqLock.unlock() }
-        // An unnumbered event reaches JS without a `seq`, which JS dispatches
-        // without gap tracking. See `EventReplayRing.isReplayed`.
-        if eventName == Events.onEvent, var numbered = body as? [String: Any],
-           EventReplayRing.isReplayed(numbered["eventJson"] as? String) {
+        if eventName == Events.onEvent, var numbered = body as? [String: Any] {
             numbered[Self.eventSeqField] = eventSeq
             if let eventJson = numbered["eventJson"] as? String {
                 eventReplay.record(seq: eventSeq, eventJson: eventJson)
@@ -1197,8 +1239,6 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(nil)
     }
 
-    /// `peer_rssi` events, which the TypeScript layer turns on while it has a
-    /// listener for them. Off by default, and off the core ignores readings.
     @objc func setPeerRssiEvents(_ enabled: Bool,
                                  resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
@@ -1353,38 +1393,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                options: NSDictionary?,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            let msgPriority: MessagePriority = {
-                switch priority {
-                case 0: return .low
-                case 1: return .medium
-                case 2: return .high
-                case 3: return .critical
-                default: return .medium
-                }
-            }()
-
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-
-            let dict = options as? [String: Any] ?? [:]
-            let sendOptions = SendMessageOptions(
-                priority: msgPriority,
-                replyToMsg: replyToMsg,
-                contentType: (dict["content_type"] as? String).map(parseContentType),
-                replyContext: parseReplyContext(dict["reply_context"] as? [String: Any]),
-                mediaMetadata: parseRichMediaMetadata(dict["media_metadata"] as? [String: Any]),
-                forwardInfo: parseForwardInfo(dict["forward_info"] as? [String: Any]),
-                appId: dict["app_id"] as? String
-            )
-
-            let messageId = try proto.sendMessageRich(recipient: recipient, content: content, options: sendOptions)
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND", fallbackMessage: "Failed to send rich message")
-        }
+        ProtocolEngineHostBridgeReactNative.sendMessageRich(self, recipient, content: content, priority: priority, replyToMsg: replyToMsg, options: options, resolver: resolver, rejecter: rejecter)
     }
 
     private func parseReplyContext(_ dict: [String: Any]?) -> ReplyContext? {
@@ -1439,27 +1448,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                               priority: Int,
                               resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-
-            let msgPriority: MessagePriority = {
-                switch priority {
-                case 0: return .low
-                case 1: return .medium
-                case 2: return .high
-                case 3: return .critical
-                default: return .medium
-                }
-            }()
-
-            let messageId = try proto.forwardMessage(originalMessageJson: originalMessageJson, newRecipient: newRecipient, priority: msgPriority)
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_FORWARD", fallbackMessage: "Failed to forward message")
-        }
+        ProtocolEngineHostBridgeReactNative.forwardMessage(self, originalMessageJson, newRecipient: newRecipient, priority: priority, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendConnectionRequest(_ recipient: String,
@@ -1468,23 +1457,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                      initialMessage: String?,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-
-            let keyPackageData = try keyPackage.map { try jsBytes($0, "keyPackage") }
-            let messageId = try proto.sendConnectionRequest(
-                recipient: recipient,
-                senderName: senderName,
-                keyPackage: keyPackageData,
-                initialMessage: initialMessage
-            )
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_CONNECTION_REQUEST", fallbackMessage: "Failed to send connection request")
-        }
+        ProtocolEngineHostBridgeReactNative.sendConnectionRequest(self, recipient, senderName: senderName, keyPackage: keyPackage, initialMessage: initialMessage, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func acceptConnectionRequest(_ recipient: String,
@@ -1492,54 +1465,19 @@ class OfflineProtocolModule: RCTEventEmitter {
                                        keyPackage: [NSNumber]?,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-
-            let keyPackageData = try keyPackage.map { try jsBytes($0, "keyPackage") }
-            let messageId = try proto.acceptConnectionRequest(
-                recipient: recipient,
-                accepterName: accepterName,
-                keyPackage: keyPackageData
-            )
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_CONNECTION_REQUEST", fallbackMessage: "Failed to accept connection request")
-        }
+        ProtocolEngineHostBridgeReactNative.acceptConnectionRequest(self, recipient, accepterName: accepterName, keyPackage: keyPackage, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func rejectConnectionRequest(_ recipient: String,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-
-            let messageId = try proto.rejectConnectionRequest(recipient: recipient)
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_CONNECTION_REQUEST", fallbackMessage: "Failed to reject connection request")
-        }
+        ProtocolEngineHostBridgeReactNative.rejectConnectionRequest(self, recipient, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func cancelConnectionRequest(_ recipient: String,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-
-            let messageId = try proto.cancelConnectionRequest(recipient: recipient)
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_CONNECTION_REQUEST", fallbackMessage: "Failed to cancel connection request")
-        }
+        ProtocolEngineHostBridgeReactNative.cancelConnectionRequest(self, recipient, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - Service Discovery & Request/Response (via MeshServices)
@@ -2121,51 +2059,19 @@ class OfflineProtocolModule: RCTEventEmitter {
                                capabilitiesJson: String,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let svc = meshServicesInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
-            }
-            var capabilities: [String: String] = [:]
-            if let data = capabilitiesJson.data(using: .utf8),
-               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-                capabilities = parsed
-            }
-            try svc.registerService(serviceId: serviceId, version: version, capabilities: capabilities)
-            resolver(NSNull())
-        } catch {
-            rejecter("ERROR_REGISTER_SERVICE", "Failed to register service: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.registerService(self, serviceId, version: version, capabilitiesJson: capabilitiesJson, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func unregisterService(_ serviceId: String,
                                  resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let svc = meshServicesInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
-            }
-            let removed = try svc.unregisterService(serviceId: serviceId)
-            resolver(removed)
-        } catch {
-            rejecter("ERROR_UNREGISTER_SERVICE", "Failed to unregister service: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.unregisterService(self, serviceId, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func discoverServices(_ serviceId: String?,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let svc = meshServicesInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
-            }
-            let queryId = try svc.discoverServices(serviceId: serviceId)
-            resolver(queryId)
-        } catch {
-            rejecter("ERROR_DISCOVER_SERVICES", "Failed to discover services: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.discoverServices(self, serviceId, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendServiceRequest(_ provider: String,
@@ -2174,16 +2080,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                   body: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let svc = meshServicesInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
-            }
-            let requestId = try svc.sendServiceRequest(provider: provider, serviceId: serviceId, method: method, body: body)
-            resolver(requestId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SERVICE_REQUEST", fallbackMessage: "Failed to send service request")
-        }
+        ProtocolEngineHostBridgeReactNative.sendServiceRequest(self, provider, serviceId: serviceId, method: method, body: body, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func respondToServiceRequest(_ requestId: String,
@@ -2193,16 +2090,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                        body: String,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let svc = meshServicesInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
-            }
-            let messageId = try svc.respondToServiceRequest(requestId: requestId, requester: requester, serviceId: serviceId, status: status, body: body)
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SERVICE_RESPONSE", fallbackMessage: "Failed to respond to service request")
-        }
+        ProtocolEngineHostBridgeReactNative.respondToServiceRequest(self, requestId, requester: requester, serviceId: serviceId, status: status, body: body, resolver: resolver, rejecter: rejecter)
     }
 
     // MARK: - User Blocking
@@ -2210,60 +2098,24 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func blockUser(_ userId: String,
                          resolver: @escaping RCTPromiseResolveBlock,
                          rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            try proto.blockUser(userId: userId)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_BLOCK_USER", "Failed to block user: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.blockUser(self, userId, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func unblockUser(_ userId: String,
                            resolver: @escaping RCTPromiseResolveBlock,
                            rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            try proto.unblockUser(userId: userId)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_UNBLOCK_USER", "Failed to unblock user: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.unblockUser(self, userId, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func getBlockedUsers(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            let blocked = try proto.getBlockedUsers()
-            resolver(blocked)
-        } catch {
-            rejecter("ERROR_GET_BLOCKED", "Failed to get blocked users: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.getBlockedUsers(self, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func isUserBlocked(_ userId: String,
                              resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            let blocked = try proto.isUserBlocked(userId: userId)
-            resolver(blocked)
-        } catch {
-            rejecter("ERROR_IS_BLOCKED", "Failed to check blocked status: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.isUserBlocked(self, userId, resolver: resolver, rejecter: rejecter)
     }
 
     // ─── Presence, Typing, Read Receipts ───────────────────────
@@ -2272,23 +2124,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                   status: Int,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            let presenceStatus: PresenceStatus
-            switch status {
-            case 0: presenceStatus = .online
-            case 1: presenceStatus = .away
-            case 2: presenceStatus = .offline
-            default: presenceStatus = .online
-            }
-            let messageId = try proto.sendPresenceUpdate(recipient: recipient, status: presenceStatus)
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_PRESENCE_UPDATE", fallbackMessage: "Failed to send presence update")
-        }
+        ProtocolEngineHostBridgeReactNative.sendPresenceUpdate(self, recipient, status: status, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendTypingIndicator(_ recipient: String,
@@ -2296,32 +2132,14 @@ class OfflineProtocolModule: RCTEventEmitter {
                                    isTyping: Bool,
                                    resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            let messageId = try proto.sendTypingIndicator(recipient: recipient, conversationId: conversationId, isTyping: isTyping)
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_TYPING_INDICATOR", fallbackMessage: "Failed to send typing indicator")
-        }
+        ProtocolEngineHostBridgeReactNative.sendTypingIndicator(self, recipient, conversationId: conversationId, isTyping: isTyping, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendReadReceipt(_ recipient: String,
                                messageIds: [String],
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            let messageId = try proto.sendReadReceipt(recipient: recipient, messageIds: messageIds)
-            resolver(messageId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_READ_RECEIPT", fallbackMessage: "Failed to send read receipt")
-        }
+        ProtocolEngineHostBridgeReactNative.sendReadReceipt(self, recipient, messageIds: messageIds, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func receiveMessage(_ resolver: @escaping RCTPromiseResolveBlock,
@@ -2386,42 +2204,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                   profile: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        let namespace = StorageNamespace.account(appId: appId, profile: profile)
-        if let config = currentConfig,
-           StorageNamespace.account(appId: config.appId, profile: config.profile) == namespace {
-            rejecter(
-                "ERROR_WIPE_STATE",
-                "Refusing to wipe storage for the account this instance is running. "
-                    + "Call destroy() first.",
-                nil
-            )
-            return
-        }
-
-        // Secure storage first: it holds the key every sealed protocol-state
-        // record is written under, so an interrupted wipe leaves the remainder
-        // as ciphertext nobody can open rather than readable state.
-        var firstError: Error?
-        do {
-            try MlsSecureStorage.wipeAccount(accountNamespace: namespace)
-        } catch {
-            firstError = error
-        }
-        do {
-            try AppContainerProtocolStateStorage.wipeAccount(accountNamespace: namespace)
-        } catch {
-            firstError = firstError ?? error
-        }
-
-        if let firstError {
-            rejecter(
-                "ERROR_WIPE_STATE",
-                "Failed to wipe persisted state: \(firstError.localizedDescription)",
-                firstError
-            )
-            return
-        }
-        resolver(nil)
+        ProtocolEngineHostBridgeReactNative.wipePersistedState(self, appId, profile: profile, resolver: resolver, rejecter: rejecter)
     }
 
     // MARK: - Transport Management
@@ -2648,140 +2431,43 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func disableTransport(_ type: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_TRANSPORT_DISABLE", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            // Stop corresponding transport manager and mark transport as unavailable
-            // Note: We don't remove the transport from the Rust protocol anymore
-            // because that prevents re-enabling it. Instead, we just stop the manager
-            // and the transport status will be updated to unavailable/disconnected.
-            switch type.lowercased() {
-            case "internet":
-                internetManager?.stop()
-                // Notify the protocol that internet is disconnected
-                try? proto.internetStatusChanged(isConnected: false)
-                emitDiagnostic(level: "info", message: "Internet transport disabled (manager stopped)")
-            case "wifidirect", "wifi_direct":
-                wifiDirectManager?.stop()
-                emitDiagnostic(level: "info", message: "WiFi Direct transport disabled (manager stopped)")
-            case "ble":
-                bleManager?.stop()
-                try? proto.bleStatusChanged(isAvailable: false)
-                emitDiagnostic(level: "info", message: "BLE transport disabled (manager stopped)")
-            case "reticulum":
-                reticulumManager?.stop()
-                try? proto.reticulumStatusChanged(isConnected: false)
-                emitDiagnostic(level: "info", message: "Reticulum transport disabled (manager stopped)")
-            case "nostr":
-                nostrManager?.stop()
-                try? proto.nostrStatusChanged(isConnected: false)
-                emitDiagnostic(level: "info", message: "Nostr transport disabled (manager stopped)")
-            default:
-                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
-            }
-            
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.disableTransport(self, type, resolver: resolver, rejecter: rejecter)
     }
     
     
     @objc func isBluetoothEnabled(_ resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        // On iOS, we can check the CBCentralManager state
-        // However, checking state requires instantiation and authorization
-        // For simplicity, return true as iOS will prompt when BLE is actually used
-        let state = bleManager?.bluetoothState ?? .unknown
-        switch state {
-        case .poweredOn:
-            resolver(true)
-        case .poweredOff:
-            resolver(false)
-        case .unauthorized, .unsupported:
-            resolver(false)
-        default:
-            // Unknown or resetting - assume enabled
-            resolver(true)
-        }
+        ProtocolEngineHostBridgeReactNative.isBluetoothEnabled(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func requestEnableBluetooth(_ resolver: @escaping RCTPromiseResolveBlock,
                                       rejecter: @escaping RCTPromiseRejectBlock) {
-        // iOS doesn't allow programmatic Bluetooth enabling
-        // The system will prompt when BLE is used
-        // Return false to indicate the app should show a manual prompt
-        resolver(false)
+        ProtocolEngineHostBridgeReactNative.requestEnableBluetooth(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getTopology(_ resolver: @escaping RCTPromiseResolveBlock,
                            rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_TOPOLOGY", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let topology = try proto.getTopology()
-            let json = try buildTopologyJson(topology)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_TOPOLOGY", "Failed to get topology: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.getTopology(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getMessageStats(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MESSAGE_STATS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let stats = proto.getMessageStats()
-            let json = try buildMessageStatsJson(stats)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_MESSAGE_STATS", "Failed to get message stats: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.getMessageStats(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getDeliverySuccessRate(_ resolver: @escaping RCTPromiseResolveBlock,
                                       rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_DELIVERY_RATE", "Protocol not initialized", nil)
-            return
-        }
-        let rate = Double(proto.getDeliverySuccessRate())
-        resolver(rate)
+        ProtocolEngineHostBridgeReactNative.getDeliverySuccessRate(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getMedianLatency(_ resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MEDIAN_LATENCY", "Protocol not initialized", nil)
-            return
-        }
-        let latency = proto.getMedianLatency()
-        if latency == 0 {
-            resolver(NSNull())
-        } else {
-            resolver(NSNumber(value: latency))
-        }
+        ProtocolEngineHostBridgeReactNative.getMedianLatency(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getMedianHops(_ resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MEDIAN_HOPS", "Protocol not initialized", nil)
-            return
-        }
-        let hops = proto.getMedianHops()
-        if hops == 0 {
-            resolver(NSNull())
-        } else {
-            resolver(NSNumber(value: Int(hops)))
-        }
+        ProtocolEngineHostBridgeReactNative.getMedianHops(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func sendFile(_ recipient: String,
@@ -2814,16 +2500,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                 fileName: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_SEND_FILE", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let fileId = try proto.sendFileFromPath(recipient: recipient, filePath: filePath, fileName: fileName)
-            resolver(fileId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_FILE", fallbackMessage: "Failed to send file from path")
-        }
+        ProtocolEngineHostBridgeReactNative.sendFileFromPath(self, recipient, filePath: filePath, fileName: fileName, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func sendMedia(_ recipient: String,
@@ -2833,33 +2510,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                          mediaMetadata: NSDictionary?,
                          resolver: @escaping RCTPromiseResolveBlock,
                          rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_SEND_MEDIA", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let data = Data(base64Encoded: fileData) else {
-                rejecter("ERROR_SEND_MEDIA", "Invalid base64 file data", nil)
-                return
-            }
-            let ct = parseContentType(contentType)
-            var meta: MediaMetadata? = nil
-            if let dict = mediaMetadata as? [String: Any] {
-                meta = MediaMetadata(
-                    mimeType: dict["mime_type"] as? String ?? "",
-                    fileName: dict["file_name"] as? String ?? fileName,
-                    fileSize: (dict["file_size"] as? NSNumber)?.uint64Value ?? 0,
-                    durationMs: (dict["duration_ms"] as? NSNumber)?.uint64Value,
-                    width: (dict["width"] as? NSNumber)?.uint32Value,
-                    height: (dict["height"] as? NSNumber)?.uint32Value,
-                    thumbnailBase64: dict["thumbnail_base64"] as? String
-                )
-            }
-            let fileId = try proto.sendMedia(recipient: recipient, fileData: Array(data), fileName: fileName, contentType: ct, mediaMetadata: meta)
-            resolver(fileId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_MEDIA", fallbackMessage: "Failed to send media")
-        }
+        ProtocolEngineHostBridgeReactNative.sendMedia(self, recipient, fileData: fileData, fileName: fileName, contentType: contentType, mediaMetadata: mediaMetadata, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendMediaRich(_ recipient: String,
@@ -2869,31 +2520,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                              options: NSDictionary?,
                              resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_SEND_MEDIA", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let data = Data(base64Encoded: fileData) else {
-                rejecter("ERROR_SEND_MEDIA", "Invalid base64 file data", nil)
-                return
-            }
-            let ct = parseContentType(contentType)
-            let dict = options as? [String: Any]
-            let sendOptions = MediaSendOptions(
-                mediaMetadata: parseRichMediaMetadata(dict?["media_metadata"] as? [String: Any]),
-                caption: dict?["caption"] as? String,
-                replyToMsg: dict?["reply_to_msg"] as? String,
-                replyContext: parseReplyContext(dict?["reply_context"] as? [String: Any]),
-                forwardInfo: parseForwardInfo(dict?["forward_info"] as? [String: Any]),
-                fileId: dict?["file_id"] as? String,
-                appId: dict?["app_id"] as? String
-            )
-            let fileId = try proto.sendMediaRich(recipient: recipient, fileData: Array(data), fileName: fileName, contentType: ct, options: sendOptions)
-            resolver(fileId)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_MEDIA", fallbackMessage: "Failed to send media")
-        }
+        ProtocolEngineHostBridgeReactNative.sendMediaRich(self, recipient, fileData: fileData, fileName: fileName, contentType: contentType, options: options, resolver: resolver, rejecter: rejecter)
     }
 
     private func parseContentType(_ value: String) -> ContentType {
@@ -2914,40 +2541,13 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func getFileProgress(_ fileId: String,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_FILE_PROGRESS", "Protocol not initialized", nil)
-            return
-        }
-        if let progress = proto.getFileProgress(fileId: fileId) {
-            let result: [String: Any] = [
-                "file_id": progress.fileId,
-                "chunks_sent": Int(progress.chunksSent),
-                "total_chunks": Int(progress.totalChunks),
-                "percentage": Int(progress.percentage)
-            ]
-            resolver(result)
-        } else {
-            resolver(NSNull())
-        }
+        ProtocolEngineHostBridgeReactNative.getFileProgress(self, fileId, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func cancelFileTransfer(_ fileId: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_FILE_CANCEL", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.cancelFileTransfer(fileId: fileId)
-            resolver(true)
-        } catch {
-            if error.localizedDescription.localizedCaseInsensitiveContains("not found") {
-                resolver(false)
-            } else {
-                rejecter("ERROR_FILE_CANCEL", "Failed to cancel file transfer: \(error.localizedDescription)", error)
-            }
-        }
+        ProtocolEngineHostBridgeReactNative.cancelFileTransfer(self, fileId, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - BLE Transport Methods
@@ -3044,12 +2644,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     @objc func bleGetPeerCount(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_BLE", "Protocol not initialized", nil)
-            return
-        }
-        let count = proto.bleGetPeerCount()
-        resolver(NSNumber(value: count))
+        ProtocolEngineHostBridgeReactNative.bleGetPeerCount(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// BLE diagnostic counters — the address-migration rollout alarm.
@@ -3061,52 +2656,17 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// All three read zero when BLE is not registered.
     @objc func bleGetDiagnostics(_ resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_BLE", "Protocol not initialized", nil)
-            return
-        }
-        resolver([
-            "fragmentFallbacks": NSNumber(value: proto.bleFragmentFallbackCount()),
-            "recipientNotAmongPeers": NSNumber(value: proto.bleRecipientNotAmongPeersCount()),
-            "undersizedMtuReports": NSNumber(value: proto.bleUndersizedMtuReports())
-        ])
+        ProtocolEngineHostBridgeReactNative.bleGetDiagnostics(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getActiveTransports(_ resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_TRANSPORT", "Protocol not initialized", nil)
-            return
-        }
-        let transports = proto.getActiveTransports()
-        resolver(transports)
+        ProtocolEngineHostBridgeReactNative.getActiveTransports(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getState(_ resolver: @escaping RCTPromiseResolveBlock,
                        rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver("Stopped")
-            return
-        }
-        let state = proto.getState()
-        let stateString: String
-        switch state {
-        case .stopped:
-            stateString = "Stopped"
-        case .running:
-            stateString = "Running"
-        case .paused:
-            stateString = "Paused"
-        @unknown default:
-            // "Stopped", matching Android's `else ->` branch, rather than an
-            // "Unknown" that is not a member of the exported `ProtocolState`
-            // enum — resolving one would make `getState(): Promise<ProtocolState>`
-            // unsound and put the two modules' fallbacks out of step. Treating
-            // an unrecognised state as stopped is also the safe direction for
-            // the reconcile pattern the integration guide documents.
-            stateString = "Stopped"
-        }
-        resolver(stateString)
+        ProtocolEngineHostBridgeReactNative.getState(self, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - Battery Management
@@ -3114,54 +2674,24 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func setBatteryLevel(_ level: Int,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_BATTERY", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.setBatteryLevel(level: UInt8(min(100, max(0, level))))
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_BATTERY", "Failed to set battery level: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.setBatteryLevel(self, level, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func setBatteryState(_ level: Int,
                                isCharging: Bool,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_BATTERY", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.setBatteryState(level: UInt8(min(100, max(0, level))), isCharging: isCharging)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_BATTERY", "Failed to set battery state: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.setBatteryState(self, level, isCharging: isCharging, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func getBatteryLevel(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_BATTERY", "Protocol not initialized", nil)
-            return
-        }
-        if let level = proto.getBatteryLevel() {
-            resolver(NSNumber(value: level))
-        } else {
-            resolver(NSNull())
-        }
+        ProtocolEngineHostBridgeReactNative.getBatteryLevel(self, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func getIsCharging(_ resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver(NSNumber(value: false))
-            return
-        }
-        resolver(NSNumber(value: proto.getIsCharging()))
+        ProtocolEngineHostBridgeReactNative.getIsCharging(self, resolver: resolver, rejecter: rejecter)
     }
 
     // MARK: - Relay Management
@@ -3169,29 +2699,12 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func setRelayPriority(_ priorityString: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_RELAY", "Protocol not initialized", nil)
-            return
-        }
-        guard let priority = normalizeRelayPriority(priorityString) else {
-            rejecter("ERROR_RELAY", "Invalid relay priority: \(priorityString)", nil)
-            return
-        }
-        do {
-            try proto.setRelayPriority(priority: priority)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_RELAY", "Failed to set relay priority: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.setRelayPriority(self, priorityString, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func getRelayPriority(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver("auto")
-            return
-        }
-        resolver(relayPriorityName(proto.getRelayPriority()))
+        ProtocolEngineHostBridgeReactNative.getRelayPriority(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Applies a partial relay configuration: fields absent from `configJson`
@@ -3200,41 +2713,12 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func updateRelayConfig(_ configJson: String,
                                  resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_RELAY", "Protocol not initialized", nil)
-            return
-        }
-        guard let data = configJson.data(using: .utf8),
-              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            rejecter("ERROR_RELAY", "Invalid relay config JSON", nil)
-            return
-        }
-        do {
-            try proto.updateRelayConfig(config: mergedRelayConfig(current: proto.getRelayConfig(), from: dict))
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_RELAY", "Failed to update relay config: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.updateRelayConfig(self, configJson, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func getRelayConfig(_ resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_RELAY", "Protocol not initialized", nil)
-            return
-        }
-        let config = proto.getRelayConfig()
-        let dict: [String: Any] = [
-            "minBatteryForRelay": config.minBatteryForRelay,
-            "allowRelay": config.allowRelay,
-            "relayPriority": relayPriorityName(config.relayPriority)
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: dict),
-              let json = String(data: data, encoding: .utf8) else {
-            rejecter("ERROR_RELAY", "Failed to serialize relay config", nil)
-            return
-        }
-        resolver(json)
+        ProtocolEngineHostBridgeReactNative.getRelayConfig(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Overlays whatever relay fields `dict` carries onto `current`. Both the
@@ -3246,12 +2730,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     @objc func isRelay(_ resolver: @escaping RCTPromiseResolveBlock,
                       rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver(false)
-            return
-        }
-        let isRelay = proto.isRelay()
-        resolver(NSNumber(value: isRelay))
+        ProtocolEngineHostBridgeReactNative.isRelay(self, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - Transport Metrics
@@ -3259,36 +2738,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func getTransportMetrics(_ transportType: String,
                                    resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_METRICS", "Protocol not initialized", nil)
-            return
-        }
-        // One mapper for every transport name that crosses this bridge
-        // (`transportType(from:)`); pinned by the Rust guard
-        // `react_native_transport_name_mappers_know_every_transport`. This
-        // used to switch on three names and default the rest to BLE, so a
-        // metrics read for any other carrier answered for the radio.
-        let type: TransportType
-        do {
-            type = try self.transportType(from: transportType)
-        } catch {
-            rejecter("ERROR_METRICS", "Unsupported transport type: \(transportType)", error)
-            return
-        }
-        
-        if let metrics = proto.getTransportMetrics(transportType: type) {
-            let metricsDict: [String: Any] = [
-                "packetsSent": NSNumber(value: metrics.packetsSent),
-                "packetsReceived": NSNumber(value: metrics.packetsReceived),
-                "bytesSent": NSNumber(value: metrics.bytesSent),
-                "bytesReceived": NSNumber(value: metrics.bytesReceived),
-                "errorRate": NSNumber(value: metrics.errorRate),
-                "avgLatencyMs": NSNumber(value: metrics.avgLatencyMs)
-            ]
-            resolver(metricsDict)
-        } else {
-            resolver(NSNull())
-        }
+        ProtocolEngineHostBridgeReactNative.getTransportMetrics(self, transportType, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - Manual Transport Control
@@ -3296,29 +2746,12 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func forceTransport(_ transportType: String,
                              resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_TRANSPORT", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            // See getTransportMetrics: one mapper. This used to default an
-            // unknown name to BLE, so forceTransport("nostr") forced the radio.
-            let type = try self.transportType(from: transportType)
-            try proto.forceTransport(transportType: type)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_TRANSPORT", "Failed to force transport: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.forceTransport(self, transportType, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func releaseTransportLock(_ resolver: @escaping RCTPromiseResolveBlock,
                                     rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_TRANSPORT", "Protocol not initialized", nil)
-            return
-        }
-        proto.releaseTransportLock()
-        resolver(nil)
+        ProtocolEngineHostBridgeReactNative.releaseTransportLock(self, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - DORS Configuration
@@ -3336,90 +2769,12 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func updateDorsConfig(_ configJson: String,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_CONFIG", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = configJson.data(using: .utf8),
-                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
-            }
-
-            let current = proto.getDorsConfig()
-            let poorSignalDuration = (config["poorSignalDurationSecs"] as? NSNumber)?.uint64Value ?? current.poorSignalDurationSecs
-            let ttlThreshold = (config["ttlEscalationThreshold"] as? NSNumber)?.uint8Value ?? current.ttlEscalationThreshold
-            let congestionDuration = max((config["congestionDurationSecs"] as? NSNumber)?.uint64Value ?? current.congestionDurationSecs, 0)
-            let ttlHold = max((config["ttlEscalationHoldSecs"] as? NSNumber)?.uint64Value ?? current.ttlEscalationHoldSecs, 1)
-            let historyWindowRaw = (config["historyWindowSize"] as? NSNumber)?.uint64Value ?? current.historyWindowSize
-            // Clamped in the unsigned domain, never through `Int`: a negative
-            // `historyWindowSize` from JavaScript reaches `uint64Value` as
-            // `UInt64.max`, and narrowing that to `Int` traps and aborts the
-            // application before the clamp around it can run.
-            let historyWindow = max(1, min(100, historyWindowRaw))
-            let rawQueueRecovery = (config["queueRecoveryRatio"] as? NSNumber)?.floatValue ?? current.queueRecoveryRatio
-            let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
-
-            let minSuccessRate = (config["minSuccessRateBeforeEscalation"] as? NSNumber)?.floatValue ?? current.minSuccessRateBeforeEscalation
-            let minSuccessRateClamped = min(max(minSuccessRate, 0.0), 1.0)
-            let minBleSamples = (config["minBleSamplesBeforeSuccessRateEscalation"] as? NSNumber)?.uint64Value ?? current.minBleSamplesBeforeSuccessRateEscalation
-            let dorsConfig = DorsConfig(
-                preferOnline: config["preferOnline"] as? Bool ?? current.preferOnline,
-                switchHysteresis: max((config["switchHysteresis"] as? NSNumber)?.floatValue ?? current.switchHysteresis, 0),
-                switchCooldownSecs: max((config["switchCooldownSecs"] as? NSNumber)?.uint64Value ?? current.switchCooldownSecs, 0),
-                bleToWifiRetryThreshold: (config["bleToWifiRetryThreshold"] as? NSNumber)?.uint32Value ?? current.bleToWifiRetryThreshold,
-                minSuccessRateBeforeEscalation: minSuccessRateClamped,
-                minBleSamplesBeforeSuccessRateEscalation: minBleSamples,
-                rssiSwitchThreshold: (config["rssiSwitchThreshold"] as? NSNumber)?.int16Value ?? current.rssiSwitchThreshold,
-                congestionQueueThreshold: (config["congestionQueueThreshold"] as? NSNumber)?.uint64Value ?? current.congestionQueueThreshold,
-                stabilityWindowSecs: (config["stabilityWindowSecs"] as? NSNumber)?.uint64Value ?? current.stabilityWindowSecs,
-                poorSignalDurationSecs: poorSignalDuration,
-                ttlEscalationThreshold: ttlThreshold,
-                congestionDurationSecs: UInt64(congestionDuration),
-                ttlEscalationHoldSecs: UInt64(ttlHold),
-                historyWindowSize: historyWindow,
-                queueRecoveryRatio: queueRecovery,
-                lowBatteryThreshold: UInt8(min(100, max(0, (config["lowBatteryThreshold"] as? NSNumber)?.intValue ?? Int(current.lowBatteryThreshold)))),
-                relayMinBatteryLevel: UInt8(min(100, max(0, (config["relayMinBatteryLevel"] as? NSNumber)?.intValue ?? Int(current.relayMinBatteryLevel)))),
-                relayOptimalConnectionCount: UInt8(min(255, max(0, (config["relayOptimalConnectionCount"] as? NSNumber)?.intValue ?? Int(current.relayOptimalConnectionCount))))
-            )
-
-            try proto.updateDorsConfig(config: dorsConfig)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_CONFIG", "Failed to update DORS config: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.updateDorsConfig(self, configJson, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getDorsConfig(_ resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_CONFIG", "Protocol not initialized", nil)
-            return
-        }
-        let config = proto.getDorsConfig()
-        let configDict: [String: Any] = [
-            "preferOnline": config.preferOnline,
-            "switchHysteresis": config.switchHysteresis,
-            "switchCooldownSecs": config.switchCooldownSecs,
-            "bleToWifiRetryThreshold": config.bleToWifiRetryThreshold,
-            "minSuccessRateBeforeEscalation": config.minSuccessRateBeforeEscalation,
-            "minBleSamplesBeforeSuccessRateEscalation": config.minBleSamplesBeforeSuccessRateEscalation,
-            "rssiSwitchThreshold": config.rssiSwitchThreshold,
-            "congestionQueueThreshold": config.congestionQueueThreshold,
-            "stabilityWindowSecs": config.stabilityWindowSecs,
-            "poorSignalDurationSecs": config.poorSignalDurationSecs,
-            "ttlEscalationThreshold": config.ttlEscalationThreshold,
-            "congestionDurationSecs": config.congestionDurationSecs,
-            "ttlEscalationHoldSecs": config.ttlEscalationHoldSecs,
-            "historyWindowSize": config.historyWindowSize,
-            "queueRecoveryRatio": config.queueRecoveryRatio,
-            "lowBatteryThreshold": config.lowBatteryThreshold,
-            "relayMinBatteryLevel": config.relayMinBatteryLevel,
-            "relayOptimalConnectionCount": config.relayOptimalConnectionCount
-        ]
-        resolver(configDict)
+        ProtocolEngineHostBridgeReactNative.getDorsConfig(self, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - Reliability Configuration
@@ -3427,130 +2782,30 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func updateAckConfig(_ configJson: String,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_CONFIG", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = configJson.data(using: .utf8),
-                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                             userInfo: [NSLocalizedDescriptionKey: "Invalid ACK config JSON"])
-            }
-            
-            let ackConfig = AckConfig(
-                defaultTimeoutMs: (config["defaultTimeoutMs"] as? NSNumber)?.uint64Value ?? 10000,
-                maxPendingAcks: (config["maxPendingAcks"] as? NSNumber)?.uint64Value ?? 1000
-            )
-            
-            try proto.updateAckConfig(config: ackConfig)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_CONFIG", "Failed to update ACK config: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.updateAckConfig(self, configJson, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func updateRetryConfig(_ configJson: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_CONFIG", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = configJson.data(using: .utf8),
-                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                             userInfo: [NSLocalizedDescriptionKey: "Invalid retry config JSON"])
-            }
-            
-            // Fallbacks must mirror the Rust defaults in
-            // offline-protocol-reliability/src/constants.rs: a partial config
-            // rebuilds the whole RetryConfig, so a stale fallback silently
-            // overrides the SDK default for every field the app didn't set.
-            let retryConfig = RetryConfig(
-                maxRetries: (config["maxRetries"] as? NSNumber)?.uint32Value ?? 10,
-                initialDelayMs: (config["initialDelayMs"] as? NSNumber)?.uint64Value ?? 1000,
-                maxDelayMs: (config["maxDelayMs"] as? NSNumber)?.uint64Value ?? 300000,
-                backoffMultiplier: (config["backoffMultiplier"] as? NSNumber)?.floatValue ?? 2.0,
-                outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000,
-                pendingMessageMaxLifetimeMs: (config["pendingMessageMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000,
-                edgeDrivenUnreachableDm: (config["edgeDrivenUnreachableDm"] as? NSNumber)?.boolValue ?? false
-            )
-            
-            try proto.updateRetryConfig(config: retryConfig)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_CONFIG", "Failed to update retry config: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.updateRetryConfig(self, configJson, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func updateDedupConfig(_ configJson: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_CONFIG", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = configJson.data(using: .utf8),
-                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                             userInfo: [NSLocalizedDescriptionKey: "Invalid dedup config JSON"])
-            }
-            
-            let dedupConfig = DedupConfig(
-                maxTrackedMessages: (config["maxTrackedMessages"] as? NSNumber)?.uint64Value ?? 5000,
-                retentionTimeSecs: (config["retentionTimeSecs"] as? NSNumber)?.uint64Value ?? 604800
-            )
-            
-            try proto.updateDedupConfig(config: dedupConfig)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_CONFIG", "Failed to update dedup config: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.updateDedupConfig(self, configJson, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getDedupStats(_ resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_STATS", "Protocol not initialized", nil)
-            return
-        }
-        let stats = proto.getDedupStats()
-        let statsDict: [String: Any] = [
-            "totalTracked": stats.totalTracked,
-            "recentTracked": stats.recentTracked,
-            "capacityUsedPercent": stats.capacityUsedPercent,
-            "mode": stats.mode
-        ]
-        resolver(statsDict)
+        ProtocolEngineHostBridgeReactNative.getDedupStats(self, resolver: resolver, rejecter: rejecter)
     }
     
     /// Cumulative mesh forwarding counters, read through to the Rust core.
     @objc func getMeshRelayStats(_ resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_STATS", "Protocol not initialized", nil)
-            return
-        }
-        let stats = proto.getMeshRelayStats()
-        let statsDict: [String: Any] = [
-            "forwarded": stats.forwarded,
-            "transmissions": stats.transmissions,
-            "queued": stats.queued,
-            "awaitingTransmission": stats.awaitingTransmission,
-            "duplicatesSuppressed": stats.duplicatesSuppressed,
-            "coveredByANeighbor": stats.coveredByANeighbor,
-            "peerRateLimited": stats.peerRateLimited,
-            "refusedQueueFull": stats.refusedQueueFull,
-            "rateDeferred": stats.rateDeferred,
-            "abandonedOverdue": stats.abandonedOverdue,
-            "hopLimitReached": stats.hopLimitReached,
-            "reachClamped": stats.reachClamped,
-            "droppedForCapacity": stats.droppedForCapacity
-        ]
-        resolver(statsDict)
+        ProtocolEngineHostBridgeReactNative.getMeshRelayStats(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// The mesh forwarding tunables in force, read from the governor.
@@ -3559,65 +2814,13 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// fallback here would be a second copy of a core default, free to drift.
     @objc func getMeshRelayTunables(_ resolver: @escaping RCTPromiseResolveBlock,
                                     rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_STATS", "Protocol not initialized", nil)
-            return
-        }
-        let tunables = proto.getMeshRelayTunables()
-        let tunablesDict: [String: Any] = [
-            "maxTtl": tunables.maxTtl,
-            "denseMaxTtl": tunables.denseMaxTtl,
-            "denseDegree": tunables.denseDegree,
-            "fanout": tunables.fanout,
-            "jitterMinMs": tunables.jitterMinMs,
-            "jitterMaxMs": tunables.jitterMaxMs,
-            "ratePerSec": tunables.ratePerSec,
-            "burst": tunables.burst,
-            "peerRatePerSec": tunables.peerRatePerSec,
-            "peerBurst": tunables.peerBurst,
-            "queueCapacity": tunables.queueCapacity,
-            "biasMinScale": tunables.biasMinScale,
-            "biasMaxHandicapMs": tunables.biasMaxHandicapMs,
-            "activityWindowMs": tunables.activityWindowMs,
-            "activityMinForwards": tunables.activityMinForwards,
-            "activityIdleWindows": tunables.activityIdleWindows
-        ]
-        resolver(tunablesDict)
+        ProtocolEngineHostBridgeReactNative.getMeshRelayTunables(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Custody counters, read through to the Rust core (docs/spec/custody.md).
     @objc func getCustodyStats(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_STATS", "Protocol not initialized", nil)
-            return
-        }
-        let stats = proto.getCustodyStats()
-        let statsDict: [String: Any] = [
-            "held": stats.held,
-            "heldBytes": stats.heldBytes,
-            "accepted": stats.accepted,
-            "delivered": stats.delivered,
-            "reOriginated": stats.reOriginated,
-            "expired": stats.expired,
-            "duplicates": stats.duplicates,
-            "evicted": stats.evicted,
-            "receiptsSent": stats.receiptsSent,
-            "receiptsDropped": stats.receiptsDropped,
-            "receiptsReceived": stats.receiptsReceived,
-            "receiptsIgnored": stats.receiptsIgnored,
-            "refusedDisabled": stats.refusedDisabled,
-            "refusedNoRequest": stats.refusedNoRequest,
-            "refusedUnknownClass": stats.refusedUnknownClass,
-            "refusedNotSealed": stats.refusedNotSealed,
-            "refusedUnprovenPeer": stats.refusedUnprovenPeer,
-            "refusedNotDepositor": stats.refusedNotDepositor,
-            "refusedStranger": stats.refusedStranger,
-            "refusedDepositorFull": stats.refusedDepositorFull,
-            "refusedStoreFull": stats.refusedStoreFull,
-            "refusedBattery": stats.refusedBattery
-        ]
-        resolver(statsDict)
+        ProtocolEngineHostBridgeReactNative.getCustodyStats(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Drops every held frame and resets the custody counters. The data
@@ -3625,48 +2828,24 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// verb.
     @objc func eraseCustody(_ resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            guard let proto = protocolInstance else {
-                throw NSError(domain: "OfflineProtocol", code: -1,
-                              userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
-            }
-            try proto.eraseCustody()
-            resolver(nil)
-        } catch {
-            rejectWithProtocolError(error, rejecter,
-                                    fallbackCode: "ERROR_ERASECUSTODY",
-                                    fallbackMessage: "eraseCustody failed")
-        }
+        ProtocolEngineHostBridgeReactNative.eraseCustody(self, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func getPendingAckCount(_ resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_STATS", "Protocol not initialized", nil)
-            return
-        }
-        resolver(NSNumber(value: proto.getPendingAckCount()))
+        ProtocolEngineHostBridgeReactNative.getPendingAckCount(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func getRetryQueueSize(_ resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_STATS", "Protocol not initialized", nil)
-            return
-        }
-        resolver(NSNumber(value: proto.getRetryQueueSize()))
+        ProtocolEngineHostBridgeReactNative.getRetryQueueSize(self, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - DORS Decision Support
     
     @objc func shouldEscalateToWifi(_ resolver: @escaping RCTPromiseResolveBlock,
                                     rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_DORS", "Protocol not initialized", nil)
-            return
-        }
-        let shouldEscalate = proto.shouldEscalateToWifi()
-        resolver(NSNumber(value: shouldEscalate))
+        ProtocolEngineHostBridgeReactNative.shouldEscalateToWifi(self, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - File Transfer Operations
@@ -3680,54 +2859,13 @@ class OfflineProtocolModule: RCTEventEmitter {
                                 data: [NSNumber],
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_FILE", "Protocol not initialized", nil)
-            return
-        }
-        // Every one of these narrows, and each narrowing traps rather than
-        // returning a value React Native could reject. The arguments come
-        // straight from JavaScript, so out-of-range is a caller mistake and
-        // must surface as a rejected promise, not as an abort.
-        guard chunkIndex >= 0, chunkIndex <= Int(UInt32.max),
-              totalChunks >= 0, totalChunks <= Int(UInt32.max),
-              // NaN fails both comparisons. The ceiling is 2^64 exactly, and
-              // every non-negative Double below it truncates into UInt64.
-              fileSize >= 0, fileSize < 18_446_744_073_709_551_616.0 else {
-            rejecter("ERROR_FILE",
-                     "Chunk index, chunk count and file size must be non-negative and in range",
-                     nil)
-            return
-        }
-        do {
-            let bytes = try jsBytes(data, "data")
-            try proto.processFileChunk(
-                fileId: fileId,
-                chunkIndex: UInt32(chunkIndex),
-                totalChunks: UInt32(totalChunks),
-                fileSize: UInt64(fileSize),
-                fileName: fileName,
-                fileChecksum: fileChecksum,
-                data: bytes
-            )
-            resolver(nil)
-        } catch {
-            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_FILE", fallbackMessage: "Failed to process file chunk")
-        }
+        ProtocolEngineHostBridgeReactNative.processFileChunk(self, fileId, chunkIndex: chunkIndex, totalChunks: totalChunks, fileSize: fileSize, fileName: fileName, fileChecksum: fileChecksum, data: data, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func finalizeFile(_ fileId: String,
                             resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_FILE", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.finalizeFile(fileId: fileId)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_FILE", "Failed to finalize file: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.finalizeFile(self, fileId, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - WiFi Direct Transport Methods
@@ -3735,80 +2873,31 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func wifiDirectStatusChanged(_ isConnected: Bool,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.wifiDirectStatusChanged(isConnected: isConnected)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_WIFI_DIRECT", "WiFi Direct status changed failed: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectStatusChanged(self, isConnected, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func wifiDirectMessageReceived(_ senderId: String,
                                          data: [NSNumber],
                                          resolver: @escaping RCTPromiseResolveBlock,
                                          rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let bytes = try jsBytes(data, "data")
-            try proto.wifiDirectMessageReceived(senderId: senderId, data: bytes)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_WIFI_DIRECT", "WiFi Direct message received failed: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectMessageReceived(self, senderId, data: data, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func wifiDirectGetNextMessage(_ resolver: @escaping RCTPromiseResolveBlock,
                                         rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
-            return
-        }
-        if let message = proto.wifiDirectGetNextMessage() {
-            let dict: [String: Any] = [
-                "recipientId": message.recipientId,
-                "data": message.data.map { NSNumber(value: $0) }
-            ]
-            resolver(dict)
-        } else {
-            resolver(NSNull())
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectGetNextMessage(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func wifiDirectPeerConnected(_ peerId: String,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.wifiDirectPeerConnected(peerId: peerId)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_WIFI_DIRECT", "WiFi Direct peer connected failed: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectPeerConnected(self, peerId, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func wifiDirectPeerDisconnected(_ peerId: String,
                                           resolver: @escaping RCTPromiseResolveBlock,
                                           rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.wifiDirectPeerDisconnected(peerId: peerId)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_WIFI_DIRECT", "WiFi Direct peer disconnected failed: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.wifiDirectPeerDisconnected(self, peerId, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - Internet Transport Methods
@@ -3816,73 +2905,31 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func internetStatusChanged(_ isConnected: Bool,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.internetStatusChanged(isConnected: isConnected)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_INTERNET", "Internet status changed failed: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.internetStatusChanged(self, isConnected, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func internetMessageReceived(_ senderId: String,
                                        data: [NSNumber],
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let bytes = try jsBytes(data, "data")
-            try proto.internetMessageReceived(senderId: senderId, data: bytes)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_INTERNET", "Internet message received failed: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.internetMessageReceived(self, senderId, data: data, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func internetGetNextMessage(_ resolver: @escaping RCTPromiseResolveBlock,
                                       rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
-            return
-        }
-        if let message = proto.internetGetNextMessage() {
-            let dict: [String: Any] = [
-                "messageId": message.messageId,
-                "recipientId": message.recipientId,
-                "data": message.data.map { NSNumber(value: $0) }
-            ]
-            resolver(dict)
-        } else {
-            resolver(NSNull())
-        }
+        ProtocolEngineHostBridgeReactNative.internetGetNextMessage(self, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func internetConfirmSent(_ messageId: String,
                                    resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
-            return
-        }
-        proto.internetConfirmSent(messageId: messageId)
-        resolver(nil)
+        ProtocolEngineHostBridgeReactNative.internetConfirmSent(self, messageId, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func internetSendFailed(_ messageId: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
-            return
-        }
-        proto.internetSendFailed(messageId: messageId)
-        resolver(nil)
+        ProtocolEngineHostBridgeReactNative.internetSendFailed(self, messageId, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - MLS (End-to-End Encryption)
@@ -3957,11 +3004,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// Check if MLS is initialized
     @objc func isMlsInitialized(_ resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver(false)
-            return
-        }
-        resolver(proto.isMlsInitialized())
+        ProtocolEngineHostBridgeReactNative.isMlsInitialized(self, resolver: resolver, rejecter: rejecter)
     }
     
     // ========================================================================
@@ -3971,16 +3014,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// Get the identity public key (Ed25519, 32 bytes)
     @objc func getIdentityPublicKey(_ resolver: @escaping RCTPromiseResolveBlock,
                                     rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let publicKey = try proto.getIdentityPublicKey()
-            resolver(publicKey.map { NSNumber(value: $0) })
-        } catch {
-            rejecter("ERROR_CRYPTO", "Failed to get identity public key: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.getIdentityPublicKey(self, resolver: resolver, rejecter: rejecter)
     }
     
     /// This device's own address (`off1…`), or `nil` before MLS is
@@ -4010,12 +3044,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     func deriveAddressBridge(_ publicKey: [NSNumber],
                              resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            let publicKeyBytes = publicKey.map { $0.uint8Value }
-            resolver(try deriveAddress(publicKey: publicKeyBytes))
-        } catch {
-            rejecter("ERROR_CRYPTO", "Failed to derive address: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.deriveAddress(self, publicKey, resolver: resolver, rejecter: rejecter)
     }
 
     /// Decode and verify an invite blob. Needs no protocol instance, so a
@@ -4032,24 +3061,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     func parseInviteBridge(_ blob: String,
                            resolver: @escaping RCTPromiseResolveBlock,
                            rejecter: @escaping RCTPromiseRejectBlock) {
-        do {
-            let invite = try parseInvite(blob: blob)
-            resolver([
-                "address": invite.address,
-                "public_key": invite.publicKey.map { NSNumber(value: $0) },
-                // `?? NSNull()` rather than `as Any`, matching every other
-                // optional in this file. The two bridge alike today, but the
-                // explicit form is the one that stays correct if the value ever
-                // stops being an Optional, and mixed spellings invite a copy
-                // that is not equivalent.
-                "petname": invite.petname ?? NSNull(),
-                "signed": invite.signed,
-            ])
-        } catch {
-            rejecter("ERROR_INVALID_INVITE",
-                     "Invite did not verify: \(error.localizedDescription)",
-                     error)
-        }
+        ProtocolEngineHostBridgeReactNative.parseInvite(self, blob, resolver: resolver, rejecter: rejecter)
     }
 
     /// Build an invite blob for this identity.
@@ -4066,17 +3078,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                             sign: NSNumber,
                             resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            resolver(try proto.createInvite(petname: petname, sign: sign.boolValue))
-        } catch {
-            rejecter("ERROR_CRYPTO",
-                     "Failed to create invite: \(error.localizedDescription)",
-                     error)
-        }
+        ProtocolEngineHostBridgeReactNative.createInvite(self, petname, sign: sign, resolver: resolver, rejecter: rejecter)
     }
 
     /// Resolve a username to the set of devices claiming it.
@@ -4087,23 +3089,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func resolveUsername(_ username: String,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            resolver(try proto.resolveUsername(username: username))
-        } catch {
-            // Mapped rather than flattened: the three refusals mean different
-            // things to a caller. InvalidConfiguration is "discovery is off",
-            // InvalidState is "too many lookups in flight, retry", and
-            // InvalidArgument is "that is not a claimable name". Reporting them
-            // all as one code leaves an app either retrying forever or giving
-            // up on a lookup that was one drain away from working.
-            rejectWithProtocolError(error, rejecter,
-                                    fallbackCode: "ERROR_INVALID_ARGUMENT",
-                                    fallbackMessage: "Failed to resolve username")
-        }
+        ProtocolEngineHostBridgeReactNative.resolveUsername(self, username, resolver: resolver, rejecter: rejecter)
     }
 
     /// Derive a user ID from a public key.
@@ -4113,30 +3099,14 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func deriveUserIdFromPublicKey(_ publicKey: [NSNumber],
                                          resolver: @escaping RCTPromiseResolveBlock,
                                          rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
-            return
-        }
-        let publicKeyBytes = publicKey.map { $0.uint8Value }
-        let userId = proto.deriveUserIdFromPublicKey(publicKey: publicKeyBytes)
-        resolver(userId)
+        ProtocolEngineHostBridgeReactNative.deriveUserIdFromPublicKey(self, publicKey, resolver: resolver, rejecter: rejecter)
     }
     
     /// Sign data with the identity private key
     @objc func signData(_ data: [NSNumber],
                         resolver: @escaping RCTPromiseResolveBlock,
                         rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let dataBytes = data.map { $0.uint8Value }
-            let signature = try proto.signData(data: dataBytes)
-            resolver(signature.map { NSNumber(value: $0) })
-        } catch {
-            rejecter("ERROR_CRYPTO", "Failed to sign data: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.signData(self, data, resolver: resolver, rejecter: rejecter)
     }
 
     /// Byte-oriented variant of `signData`: the input crosses the bridge as
@@ -4145,20 +3115,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func signDataBase64(_ dataBase64: String,
                               resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
-            return
-        }
-        guard let data = Data(base64Encoded: dataBase64) else {
-            rejecter("ERROR_CRYPTO", "signDataBase64: invalid base64 input", nil)
-            return
-        }
-        do {
-            let signature = try proto.signDataBytes(data: data)
-            resolver(signature.base64EncodedString())
-        } catch {
-            rejecter("ERROR_CRYPTO", "Failed to sign data: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.signDataBase64(self, dataBase64, resolver: resolver, rejecter: rejecter)
     }
     
     /// Verify a signature against a public key
@@ -4167,19 +3124,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                signature: [NSNumber],
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let publicKeyBytes = publicKey.map { $0.uint8Value }
-            let dataBytes = data.map { $0.uint8Value }
-            let signatureBytes = signature.map { $0.uint8Value }
-            let isValid = try proto.verifySignature(publicKey: publicKeyBytes, data: dataBytes, signature: signatureBytes)
-            resolver(isValid)
-        } catch {
-            rejecter("ERROR_CRYPTO", "Failed to verify signature: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.verifySignature(self, publicKey, data: data, signature: signature, resolver: resolver, rejecter: rejecter)
     }
 
     /// Byte-oriented variant of `verifySignature`, base64 across the bridge
@@ -4189,220 +3134,60 @@ class OfflineProtocolModule: RCTEventEmitter {
                                      signature signatureBase64: String,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
-            return
-        }
-        guard let publicKey = Data(base64Encoded: publicKeyBase64),
-              let data = Data(base64Encoded: dataBase64),
-              let signature = Data(base64Encoded: signatureBase64) else {
-            rejecter("ERROR_CRYPTO", "verifySignatureBase64: invalid base64 input", nil)
-            return
-        }
-        do {
-            resolver(try proto.verifySignatureBytes(publicKey: publicKey, data: data, signature: signature))
-        } catch {
-            rejecter("ERROR_CRYPTO", "Failed to verify signature: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.verifySignatureBase64(self, publicKeyBase64, data: dataBase64, signature: signatureBase64, resolver: resolver, rejecter: rejecter)
     }
     
     /// Generate a new MLS key package
     @objc func mlsGenerateKeyPackage(_ resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let bundle = try proto.mlsGenerateKeyPackage()
-            let result: [String: Any] = [
-                "packageId": bundle.packageId,
-                "userId": bundle.userId,
-                "keyPackageData": bundle.keyPackageData.map { NSNumber(value: $0) },
-                "createdAtMs": NSNumber(value: bundle.createdAtMs),
-                "expiresAtMs": NSNumber(value: bundle.expiresAtMs),
-                "synced": bundle.synced
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to generate key package: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsGenerateKeyPackage(self, resolver: resolver, rejecter: rejecter)
     }
     
     /// Get existing or generate new key package
     @objc func mlsGetOrCreateKeyPackage(_ resolver: @escaping RCTPromiseResolveBlock,
                                         rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let bundle = try proto.mlsGetOrCreateKeyPackage()
-            let result: [String: Any] = [
-                "packageId": bundle.packageId,
-                "userId": bundle.userId,
-                "keyPackageData": bundle.keyPackageData.map { NSNumber(value: $0) },
-                "createdAtMs": NSNumber(value: bundle.createdAtMs),
-                "expiresAtMs": NSNumber(value: bundle.expiresAtMs),
-                "synced": bundle.synced
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to get key package: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsGetOrCreateKeyPackage(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Get pending key packages to upload
     @objc func mlsGetPendingKeyPackages(_ resolver: @escaping RCTPromiseResolveBlock,
                                         rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        let bundles = proto.mlsGetPendingKeyPackages()
-        let results = bundles.map { bundle -> [String: Any] in
-            return [
-                "packageId": bundle.packageId,
-                "userId": bundle.userId,
-                "keyPackageData": bundle.keyPackageData.map { NSNumber(value: $0) },
-                "createdAtMs": NSNumber(value: bundle.createdAtMs),
-                "expiresAtMs": NSNumber(value: bundle.expiresAtMs),
-                "synced": bundle.synced
-            ]
-        }
-        resolver(results)
+        ProtocolEngineHostBridgeReactNative.mlsGetPendingKeyPackages(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Mark key package as synced (uploaded)
     @objc func mlsMarkKeyPackageSynced(_ packageId: String,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.mlsMarkKeyPackageSynced(packageId: packageId)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to mark key package synced: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsMarkKeyPackageSynced(self, packageId, resolver: resolver, rejecter: rejecter)
     }
 
     /// Create a 1:1 session (returns Welcome message)
     @objc func mlsCreateSession(_ otherUserId: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let welcome = try proto.mlsCreateSession(otherUserId: otherUserId)
-            let result: [String: Any] = [
-                "groupId": welcome.groupId,
-                "welcomeData": welcome.welcomeData.map { NSNumber(value: $0) },
-                "inviterId": welcome.inviterId,
-                "groupName": welcome.groupName ?? NSNull(),
-                "timestampMs": NSNumber(value: welcome.timestampMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to create session: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsCreateSession(self, otherUserId, resolver: resolver, rejecter: rejecter)
     }
 
     /// Join a session from Welcome message
     @objc func mlsJoinSession(_ welcomeJson: String,
                               resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = welcomeJson.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
-            }
-            
-            let welcomeDataNumbers = json["welcomeData"] as? [NSNumber] ?? []
-            let welcomeData = try jsBytes(welcomeDataNumbers, "welcomeData")
-            
-            let welcome = MlsWelcomeMessage(
-                groupId: json["groupId"] as? String ?? "",
-                welcomeData: welcomeData,
-                inviterId: json["inviterId"] as? String ?? "",
-                groupName: json["groupName"] as? String,
-                timestampMs: (json["timestampMs"] as? NSNumber)?.uint64Value ?? 0
-            )
-            
-            let info = try proto.mlsJoinSession(welcome: welcome)
-            let result: [String: Any] = [
-                "groupId": info.groupId,
-                "name": info.name ?? NSNull(),
-                "members": info.members,
-                "epoch": NSNumber(value: info.epoch),
-                "isSession": info.isSession,
-                "createdAtMs": NSNumber(value: info.createdAtMs),
-                "lastActivityMs": NSNumber(value: info.lastActivityMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to join session: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsJoinSession(self, welcomeJson, resolver: resolver, rejecter: rejecter)
     }
 
     /// Decrypt a message from a user
     @objc func mlsDecryptFromUser(_ encryptedJson: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = encryptedJson.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
-            }
-            
-            let ciphertextNumbers = json["ciphertext"] as? [NSNumber] ?? []
-            let ciphertext = try jsBytes(ciphertextNumbers, "ciphertext")
-            
-            let encrypted = MlsEncryptedMessage(
-                groupId: json["groupId"] as? String ?? "",
-                messageType: json["messageType"] as? String ?? "Application",
-                epoch: (json["epoch"] as? NSNumber)?.uint64Value ?? 0,
-                ciphertext: ciphertext,
-                senderId: json["senderId"] as? String ?? "",
-                timestampMs: (json["timestampMs"] as? NSNumber)?.uint64Value ?? 0
-            )
-            
-            if let plaintext = try proto.mlsDecryptFromUser(encrypted: encrypted) {
-                resolver(plaintext.map { NSNumber(value: $0) })
-            } else {
-                resolver(NSNull())
-            }
-        } catch {
-            rejecter("ERROR_MLS", "Failed to decrypt message from user: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsDecryptFromUser(self, encryptedJson, resolver: resolver, rejecter: rejecter)
     }
 
     /// Delete a session
     @objc func mlsDeleteSession(_ otherUserId: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.mlsDeleteSession(otherUserId: otherUserId)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to delete session: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsDeleteSession(self, otherUserId, resolver: resolver, rejecter: rejecter)
     }
     
     /// Import a contact's key package
@@ -4410,93 +3195,35 @@ class OfflineProtocolModule: RCTEventEmitter {
                                    keyPackageData: [NSNumber],
                                    resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let data = try jsBytes(keyPackageData, "keyPackageData")
-            try proto.mlsImportKeyPackage(userId: userId, keyPackageData: data)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to import key package: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsImportKeyPackage(self, userId, keyPackageData: keyPackageData, resolver: resolver, rejecter: rejecter)
     }
     
     /// Check if a session exists with a user
     @objc func mlsHasSession(_ otherUserId: String,
                              resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver(false)
-            return
-        }
-        resolver(proto.mlsHasSession(otherUserId: otherUserId))
+        ProtocolEngineHostBridgeReactNative.mlsHasSession(self, otherUserId, resolver: resolver, rejecter: rejecter)
     }
     
     /// Check if a pending key package is available for a peer
     @objc func hasPendingKeyPackage(_ peerId: String,
                                     resolver: @escaping RCTPromiseResolveBlock,
                                     rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver(false)
-            return
-        }
-        resolver(proto.hasPendingKeyPackage(peerId: peerId))
+        ProtocolEngineHostBridgeReactNative.hasPendingKeyPackage(self, peerId, resolver: resolver, rejecter: rejecter)
     }
 
     /// Returns the current session establishment state for a peer.
     @objc func getEstablishmentState(_ peerId: String,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver("NoKeyPackage")
-            return
-        }
-        do {
-            let state = try proto.getEstablishmentState(peerId: peerId)
-            let stateString: String
-            switch state {
-            case .noKeyPackage:
-                stateString = "NoKeyPackage"
-            case .haveKeyPackage:
-                stateString = "HaveKeyPackage"
-            case .sessionPending:
-                stateString = "SessionPending"
-            case .sessionConfirmed:
-                stateString = "SessionConfirmed"
-            }
-            resolver(stateString)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to get establishment state: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.getEstablishmentState(self, peerId, resolver: resolver, rejecter: rejecter)
     }
     
     /// Establish a secure session with a peer (high-level API)
     @objc func establishSecureSession(_ peerId: String,
                                       resolver: @escaping RCTPromiseResolveBlock,
                                       rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            if let welcome = try proto.establishSecureSession(peerId: peerId) {
-                let result: [String: Any] = [
-                    "groupId": welcome.groupId,
-                    "welcomeData": welcome.welcomeData.map { NSNumber(value: $0) },
-                    "inviterId": welcome.inviterId,
-                    "groupName": welcome.groupName ?? NSNull(),
-                    "timestampMs": NSNumber(value: welcome.timestampMs)
-                ]
-                resolver(result)
-            } else {
-                // Session already exists
-                resolver(NSNull())
-            }
-        } catch {
-            rejecter("ERROR_MLS", "Failed to establish secure session: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.establishSecureSession(self, peerId, resolver: resolver, rejecter: rejecter)
     }
     
     /// Rotate the 1:1 session with a peer, advancing post-compromise security.
@@ -4512,16 +3239,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func rekeySession(_ peerId: String,
                             resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let rotated = try proto.rekeySession(peerId: peerId)
-            resolver(NSNumber(value: rotated))
-        } catch {
-            rejecter("ERROR_MLS", "Failed to rotate session: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.rekeySession(self, peerId, resolver: resolver, rejecter: rejecter)
     }
     
     /// Encrypt a message for a user
@@ -4529,112 +3247,27 @@ class OfflineProtocolModule: RCTEventEmitter {
                                  plaintext: [NSNumber],
                                  resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let data = try jsBytes(plaintext, "plaintext")
-            let encrypted = try proto.mlsEncryptForUser(otherUserId: otherUserId, plaintext: data)
-            let result: [String: Any] = [
-                "groupId": encrypted.groupId,
-                "messageType": encrypted.messageType,
-                "epoch": NSNumber(value: encrypted.epoch),
-                "ciphertext": encrypted.ciphertext.map { NSNumber(value: $0) },
-                "senderId": encrypted.senderId,
-                "timestampMs": NSNumber(value: encrypted.timestampMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to encrypt message: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsEncryptForUser(self, otherUserId, plaintext: plaintext, resolver: resolver, rejecter: rejecter)
     }
     
     /// Decrypt a message
     @objc func mlsDecrypt(_ encryptedJson: String,
                           resolver: @escaping RCTPromiseResolveBlock,
                           rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = encryptedJson.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
-            }
-            
-            let ciphertextNumbers = json["ciphertext"] as? [NSNumber] ?? []
-            let ciphertext = try jsBytes(ciphertextNumbers, "ciphertext")
-            
-            let encrypted = MlsEncryptedMessage(
-                groupId: json["groupId"] as? String ?? "",
-                messageType: json["messageType"] as? String ?? "Application",
-                epoch: (json["epoch"] as? NSNumber)?.uint64Value ?? 0,
-                ciphertext: ciphertext,
-                senderId: json["senderId"] as? String ?? "",
-                timestampMs: (json["timestampMs"] as? NSNumber)?.uint64Value ?? 0
-            )
-            
-            if let plaintext = try proto.mlsDecrypt(encrypted: encrypted) {
-                resolver(plaintext.map { NSNumber(value: $0) })
-            } else {
-                resolver(NSNull())
-            }
-        } catch {
-            rejecter("ERROR_MLS", "Failed to decrypt message: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsDecrypt(self, encryptedJson, resolver: resolver, rejecter: rejecter)
     }
     
     /// List all active sessions
     @objc func mlsListSessions(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver([])
-            return
-        }
-        resolver(proto.mlsListSessions())
+        ProtocolEngineHostBridgeReactNative.mlsListSessions(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Process a Welcome message
     @objc func mlsProcessWelcome(_ welcomeJson: String,
                                  resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = welcomeJson.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
-            }
-            
-            let welcomeDataNumbers = json["welcomeData"] as? [NSNumber] ?? []
-            let welcomeData = try jsBytes(welcomeDataNumbers, "welcomeData")
-            
-            let welcome = MlsWelcomeMessage(
-                groupId: json["groupId"] as? String ?? "",
-                welcomeData: welcomeData,
-                inviterId: json["inviterId"] as? String ?? "",
-                groupName: json["groupName"] as? String,
-                timestampMs: (json["timestampMs"] as? NSNumber)?.uint64Value ?? 0
-            )
-            
-            let info = try proto.mlsProcessWelcome(welcome: welcome)
-            let result: [String: Any] = [
-                "groupId": info.groupId,
-                "name": info.name ?? NSNull(),
-                "members": info.members,
-                "epoch": NSNumber(value: info.epoch),
-                "isSession": info.isSession,
-                "createdAtMs": NSNumber(value: info.createdAtMs),
-                "lastActivityMs": NSNumber(value: info.lastActivityMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to process welcome message: \(error.localizedDescription)", error)
-        }
+        ProtocolEngineHostBridgeReactNative.mlsProcessWelcome(self, welcomeJson, resolver: resolver, rejecter: rejecter)
     }
     
     // MARK: - Mesh Group Management (Protocol-Level MLS Groups)
@@ -4963,15 +3596,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                      options: NSDictionary,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let manager = internetManager else {
-            // Same message shape as the Android module's rejectWithProtocolError.
-            rejecter("ERROR_INTERNET", "Failed to query presence: Internet transport not initialized", nil)
-            return
-        }
-        let force = (options["force"] as? NSNumber)?.boolValue ?? false
-        manager.checkPresence(userId: userId, force: force) { written in
-            resolver(written)
-        }
+        ProtocolEngineHostBridgeReactNative.checkInternetPresence(self, userId, options: options, resolver: resolver, rejecter: rejecter)
     }
 
     /// Sends a raw, caller-built relay command verbatim over the SDK's
@@ -4981,14 +3606,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func internetSendRawCommand(_ json: String,
                                       resolver: @escaping RCTPromiseResolveBlock,
                                       rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let manager = internetManager else {
-            // Same message shape as the Android module's rejectWithProtocolError.
-            rejecter("ERROR_INTERNET", "Failed to send raw server command: Internet transport not initialized", nil)
-            return
-        }
-        manager.sendRawCommand(json: json) { written in
-            resolver(written)
-        }
+        ProtocolEngineHostBridgeReactNative.internetSendRawCommand(self, json, resolver: resolver, rejecter: rejecter)
     }
 
     /// Whether the internet socket is connected AND relay-authenticated —
@@ -4997,7 +3615,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// false (never rejects) when the internet transport isn't initialized.
     @objc func internetIsReady(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        resolver(internetManager?.isReady() ?? false)
+        ProtocolEngineHostBridgeReactNative.internetIsReady(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Whether the relay displaced this session ("connected elsewhere") and
@@ -5017,7 +3635,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// whose process died and came back.
     @objc func internetIsSuperseded(_ resolver: @escaping RCTPromiseResolveBlock,
                                     rejecter: @escaping RCTPromiseRejectBlock) {
-        resolver(internetManager?.isSessionSuperseded() ?? false)
+        ProtocolEngineHostBridgeReactNative.internetIsSuperseded(self, resolver: resolver, rejecter: rejecter)
     }
 
     /// Forces an immediate teardown + reconnect + re-authenticate of the
@@ -5030,12 +3648,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// rejects) only when the internet transport isn't initialized.
     @objc func internetForceReconnect(_ resolver: @escaping RCTPromiseResolveBlock,
                                       rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let manager = internetManager else {
-            resolver(false)
-            return
-        }
-        manager.forceReconnect()
-        resolver(true)
+        ProtocolEngineHostBridgeReactNative.internetForceReconnect(self, resolver: resolver, rejecter: rejecter)
     }
 
     // MARK: - Helpers
