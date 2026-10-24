@@ -648,7 +648,8 @@ transport manager that takes a `Promise`, or a policy class that imports React
 for one type, still builds in React Native and breaks the native packages and
 the Flutter plugin for every application that uses them.
 
-The check is the package build, on every pull request: the `Swift Package`
+The check is the package build, on every pull request that touches a
+shared bridge source: the `Swift Package`
 job builds the package and runs it on a simulator, the `Android Library`
 job compiles the library and its suite, and the `Flutter Binding` job runs
 Dart tests, assembles the plugin release AAR (shared Kotlin + jniLibs), and
