@@ -216,13 +216,6 @@ pub struct EncryptionConfig {
     /// injection rather than a real fork — is visible to the app. The residual
     /// is bounded re-key churn on a single pair: delivery delayed, never lost.
     /// `OfflineProtocol::schedule_session_rekey` carries the full analysis.
-    ///
-    /// **The split-session heal is not governed by this switch.** Any ordinary
-    /// decrypt failure on a 1:1 session asks the peer to corroborate it, and
-    /// only a signed answer to that side's own live challenge, showing the two
-    /// hold different groups, makes the greater side give up its group (ADR
-    /// 0033). That trigger is authenticated, unlike the epoch re-key above, so
-    /// turning recovery off does not turn it off.
     pub crypto_recovery_enabled: bool,
 
     /// Whether service request and response bodies (`__SVC_REQ__`,
@@ -2225,9 +2218,12 @@ mod tests {
         let defaults = ProtocolConfig::new("test-app", "user123").reliability.dedup;
         let rn_root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        // Fallbacks live in the shared bridge (ADR 0025), not the RN module shells.
         let kotlin =
-            rn_root.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
-        let swift = rn_root.join("ios/OfflineProtocolModule.swift");
+            rn_root.join("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt");
+        let swift = rn_root.join("ios/ProtocolEngineHostBridge.swift");
+        let swift_max = format_underscored(defaults.max_tracked_messages as u64);
+        let swift_retention = format_underscored(defaults.retention_time_secs);
         let expected = [
             (
                 kotlin.clone(),
@@ -2245,17 +2241,11 @@ mod tests {
             ),
             (
                 swift.clone(),
-                format!(
-                    "(config[\"maxTrackedMessages\"] as? NSNumber)?.uint64Value ?? {}",
-                    defaults.max_tracked_messages
-                ),
+                format!(r#"unsigned64(j, "maxTrackedMessages", {swift_max})"#),
             ),
             (
                 swift,
-                format!(
-                    "(config[\"retentionTimeSecs\"] as? NSNumber)?.uint64Value ?? {}",
-                    defaults.retention_time_secs
-                ),
+                format!(r#"unsigned64(j, "retentionTimeSecs", {swift_retention})"#),
             ),
         ];
 

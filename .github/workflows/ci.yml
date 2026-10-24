@@ -257,6 +257,13 @@ jobs:
 
             rn_typecheck:
               - 'bindings/react-native/**'
+              - 'scripts/check-binding-generators.sh'
+              - 'tools/gen_protocol_engine_host_bridge.py'
+              - 'tools/gen_rn_protocol_engine_bridge_react_native.py'
+              - 'tools/gen_rn_protocol_engine_bridge_react_native_swift.py'
+              - 'tools/rn_engine_bridge_error_manifest.json'
+              - 'tools/bridge_impl_supplement.py'
+              - 'tools/extract_rn_bridge_error_manifest.py'
 
             android_unit:
               - 'bindings/react-native/android/**'
@@ -1567,6 +1574,9 @@ jobs:
       - name: React Native JS behavior tests
         working-directory: bindings/react-native
         run: npm run test:js
+
+      - name: Check RN engine bridge generators
+        run: bash scripts/check-binding-generators.sh --check
 
   android-unit-tests:
     name: Android Unit Tests
