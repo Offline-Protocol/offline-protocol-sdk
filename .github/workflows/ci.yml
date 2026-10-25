@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # ready_for_review starts the first real run of a PR opened as a draft.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -47,8 +49,12 @@ jobs:
   # Skipped jobs report success, so a required check on any of them never
   # waits on a job that did not need to run. CI Result, at the end, is the
   # one check that summarises them all.
+  #
+  # A draft pull request runs nothing: every job needs this one, so skipping
+  # it here skips them all. Marking the PR ready for review triggers the run.
   changes:
     name: Detect Changes
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -2022,7 +2028,7 @@ jobs:
   # failed, and this job must still run to say so.
   ci-result:
     name: CI Result
-    if: always()
+    if: always() && github.event.pull_request.draft != true
     needs:
       - changes
       - fmt
