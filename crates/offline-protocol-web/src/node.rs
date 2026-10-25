@@ -44,11 +44,12 @@ use offline_protocol::{
 };
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_transport::{
-    frame, NostrTransport, PeerStreamReader, StreamEvent, Transport, TransportStatus,
+    frame, BleTransport, NostrTransport, PeerStreamReader, StreamEvent, Transport, TransportStatus,
     TransportType, WifiDirectTransport,
 };
 use tracing::warn;
 
+use crate::ble_host::BleHost;
 use crate::memory_store::MemoryProtocolStateStorage;
 use crate::nostr_host::{NostrHost, NostrOptions};
 
@@ -118,6 +119,8 @@ impl SessionStart {
 pub struct NodeOptions {
     /// The Nostr slot, when the application gives the node relays.
     pub nostr: Option<NostrOptions>,
+    /// The Bluetooth LE slot, driven from the page over Web Bluetooth.
+    pub ble: bool,
 }
 
 struct Link {
@@ -134,6 +137,8 @@ pub struct Node {
     pub(crate) events: Arc<Mutex<VecDeque<String>>>,
     /// The worker's half of the Nostr slot, when the node has one.
     pub(crate) nostr_host: Option<NostrHost>,
+    /// The worker's half of the Bluetooth slot, when the node has one.
+    pub(crate) ble_host: Option<BleHost>,
     links: BTreeMap<LinkId, Link>,
     /// The one live link for each announced address.
     peers: HashMap<String, LinkId>,
@@ -157,11 +162,12 @@ impl Node {
     /// The peer-stream slot is always registered. The Nostr slot is
     /// registered once the address exists, when `options.nostr` is set: the
     /// transport derives its routing tag from the address it is built with.
-    /// A browser has no Bluetooth peripheral, and the internet relay's socket
-    /// is not wired.
+    /// The Bluetooth slot is registered with it when `options.ble` is set:
+    /// the page is a central over Web Bluetooth, never a peripheral. The
+    /// internet relay's socket is not wired.
     pub fn with_options(app_id: &str, profile: &str, options: NodeOptions) -> NodeResult<Self> {
         let mut config = ProtocolConfig::new(app_id, profile);
-        config.transport.ble_enabled = false;
+        config.transport.ble_enabled = options.ble;
         config.transport.internet_enabled = false;
         config.transport.reticulum_enabled = false;
         config.transport.nostr_enabled = options.nostr.is_some();
@@ -187,6 +193,7 @@ impl Node {
             protocol,
             events,
             nostr_host: options.nostr.map(|_| NostrHost::default()),
+            ble_host: options.ble.then(BleHost::default),
             links: BTreeMap::new(),
             peers: HashMap::new(),
             outbound: VecDeque::new(),
@@ -239,6 +246,12 @@ impl Node {
             TransportType::WiFiDirect,
             Box::new(WifiDirectTransport::new(address.as_str())),
         );
+        if self.ble_host.is_some() {
+            self.protocol.transport_manager_mut().add_transport(
+                TransportType::BLE,
+                Box::new(BleTransport::new(address.as_str())),
+            );
+        }
         if let Some(nostr) = nostr {
             self.protocol
                 .transport_manager_mut()
@@ -259,6 +272,17 @@ impl Node {
         self.protocol.start()?;
         if let Some(transport) = self.slot() {
             transport.on_status_changed(TransportStatus::Available);
+        }
+        // Up as the peer-stream slot is: a link is announced only once its
+        // peripheral's identity verified, so "up" promises no peer.
+        if self.ble_host.is_some() {
+            if let Some(transport) = self
+                .protocol
+                .transport_manager()
+                .get_transport(TransportType::BLE)
+            {
+                transport.on_status_changed(TransportStatus::Available);
+            }
         }
         Ok(())
     }
@@ -381,6 +405,10 @@ impl Node {
         self.peers.remove(&peer);
         if let Some(transport) = self.wifi_direct() {
             transport.on_peer_disconnected(&peer);
+        }
+        // Still reachable over Bluetooth: not lost, as the FFI decides.
+        if self.ble_linked(&peer) {
+            return;
         }
         self.protocol.on_neighbor_lost(&peer);
         push_event(&self.events, &Event::NeighborLost { peer_id: peer });
@@ -579,6 +607,11 @@ impl Node {
             return;
         }
         self.request_nostr_key_packages(peer);
+    }
+
+    /// Whether `peer` is announced on a peer-stream link now.
+    pub(crate) fn stream_linked(&self, peer: &str) -> bool {
+        self.peers.contains_key(peer)
     }
 
     fn has_session(&self, peer: &str) -> bool {

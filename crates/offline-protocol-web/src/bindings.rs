@@ -170,6 +170,36 @@ impl OutboundFrame {
     }
 }
 
+/// One fragment for the page to write to a peripheral's Message
+/// characteristic.
+#[wasm_bindgen]
+pub struct BleFragment {
+    peer: String,
+    data: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl BleFragment {
+    /// The address whose link it goes on.
+    #[wasm_bindgen(getter)]
+    pub fn peer(&self) -> String {
+        self.peer.clone()
+    }
+
+    /// The fragment, written as one value.
+    #[wasm_bindgen(getter)]
+    pub fn data(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+}
+
+/// This application's App tag (8 bytes), which a central compares when a
+/// peripheral presents one instance of the service per SDK application.
+#[wasm_bindgen(js_name = bleAppTag)]
+pub fn ble_app_tag(app_id: &str) -> Vec<u8> {
+    crate::ble_host::app_tag(app_id).to_vec()
+}
+
 /// The Offline Protocol engine, one per worker.
 #[wasm_bindgen]
 pub struct WebEngine {
@@ -189,22 +219,27 @@ impl WebEngine {
         })
     }
 
-    /// A stopped engine that also carries the Nostr slot (W12), which the
-    /// worker drives over relays the application named. `coldContact`
-    /// publishes key packages and resolves peers'; `usernameDiscovery`
-    /// publishes `profile` as a username and resolves others'.
-    #[wasm_bindgen(js_name = withNostr)]
-    pub fn with_nostr(
+    /// A stopped engine with the slots the application turned on. `nostr`
+    /// adds the Nostr slot (W12), which the worker drives over relays the
+    /// application named: `coldContact` publishes key packages and resolves
+    /// peers', `usernameDiscovery` publishes `profile` as a username and
+    /// resolves others'. `ble` adds the Bluetooth LE slot (W14), driven from
+    /// the page over Web Bluetooth.
+    #[wasm_bindgen(js_name = withOptions)]
+    pub fn with_options(
         app_id: &str,
         profile: &str,
+        nostr: bool,
         cold_contact: bool,
         username_discovery: bool,
+        ble: bool,
     ) -> Result<WebEngine, JsError> {
         let options = NodeOptions {
-            nostr: Some(NostrOptions {
+            nostr: nostr.then_some(NostrOptions {
                 cold_contact,
                 username_discovery,
             }),
+            ble,
         };
         Ok(Self {
             node: Node::with_options(app_id, profile, options).map_err(js)?,
@@ -457,6 +492,47 @@ impl WebEngine {
     #[wasm_bindgen(js_name = nostrRelayEvent)]
     pub fn nostr_relay_event(&mut self, relay_message: &str) -> Result<(), JsError> {
         self.node.nostr_relay_event(relay_message).map_err(js)
+    }
+
+    /// This device's identity assertion, which the page writes to a
+    /// peripheral's Hello characteristic (W14).
+    #[wasm_bindgen(js_name = bleHello)]
+    pub fn ble_hello(&self) -> Result<Vec<u8>, JsError> {
+        self.node.ble_hello().map_err(js)
+    }
+
+    /// Checks a peripheral's Device id and Identity values; returns the
+    /// address the identity proves, which must equal the Device id.
+    #[wasm_bindgen(js_name = bleVerify)]
+    pub fn ble_verify(&mut self, device_id: &[u8], identity: &[u8]) -> Result<String, JsError> {
+        self.node.ble_verify(device_id, identity).map_err(js)
+    }
+
+    /// A verified peripheral's link is subscribed and has said hello; its
+    /// write payload is `maxPayload` bytes.
+    #[wasm_bindgen(js_name = bleLinkUp)]
+    pub fn ble_link_up(&mut self, peer: &str, max_payload: u32) -> Result<(), JsError> {
+        self.node.ble_link_up(peer, max_payload).map_err(js)
+    }
+
+    /// One fragment a peripheral notified on `peer`'s link.
+    #[wasm_bindgen(js_name = bleFragmentReceived)]
+    pub fn ble_fragment_received(&mut self, peer: &str, fragment: &[u8]) -> Result<(), JsError> {
+        self.node.ble_fragment_received(peer, fragment).map_err(js)
+    }
+
+    /// The next fragment to write, or `undefined`.
+    #[wasm_bindgen(js_name = bleNextFragment)]
+    pub fn ble_next_fragment(&mut self) -> Option<BleFragment> {
+        self.node
+            .ble_next_fragment()
+            .map(|(peer, data)| BleFragment { peer, data })
+    }
+
+    /// The link to `peer` is gone.
+    #[wasm_bindgen(js_name = bleLinkDown)]
+    pub fn ble_link_down(&mut self, peer: &str) {
+        self.node.ble_link_down(peer);
     }
 
     /// Sends to a group; returns the per-member message ids as JSON.

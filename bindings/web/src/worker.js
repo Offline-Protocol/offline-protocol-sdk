@@ -34,6 +34,7 @@ import init, {
   signalOpen,
   parseInvite,
   NearbyRoomKeys,
+  bleAppTag,
 } from "../pkg/offline_protocol_web.js";
 import { openDurableStore } from "./store.js";
 import { TabCarrier } from "./tab-carrier.js";
@@ -97,6 +98,14 @@ function flush() {
     frame.free();
     if (pageLinks.has(link)) self.postMessage({ kind: "frame", link, data }, [data.buffer]);
     else carrier?.send(link, data);
+  }
+  // Bluetooth fragments go to the page, which holds the GATT connections
+  // (W14). Transferred, as a carrier frame is.
+  for (let next = engine.bleNextFragment(); next; next = engine.bleNextFragment()) {
+    const peer = next.peer;
+    const data = next.data;
+    next.free();
+    self.postMessage({ kind: "bleFragment", peer, data }, [data.buffer]);
   }
   if (nostr?.live) {
     for (let next = engine.nostrNextEvent(); next !== undefined; next = engine.nostrNextEvent()) {
@@ -164,7 +173,7 @@ function nearbyRoom(id) {
 }
 
 const handlers = {
-  async start({ appId, profile, storage = "durable", tabs = true, instance, wasm, nostr: relays }) {
+  async start({ appId, profile, storage = "durable", tabs = true, instance, wasm, nostr: relays, ble = false }) {
     if (engine) throw new Error("this worker already runs a node");
     const nostrRelays = relays === undefined ? undefined : checkRelays(relays.relays);
     // A host that cannot serve the module beside this file (an editor
@@ -173,15 +182,14 @@ const handlers = {
     // Nothing is kept from a start that fails: no engine, and no lock or
     // handle, so the page can start the node again once the cause is gone.
     let address;
-    const next =
-      relays === undefined
-        ? new WebEngine(appId, profile)
-        : WebEngine.withNostr(
-            appId,
-            profile,
-            relays.coldContact ?? true,
-            relays.usernameDiscovery ?? false,
-          );
+    const next = WebEngine.withOptions(
+      appId,
+      profile,
+      relays !== undefined,
+      relays?.coldContact ?? true,
+      relays?.usernameDiscovery ?? false,
+      Boolean(ble),
+    );
     try {
       if (storage === "durable") {
         store = await openDurableStore(storageNamespace(appId, profile));
@@ -321,6 +329,26 @@ const handlers = {
   nearbyClose({ id }) {
     nearby.get(id)?.free();
     nearby.delete(id);
+  },
+  // The Bluetooth slot's half in the worker (W14). The page holds the GATT
+  // connection and moves bytes; these verify, announce and reassemble.
+  bleHello() {
+    return engine.bleHello();
+  },
+  bleAppTag() {
+    return bleAppTag(startedAppId);
+  },
+  bleVerify({ deviceId, identity }) {
+    return engine.bleVerify(deviceId, identity);
+  },
+  bleLinkUp({ peer, maxPayload }) {
+    engine.bleLinkUp(peer, maxPayload);
+  },
+  bleFragmentReceived({ peer, bytes }) {
+    engine.bleFragmentReceived(peer, bytes);
+  },
+  bleLinkDown({ peer }) {
+    engine.bleLinkDown(peer);
   },
   sendGroupMessage({ groupId, content, ephemeral = false }) {
     return JSON.parse(engine.sendGroupMessage(groupId, content, Boolean(ephemeral)));

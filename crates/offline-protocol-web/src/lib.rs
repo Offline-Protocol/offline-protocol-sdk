@@ -13,7 +13,8 @@
 //! connection codes through Nostr relays instead of by hand, and
 //! [`nostr_host`] drives the Nostr transport itself from the worker, with
 //! relays the application names. [`nearby`] lets the browsers behind one
-//! network address find each other there.
+//! network address find each other there. [`ble_host`] drives the
+//! Bluetooth LE slot from a page that is a GATT central over Web Bluetooth.
 //!
 //! The crate also builds on every host, so the workspace's lint, docs and test
 //! runs cover it: everything below the bindings is plain Rust, and the tests
@@ -23,6 +24,7 @@
 #![warn(missing_docs)]
 
 pub mod bindings;
+pub mod ble_host;
 pub mod log_store;
 pub mod memory_store;
 pub mod nearby;
@@ -31,6 +33,8 @@ pub mod nostr_host;
 pub mod opfs;
 pub mod signal;
 
+#[cfg(test)]
+mod ble_tests;
 #[cfg(test)]
 mod nostr_tests;
 #[cfg(test)]

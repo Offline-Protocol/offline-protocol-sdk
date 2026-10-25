@@ -15,6 +15,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A browser links to a phone or a board over Bluetooth LE.** In
+  Chromium, `BluetoothCarrier` makes the page a GATT central: its person
+  picks a device running the SDK in the browser's chooser, the engine
+  verifies the identity the device serves, the page writes its hello, and
+  the link carries sessions and messages through the same `BleTransport`
+  and fragment codec as every binding. A browser is never discoverable over
+  Bluetooth, and Firefox and Safari have no Web Bluetooth
+  ([W14](docs/bridges/web.md#w14-bluetooth-is-a-central-the-person-points-at-a-device)).
+  Not run yet from a real browser to a real device.
+
 - **Browsers on one network find each other.** `NearbyRoom` meets the
   browsers behind one public address in a Nostr room derived from that
   address and the application id, lists them by the label each application

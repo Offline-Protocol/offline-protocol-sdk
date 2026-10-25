@@ -19,6 +19,8 @@ export interface StartOptions {
   tabs?: boolean;
   /** The Nostr transport over relays the application names (W12). */
   nostr?: NostrOptions;
+  /** The Bluetooth LE slot, driven by a BluetoothCarrier on this page (W14). */
+  ble?: boolean;
   /** Where worker.js is served, if not beside this module. */
   workerUrl?: string | URL;
   /**
@@ -176,6 +178,15 @@ export class OfflineNode extends EventTarget {
     freshUntilMs: number;
   } | null>;
   nearbyClose(id: number): Promise<void>;
+  /** BluetoothCarrier's half in the worker (W14). */
+  bleHello(): Promise<Uint8Array>;
+  bleAppTag(): Promise<Uint8Array>;
+  bleVerify(deviceId: Uint8Array, identity: Uint8Array): Promise<string>;
+  bleLinkUp(peer: string, maxPayload: number): Promise<void>;
+  bleFragmentReceived(peer: string, bytes: Uint8Array): Promise<void>;
+  bleLinkDown(peer: string): Promise<void>;
+  /** Where the engine's outbound Bluetooth fragments go; BluetoothCarrier sets it. */
+  setBluetoothSink(sink: ((peer: string, bytes: Uint8Array) => void) | null): void;
   /** Registers a carrier the page opened; resolves to its link id. */
   openLink(carrier: PageCarrier): Promise<number>;
   /** Bytes the carrier delivered; resolves to the reason it was closed, if it was. */
@@ -336,3 +347,28 @@ export function publicAddress(
   iceServers: RTCIceServer[],
   options?: { timeoutMs?: number; settleMs?: number },
 ): Promise<string>;
+
+/**
+ * A Bluetooth LE carrier over Web Bluetooth (W14): this page as a GATT
+ * central to phones and boards running the SDK as a peripheral. Chromium
+ * only. The page is never discoverable: every link starts from a person
+ * picking a device in the browser's chooser, inside a user gesture, or from a
+ * device this origin was granted before. Start the node with `ble: true`.
+ * A `connection` event carries `{ peer, state: "connected" | "closed" }`.
+ */
+export class BluetoothCarrier extends EventTarget {
+  /** `bluetooth` defaults to `navigator.bluetooth`. */
+  constructor(node: OfflineNode, options?: { bluetooth?: unknown });
+  /** Whether this browser exposes Web Bluetooth at all. */
+  static readonly supported: boolean;
+  /** The addresses linked now. */
+  readonly peers: string[];
+  /** Opens the chooser and links the device picked; call inside a user gesture. */
+  request(): Promise<string>;
+  /** Devices this origin was granted before, where the browser remembers them. */
+  known(): Promise<unknown[]>;
+  /** Links a device; resolves to the address its identity proves. */
+  connect(device: unknown): Promise<string>;
+  close(peer: string): void;
+  closeAll(): void;
+}

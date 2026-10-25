@@ -1343,6 +1343,25 @@ real device off the list between its announcements. The application's own
 policy (who it asks about, how fast it lets questions come) is the limit
 here, not a count in the SDK.
 
+### R31. A Bluetooth chooser names nearby devices, and a granted device stays granted
+
+A page that opens the Web Bluetooth chooser shows its person the name every
+nearby SDK peripheral advertises. The device the person picks is granted to
+the origin, and Chromium remembers the grant: the origin can reconnect to
+that device later without asking (`getDevices`), for as long as the grant
+stands
+([web bridge W14](../bridges/web.md#w14-bluetooth-is-a-central-the-person-points-at-a-device)).
+
+**Why it stands:** the chooser is the browser's, and it is the only way a
+page reaches Bluetooth at all; the grant is what lets a page reconnect
+without a click every time.
+
+**What bounds it:** the chooser is filtered to the SDK's service, and a page
+learns nothing about a device until its person picks it. A link carries
+bytes only: the engine announces a peer under the address its identity
+proves, never the advertised name, and MLS admits it to nothing until it is
+invited. The person can revoke a grant in the browser's site settings.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

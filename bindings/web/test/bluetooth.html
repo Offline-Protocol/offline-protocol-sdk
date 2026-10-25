@@ -1,0 +1,93 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// A node links to an SDK peripheral over its Bluetooth carrier, through a
+// stand-in for navigator.bluetooth (test/fake-bluetooth.js) whose device is a
+// second node playing the peripheral. The chooser is asked for the SDK's
+// service; the carrier verifies the peripheral, subscribes, writes its hello
+// before anything else, and the two form a session and exchange a message
+// that crosses in several fragments, each way. A peripheral serving a Device
+// id its identity does not prove is refused and disconnected; of two
+// instances behind one device, the carrier binds the one tagged with this
+// application; and a disconnect reports the peer lost. The title ends as
+// PASS or FAIL: <step>.
+import { OfflineNode, BluetoothCarrier } from "../src/index.js";
+import { FakeBluetooth, peripheral, foreignInstance } from "./fake-bluetooth.js";
+import { log, waitFor, run } from "./common.js";
+
+const appId = `web-bluetooth-${crypto.randomUUID()}`;
+const start = (profile) => OfflineNode.start({ appId, profile, storage: "memory", tabs: false, ble: true });
+
+await run(async (step) => {
+  const [a, b, c] = await Promise.all([start("browser"), start("phone"), start("other")]);
+
+  step.name = "link";
+  const device = await peripheral(b, a.address);
+  const bluetooth = new FakeBluetooth([device]);
+  const carrier = new BluetoothCarrier(a, { bluetooth });
+  const sessions = Promise.all([
+    waitFor(a, "secure_session_established", (e) => e.peer_id === b.address),
+    waitFor(b, "secure_session_established", (e) => e.peer_id === a.address),
+  ]);
+  const discovered = waitFor(a, "neighbor_discovered", (e) => e.peer_id === b.address && e.transport === "BLE");
+  const peer = await carrier.request();
+  if (peer !== b.address) throw new Error(`linked ${peer}, not the peripheral's proved address`);
+  const asked = bluetooth.requests[0]?.filters?.[0]?.services ?? [];
+  if (!asked.includes("6e400001-b5a3-f393-e0a9-e50e24dcca9e")) {
+    throw new Error(`the chooser was not asked for the SDK's service: ${JSON.stringify(bluetooth.requests)}`);
+  }
+  if (device.hello.writes.length !== 1) throw new Error("the central did not write exactly one hello");
+  await discovered;
+  await sessions;
+  log("the carrier verified the peripheral, said hello, and a session formed over Bluetooth");
+
+  step.name = "hello first";
+  // Every Message write came after the hello, so the peripheral attributed all of them.
+  if (device.order[0] !== "hello" || device.order.indexOf("hello", 1) !== -1) {
+    throw new Error(`the hello was not the first and only hello write: ${device.order.slice(0, 5)}`);
+  }
+  if (device.message.writes.length === 0) throw new Error("nothing was written to Message");
+  log(`${device.message.writes.length} fragments written, all after the hello`);
+
+  step.name = "messages";
+  const long = "over Bluetooth ".repeat(40);
+  const toB = waitFor(b, "message_received", (e) => e.content === long && e.encrypted === true);
+  await a.sendMessage(b.address, long);
+  await toB;
+  const toA = waitFor(a, "message_received", (e) => e.content === long && e.encrypted === true);
+  await b.sendMessage(a.address, long);
+  await toA;
+  log("a message of several fragments crossed each way");
+
+  step.name = "a lying peripheral";
+  const liar = await peripheral(c, a.address, { servedId: b.address });
+  const refused = await new BluetoothCarrier(a, { bluetooth: new FakeBluetooth([liar]) })
+    .request()
+    .then(() => null, (error) => error.message);
+  if (!refused) throw new Error("a peripheral serving another's Device id was linked");
+  if (liar.gatt.connected) throw new Error("a refused peripheral was left connected");
+  log(`a peripheral whose Device id its identity does not prove was refused: ${refused}`);
+  // The liar's carrier replaced the node's Bluetooth sink; the first carrier
+  // takes it back, as one carrier per node is the shape (W14).
+  a.setBluetoothSink(null);
+
+  step.name = "instances";
+  const [d, e] = await Promise.all([start("phone-two"), start("phone-app-two")]);
+  const tag = await d.bleAppTag();
+  const foreign = await foreignInstance(e, Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]));
+  const shared = await peripheral(d, a.address, { tag, extraInstances: [foreign] });
+  const picked = await new BluetoothCarrier(a, { bluetooth: new FakeBluetooth([shared]) }).request();
+  if (picked !== d.address) throw new Error(`bound ${picked}, not this application's instance`);
+  log("of two instances behind one device, the one tagged with this application was bound");
+
+  step.name = "disconnect";
+  const lost = waitFor(a, "neighbor_lost", (ev) => ev.peer_id === d.address);
+  shared.gatt.disconnect();
+  await lost;
+  log("a disconnect reported the peer lost");
+
+  await Promise.all([a, b, c, d, e].map((node) => node.stop()));
+});
+</script>
