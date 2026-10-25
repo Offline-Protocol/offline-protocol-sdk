@@ -557,12 +557,22 @@ drops during the handshake is refused and never announced. One that drops
 later is reported lost once, and so is a link the page closes after its
 server already went away, when no disconnect event follows. A link that
 replaces an earlier one to the same address keeps the peer announced: the
-engine neither loses nor rediscovers it.
+engine neither loses nor rediscovers it. Linking a device that is already
+linked on a live connection hands back its peer and does nothing else: the
+browser returns the same device and the same characteristics for one
+physical device, so a second handshake would subscribe twice and deliver
+every fragment to the engine once per handshake. Every path that ends a
+link removes its notification listener for the same reason. Two connects
+to one device at once share one handshake: the engine holds one
+verification per address, so a second handshake would fail its link-up
+and take the first one's link down with it.
 
 **The write payload is the browser's if it says, and the floor if not.**
-Chromium does not expose the negotiated ATT MTU to a page; the carrier uses
-`maxWriteWithoutResponseSize` where the browser reports it, and otherwise
-the 185-byte floor every binding falls back to. A link whose ATT MTU is
+Chromium does not expose the negotiated ATT MTU to a page. The carrier
+reads `maxWriteWithoutResponseSize` on the Message characteristic, where
+the Web Bluetooth proposal puts it, and otherwise uses the 185-byte floor
+every binding falls back to. No browser reports it yet, so the floor is
+what runs today. A link whose ATT MTU is
 below 188 cannot carry a 185-byte fragment, and no shipped device is known
 to negotiate one, but it has not been measured from Chrome on Android
 (see what is not built).
@@ -702,7 +712,9 @@ start there, because Firefox answers it by asking the user.
   message of several fragments crosses each way. A peripheral serving a
   Device id its identity does not prove, one serving no Hello, one refusing
   the hello and one dropping mid-handshake are each refused, disconnected
-  and never announced. A second carrier is refused until the first is
+  and never announced. Linking a device already linked hands back its
+  peer and delivers each fragment once, and two connects to one device at
+  once share one handshake. A second carrier is refused until the first is
   released. Of two instances behind one device the one tagged with this
   application is bound; a disconnect reports the peer lost, as does closing
   a link whose server is already gone; stopping the node closes the

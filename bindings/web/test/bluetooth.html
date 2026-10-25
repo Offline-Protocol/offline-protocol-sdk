@@ -11,7 +11,8 @@
 // that crosses in several fragments, each way. Refused, each disconnected and
 // never announced: a peripheral serving a Device id its identity does not
 // prove, one serving no Hello, one refusing the hello, and one that drops
-// during the handshake. A second carrier on the node is refused until the
+// during the handshake. Linking a device already linked hands back its peer
+// and delivers each fragment once; two connects at once share one handshake. A second carrier on the node is refused until the
 // first is released. Of two instances behind one device, the carrier binds
 // the one tagged with this application. A disconnect reports the peer lost,
 // and so does closing a link whose server is already gone, with no event to
@@ -72,6 +73,36 @@ await run(async (step) => {
   await toA;
   log("a message of several fragments crossed each way");
 
+  step.name = "relink";
+  // Linking a device already linked hands back the peer, and every fragment
+  // still reaches the engine once: the browser returns the same device and
+  // characteristics, so a second subscription would deliver each one twice.
+  let notified = 0;
+  let delivered = 0;
+  const notify = device.message.notify.bind(device.message);
+  device.message.notify = (bytes) => {
+    if (device.message.notifying) notified += 1;
+    notify(bytes);
+  };
+  const receive = a.bleFragmentReceived.bind(a);
+  a.bleFragmentReceived = (from, bytes) => {
+    if (from === b.address) delivered += 1;
+    return receive(from, bytes);
+  };
+  const again = await carrier.connect(device);
+  if (again !== b.address) throw new Error(`relinked ${again}`);
+  const afterRelink = waitFor(a, "message_received", (e) => e.content === long);
+  await b.sendMessage(a.address, long);
+  await afterRelink;
+  await new Promise((r) => setTimeout(r, 300));
+  delete a.bleFragmentReceived;
+  device.message.notify = notify;
+  if (notified === 0 || delivered !== notified) {
+    throw new Error(`${notified} fragments notified, ${delivered} reached the engine`);
+  }
+  if (device.hello.writes.length !== 1) throw new Error("a relink said hello again");
+  log(`after a relink, ${notified} fragments reached the engine once each`);
+
   // Each refusal: the request rejects with `expected` in its message, the
   // device is left disconnected, and the browser never hears of the peer.
   const refusedBy = async (name, node, options, expected) => {
@@ -93,6 +124,26 @@ await run(async (step) => {
   await refusedBy("a peripheral refusing the hello", g, { refuseHello: true }, "refused the hello");
   await refusedBy("a drop mid-handshake", h, { dropOnHello: true }, "disconnected during the handshake");
   if (!carrier.peers.includes(b.address)) throw new Error("a refusal cost the live link");
+
+  step.name = "concurrent connects";
+  // Two connects to one device at once: the page hears of the link once,
+  // and of its loss once.
+  const t = await start("twice");
+  const twice = await peripheral(t, a.address);
+  bluetooth.devices = [twice];
+  let open = 0;
+  carrier.addEventListener("connection", ({ detail }) => {
+    if (detail.peer === t.address) open += detail.state === "connected" ? 1 : -1;
+  });
+  const both = await Promise.all([carrier.connect(twice), carrier.connect(twice)]);
+  if (both.some((p) => p !== t.address)) throw new Error(`linked ${both}`);
+  if (open !== 1) throw new Error(`${open} links announced open to one device`);
+  if (twice.hello.writes.length !== 1) throw new Error("two connects at once ran two handshakes");
+  const lostT = waitFor(a, "neighbor_lost", (ev) => ev.peer_id === t.address);
+  twice.gatt.disconnect();
+  await lostT;
+  if (open !== 0) throw new Error(`${open} links still announced open after the disconnect`);
+  log("two connects at once shared one handshake, announced one link, and its loss once");
 
   step.name = "one carrier per node";
   let second = null;
@@ -150,6 +201,6 @@ await run(async (step) => {
   if (next.peers.length !== 0 || third.gatt.connected) throw new Error("stopping left a link open");
   log("stopping the node closed the carrier's links");
 
-  await Promise.all([b, c, d, e, f, g, h, k].map((node) => node.stop()));
+  await Promise.all([b, c, d, e, f, g, h, k, t].map((node) => node.stop()));
 });
 </script>

@@ -62,10 +62,12 @@ async function characteristics(service) {
 export class BluetoothCarrier extends EventTarget {
   #node;
   #bluetooth;
-  // peer -> link: { device, peer, message, queue, inbound, linked, announced, gone, onDisconnect }
+  // peer -> link: { device, peer, message, queue, inbound, linked, announced, gone, onDisconnect, onNotify }
   #links = new Map();
   #tag = null;
   #released = false;
+  // device -> the handshake in flight for it, which a second connect joins.
+  #connecting = new Map();
 
   constructor(node, { bluetooth = globalThis.navigator?.bluetooth } = {}) {
     super();
@@ -110,6 +112,23 @@ export class BluetoothCarrier extends EventTarget {
   /// refuses the hello, or disconnects before the link is up.
   async connect(device) {
     this.#usable();
+    // Already linked on a live connection: the browser hands back the same
+    // device, and the same characteristics, for one physical device, so a
+    // second handshake would subscribe a second time and every fragment
+    // would reach the engine once per handshake.
+    const held = [...this.#links.values()].find((l) => l.device === device);
+    if (held && device.gatt.connected) return held.peer;
+    // A handshake already under way for this device is joined, not raced:
+    // the engine holds one verification per address, so a second would
+    // fail its link-up and take the first one's link down with it.
+    const inflight = this.#connecting.get(device);
+    if (inflight) return inflight;
+    const handshake = this.#handshake(device).finally(() => this.#connecting.delete(device));
+    this.#connecting.set(device, handshake);
+    return handshake;
+  }
+
+  async #handshake(device) {
     const server = await device.gatt.connect();
     let ready;
     const link = {
@@ -125,13 +144,14 @@ export class BluetoothCarrier extends EventTarget {
       announced: false,
       gone: false,
       onDisconnect: null,
+      onNotify: null,
     };
     // Watched before the first await on the server, so a drop anywhere in
     // the handshake is seen.
     link.onDisconnect = () => {
       link.gone = true;
       if (link.linked) this.#lost(link);
-      else device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+      else this.#detach(link);
     };
     device.addEventListener("gattserverdisconnected", link.onDisconnect);
     const goneCheck = () => {
@@ -158,12 +178,13 @@ export class BluetoothCarrier extends EventTarget {
       );
       link.peer = peer;
       link.message = message;
-      message.addEventListener("characteristicvaluechanged", ({ target }) => {
+      link.onNotify = ({ target }) => {
         const bytes = bytesOf(target.value);
         link.inbound = link.inbound
           .then(() => this.#node.bleFragmentReceived(peer, bytes))
           .catch(() => {});
-      });
+      };
+      message.addEventListener("characteristicvaluechanged", link.onNotify);
       await message.startNotifications();
       try {
         await hello.writeValueWithResponse(await this.#node.bleHello());
@@ -178,18 +199,23 @@ export class BluetoothCarrier extends EventTarget {
       this.#links.set(peer, link);
       link.linked = true;
       if (previous) this.#retire(previous);
-      const payload = server.maxWriteWithoutResponseSize ?? FLOOR_PAYLOAD;
+      // Proposed for the characteristic (web-bluetooth #672) and shipped by
+      // no browser yet, so the floor is what runs today.
+      const payload = message.maxWriteWithoutResponseSize ?? FLOOR_PAYLOAD;
       // In #links before the engine hears of it: the fragments its link-up
       // queues reach the sink ahead of this call's reply.
       await this.#node.bleLinkUp(peer, payload);
       goneCheck();
+      // A connect to another device proving the same address replaced this
+      // link while the engine took it; the newer one is the one announced.
+      if (this.#links.get(peer) !== link) return peer;
       ready();
       link.announced = true;
       this.dispatchEvent(new CustomEvent("connection", { detail: { peer, state: "connected" } }));
       return peer;
     } catch (error) {
       if (link.linked) this.#lost(link);
-      else device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+      else this.#detach(link);
       if (device.gatt.connected) device.gatt.disconnect();
       throw error;
     }
@@ -262,10 +288,18 @@ export class BluetoothCarrier extends EventTarget {
     this.#lost(link);
   }
 
+  // Removes both of a link's listeners. Every path that ends a link comes
+  // here: a notification listener left on a characteristic the browser hands
+  // out again would deliver each fragment once more per handshake.
+  #detach(link) {
+    link.device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+    if (link.onNotify) link.message?.removeEventListener("characteristicvaluechanged", link.onNotify);
+  }
+
   // A link replaced by a newer one to the same address: closed without
   // telling the engine, which keeps the peer on the newer link.
   #retire(link) {
-    link.device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+    this.#detach(link);
     if (link.announced) {
       this.dispatchEvent(new CustomEvent("connection", { detail: { peer: link.peer, state: "closed" } }));
     }
@@ -276,7 +310,7 @@ export class BluetoothCarrier extends EventTarget {
   }
 
   #lost(link) {
-    link.device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+    this.#detach(link);
     if (this.#links.get(link.peer) !== link) return;
     this.#links.delete(link.peer);
     this.#node.bleLinkDown(link.peer);
@@ -289,7 +323,7 @@ export class BluetoothCarrier extends EventTarget {
   // The node stopped: its worker is gone, so the links carry nothing.
   #nodeStopped() {
     for (const link of [...this.#links.values()]) {
-      link.device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+      this.#detach(link);
       if (link.device.gatt.connected) link.device.gatt.disconnect();
       this.#links.delete(link.peer);
       if (link.announced) {

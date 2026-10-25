@@ -115,17 +115,24 @@ export async function peripheral(node, centralAddress, options = {}) {
       if (central) await node.bleFragmentReceived(central, bytes);
     },
   });
+  // A peripheral's stack answers one write before the next, so two hellos
+  // in flight are verified and linked one after the other.
+  let helloQueue = Promise.resolve();
   const hello = new Characteristic(HELLO, {
-    onWrite: async (bytes) => {
-      order.push("hello");
-      if (options.refuseHello) throw new DOMException("hello refused", "NotSupportedError");
-      if (options.dropOnHello) {
-        device.gatt.disconnect();
-        return;
-      }
-      const named = await node.bleVerify(encoder.encode(centralAddress), bytes);
-      await node.bleLinkUp(named, 244);
-      central = named;
+    onWrite: (bytes) => {
+      const handled = helloQueue.then(async () => {
+        order.push("hello");
+        if (options.refuseHello) throw new DOMException("hello refused", "NotSupportedError");
+        if (options.dropOnHello) {
+          device.gatt.disconnect();
+          return;
+        }
+        const named = await node.bleVerify(encoder.encode(centralAddress), bytes);
+        await node.bleLinkUp(named, 244);
+        central = named;
+      });
+      helloQueue = handled.catch(() => {});
+      return handled;
     },
   });
   // The node plays a peripheral here, never a central, so its sink is this
