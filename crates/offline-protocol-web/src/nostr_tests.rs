@@ -499,3 +499,80 @@ fn junk_from_a_relay_moves_nothing() {
         "junk surfaced as {events:?}"
     );
 }
+
+/// A key-package record anyone can publish opens, because its seal key
+/// derives from the queried address, and then need not decode. That is junk
+/// on a public tag like any other: dropped, not an error the page hears.
+#[test]
+fn a_record_that_opens_but_does_not_decode_is_not_an_error() {
+    use crate::node::SessionStart;
+    use offline_protocol_transport::nostr_crypto::{
+        record_seal_keypair_for_address, NostrEvent, NostrKeypair,
+    };
+
+    let mut a = peer("alice", false);
+    let b = peer("bob", false);
+    a.node.nostr_status_changed(true).expect("status");
+    assert_eq!(
+        a.node
+            .establish_secure_session(&b.address)
+            .expect("establish"),
+        SessionStart::Pending
+    );
+    let query = a.node.nostr_next_query().expect("a lookup for bob");
+    let seal =
+        record_seal_keypair_for_address(&b.address.parse().expect("address")).expect("seal key");
+    let squatter = NostrKeypair::generate_ephemeral().expect("key");
+    let record = NostrEvent::create_key_package_publication(
+        &squatter,
+        "routing-tag",
+        seal.public_key_hex(),
+        "slot",
+        b"not a protocol message",
+    )
+    .expect("record");
+    let sent: Value =
+        serde_json::from_str(&record.to_relay_message().expect("relay message")).expect("json");
+    let message = serde_json::json!(["EVENT", query.query_id, sent[1]]).to_string();
+    a.node
+        .nostr_relay_event(&message)
+        .expect("a record that opens and does not decode is not an error");
+}
+
+fn nostr_node(cold_contact: bool, username_discovery: bool, profile: &str) -> Node {
+    let options = NodeOptions {
+        nostr: Some(NostrOptions {
+            cold_contact,
+            username_discovery,
+        }),
+    };
+    let mut node = Node::with_options("web-nostr-test", profile, options).expect("node");
+    node.initialize().expect("initialize");
+    node.start().expect("start");
+    node.nostr_status_changed(true).expect("status");
+    node
+}
+
+/// With cold contact off the node never asks the relays for anyone's key
+/// packages: not for a session, and not for a send.
+#[test]
+fn without_cold_contact_nobody_is_looked_up() {
+    let mut node = nostr_node(false, false, "quiet");
+    let stranger = peer("carol", false);
+    node.establish_secure_session(&stranger.address)
+        .expect("establish");
+    let _ = node.send_message(&stranger.address, "hello", false);
+    assert!(
+        node.nostr_next_query().is_none(),
+        "a node without cold contact looked a peer up"
+    );
+}
+
+/// The directory is off unless asked for, and a lookup on a node without it
+/// is refused rather than left to wait for an answer that never comes.
+#[test]
+fn without_the_directory_a_lookup_is_refused() {
+    let mut node = nostr_node(true, false, "private");
+    assert!(node.resolve_username("bobby").is_err());
+    assert!(node.nostr_next_query().is_none());
+}

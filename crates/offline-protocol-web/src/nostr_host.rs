@@ -298,7 +298,14 @@ impl Node {
             .map_err(|e| NodeError(e.to_string()))?;
         match opened {
             Some(ResolvedRecord::KeyPackage { plaintext, .. }) => {
-                self.protocol.handle_resolved_key_package(&plaintext)?;
+                // Anyone can publish a record that opens: its seal key derives
+                // from the queried address. One that then does not decode is
+                // junk on a public tag, dropped like any other, not an error
+                // the page hears.
+                if let Err(error) = self.protocol.handle_resolved_key_package(&plaintext) {
+                    warn!(%error, "nostr: a resolved key-package record did not decode");
+                    return Ok(());
+                }
                 while self.protocol.receive_message().is_some() {}
             }
             Some(ResolvedRecord::Discovery {
