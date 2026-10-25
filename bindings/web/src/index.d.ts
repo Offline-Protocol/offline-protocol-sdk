@@ -102,7 +102,8 @@ export interface PageCarrier {
  * as a DOM event named by its `type` and as `event`, with the JSON as `detail`.
  *
  * Two more events are the binding's own. `error` carries a tick that failed
- * and the node carried on. `fatal` carries why the node ended (its module
+ * and the node carried on, or a Nostr relay the node cannot use (one the
+ * browser will not dial, or one that closed this device's subscription). `fatal` carries why the node ended (its module
  * trapped, its worker failed, or it was terminated): every call in flight and
  * every later one rejects. Starting the node again with the same `appId` and
  * `profile` is the same device when its storage is durable.

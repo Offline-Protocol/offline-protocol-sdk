@@ -378,13 +378,22 @@ only for bytes that decoded into a message, then announce the message's own
 sender. In another order, junk addressed to this device's public routing tag
 would move the watermark past history a relay still owes it.
 
-**A relay is live while it confirms this device's subscription.** It is
-live from its first `EOSE`, and every 60 s the subscription is sent again
-under the same id (a NIP-01 replace); a relay that has not answered within
-10 s is dropped and redialled, from 1 s doubling to 30 s, and coming back
-`online` redials at once. The engine hears "live" when the first relay is,
-which flushes the outbox, and "not live" when the last one stops. Nothing is
-published to a relay that is not live.
+**A relay is live while it keeps answering.** It is live from the first
+`EOSE` of this device's subscription, and every 60 s it is sent a probe: a
+`REQ` for an event id nobody can have, closed again on its `EOSE`. A relay
+that has not answered within 10 s is dropped and redialled, from 1 s
+doubling to 30 s, and coming back `online` redials at once. The probe is
+never the subscription sent again under its own id: a relay answers that
+replace with every stored event since the receive watermark, which sits more
+than an hour back because gift wraps backdate `created_at`, so it would
+replay that history from every relay every minute. The engine hears "live"
+when the first relay is, which flushes the outbox, and "not live" when the
+last one stops, before anything that relay held is failed or completed: a
+flush in between would hand the next query to no relay and spend that peer's
+five-minute resolution limit on an empty answer. Nothing is published to a
+relay that is not live, and a relay the browser will not dial (a `ws://` URL
+from an `https:` page) or that closes the subscription reaches the page as
+an `error` event.
 
 **An event is confirmed by the first relay that accepts it.** It goes to
 every live relay, and fails only when each of them refused it or dropped.
@@ -520,6 +529,13 @@ start there, because Firefox answers it by asking the user.
   published resolves to its address, an invite opens to its maker and a
   tampered one is refused, and a node offered no relays refuses to start
   (W12).
+- `nostr-relays.html`: the relay driver alone, with a recording engine and
+  its timers shortened. A keep-alive probe replays no stored event, an
+  `OK false` fails the event with the relay's reason, a relay that goes
+  quiet is reported down before its event fails and its query ends, a query
+  one relay never answers ends at its deadline rather than on the first
+  answer, and a relay that closes the subscription is reported and never
+  counts as live (W12).
 
   The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
   library. It keeps what is not ephemeral, replaces an addressable event by

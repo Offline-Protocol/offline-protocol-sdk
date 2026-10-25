@@ -1,0 +1,160 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// The Nostr transport's socket driver on its own, against the runner's relay,
+// with a recording engine in place of the worker's and its timers shortened
+// so a probe takes milliseconds rather than a minute (W12). It checks the
+// rules the engine cannot see: a keep-alive probe replays no stored history,
+// a refused event fails, a relay that goes quiet is reported down before what
+// it held is failed or completed, a query waits for every relay it went to,
+// and a relay that closes this device's subscription is reported. The title
+// ends as PASS or FAIL: <step>.
+import { NostrRelays } from "../src/nostr-relays.js";
+import { log, run } from "./common.js";
+
+const relay = new URLSearchParams(location.search).get("relay") ?? "ws://127.0.0.1:8766";
+const tag = `relays-${crypto.randomUUID()}`;
+
+function hex(bytes) {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+function event() {
+  const body = {
+    id: hex(32),
+    pubkey: "ab".repeat(32),
+    created_at: Math.floor(Date.now() / 1000),
+    kind: 1,
+    tags: [["t", tag]],
+    content: "",
+    sig: "",
+  };
+  return { messageId: `m-${body.id.slice(0, 8)}`, eventId: body.id, eventJson: JSON.stringify(["EVENT", body]) };
+}
+
+// An engine that writes down every call, in order.
+function recorder() {
+  const trace = [];
+  const engine = {
+    subscription: (id) => JSON.stringify(["REQ", id, { kinds: [1], "#t": [tag] }]),
+    event: (text) => trace.push(["event", JSON.parse(text)[2]?.id]),
+    status: (live) => trace.push(["status", live]),
+    confirmed: (id) => trace.push(["confirmed", id]),
+    failed: (id, reason) => trace.push(["failed", id, reason]),
+    completed: (id) => trace.push(["completed", id]),
+    warn: (text) => trace.push(["warn", text]),
+  };
+  return { trace, engine };
+}
+
+function until(trace, predicate, what, ms = 10000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const check = setInterval(() => {
+      const at = trace.findIndex(predicate);
+      if (at !== -1) {
+        clearInterval(check);
+        resolve(at);
+      } else if (Date.now() - started > ms) {
+        clearInterval(check);
+        reject(new Error(`timed out waiting for ${what}: ${JSON.stringify(trace)}`));
+      }
+    }, 20);
+  });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const live = (trace) => until(trace, ([kind, up]) => kind === "status" && up === true, "a live relay");
+
+await run(async (step) => {
+  step.name = "a probe replays nothing";
+  {
+    const { trace, engine } = recorder();
+    const driver = new NostrRelays([relay], engine, { keepAliveMs: 200, probeMs: 2000 });
+    driver.open();
+    await live(trace);
+    const stored = event();
+    driver.publish(stored);
+    await until(trace, ([kind, id]) => kind === "confirmed" && id === stored.messageId, "the OK");
+    await until(trace, ([kind, id]) => kind === "event" && id === stored.eventId, "the live copy");
+    // Seven probes or so. A probe that sent the subscription again would be
+    // answered with the stored event each time.
+    await sleep(1500);
+    const copies = trace.filter(([kind, id]) => kind === "event" && id === stored.eventId).length;
+    if (copies !== 1) throw new Error(`the stored event arrived ${copies} times`);
+    if (trace.some(([kind, up]) => kind === "status" && up === false)) {
+      throw new Error(`a relay that answered its probes was dropped: ${JSON.stringify(trace)}`);
+    }
+    driver.close();
+    log("probes kept the relay live and replayed nothing");
+  }
+
+  step.name = "a refused event fails";
+  {
+    const { trace, engine } = recorder();
+    const driver = new NostrRelays([`${relay}/reject`], engine);
+    driver.open();
+    await live(trace);
+    const refused = event();
+    driver.publish(refused);
+    const at = await until(trace, ([kind, id]) => kind === "failed" && id === refused.messageId, "the failure");
+    if (!String(trace[at][2]).includes("blocked")) throw new Error(`the relay's reason was lost: ${trace[at][2]}`);
+    driver.close();
+    log("an OK false failed the event with the relay's reason");
+  }
+
+  step.name = "a quiet relay goes down first";
+  {
+    const { trace, engine } = recorder();
+    const driver = new NostrRelays([`${relay}/once`], engine, { keepAliveMs: 300, probeMs: 300 });
+    driver.open();
+    await live(trace);
+    const held = event();
+    driver.publish(held);
+    driver.query({ queryId: "q-quiet", reqJson: JSON.stringify(["REQ", "q-quiet", { kinds: [1], "#t": [tag] }]) });
+    const failed = await until(trace, ([kind, id]) => kind === "failed" && id === held.messageId, "the failure");
+    const completed = await until(trace, ([kind, id]) => kind === "completed" && id === "q-quiet", "the completion");
+    const down = trace.findIndex(([kind, up]) => kind === "status" && up === false);
+    if (down === -1 || down > failed || down > completed) {
+      throw new Error(`what the relay held was released before it went down: ${JSON.stringify(trace)}`);
+    }
+    driver.close();
+    log("a relay that stopped answering was reported down before its event failed and its query ended");
+  }
+
+  step.name = "a query waits for every relay";
+  {
+    const { trace, engine } = recorder();
+    const driver = new NostrRelays([relay, `${relay}/once`], engine, { completionMs: 1500 });
+    driver.open();
+    await live(trace);
+    // Both slots up: the quiet one confirmed its subscription and went quiet.
+    await sleep(500);
+    const sent = Date.now();
+    driver.query({ queryId: "q-both", reqJson: JSON.stringify(["REQ", "q-both", { kinds: [1], "#t": [tag] }]) });
+    await until(trace, ([kind, id]) => kind === "completed" && id === "q-both", "the completion");
+    const waited = Date.now() - sent;
+    if (waited < 1400) throw new Error(`the query ended on the first relay's answer, after ${waited} ms`);
+    driver.close();
+    log(`a query one relay never answered ended at its deadline (${waited} ms), not on the first answer`);
+  }
+
+  step.name = "a closed subscription is reported";
+  {
+    const { trace, engine } = recorder();
+    const driver = new NostrRelays([`${relay}/closed`], engine);
+    driver.open();
+    const at = await until(trace, ([kind]) => kind === "warn", "the warning");
+    if (!trace[at][1].includes("auth-required")) throw new Error(`the relay's reason was lost: ${trace[at][1]}`);
+    if (trace.some(([kind, up]) => kind === "status" && up === true)) {
+      throw new Error("a relay that refused the subscription counted as live");
+    }
+    driver.close();
+    log("a relay that closed the subscription was reported, with its reason, and never counted as live");
+  }
+});
+</script>

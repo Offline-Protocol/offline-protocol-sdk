@@ -7,12 +7,17 @@
 //   type, its subscription id, an OK's event id and verdict) and hands every
 //   EVENT to the engine whole, which decodes, unseals and attributes it.
 // - A relay is live once it has confirmed this device's subscription with
-//   EOSE, and stays live while it keeps confirming: every KEEP_ALIVE_MS the
-//   subscription is sent again under the same id (a NIP-01 replace), and a
-//   relay that has not answered within PROBE_MS is dropped and redialled. A
+//   EOSE, and stays live while it keeps answering: every KEEP_ALIVE_MS it is
+//   sent a probe, a REQ for an event id nobody can have, and a relay that has
+//   not sent the probe's EOSE within PROBE_MS is dropped and redialled. A
 //   socket the network lost without closing it would otherwise count as a
-//   relay for ever. The engine hears "live" when the first relay is and "not
-//   live" when the last one stops.
+//   relay for ever. The probe is never the inbox subscription sent again: a
+//   replace is answered with every stored event since the receive watermark
+//   (an hour and more back, since gift wraps backdate created_at), so it
+//   would replay that history from every relay every minute. The engine
+//   hears "live" when the first relay is and "not live" when the last one
+//   stops, and hears "not live" before anything that relay held is released,
+//   so nothing is drained toward a relay set that is already empty.
 // - An event is confirmed by the first relay that accepts it and fails only
 //   when every relay it went to refused it or dropped. The transport expires
 //   a confirmation nobody reported, so a silent relay costs a retry, not a
@@ -32,6 +37,9 @@ const COMPLETION_TIMEOUT_MS = 10_000;
 // Events awaiting a verdict, at most. The transport bounds its own queue;
 // this bounds the driver's copy if the relays never answer.
 const MAX_PENDING_EVENTS = 1024;
+// The probe asks for this id, which no event has: a relay answers it with its
+// EOSE and nothing before it.
+const NO_EVENT_ID = "0".repeat(64);
 
 function randomHex(bytes) {
   const buffer = new Uint8Array(bytes);
@@ -65,11 +73,15 @@ export class NostrRelays {
   #engine;
   #slots = [];
   #subscriptionId = `inbox-${randomHex(8)}`;
+  #probeId = `probe-${randomHex(8)}`;
   // eventId -> { messageId, waiting: Set<url>, reason }
   #pending = new Map();
   // queryId -> { waiting: Set<url>, deadline }
   #queries = new Map();
   #keepAlive = null;
+  #keepAliveMs;
+  #probeMs;
+  #completionMs;
   #live = false;
   #closed = false;
   #wake = () => this.#redialNow();
@@ -77,9 +89,17 @@ export class NostrRelays {
   /// `engine` is what the worker hands over: `subscription(id)` returns the
   /// REQ text, `event(text)` takes a relay's EVENT, `status(live)`,
   /// `confirmed(messageId)`, `failed(messageId, reason)` and
-  /// `completed(queryId)` report back.
-  constructor(relays, engine) {
+  /// `completed(queryId)` report back, and `warn(text)` reports a relay the
+  /// node cannot use (one the browser will not dial, or one that ends this
+  /// device's subscription), which the page would otherwise never learn of.
+  ///
+  /// `timers` exists for the driver's own test page, which cannot wait out a
+  /// minute per probe; a node always runs on the defaults.
+  constructor(relays, engine, timers = {}) {
     this.#engine = engine;
+    this.#keepAliveMs = timers.keepAliveMs ?? KEEP_ALIVE_MS;
+    this.#probeMs = timers.probeMs ?? PROBE_MS;
+    this.#completionMs = timers.completionMs ?? COMPLETION_TIMEOUT_MS;
     for (const url of checkRelays(relays)) {
       this.#slots.push({ url, socket: null, live: false, confirm: null, retry: null, backoff: RETRY_MIN_MS });
     }
@@ -91,7 +111,7 @@ export class NostrRelays {
 
   open() {
     for (const slot of this.#slots) this.#connect(slot);
-    this.#keepAlive = setInterval(() => this.#probe(), KEEP_ALIVE_MS);
+    this.#keepAlive = setInterval(() => this.#probe(), this.#keepAliveMs);
     self.addEventListener?.("online", this.#wake);
   }
 
@@ -112,7 +132,7 @@ export class NostrRelays {
   query({ queryId, reqJson }) {
     const live = this.#slots.filter((slot) => slot.live);
     if (live.length === 0) return this.#engine.completed(queryId);
-    const deadline = setTimeout(() => this.#finish(queryId), COMPLETION_TIMEOUT_MS);
+    const deadline = setTimeout(() => this.#finish(queryId), this.#completionMs);
     this.#queries.set(queryId, { waiting: new Set(live.map((s) => s.url)), deadline });
     for (const slot of live) slot.socket.send(reqJson);
   }
@@ -139,8 +159,13 @@ export class NostrRelays {
     let socket;
     try {
       socket = new WebSocket(slot.url);
-    } catch {
-      // A URL the browser refuses to dial is refused for good.
+    } catch (error) {
+      // A URL the browser refuses to dial (a ws:// relay from an https: page
+      // is mixed content) is refused for good, and said so: with every relay
+      // refused the node would otherwise just never go live.
+      this.#engine.warn?.(
+        `nostr: the browser refused to dial ${slot.url}: ${error?.message ?? error}`,
+      );
       return;
     }
     slot.socket = socket;
@@ -163,20 +188,31 @@ export class NostrRelays {
     this.#await(slot);
   }
 
-  // Arms the confirmation deadline for the subscription just sent.
+  // Arms the confirmation deadline for the subscription or probe just sent.
   #await(slot) {
     clearTimeout(slot.confirm);
     const socket = slot.socket;
     slot.confirm = setTimeout(() => {
       if (slot.socket === socket) this.#lost(slot, socket);
-    }, PROBE_MS);
+    }, this.#probeMs);
   }
 
   #probe() {
+    const probe = JSON.stringify(["REQ", this.#probeId, { ids: [NO_EVENT_ID] }]);
     for (const slot of this.#slots) {
       if (slot.live && slot.socket?.readyState === WebSocket.OPEN && !slot.confirm) {
-        this.#subscribe(slot);
+        slot.socket.send(probe);
+        this.#await(slot);
       }
+    }
+  }
+
+  // The relay answered the probe: it is still carrying this socket.
+  #probed(slot) {
+    clearTimeout(slot.confirm);
+    slot.confirm = null;
+    if (slot.socket?.readyState === WebSocket.OPEN) {
+      slot.socket.send(JSON.stringify(["CLOSE", this.#probeId]));
     }
   }
 
@@ -209,13 +245,26 @@ export class NostrRelays {
         slot.backoff = RETRY_MIN_MS;
         slot.live = true;
         this.#setLive(true);
+      } else if (id === this.#probeId) {
+        this.#probed(slot);
       } else {
         this.#answered(slot, id);
       }
     } else if (type === "CLOSED") {
-      // A relay that ends this device's subscription is not carrying it.
-      if (id === this.#subscriptionId) this.#lost(slot, slot.socket);
-      else this.#answered(slot, id);
+      if (id === this.#subscriptionId) {
+        // A relay that ends this device's subscription is not carrying it.
+        // Said once per drop, because the redial may meet the same refusal
+        // (a relay that wants authentication) every time.
+        this.#engine.warn?.(
+          `nostr: ${slot.url} closed this device's subscription: ${parts[2] ?? "no reason given"}`,
+        );
+        this.#lost(slot, slot.socket);
+      } else if (id === this.#probeId) {
+        // A refusal is still an answer from a live relay.
+        this.#probed(slot);
+      } else {
+        this.#answered(slot, id);
+      }
     }
   }
 
@@ -263,11 +312,15 @@ export class NostrRelays {
   #lost(slot, socket) {
     if (slot.socket !== socket || socket === null) return;
     this.#drop(slot);
+    // Before anything is released: each release runs the engine and flushes,
+    // and a flush that still saw this node live would drain the next query
+    // toward no relay, complete it empty and spend the peer's resolution
+    // rate limit on nothing.
+    this.#setLive(this.#slots.some((s) => s.live));
     for (const [eventId, entry] of [...this.#pending]) {
       if (entry.waiting.has(slot.url)) this.#released(entry, eventId, slot.url);
     }
     for (const queryId of [...this.#queries.keys()]) this.#answered(slot, queryId);
-    this.#setLive(this.#slots.some((s) => s.live));
     if (this.#closed) return;
     slot.retry = setTimeout(() => this.#connect(slot), slot.backoff);
     slot.backoff = Math.min(slot.backoff * 2, RETRY_MAX_MS);

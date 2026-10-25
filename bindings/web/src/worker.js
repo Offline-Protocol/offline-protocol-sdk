@@ -131,6 +131,8 @@ function relaysFor() {
     confirmed: guarded((messageId) => engine.nostrConfirmSent(messageId)),
     failed: guarded((messageId, reason) => engine.nostrSendFailed(messageId, reason)),
     completed: guarded((queryId) => engine.nostrQueryCompleted(queryId)),
+    // A relay the node cannot use reaches the page as an `error` event.
+    warn: (text) => post({ kind: "error", message: text }),
   };
 }
 

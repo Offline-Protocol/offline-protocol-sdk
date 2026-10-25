@@ -12,7 +12,10 @@
 // a socket the network lost without closing it. On `/first/<token>` the
 // first socket for a token is served and every later one is silent: a relay
 // that answered before a network change and now accepts and ignores a
-// redial. Node's standard library only, so the test runner installs nothing.
+// redial. On `/reject` every event is refused with `OK false`, and on
+// `/closed` every subscription is ended with `CLOSED`, as a relay that wants
+// authentication does. Node's standard library only, so the test runner
+// installs nothing.
 //
 // Usage: node test/nostr-relay.mjs <port>
 
@@ -163,7 +166,9 @@ class Client {
     }
     if (this.silent) return;
     const [type, ...rest] = message;
-    if (type === "REQ") {
+    if (type === "REQ" && this.mode === "closed") {
+      this.send(["CLOSED", rest[0], "auth-required: this relay serves members only"]);
+    } else if (type === "REQ") {
       const [id, ...filters] = rest;
       this.subscriptions.set(id, filters);
       for (const event of history(filters)) this.send(["EVENT", id, event]);
@@ -171,6 +176,8 @@ class Client {
       if (this.mode === "once") this.mode = "quiet";
     } else if (type === "CLOSE") {
       this.subscriptions.delete(rest[0]);
+    } else if (type === "EVENT" && this.mode === "reject") {
+      this.send(["OK", rest[0]?.id ?? "", false, "blocked: this relay takes nothing"]);
     } else if (type === "EVENT") {
       const event = rest[0];
       keep(event);
@@ -193,7 +200,7 @@ server.on("upgrade", (request, socket) => {
     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
       `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
   );
-  let mode = { "/silent": "silent", "/once": "once" }[request.url] ?? "open";
+  let mode = { "/silent": "silent", "/once": "once", "/reject": "reject", "/closed": "closed" }[request.url] ?? "open";
   if (request.url.startsWith("/first/")) {
     mode = served.has(request.url) ? "silent" : "open";
     served.add(request.url);
