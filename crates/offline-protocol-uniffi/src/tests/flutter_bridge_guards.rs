@@ -99,10 +99,18 @@ const FLUTTER_SHARED_SOURCES: &[&str] = &[
     "InternetManager",
     "PresenceWatchPolicy",
     "EventReplayRing",
+    "InboundEventBuffer",
     "ForegroundReconnectPolicy",
     "WifiDirectManager",
     "ProtocolConfigParser",
     "InitialRuntimeConfigApplier",
+    "ProtocolBackgroundProcessor",
+    "ProtocolEngineHost",
+    "ProtocolEngineHostBridge",
+    "TransportBridge",
+    "ReticulumManager",
+    "NostrManager",
+    "NostrQueryTracker",
 ];
 
 /// Every `exclude('com/offlineprotocol/X.kt')` in the plugin's Gradle build.
@@ -442,5 +450,24 @@ fn flutter_method_channel_methods_match_native_plugins() {
     assert_eq!(
         swift_methods, dart_set,
         "OfflineProtocolPlugin.swift switch call.method must match Dart nativeMethodChannelMethods"
+    );
+}
+
+/// The Android plugin prefers the native libraries a release stages into it,
+/// and falls back to the React Native build otherwise. The choice must test
+/// for the library, never for a non-empty directory: an ABI directory with no
+/// library in it passes that test, the fallback never runs, and the AAR ships
+/// with no native code, failing at the first UniFFI call.
+#[test]
+fn flutter_android_staged_jni_libs_are_chosen_by_the_library_not_the_directory() {
+    let gradle = read_text(&flutter_plugin_dir().join("android/build.gradle"));
+    assert!(
+        gradle.contains("it.name == 'libuniffi_offline_protocol.so'")
+            && gradle.contains("jniLibs.srcDirs(stagedHasLibrary ? stagedJni : rnJni)"),
+        "android/build.gradle must use the staged jniLibs only when a library is present"
+    );
+    assert!(
+        !gradle.contains("stagedJni.list()"),
+        "android/build.gradle must not choose the staged jniLibs by listing the directory"
     );
 }

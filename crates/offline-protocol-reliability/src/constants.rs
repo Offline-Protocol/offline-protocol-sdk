@@ -78,8 +78,8 @@ mod tests {
         let rn_root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
         let kotlin_path =
-            rn_root.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
-        let swift_path = rn_root.join("ios/OfflineProtocolModule.swift");
+            rn_root.join("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt");
+        let swift_path = rn_root.join("ios/ProtocolEngineHostBridge.swift");
 
         // The guard only applies in the repo checkout; skip when the
         // bindings tree isn't present (e.g. a vendored crate).
@@ -95,13 +95,15 @@ mod tests {
             (
                 format!("json.optLong(\"defaultTimeoutMs\", {DEFAULT_ACK_TIMEOUT_MS})"),
                 format!(
-                    "(config[\"defaultTimeoutMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_ACK_TIMEOUT_MS}"
+                    r#"unsigned64(j, "defaultTimeoutMs", {})"#,
+                    format_underscored(DEFAULT_ACK_TIMEOUT_MS)
                 ),
             ),
             (
                 format!("json.optLong(\"maxPendingAcks\", {DEFAULT_MAX_PENDING_ACKS})"),
                 format!(
-                    "(config[\"maxPendingAcks\"] as? NSNumber)?.uint64Value ?? {DEFAULT_MAX_PENDING_ACKS}"
+                    r#"unsigned64(j, "maxPendingAcks", {})"#,
+                    format_underscored(DEFAULT_MAX_PENDING_ACKS as u64)
                 ),
             ),
         ];
@@ -140,19 +142,23 @@ mod tests {
         }
 
         let swift_expected = [
-            format!("(config[\"maxRetries\"] as? NSNumber)?.uint32Value ?? {DEFAULT_MAX_RETRIES}"),
+            format!(r#"unsigned32(j, "maxRetries", {DEFAULT_MAX_RETRIES})"#),
             format!(
-                "(config[\"initialDelayMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_INITIAL_DELAY_MS}"
-            ),
-            format!("(config[\"maxDelayMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_MAX_DELAY_MS}"),
-            format!(
-                "(config[\"backoffMultiplier\"] as? NSNumber)?.floatValue ?? {DEFAULT_BACKOFF_MULTIPLIER:.1}"
+                r#"unsigned64(j, "initialDelayMs", {})"#,
+                format_underscored(DEFAULT_INITIAL_DELAY_MS)
             ),
             format!(
-                "(config[\"outboxMaxLifetimeMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_OUTBOX_LIFETIME_MS}"
+                r#"unsigned64(j, "maxDelayMs", {})"#,
+                format_underscored(DEFAULT_MAX_DELAY_MS)
+            ),
+            format!(r#"number(j, "backoffMultiplier") ?? {DEFAULT_BACKOFF_MULTIPLIER:.1}"#),
+            format!(
+                r#"unsigned64(j, "outboxMaxLifetimeMs", {})"#,
+                format_underscored(DEFAULT_OUTBOX_LIFETIME_MS)
             ),
             format!(
-                "(config[\"pendingMessageMaxLifetimeMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_PENDING_MESSAGE_LIFETIME_MS}"
+                r#"unsigned64(j, "pendingMessageMaxLifetimeMs", {})"#,
+                format_underscored(DEFAULT_PENDING_MESSAGE_LIFETIME_MS)
             ),
         ];
         for expected in &swift_expected {
@@ -163,5 +169,18 @@ mod tests {
                 swift_path.display()
             );
         }
+    }
+
+    /// Renders `86400000` as `86_400_000`, the form Swift bridge literals use.
+    fn format_underscored(value: u64) -> String {
+        let digits = value.to_string();
+        let mut out = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                out.push('_');
+            }
+            out.push(c);
+        }
+        out
     }
 }

@@ -26,6 +26,9 @@ val reactOnly = listOf(
     "OfflineProtocolModule.kt",
     "OfflineProtocolPackage.kt",
     "MeshHeadlessWakeService.kt",
+    "ProtocolEngineHostBridgeReactNative.kt",
+    "BridgeArgumentMaps.kt",
+    "BridgeResults.kt",
 )
 
 // Every name has to match a file. One that matches nothing is a rename nobody

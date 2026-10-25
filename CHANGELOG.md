@@ -15,6 +15,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Shared React Native engine bridge.** Engine operations live in
+  `ProtocolEngineHost` and `ProtocolEngineHostBridge`; `OfflineProtocolModule`
+  delegates through `ProtocolEngineHostBridgeReactNative` with promise fallback
+  codes pinned in `tools/rn_engine_bridge_error_manifest.json`. JavaScript sees
+  no change: the same file records the 19 methods that reject with typed
+  protocol codes and the one (`getDorsConfig`) whose JSON is resolved as an
+  object, and every other string reaches JavaScript unchanged. Generators and
+  `scripts/check-binding-generators.sh` keep Kotlin and Swift adapters in sync
+  ([C9b](docs/bridges/README.md#c9b-shared-engine-bridge-generators-and-rn-promise-codes)).
+
 - **The browser can remove a group member.** `OfflineNode.removeFromGroup`
   removes a member from a group this device administers: the others move to
   a new epoch whose keys the removed member never holds, and the removed

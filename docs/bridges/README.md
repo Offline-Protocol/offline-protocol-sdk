@@ -384,6 +384,58 @@ and they are fast enough that there is no excuse:
 compiler will not find it in the three languages that do not share a type system
 with the one you changed.
 
+## C9b. Shared engine bridge generators and RN promise codes
+
+React Native delegates the 107 methods listed in
+`tools/gen_protocol_engine_host_bridge.py` through
+`ProtocolEngineHostBridge` plus thin adapters
+(`ProtocolEngineHostBridgeReactNative.{swift,kt}`). Both adapters and the
+Kotlin bridge are generated; the Swift bridge is written by hand, and
+`tools/check_swift_protocol_engine_host_bridge.py` holds it to one handler per
+shared method with no stubs. It does not compare bodies with Kotlin, so a
+behaviour change goes into both bridges by hand. The gate runs all four:
+
+```bash
+bash scripts/check-binding-generators.sh --check   # CI gate
+```
+
+Each shared method resolves and rejects exactly as its inline React Native
+body did before the shared bridge existed, because `src/index.ts` and apps
+were written against that. `tools/rn_engine_bridge_error_manifest.json` holds
+what the thin `@objc` / `@ReactMethod` bodies can no longer show, per method:
+
+- **`code` and `message`**: the fallback a rejection uses when the shared
+  bridge throws.
+- **`mapProtocolErrors`**: true for the 19 methods (the sends, the connection
+  requests, `eraseCustody`, `resolveUsername`, the service requests) that went
+  through `rejectWithProtocolError`. A mapped core error rejects with its typed
+  code (`NoKeyPackage`, `SessionNotReady`, `MediaTransferLimit`, `DataDisabled`).
+  Every other method keeps its fixed code. Mapping all of them changes the code
+  an app sees; mapping none loses the typed codes the sends document.
+- **`parseJsonResult`**: true only for `getDorsConfig`, which React Native has
+  always resolved as an object while the shared bridge returns its JSON for
+  Flutter's codec. Every other string reaches JavaScript as the string:
+  `src/index.ts` passes `getTopology` and `getMessageStats` to `JSON.parse`,
+  and `JSON.parse` on an object throws.
+
+Both adapters read the same entry, so the two platforms cannot disagree. The
+JS harness stubs the native module and cannot see either property; the Rust
+guards `react_native_engine_bridge_error_codes_match_manifest`,
+`react_native_engine_bridge_keeps_typed_error_codes_where_they_always_were` and
+`react_native_engine_bridge_resolves_strings_javascript_parses_as_strings` hold
+them. After you change how one of the 107 methods resolves or rejects:
+
+```bash
+python3 tools/extract_rn_bridge_error_manifest.py   # merges; keeps hand-set fields
+python3 tools/gen_rn_protocol_engine_bridge_react_native_swift.py
+python3 tools/gen_rn_protocol_engine_bridge_react_native.py
+bash scripts/check-binding-generators.sh --check
+```
+
+Commit the manifest and both generated adapter files together. Edit the
+manifest directly for a resolve-only query that needs a domain code if the
+shared bridge throws.
+
 ## C10. Lifecycle rules for event emission
 
 An event delivered to a binding that has no live host instance is **lost**. The
