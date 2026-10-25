@@ -453,14 +453,28 @@ fn flutter_method_channel_methods_match_native_plugins() {
     );
 }
 
-/// The Android plugin prefers the native libraries a release stages into it,
-/// and falls back to the React Native build otherwise. The choice must test
-/// for the library, never for a non-empty directory: an ABI directory with no
-/// library in it passes that test, the fallback never runs, and the AAR ships
-/// with no native code, failing at the first UniFFI call.
+/// The plugin prefers native libraries a release stages into it, and falls
+/// back to the React Native build otherwise. The choice must test for the
+/// library, never for its directory: the libraries are ignored repository-wide,
+/// so a framework holding only an `Info.plist`, or an ABI directory with no
+/// library in it, passes a directory test and the fallback never runs. The iOS
+/// app then fails at the first UniFFI symbol; the Android AAR ships with no
+/// native code.
 #[test]
-fn flutter_android_staged_jni_libs_are_chosen_by_the_library_not_the_directory() {
-    let gradle = read_text(&flutter_plugin_dir().join("android/build.gradle"));
+fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory() {
+    let flutter = flutter_plugin_dir();
+    let podspec = read_text(&flutter.join("ios/offline_protocol.podspec"));
+    assert!(
+        podspec.contains("ios-arm64/liboffline_protocol_uniffi.a")
+            && podspec.contains("File.file?(staged_lib) ? staged_xcf : rn_xcf"),
+        "offline_protocol.podspec must vendor the staged XCFramework only when its device \
+         library is present"
+    );
+    assert!(
+        !podspec.contains("File.directory?(staged_xcf)"),
+        "offline_protocol.podspec must not choose the staged XCFramework by its directory"
+    );
+    let gradle = read_text(&flutter.join("android/build.gradle"));
     assert!(
         gradle.contains("it.name == 'libuniffi_offline_protocol.so'")
             && gradle.contains("jniLibs.srcDirs(stagedHasLibrary ? stagedJni : rnJni)"),
@@ -469,5 +483,10 @@ fn flutter_android_staged_jni_libs_are_chosen_by_the_library_not_the_directory()
     assert!(
         !gradle.contains("stagedJni.list()"),
         "android/build.gradle must not choose the staged jniLibs by listing the directory"
+    );
+    let ignore = read_text(&flutter.join("ios/.gitignore"));
+    assert!(
+        ignore.lines().any(|l| l.trim() == "Frameworks/"),
+        "ios/.gitignore must keep the staged XCFramework out of the repository"
     );
 }

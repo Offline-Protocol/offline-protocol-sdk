@@ -1,2 +1,7 @@
 # Written by offline_protocol.podspec prepare_command: a copy of the shared RN iOS bridge.
 BridgeRN
+# The XCFramework a release stages into the plugin, which offline_protocol.podspec
+# prefers when its device library is present. Never committed: the library
+# inside is ignored repository-wide, so a committed Info.plist is a framework
+# with no binary on every fresh clone.
+Frameworks/
