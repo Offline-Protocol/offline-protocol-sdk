@@ -1,12 +1,13 @@
 //! Nostr key-package publication slots and peer key-package resolution.
 //!
-//! Cold first contact over Nostr — reaching a peer known only by username, with
-//! no prior key-package exchange over some other transport — needs the peer's
-//! key package to be *fetchable* rather than pushed. This module owns the
-//! publishing half of that: it keeps a small set of single-use MLS key packages
-//! standing in addressable relay records, replaces each as it is consumed, and
-//! feeds the answers to outbound resolution queries back into the ordinary
-//! key-package handler.
+//! Cold first contact over Nostr (reaching a peer known only by address, with
+//! no prior key-package exchange over some other transport) needs the peer's
+//! key package to be *fetchable* rather than pushed. This module owns both
+//! halves of that: it keeps a small set of single-use MLS key packages
+//! standing in addressable relay records, replaces each as it is consumed,
+//! asks the relays for a peer's records when a session with that peer is
+//! wanted and nothing else can produce one, and feeds the answers back into
+//! the ordinary key-package handler.
 //!
 //! # Why slots, rather than one record
 //!
@@ -437,6 +438,57 @@ impl OfflineProtocol {
         Self::sign_control_message_with(&mut message, &manager, false)?;
         drop(manager);
         Ok(message)
+    }
+
+    /// Asks the relays for `peer_id`'s published key packages when a session
+    /// with them is wanted and only the relays can produce one. Returns
+    /// whether a query was queued.
+    ///
+    /// Invariant: a session wanted with a peer this device holds no key
+    /// package for is enough to ask every carrier that can produce one. For a
+    /// peer known only by address and reachable only through a relay, the
+    /// relays are that carrier, and nothing else ever asked them: a send with
+    /// no session only queues, so no frame is built for the transport to
+    /// attach a lookup to; discovery's first push never names a peer that has
+    /// sent nothing; and the tick's mesh push stands down whenever Nostr
+    /// claims to reach the peer. The records were published and never
+    /// fetched, so cold first contact never started on any binding (issue
+    /// #633).
+    ///
+    /// The gates run cheapest first, and the storage read comes last:
+    ///
+    /// - **Blocked peers are never asked about.** A query names the peer's
+    ///   routing tag to every relay, which is interest in them.
+    /// - **Cold contact must be on.** Off, nothing is published to fetch.
+    /// - **A live mesh link wins.** The link carries the key-package exchange
+    ///   within a tick, and a query would only tell the relays which address
+    ///   this device wants.
+    /// - **The transport's rate limit decides how often.** One query per peer
+    ///   per interval, read before the session check so that a peer with a
+    ///   message waiting costs one storage read per interval, not per tick.
+    /// - **A session already formed needs nothing.**
+    ///
+    /// Callers reach this only where they have found no key package for the
+    /// peer, so it does not look for one itself.
+    pub(crate) fn request_nostr_key_package_for(&mut self, peer_id: &str) -> bool {
+        if self.mls_manager.is_none()
+            || !self.config.encryption.enabled
+            || peer_id == self.local_id
+            || self.is_user_blocked(peer_id)
+            || !self.transport_manager.nostr_cold_contact_active()
+            || self.transport_manager.mesh_can_address(peer_id)
+            || !self.transport_manager.nostr_resolution_due(peer_id)
+        {
+            return false;
+        }
+        if !matches!(self.has_mls_session(peer_id), Ok(false)) {
+            return false;
+        }
+        let queued = self.transport_manager.request_nostr_key_packages(peer_id);
+        if queued {
+            debug!(peer_id = %peer_id, "No key package for a wanted session, asking the Nostr relays");
+        }
+        queued
     }
 
     /// Handles a key-package record returned by a resolution query.

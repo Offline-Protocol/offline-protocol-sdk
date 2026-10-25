@@ -470,7 +470,6 @@ impl Node {
         content: &str,
         ephemeral: bool,
     ) -> NodeResult<String> {
-        self.reach_over_nostr(recipient);
         let id = self.protocol.send_message_with(
             recipient,
             content,
@@ -540,13 +539,13 @@ impl Node {
     /// - [`SessionStart::Created`]: this call built it and sent the Welcome;
     /// - [`SessionStart::Existing`]: there already is one;
     /// - [`SessionStart::Pending`]: no key package from `peer` yet. On a node
-    ///   with relays this call has asked them for the peer's published
-    ///   packages, and `secure_session_established` follows once one arrives.
+    ///   with relays and no live link to `peer`, the engine has asked them
+    ///   for the peer's published packages, and `secure_session_established`
+    ///   follows once one arrives.
     ///
     /// Pending is not an error here, as it is in the engine: for a device met
     /// only by its address it is the ordinary first answer.
     pub fn establish_secure_session(&mut self, peer: &str) -> NodeResult<SessionStart> {
-        self.reach_over_nostr(peer);
         match self.protocol.establish_secure_session(peer) {
             Ok(Some(_)) => Ok(SessionStart::Created),
             Ok(None) => Ok(SessionStart::Existing),
@@ -595,32 +594,9 @@ impl Node {
         .map_err(mls)
     }
 
-    /// Asks the relays for `peer`'s published key packages when there is no
-    /// session with it yet and no live link to it. Nothing else does: a
-    /// session-less send only queues, and the engine's own key-package push
-    /// reaches only the mesh. That is a core gap on every binding, filed as
-    /// #633; once the engine asks for itself, this goes.
-    ///
-    /// A linked peer is skipped: the link carries the key-package exchange
-    /// within a tick, and a relay query would only publish which address
-    /// this node wants (its `#p` filter) for nothing.
-    fn reach_over_nostr(&self, peer: &str) {
-        if !self.nostr_enabled() || self.peers.contains_key(peer) || self.has_session(peer) {
-            return;
-        }
-        self.request_nostr_key_packages(peer);
-    }
-
     /// Whether `peer` is announced on a peer-stream link now.
     pub(crate) fn stream_linked(&self, peer: &str) -> bool {
         self.peers.contains_key(peer)
-    }
-
-    fn has_session(&self, peer: &str) -> bool {
-        self.protocol
-            .mls_manager()
-            .and_then(|manager| manager.read().ok()?.has_session(peer).ok())
-            .unwrap_or(false)
     }
 
     fn preamble(&self) -> NodeResult<Vec<u8>> {

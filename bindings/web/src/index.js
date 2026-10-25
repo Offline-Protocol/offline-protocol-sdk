@@ -144,7 +144,7 @@ export class OfflineNode extends EventTarget {
 
   /// Starts a session with `address`: "created" (the Welcome went out now),
   /// "existing", or "pending" while its key package has not arrived. On a
-  /// node with relays, "pending" has asked them for the packages the device
+  /// node with relays, the engine has asked them for the packages the device
   /// published, and `secure_session_established` follows. A message sent
   /// meanwhile waits for the session, so calling this first is optional.
   establishSecureSession(address) {

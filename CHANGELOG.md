@@ -226,6 +226,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A device known only by its address is reached over Nostr on every
+  binding.** Cold first contact never started outside the browser: a send to
+  a peer with no session only queued, and nothing asked the relays for the
+  key packages that peer published, so two phones sharing only a relay never
+  formed a session. The engine now asks when a send or
+  `establish_secure_session` finds no key package for the peer, and the
+  tick asks again every 5 minutes while a message waits. A peer on a live
+  Bluetooth or Wi-Fi link, a blocked peer, and every peer with cold contact
+  off are never looked up. The browser's own lookup is gone; the engine's
+  replaces it
+  ([#633](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/633)).
+
 - **An iPhone names a central that cannot be dialled back.** The iOS
   peripheral now serves the Hello characteristic, as Android and the Python
   service do: a central writes its identity assertion once, and the iPhone

@@ -356,8 +356,8 @@ fn linked_pair() -> (Peer, Peer) {
 
 /// A peer this node holds a live link to forms its session over the link;
 /// asking the relays for its key packages would only publish which address
-/// this node wants. Without the link check in `reach_over_nostr` a query
-/// comes out here.
+/// this node wants. Without the engine's mesh-link gate on its key-package
+/// request a query comes out here.
 #[test]
 fn a_linked_peer_is_not_looked_up_on_the_relays() {
     let (mut a, b) = linked_pair();

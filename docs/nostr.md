@@ -362,7 +362,11 @@ Sealing a frame requires the recipient's Nostr public key, and until it is known
 To make the fallback rare rather than routine, each install **publishes MLS key packages as fetchable relay records**, and resolves a peer's before sealing to them.
 
 - **Publishing.** `NOSTR_KEY_PACKAGE_SLOTS` (5) single-use key packages are published as NIP-33 addressable events (kind `30443`), one per slot, tagged `[["d", <slot id>], ["p", <our routing tag>]]` and signed by the install's real Nostr key. Slots refresh on the process tick: a package consumed by a Welcome, or expired, is replaced and republished under the same slot id.
-- **Resolving.** A send to a peer whose per-install key we lack queues a query — `{"kinds":[30443],"#p":[<their routing tag>]}` — issued to every connected relay. *That send still goes out on the bootstrap leg*: blocking on a relay round-trip would turn a metadata upgrade into latency, and the round-trip may have nothing to return. The answer upgrades the next frame.
+- **Resolving.** A query, `{"kinds":[30443],"#p":[<their routing tag>]}`, issued to every connected relay, asks for a peer's records. Two things queue one, at most once per peer every 5 minutes:
+  - **A session is wanted and no key package is held.** A send to, or an explicit `establish_secure_session` with, a peer this device holds no session and no key package for asks, and the reconciliation tick asks again while a message waits. This is the query cold contact depends on: with encryption required, that send builds no frame until a session exists, so nothing else would ask. A peer on a live Bluetooth or Wi-Fi link is not looked up, since the link carries the exchange; nor is a blocked peer.
+  - **A frame is sealed without the peer's per-install key.** *That frame still goes out on the bootstrap leg*: blocking on a relay round-trip would turn a metadata upgrade into latency, and the round-trip may have nothing to return. The answer upgrades the next frame.
+
+  Each query tells the relays it reaches that this device is interested in the queried tag. That is the price of fetching rather than pushing, and it is paid only for peers the application asked to reach.
 
 This is what makes **cold first contact** possible at all: a peer known only by address — from an invite or a QR code — becomes reachable over Nostr with no prior key-package exchange over some other transport. Note what changed with addressing: cold contact by *username* is gone, because a username no longer resolves to anything. Reaching a stranger means holding their address first.
 

@@ -3144,7 +3144,8 @@ impl OfflineProtocol {
     /// 1. Checks if a session already exists (returns Ok(None) if so)
     /// 2. Checks for a pending key package from the peer
     /// 3. If found, imports the key package, creates the session, and sends the Welcome message
-    /// 4. If no key package is available, returns an error
+    /// 4. If no key package is available, asks the Nostr relays for one the
+    ///    peer published (with cold contact on) and returns `SessionNotReady`
     ///
     /// This method is designed for use by application code that needs explicit control
     /// over session establishment, as opposed to the automatic encryption flow.
@@ -3247,7 +3248,11 @@ impl OfflineProtocol {
             }
         }
 
-        // No key package available (memory nor storage) — return non-terminal state so caller can retry
+        // No key package available (memory nor storage). Ask the relays for
+        // one the peer published, then return the non-terminal state so the
+        // caller can retry; the package that answers establishes the session
+        // on arrival.
+        self.request_nostr_key_package_for(peer_id);
         Err(Error::SessionNotReady(self.establishment_state(peer_id)?))
     }
 

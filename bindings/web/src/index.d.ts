@@ -122,7 +122,7 @@ export class OfflineNode extends EventTarget {
   sendMessage(to: string, content: string, options?: SendOptions): Promise<string>;
   /**
    * Starts a session with a device. "pending" means its key package has not
-   * arrived; with relays, the node has asked them for it, and
+   * arrived; with relays, the engine has asked them for it, and
    * `secure_session_established` follows.
    */
   establishSecureSession(address: string): Promise<SessionStart>;

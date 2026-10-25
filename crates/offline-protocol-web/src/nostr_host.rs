@@ -279,18 +279,6 @@ impl Node {
         }
     }
 
-    /// Asks the relays for `peer`'s published key packages. The transport
-    /// rate-limits the request per peer, so a caller may repeat it.
-    pub(crate) fn request_nostr_key_packages(&self, peer: &str) -> bool {
-        self.with_nostr(|nostr| nostr.request_peer_key_packages(peer))
-            .unwrap_or(false)
-    }
-
-    /// Whether Nostr is wired on this node.
-    pub(crate) fn nostr_enabled(&self) -> bool {
-        self.nostr_host.is_some()
-    }
-
     fn open_query_event(&mut self, query_id: &str, event: &Value) -> NodeResult<()> {
         let event_json = event.to_string();
         let opened = self

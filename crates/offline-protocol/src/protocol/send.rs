@@ -76,7 +76,8 @@ impl OfflineProtocol {
     /// encrypted before sending. If no session exists with the recipient but we have
     /// their key package, a session is created automatically. If no key package is
     /// available and `store_pending` is enabled, the message is queued until a key
-    /// package is received.
+    /// package is received; with Nostr cold contact on, the relays are asked for
+    /// one the recipient published.
     pub fn send_message(
         &mut self,
         recipient: impl Into<String>,
@@ -1114,7 +1115,10 @@ impl OfflineProtocol {
                     }
                 }
             } else {
-                // No key package available (memory nor storage)
+                // No key package available (memory nor storage). A peer
+                // reachable only through a relay produces none unprompted, so
+                // ask the relays for one it published.
+                self.request_nostr_key_package_for(recipient);
                 self.emit_mls_session_missing(
                     Some(recipient),
                     None,

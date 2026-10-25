@@ -10,6 +10,7 @@ mod ephemeral;
 mod file_stores;
 mod leaf_pairing;
 mod mesh_session;
+mod nostr_cold_contact;
 mod per_send_app_id;
 mod service_seal;
 
@@ -37985,6 +37986,166 @@ fn nostr_resolution_drops_anything_that_is_not_a_key_package() {
     assert!(
         bob.load_peer_capabilities_record(&id("mallory")).is_none(),
         "a non-key-package record was acted on"
+    );
+}
+
+// ============================================================================
+// COLD CONTACT: THE ENGINE ASKS THE RELAYS (issue #633)
+// ============================================================================
+
+/// A started engine with Nostr, and nothing else, to reach peers by.
+#[cfg(test)]
+fn started_with_nostr(user_id: &str) -> OfflineProtocol {
+    let mut protocol = protocol_with_nostr(user_id);
+    protocol.start().unwrap();
+    protocol
+}
+
+/// Pops the next resolution query, returning the routing tag it asks about.
+#[cfg(test)]
+fn next_resolution_tag(protocol: &OfflineProtocol) -> Option<String> {
+    let handle = nostr_transport_of(protocol);
+    let query = as_nostr(&handle).next_query().unwrap()?;
+    let req: serde_json::Value = serde_json::from_str(&query.req_json).unwrap();
+    req[2]["#p"][0].as_str().map(str::to_string)
+}
+
+#[cfg(test)]
+fn routing_tag_of(label: &str) -> String {
+    let address = id(label).parse::<offline_protocol_core::Address>().unwrap();
+    offline_protocol_transport::nostr_crypto::routing_tag_for_address(&address).unwrap()
+}
+
+/// A send to a peer this device holds no key package for asks the relays for
+/// the one it published. Before this nothing did: the send only queued, no
+/// frame was built for the transport to attach a lookup to, and cold contact
+/// never started on any binding.
+#[test]
+fn a_send_with_no_key_package_asks_the_relays_for_one() {
+    let mut alice = started_with_nostr("alice");
+    alice
+        .send_message(id("bob"), "hello", None, None::<String>)
+        .unwrap();
+    assert_eq!(
+        next_resolution_tag(&alice),
+        Some(routing_tag_of("bob")),
+        "the send queued no lookup of bob's published key packages"
+    );
+    assert_eq!(
+        next_resolution_tag(&alice),
+        None,
+        "one lookup, not one per path"
+    );
+}
+
+#[test]
+fn establishing_with_no_key_package_asks_the_relays_for_one() {
+    let mut alice = started_with_nostr("alice");
+    assert!(matches!(
+        alice.establish_secure_session(&id("bob")),
+        Err(Error::SessionNotReady(EstablishmentState::NoKeyPackage))
+    ));
+    assert_eq!(next_resolution_tag(&alice), Some(routing_tag_of("bob")));
+}
+
+/// One query per peer per interval, however many sends wait: a peer who has
+/// published nothing must not cost a round trip per message.
+#[test]
+fn repeated_sends_ask_once_per_interval() {
+    let mut alice = started_with_nostr("alice");
+    for _ in 0..3 {
+        alice
+            .send_message(id("bob"), "hello", None, None::<String>)
+            .unwrap();
+    }
+    alice.last_reconciliation_at = None;
+    alice.run_throttled_reconciliation("test");
+    assert!(next_resolution_tag(&alice).is_some());
+    assert_eq!(next_resolution_tag(&alice), None);
+}
+
+/// A query names the peer's routing tag to every relay. Nothing is worth
+/// that for a blocked peer, and there is nothing to fetch with cold contact
+/// off.
+#[test]
+fn no_lookup_for_a_blocked_peer_or_with_cold_contact_off() {
+    let mut alice = started_with_nostr("alice");
+    alice.block_user(&id("bob")).unwrap();
+    let _ = alice.establish_secure_session(&id("bob"));
+    assert_eq!(
+        next_resolution_tag(&alice),
+        None,
+        "a blocked peer was looked up"
+    );
+
+    let mut config = create_test_config();
+    config.profile = "carol".to_string();
+    config.encryption.enabled = true;
+    config.transport.nostr_enabled = true;
+    config.transport.nostr_cold_contact_enabled = false;
+    let mut carol = OfflineProtocol::new(config).unwrap();
+    carol
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let nostr = NostrTransport::new(local_id(&carol)).unwrap();
+    carol
+        .transport_manager_mut()
+        .add_transport(TransportType::Nostr, Box::new(nostr));
+    carol.start().unwrap();
+    carol
+        .send_message(id("bob"), "hello", None, None::<String>)
+        .unwrap();
+    assert_eq!(
+        next_resolution_tag(&carol),
+        None,
+        "cold contact off still looked up"
+    );
+}
+
+/// A peer on a live mesh link forms its session over the link within a tick;
+/// a query would only tell the relays which address this device wants.
+#[test]
+fn a_peer_on_a_live_link_is_not_looked_up_on_the_relays() {
+    let mut alice = started_with_nostr("alice");
+    let link = MockTransport::new(TransportType::WiFiDirect);
+    link.set_status(TransportStatus::Available);
+    link.add_connected_peer(id("bob"), -40);
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(link));
+    let _ = alice.establish_secure_session(&id("bob"));
+    alice
+        .send_message(id("bob"), "hello", None, None::<String>)
+        .unwrap();
+    assert_eq!(
+        next_resolution_tag(&alice),
+        None,
+        "a linked peer was looked up"
+    );
+
+    // The control: a peer with no link is.
+    let _ = alice.establish_secure_session(&id("carol"));
+    assert_eq!(next_resolution_tag(&alice), Some(routing_tag_of("carol")));
+}
+
+/// A message waiting for a session keeps asking, on the transport's
+/// interval: a lookup no relay could answer (none held a record yet, or none
+/// was live) is otherwise never repeated while the message waits.
+#[test]
+fn the_tick_asks_again_while_a_message_waits() {
+    let mut alice = started_with_nostr("alice");
+    alice
+        .send_message(id("bob"), "hello", None, None::<String>)
+        .unwrap();
+    assert!(next_resolution_tag(&alice).is_some());
+    as_nostr(&nostr_transport_of(&alice)).forget_resolution_attempts_for_test();
+
+    alice.last_reconciliation_at = None;
+    alice.run_throttled_reconciliation("test");
+    assert_eq!(
+        next_resolution_tag(&alice),
+        Some(routing_tag_of("bob")),
+        "the waiting message did not ask again once the interval lapsed"
     );
 }
 

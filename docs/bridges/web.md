@@ -418,18 +418,17 @@ The 10 s is the sixth hand-mirrored constant
 pinned here as in the two mobile trackers.
 
 **Reaching a device by its address alone asks the relays for its key
-packages.** `sendMessage` and `establishSecureSession` to a device with no
-session and no live link ask for the packages it published (cold contact,
-on by default); a linked device forms its session over the link, and asking
-the relays anyway would only tell them which address this node wants;
-the first one that opens forms the session, and a message sent meanwhile
-waits for it. The engine does not ask on its own: a session-less send only
-queues, and its own key-package push reaches only the mesh (a gap on every
-binding, filed as
-[#633](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/633);
-once the engine asks, this request goes). Without the request, two browsers that share only a relay never meet, which is what the
-negative control in `a_device_known_only_by_its_address_is_reached_over_nostr`
-shows. `establishSecureSession` answers `"created"`, `"existing"` or
+packages.** The engine asks, as it does on every binding: `sendMessage` and
+`establishSecureSession` to a device with no session and no live link queue
+a lookup of the packages it published (cold contact, on by default), and the
+tick asks again while a message waits. A linked device forms its session
+over the link, and asking the relays anyway would only tell them which
+address this node wants. The first package that opens forms the session,
+and a message sent meanwhile waits for it. The worker only moves the query
+and its answers; it decides nothing
+([#633](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/633)
+is where the engine stopped leaving this to the binding).
+`establishSecureSession` answers `"created"`, `"existing"` or
 `"pending"`; for a device met only by its address, pending is the ordinary
 first answer.
 
