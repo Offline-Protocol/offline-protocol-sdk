@@ -14656,10 +14656,47 @@ mod tests {
              rather than leave completePeerHandshake waiting on a read nobody will issue"
         );
         assert!(
-            swift.matches("blePeerDiscovered(").count() == 1
-                && kotlin.matches("blePeerDiscovered(").count() == 1,
-            "Each platform must announce from exactly one place — the verified path. A second \
-             call site is how an unproven id gets surfaced without anyone noticing"
+            kotlin.matches("blePeerDiscovered(").count() == 1,
+            "CentralGattClient.kt must announce from exactly one place, the verified path. A \
+             second call site is how an unproven id gets surfaced without anyone noticing"
+        );
+        // iOS has two verified paths in one file: the central's, after the
+        // cross-check, and the peripheral's, after a hello verifies (Android's
+        // peripheral path lives in BleTransportFacade.kt). Each announces once,
+        // and nothing else does.
+        let swift_body = |signature: &str| -> &str {
+            let start = swift
+                .find(signature)
+                .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
+            let rest = &swift[start + signature.len()..];
+            let end = [" private func ", " public func ", " func "]
+                .iter()
+                .filter_map(|next| rest.find(next))
+                .min()
+                .unwrap_or(rest.len());
+            &rest[..end]
+        };
+        let central =
+            swift_body("private func completePeerHandshake(for peripheral: CBPeripheral) {");
+        let hello =
+            swift_body("private func handleInboundHello(_ value: Data, from central: CBCentral) {");
+        assert!(
+            swift.matches("blePeerDiscovered(").count() == 2
+                && central.matches("blePeerDiscovered(").count() == 1
+                && hello.matches("blePeerDiscovered(").count() == 1,
+            "BleManager.swift must announce from exactly two places, the central's cross-checked \
+             path and the peripheral's verified hello. A third call site is how an unproven id \
+             gets surfaced without anyone noticing"
+        );
+        let at = |body: &str, needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("BleManager.swift lost `{needle}` on a verified path"))
+        };
+        assert!(
+            at(central, "case let .verified(peerId) = outcome") < at(central, "blePeerDiscovered(")
+                && at(hello, "verifyIdentityAssertion(assertion:")
+                    < at(hello, "blePeerDiscovered("),
+            "each iOS announce must follow its proof"
         );
         assert!(
             kotlin
