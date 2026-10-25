@@ -49,3 +49,29 @@ final class BleHelloPolicyTests: XCTestCase {
         }
     }
 }
+
+/// Covers `BlePeripheralHelloPolicy` only. That `BleManager` serves Hello,
+/// answers through this verdict and binds the central before announcing it
+/// is pinned in `react_native_ios_peripheral_serves_hello` in the uniffi
+/// crate.
+final class BlePeripheralHelloPolicyTests: XCTestCase {
+
+    func testTakesOneCompleteValueWithinTheBounds() {
+        XCTAssertEqual(BlePeripheralHelloPolicy.verdict(length: 96, offset: 0, requestsForHello: 1), .accept)
+        XCTAssertEqual(BlePeripheralHelloPolicy.verdict(length: 512, offset: 0, requestsForHello: 1), .accept)
+    }
+
+    func testRefusesALongWrite() {
+        XCTAssertEqual(BlePeripheralHelloPolicy.verdict(length: 115, offset: 18, requestsForHello: 1), .invalidOffset)
+        XCTAssertEqual(
+            BlePeripheralHelloPolicy.verdict(length: 115, offset: 0, requestsForHello: 2),
+            .invalidOffset,
+            "a long write arrives as several requests in one call"
+        )
+    }
+
+    func testRefusesALengthOutsideTheBounds() {
+        XCTAssertEqual(BlePeripheralHelloPolicy.verdict(length: 95, offset: 0, requestsForHello: 1), .invalidLength)
+        XCTAssertEqual(BlePeripheralHelloPolicy.verdict(length: 513, offset: 0, requestsForHello: 1), .invalidLength)
+    }
+}

@@ -122,6 +122,9 @@ public class BleManager: NSObject, TransportManager {
     private var deviceIdCharacteristic: CBMutableCharacteristic?
     private var identityCharacteristic: CBMutableCharacteristic?
     private var appTagCharacteristic: CBMutableCharacteristic?
+    /// Hello, served so a central this device cannot dial back names itself
+    /// on the link it opened (`BlePeripheralHelloPolicy`).
+    private var helloCharacteristic: CBMutableCharacteristic?
 
     /// Cached signed identity and local address for serving via GATT.
     ///
@@ -1670,9 +1673,23 @@ public class BleManager: NSObject, TransportManager {
             permissions: [.readable]
         )
 
+        // Hello: a central writes its identity assertion here once, with
+        // response, so this peripheral can name it without dialling it back.
+        // Without it a central that cannot be dialled (a browser, which has no
+        // GATT server; an Android phone whose advertising address rotated)
+        // has every fragment it writes queued behind a dial-back that never
+        // completes. Dynamic (nil value) and write-only: there is nothing to
+        // read, and each write is handled in `didReceiveWrite`.
+        helloCharacteristic = CBMutableCharacteristic(
+            type: HELLO_CHAR_UUID,
+            properties: [.write],
+            value: nil,
+            permissions: [.writeable]
+        )
+
         // Create service
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
-        service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!, appTagCharacteristic!]
+        service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!, appTagCharacteristic!, helloCharacteristic!]
         
         // Clear this app's published services first, so this add is the only
         // instance. CoreBluetooth documents the local GATT database as cleared
@@ -4556,8 +4573,26 @@ extension BleManager: CBPeripheralManagerDelegate {
     }
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        let helloRequests = requests.filter { $0.characteristic.uuid == HELLO_CHAR_UUID }.count
         for request in requests {
             noteCentralHeard(request.central.identifier)
+            if request.characteristic.uuid == HELLO_CHAR_UUID {
+                let value = request.value ?? Data()
+                switch BlePeripheralHelloPolicy.verdict(
+                    length: value.count,
+                    offset: request.offset,
+                    requestsForHello: helloRequests
+                ) {
+                case .accept:
+                    peripheral.respond(to: request, withResult: .success)
+                    handleInboundHello(value, from: request.central)
+                case .invalidOffset:
+                    peripheral.respond(to: request, withResult: .invalidOffset)
+                case .invalidLength:
+                    peripheral.respond(to: request, withResult: .invalidAttributeValueLength)
+                }
+                continue
+            }
             print("[BleManager] 📨 GATT WRITE REQUEST from \(request.central.identifier), char: \(request.characteristic.uuid), size: \(request.value?.count ?? 0)")
             emitDiagnostic("info", "GATT write request received", context: [
                 "centralId": request.central.identifier.uuidString,
@@ -4598,6 +4633,71 @@ extension BleManager: CBPeripheralManagerDelegate {
         }
     }
     
+    /// A central named itself by writing its identity assertion to Hello.
+    ///
+    /// The peripheral half of the chapter's Hello rule, and the iOS copy of
+    /// Android's `handleInboundHelloOnBleThread`: verify, bind the central to
+    /// the derived address (never to anything the central claimed), flush
+    /// the per-peer MTU before the core hears of the peer, announce it once,
+    /// then deliver whatever it wrote before it said hello. A hello that does
+    /// not verify is ignored, and one naming a different peer than the link
+    /// is already bound to never rebinds it: a link is bound once.
+    private func handleInboundHello(_ value: Data, from central: CBCentral) {
+        let peerId: String
+        do {
+            peerId = try verifyIdentityAssertion(assertion: [UInt8](value))
+        } catch {
+            emitDiagnostic("warning", "BLE hello failed verification", context: [
+                "central": central.identifier.uuidString,
+                "reason": error.localizedDescription
+            ])
+            return
+        }
+        // This device's own assertion, replayed at it, names no peer.
+        if peerId == currentLocalAddress() { return }
+        let bound = connections.centralDeviceId(for: central.identifier)
+            ?? connections.peripheralDeviceId(for: central.identifier)
+        if let bound = bound {
+            if bound != peerId {
+                emitDiagnostic("warning", "BLE hello names a different peer than this link", context: [
+                    "central": central.identifier.uuidString,
+                    "bound": bound,
+                    "hello": peerId
+                ])
+            }
+            return
+        }
+        let alreadyAnnounced = !otherLiveLinks(of: peerId, excluding: central.identifier).isEmpty
+        print("[BleManager] ✅ Hello from central \(central.identifier) verified as \(peerId)")
+        connections.setCentralDeviceId(peerId, for: central.identifier)
+
+        // ORDERING INVARIANT, as in `completePeerHandshake`: the per-peer
+        // MTU reaches the core before the peer does, in one serial block, so
+        // no fragmenting send sees an announced peer with no MTU on file.
+        let maxPayload = central.maximumUpdateValueLength
+        let rssi = peripheralRSSI[central.identifier] ?? -60
+        onProtocolQueue { [weak self] in
+            guard let self = self else { return }
+            do {
+                try self.protocolInstance.bleSetPeerMtu(peerId: peerId, maxPayload: UInt32(maxPayload))
+            } catch {
+                self.emitDiagnostic("error", "bleSetPeerMtu failed", context: [
+                    "deviceId": peerId,
+                    "error": error.localizedDescription,
+                    "cause": "uniffi_throw",
+                ])
+            }
+            if !alreadyAnnounced {
+                try? self.protocolInstance.blePeerDiscovered(peerId: peerId, rssi: rssi)
+            }
+        }
+
+        // Registers the connection, reflects the egress MTU and delivers the
+        // fragments this central wrote before its hello.
+        processPendingFragments(for: central.identifier, deviceId: peerId)
+        self.drainAndSendFragments()
+    }
+
     //  When a central subscribes to notifications, try to read its device ID
     // This helps resolve device IDs for Android devices that wrote to iOS before iOS connected to them
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {

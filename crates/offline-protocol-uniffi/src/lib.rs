@@ -14919,6 +14919,94 @@ mod tests {
         );
     }
 
+    /// The iOS peripheral serves Hello, and binds a central only on what its
+    /// hello proves.
+    ///
+    /// A central that cannot be dialled back (a browser over Web Bluetooth,
+    /// which has no GATT server; an Android phone whose advertising address
+    /// rotated) is named only by its hello. Without Hello in the service, every
+    /// fragment such a central writes is queued behind a dial-back that never
+    /// completes. `BlePeripheralHelloPolicy` is unit-tested; this pins that
+    /// `BleManager` uses it:
+    ///
+    /// 1. Hello is in the published service, write-only, under the Rust UUID.
+    /// 2. A write to it is answered through the policy's verdict, and only an
+    ///    accepted one reaches `handleInboundHello`.
+    /// 3. The handler verifies before it binds, and flushes the per-peer MTU
+    ///    before it announces, as `completePeerHandshake` does.
+    #[test]
+    fn react_native_ios_peripheral_serves_hello() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        assert!(
+            swift.contains("type: HELLO_CHAR_UUID, properties: [.write],"),
+            "BleManager.swift must create a write-only Hello characteristic"
+        );
+        let service = swift
+            .split("service.characteristics = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("BleManager.swift must set the service's characteristics");
+        assert!(
+            service.contains("helloCharacteristic!"),
+            "the published service must carry Hello ({service}])"
+        );
+
+        let write = swift
+            .split("didReceiveWrite requests: [CBATTRequest]) {")
+            .nth(1)
+            .expect("BleManager.swift must implement didReceiveWrite");
+        let end = [" public func ", " private func "]
+            .iter()
+            .filter_map(|next| write.find(next))
+            .min()
+            .unwrap_or(write.len());
+        let write = &write[..end];
+        let verdict = write
+            .find("BlePeripheralHelloPolicy.verdict(")
+            .expect("a Hello write must be answered through BlePeripheralHelloPolicy");
+        let accepted = write
+            .find("case .accept:")
+            .expect("the verdict's accept arm must exist");
+        let handled = write
+            .find("handleInboundHello(value, from: request.central)")
+            .expect("an accepted hello must reach handleInboundHello");
+        assert!(
+            verdict < accepted && accepted < handled,
+            "only an accepted hello may reach handleInboundHello"
+        );
+        assert_eq!(
+            write.matches("handleInboundHello(").count(),
+            1,
+            "handleInboundHello must be reached from the accept arm only"
+        );
+
+        let body = swift
+            .split("private func handleInboundHello(_ value: Data, from central: CBCentral) {")
+            .nth(1)
+            .expect("BleManager.swift must define handleInboundHello");
+        let body = &body[..body.find(" private func ").unwrap_or(body.len())];
+        let verified = body
+            .find("verifyIdentityAssertion(assertion:")
+            .expect("a hello must be verified");
+        let bound = body
+            .find("connections.setCentralDeviceId(peerId, for: central.identifier)")
+            .expect("a verified hello binds the central to the derived address");
+        let mtu = body
+            .find("bleSetPeerMtu(peerId: peerId")
+            .expect("the hello path must flush the per-peer MTU");
+        let announced = body
+            .find("blePeerDiscovered(peerId: peerId")
+            .expect("the hello path must announce the peer");
+        assert!(
+            verified < bound,
+            "a hello must be verified before it binds the central"
+        );
+        assert!(
+            mtu < announced,
+            "ORDERING INVARIANT: the hello path must call bleSetPeerMtu BEFORE blePeerDiscovered"
+        );
+    }
+
     /// The Android central refuses a second client link to a peer it already
     /// holds, before announcing it, and leaves the address undialed.
     ///

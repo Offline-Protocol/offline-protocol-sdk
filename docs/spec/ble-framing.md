@@ -138,6 +138,11 @@ every fragment the central wrote waits for it. The hello removes the dial:
   would have been without one. So is a hello on a link already bound to a
   different address: a hello never rebinds a link.
 
+The shipped iOS, Android and Python peripherals serve Hello. A central that
+can never be dialled back (a browser over Web Bluetooth, which serves no
+GATT at all) is named only by its hello, so a peripheral that leaves Hello
+out cannot attribute anything such a central writes.
+
 The hello carries the same static assertion as Identity, with the same limits
 below: it proves possession of the key once, and a device that copied a
 peer's assertion can label its own link with that peer's address.

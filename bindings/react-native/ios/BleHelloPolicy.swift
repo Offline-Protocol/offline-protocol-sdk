@@ -49,3 +49,30 @@ enum BleHelloPolicy {
         return identity
     }
 }
+
+/// Whether this device's peripheral takes a write to its Hello characteristic.
+///
+/// The peripheral side of the chapter's Hello rule: a central that cannot be
+/// dialled back (a browser over Web Bluetooth, an Android phone whose
+/// advertising address rotated) names itself by writing its identity
+/// assertion here, once, with response. Before anything is verified the
+/// peripheral refuses a prepared (long) write, a write at a non-zero offset
+/// and a length outside the chapter's bounds, so a hello is always one
+/// complete value. CoreBluetooth hands a long write over as several requests
+/// in one `didReceiveWrite` call, the later ones at non-zero offsets, so more
+/// than one request for Hello in a call is a long write.
+enum BlePeripheralHelloPolicy {
+    enum Verdict: Equatable {
+        case accept
+        /// Answered with `.invalidOffset`: a prepared or offset write.
+        case invalidOffset
+        /// Answered with `.invalidAttributeValueLength`.
+        case invalidLength
+    }
+
+    static func verdict(length: Int, offset: Int, requestsForHello: Int) -> Verdict {
+        if offset != 0 || requestsForHello > 1 { return .invalidOffset }
+        if length < BleHelloPolicy.minLength || length > BleHelloPolicy.maxLength { return .invalidLength }
+        return .accept
+    }
+}

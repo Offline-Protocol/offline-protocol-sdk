@@ -129,7 +129,7 @@ interface TransportManager {
   when a peer runs several apps on this SDK, to pick this app's instance)
 - Hello Characteristic: `6E400006-B5A3-F393-E0A9-E50E24DCCA9E` (written once
   by a central with its identity assertion, so the peer maps the central's
-  address without dialling it back; optional: served by Android and the
+  address without dialling it back; optional: served by iOS, Android and the
   Python service, written by iOS, Android and the Python service as centrals)
 
 These, the fragment header and the reassembly rules are specified normatively
