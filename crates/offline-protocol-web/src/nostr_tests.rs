@@ -53,10 +53,8 @@ impl Relay {
 }
 
 fn tag(event: &Value, name: &str) -> Option<String> {
-    event["tags"]
-        .as_array()?
-        .iter()
-        .find_map(|t| (t[0] == name).then(|| t[1].as_str().map(str::to_string))?)
+    let found = event["tags"].as_array()?.iter().find(|t| t[0] == name)?;
+    found[1].as_str().map(str::to_string)
 }
 
 fn matches(filter: &Value, event: &Value) -> bool {
@@ -328,4 +326,177 @@ fn a_node_without_relays_has_no_nostr_slot() {
     assert!(node.nostr_status_changed(true).is_err());
     assert!(node.nostr_subscription(SUBSCRIPTION).is_err());
     assert!(node.nostr_next_event().is_none());
+}
+
+/// Two Nostr nodes joined by a peer-stream link, with `b`'s frames handed to
+/// `a` one at a time and no further than the one that announces `b`: past
+/// that, the frames that follow form the session and the lookup path would
+/// never run.
+fn linked_pair() -> (Peer, Peer) {
+    let (mut a, mut b) = (peer("alice", false), peer("bob", false));
+    let la = a.node.open_link().expect("link");
+    b.node.open_link().expect("link");
+    while let Some((_, data)) = b.node.next_outbound() {
+        assert_eq!(a.node.link_received(la, &data), None);
+        while let Some(json) = a.node.poll_event() {
+            a.events
+                .push(serde_json::from_str(&json).expect("event json"));
+        }
+        let announced = a
+            .events
+            .iter()
+            .any(|e| e["type"] == "neighbor_discovered" && e["peer_id"] == b.address.as_str());
+        if announced {
+            return (a, b);
+        }
+    }
+    panic!("the link never announced the other end");
+}
+
+/// A peer this node holds a live link to forms its session over the link;
+/// asking the relays for its key packages would only publish which address
+/// this node wants. Without the link check in `reach_over_nostr` a query
+/// comes out here.
+#[test]
+fn a_linked_peer_is_not_looked_up_on_the_relays() {
+    let (mut a, b) = linked_pair();
+    a.node.nostr_status_changed(true).expect("status");
+    let started = a
+        .node
+        .establish_secure_session(&b.address)
+        .expect("establish");
+    assert_ne!(
+        started,
+        crate::node::SessionStart::Existing,
+        "the session formed before the call, so the lookup path never ran"
+    );
+    a.node
+        .send_message(&b.address, "over the link", false)
+        .expect("send");
+    assert!(
+        a.node.nostr_next_query().is_none(),
+        "a linked peer was looked up on the relays"
+    );
+
+    // The control: a peer with no link is looked up.
+    let stranger = peer("carol", false);
+    a.node
+        .establish_secure_session(&stranger.address)
+        .expect("establish");
+    assert!(a.node.nostr_next_query().is_some());
+}
+
+/// A liveness report before the address exists is refused and not kept: the
+/// first report after it must still be the edge that flushes the outbox and
+/// tells the page.
+#[test]
+fn liveness_reported_before_an_address_is_not_kept() {
+    let options = NodeOptions {
+        nostr: Some(NostrOptions::default()),
+    };
+    let mut node = Node::with_options("web-nostr-test", "early", options).expect("node");
+    assert!(node.nostr_status_changed(true).is_err());
+    node.initialize().expect("initialize");
+    node.start().expect("start");
+    node.nostr_status_changed(true).expect("status");
+    let mut switched = false;
+    while let Some(json) = node.poll_event() {
+        let event: Value = serde_json::from_str(&json).expect("event json");
+        switched |= event["type"] == "transport_switched" && event["to"] == "Nostr";
+    }
+    assert!(
+        switched,
+        "the first real liveness report was taken as a repeat"
+    );
+}
+
+/// Going down is said once, and nothing is handed out to publish until a
+/// relay is live again; what was queued is still there then.
+#[test]
+fn going_down_stops_publication_and_says_so() {
+    let mut a = peer("alice", false);
+    // The tick queues the key-package publications.
+    a.node.process().expect("process");
+    a.node.nostr_status_changed(true).expect("status");
+    assert!(a.node.nostr_next_event().is_some());
+    while a.node.poll_event().is_some() {}
+
+    a.node.nostr_status_changed(false).expect("status");
+    a.node.nostr_status_changed(false).expect("repeat");
+    let downs = std::iter::from_fn(|| a.node.poll_event())
+        .map(|json| serde_json::from_str::<Value>(&json).expect("event json"))
+        .filter(|e| e["type"] == "transport_switched" && e["to"] == "None")
+        .count();
+    assert_eq!(
+        downs, 1,
+        "going down is one event, however often it is said"
+    );
+    assert!(a.node.nostr_next_event().is_none());
+
+    a.node.nostr_status_changed(true).expect("status");
+    assert!(
+        a.node.nostr_next_event().is_some(),
+        "the publications still queued went out once a relay was back"
+    );
+}
+
+/// Whatever a relay sends that does not open is dropped without an error,
+/// an event, or a step of the receive watermark. Anyone can address this
+/// device's public routing tag, so junk there must not move the window past
+/// history a relay still owes it.
+#[test]
+fn junk_from_a_relay_moves_nothing() {
+    use offline_protocol_transport::{NostrTransport, TransportType};
+
+    let mut a = peer("alice", false);
+    a.node.nostr_status_changed(true).expect("status");
+    while a.node.poll_event().is_some() {}
+    let watermark = |node: &Node| {
+        node.protocol
+            .transport_manager()
+            .get_transport(TransportType::Nostr)
+            .and_then(|t| {
+                t.as_any()
+                    .downcast_ref::<NostrTransport>()
+                    .map(NostrTransport::receive_watermark_secs)
+            })
+            .expect("nostr slot")
+    };
+    let before = watermark(&a.node);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let oversized = format!(
+        "[\"EVENT\",\"{SUBSCRIPTION}\",{{\"content\":\"{}\"}}]",
+        "A".repeat(70 * 1024)
+    );
+    for junk in [
+        "not json".to_string(),
+        "{}".to_string(),
+        "[\"EVENT\"]".to_string(),
+        format!("[\"EVENT\",\"{SUBSCRIPTION}\",\"not an object\"]"),
+        format!(
+            "[\"EVENT\",\"{SUBSCRIPTION}\",{{\"pubkey\":\"{}\",\"content\":\"AAAA\",\"created_at\":{now}}}]",
+            "ab".repeat(32)
+        ),
+        oversized,
+    ] {
+        a.node.nostr_relay_event(&junk).expect("junk is not an error");
+    }
+    a.node.process().expect("process");
+    assert_eq!(
+        watermark(&a.node),
+        before,
+        "junk moved the receive watermark"
+    );
+    let events: Vec<Value> = std::iter::from_fn(|| a.node.poll_event())
+        .map(|json| serde_json::from_str(&json).expect("event json"))
+        .collect();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["type"] == "message_received" || e["type"] == "neighbor_discovered"),
+        "junk surfaced as {events:?}"
+    );
 }

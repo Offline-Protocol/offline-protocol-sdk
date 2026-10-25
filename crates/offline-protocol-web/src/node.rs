@@ -566,10 +566,16 @@ impl Node {
     }
 
     /// Asks the relays for `peer`'s published key packages when there is no
-    /// session with it yet. Nothing else does: a session-less send only
-    /// queues, and the engine's own key-package push reaches only the mesh.
+    /// session with it yet and no live link to it. Nothing else does: a
+    /// session-less send only queues, and the engine's own key-package push
+    /// reaches only the mesh. That is a core gap on every binding, filed as
+    /// #633; once the engine asks for itself, this goes.
+    ///
+    /// A linked peer is skipped: the link carries the key-package exchange
+    /// within a tick, and a relay query would only publish which address
+    /// this node wants (its `#p` filter) for nothing.
     fn reach_over_nostr(&self, peer: &str) {
-        if !self.nostr_enabled() || self.has_session(peer) {
+        if !self.nostr_enabled() || self.peers.contains_key(peer) || self.has_session(peer) {
             return;
         }
         self.request_nostr_key_packages(peer);

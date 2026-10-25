@@ -108,13 +108,15 @@ impl Node {
     /// The worker has a live relay (`true`) or none (`false`). The first
     /// relay up flushes the outbox, as the FFI does.
     pub fn nostr_status_changed(&mut self, live: bool) -> NodeResult<()> {
+        // The slot first: a node with options but no address yet has no
+        // transport, and must not record a liveness nothing acted on.
+        let transport = self.nostr_slot()?;
         let host = self
             .nostr_host
             .as_mut()
             .ok_or_else(|| NodeError("Nostr is not enabled on this node".to_string()))?;
         let was_live = host.live;
         host.live = live;
-        let transport = self.nostr_slot()?;
         transport.on_status_changed(if live {
             TransportStatus::Available
         } else {
