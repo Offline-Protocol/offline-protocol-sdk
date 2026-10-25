@@ -122,6 +122,9 @@ public class BleManager: NSObject, TransportManager {
     private var deviceIdCharacteristic: CBMutableCharacteristic?
     private var identityCharacteristic: CBMutableCharacteristic?
     private var appTagCharacteristic: CBMutableCharacteristic?
+    /// Hello, served so a central this device cannot dial back names itself
+    /// on the link it opened (`BlePeripheralHelloPolicy`).
+    private var helloCharacteristic: CBMutableCharacteristic?
 
     /// Cached signed identity and local address for serving via GATT.
     ///
@@ -212,6 +215,12 @@ public class BleManager: NSObject, TransportManager {
     }
     private var serviceInstanceProbes: [UUID: ServiceInstanceProbe] = [:]
     private var serviceInstanceDeadlines: [UUID: DispatchWorkItem] = [:]
+
+    /// Pending loss reports, by peer, for a peer whose last link was a
+    /// subscribed central that went (`scheduleCentralLostReport`). A central
+    /// named by its hello has no peripheral-role link, so no disconnect
+    /// callback of the central manager ever reports it lost. Main only.
+    private var centralLostReports: [String: DispatchWorkItem] = [:]
 
     /// How long a multi-instance link waits for its instances' characteristics
     /// and tags before choosing with what it has. An instance still unknown
@@ -431,6 +440,19 @@ public class BleManager: NSObject, TransportManager {
     private var connectionRetryCount: [UUID: Int] = [:]
     private let CONNECTION_MONITOR_INTERVAL: TimeInterval = 5.0
     private let MIN_RECONNECT_INTERVAL: TimeInterval = 5.0
+    /// How long a central that subscribed has to write its hello before this
+    /// peripheral dials it back to read its identity. Every shipped central
+    /// writes the hello one round trip after its subscription is
+    /// acknowledged, so the wait is spent only on a central with no hello.
+    /// Without it the dial-back raced every hello: a futile ten-second dial
+    /// to an Android phone's rotated address, and a dial to a browser that
+    /// found no service and cancelled the connection the browser was using.
+    private let HELLO_WAIT_BEFORE_DIAL_BACK: TimeInterval = 2.0
+    /// How long a peer whose last link was a central subscribed to this
+    /// peripheral stays a neighbour after that central goes. The central
+    /// re-subscribes when it reconnects, so a short drop is not a loss.
+    /// Android's `PEER_LOST_GRACE_MS` for the same case.
+    private let CENTRAL_LOST_GRACE: TimeInterval = 15.0
     private let MAX_RECONNECT_INTERVAL: TimeInterval = 60.0
     private let MAX_CONNECTION_RETRIES = 5
     private var scanRestartCount: Int = 0
@@ -865,6 +887,8 @@ public class BleManager: NSObject, TransportManager {
 
         for deadline in serviceInstanceDeadlines.values { deadline.cancel() }
         serviceInstanceDeadlines.removeAll()
+        for report in centralLostReports.values { report.cancel() }
+        centralLostReports.removeAll()
         serviceInstanceProbes.removeAll()
         serviceInstanceLock.lock()
         serviceInstanceBindings.removeAll()
@@ -1670,9 +1694,23 @@ public class BleManager: NSObject, TransportManager {
             permissions: [.readable]
         )
 
+        // Hello: a central writes its identity assertion here once, with
+        // response, so this peripheral can name it without dialling it back.
+        // Without it a central that cannot be dialled (a browser, which has no
+        // GATT server; an Android phone whose advertising address rotated)
+        // has every fragment it writes queued behind a dial-back that never
+        // completes. Dynamic (nil value) and write-only: there is nothing to
+        // read, and each write is handled in `didReceiveWrite`.
+        helloCharacteristic = CBMutableCharacteristic(
+            type: HELLO_CHAR_UUID,
+            properties: [.write],
+            value: nil,
+            permissions: [.writeable]
+        )
+
         // Create service
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
-        service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!, appTagCharacteristic!]
+        service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!, appTagCharacteristic!, helloCharacteristic!]
         
         // Clear this app's published services first, so this add is the only
         // instance. CoreBluetooth documents the local GATT database as cleared
@@ -4020,16 +4058,7 @@ extension BleManager: CBPeripheralDelegate {
             try? self.protocolInstance.blePeerDiscovered(peerId: peerId, rssi: rssi)
         }
 
-        let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: peerId) ?? .member
-        meshController.registerConnection(peerId: peerId, role: role)
-        connections.setConnectionRole(role, for: peerId)
-        meshController.markPeerActive(peerId)
-        meshController.markPeerActive(self.deviceId)
-        refreshSelfMetrics()
-        meshController.updatePeerMetrics(peerId: peerId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
-        DispatchQueue.main.async {
-            self.refreshAdvertising(reason: "membership_change")
-        }
+        registerVerifiedLink(peerId: peerId, on: peripheral.identifier, rssi: rssi)
 
         //  Process any pending fragments for this device immediately
         // This is essential for Android → iOS messages that were queued while waiting for device ID
@@ -4062,6 +4091,30 @@ extension BleManager: CBPeripheralDelegate {
         // nothing to re-trigger it and stalled until a later fragment
         // event or the 30s expiry — the iOS->Android first-message stall.
         self.drainAndSendFragments()
+    }
+
+    /// Counts a link that just proved its peer: the mesh controller's degree
+    /// and the advertisement both follow it, and a pending loss report for
+    /// the peer is cancelled. Both verified paths call it unconditionally,
+    /// the central's handshake and the peripheral's hello.
+    ///
+    /// It is not left to `processPendingFragments`, which registers the
+    /// connection only when fragments were queued: a central that writes its
+    /// hello before its first Message write, as the chapter orders, has none,
+    /// so the hello path never counted its link against the budget nor
+    /// refreshed the advertisement. Main only.
+    private func registerVerifiedLink(peerId: String, on identifier: UUID, rssi: Int16) {
+        cancelCentralLostReport(for: peerId)
+        let role = connections.consumePendingRole(for: identifier) ?? connections.connectionRole(for: peerId) ?? .member
+        meshController.registerConnection(peerId: peerId, role: role)
+        connections.setConnectionRole(role, for: peerId)
+        meshController.markPeerActive(peerId)
+        meshController.markPeerActive(self.deviceId)
+        refreshSelfMetrics()
+        meshController.updatePeerMetrics(peerId: peerId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
+        DispatchQueue.main.async {
+            self.refreshAdvertising(reason: "membership_change")
+        }
     }
 
     /// Abandons a handshake that can never complete, and drops the link.
@@ -4556,8 +4609,26 @@ extension BleManager: CBPeripheralManagerDelegate {
     }
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        let helloRequests = requests.filter { $0.characteristic.uuid == HELLO_CHAR_UUID }.count
         for request in requests {
             noteCentralHeard(request.central.identifier)
+            if request.characteristic.uuid == HELLO_CHAR_UUID {
+                let value = request.value ?? Data()
+                switch BlePeripheralHelloPolicy.verdict(
+                    length: value.count,
+                    offset: request.offset,
+                    requestsForHello: helloRequests
+                ) {
+                case .accept:
+                    peripheral.respond(to: request, withResult: .success)
+                    handleInboundHello(value, from: request.central)
+                case .invalidOffset:
+                    peripheral.respond(to: request, withResult: .invalidOffset)
+                case .invalidLength:
+                    peripheral.respond(to: request, withResult: .invalidAttributeValueLength)
+                }
+                continue
+            }
             print("[BleManager] 📨 GATT WRITE REQUEST from \(request.central.identifier), char: \(request.characteristic.uuid), size: \(request.value?.count ?? 0)")
             emitDiagnostic("info", "GATT write request received", context: [
                 "centralId": request.central.identifier.uuidString,
@@ -4598,16 +4669,90 @@ extension BleManager: CBPeripheralManagerDelegate {
         }
     }
     
+    /// A central named itself by writing its identity assertion to Hello.
+    ///
+    /// The peripheral half of the chapter's Hello rule, and the iOS copy of
+    /// Android's `handleInboundHelloOnBleThread`: verify, bind the central to
+    /// the derived address (never to anything the central claimed), flush
+    /// the per-peer MTU before the core hears of the peer, announce it once,
+    /// then deliver whatever it wrote before it said hello. A hello that does
+    /// not verify is ignored, and one naming a different peer than the link
+    /// is already bound to never rebinds it: a link is bound once.
+    ///
+    /// Only a central this peripheral kept is named. Every shipped central
+    /// subscribes before it writes its hello, and `didSubscribeTo` keeps a
+    /// central only when the mesh admits it and the connection cap has room.
+    /// A central turned away there has no notify target here, so announcing
+    /// it would hand the core a peer every send to which goes nowhere.
+    /// Android's handler refuses a hello from an address with no server
+    /// connection for the same reason.
+    private func handleInboundHello(_ value: Data, from central: CBCentral) {
+        guard isSubscribedCentral(central.identifier) else {
+            emitDiagnostic("info", "BLE hello from a central that is not subscribed", context: [
+                "central": central.identifier.uuidString
+            ])
+            return
+        }
+        let peerId: String
+        do {
+            peerId = try verifyIdentityAssertion(assertion: [UInt8](value))
+        } catch {
+            emitDiagnostic("warning", "BLE hello failed verification", context: [
+                "central": central.identifier.uuidString,
+                "reason": error.localizedDescription
+            ])
+            return
+        }
+        // This device's own assertion, replayed at it, names no peer.
+        if peerId == currentLocalAddress() { return }
+        let bound = connections.centralDeviceId(for: central.identifier)
+            ?? connections.peripheralDeviceId(for: central.identifier)
+        if let bound = bound {
+            if bound != peerId {
+                emitDiagnostic("warning", "BLE hello names a different peer than this link", context: [
+                    "central": central.identifier.uuidString,
+                    "bound": bound,
+                    "hello": peerId
+                ])
+            }
+            return
+        }
+        let alreadyAnnounced = !otherLiveLinks(of: peerId, excluding: central.identifier).isEmpty
+        print("[BleManager] ✅ Hello from central \(central.identifier) verified as \(peerId)")
+        connections.setCentralDeviceId(peerId, for: central.identifier)
+
+        // ORDERING INVARIANT, as in `completePeerHandshake`: the per-peer
+        // MTU reaches the core before the peer does, in one serial block, so
+        // no fragmenting send sees an announced peer with no MTU on file.
+        let maxPayload = central.maximumUpdateValueLength
+        let rssi = peripheralRSSI[central.identifier] ?? -60
+        onProtocolQueue { [weak self] in
+            guard let self = self else { return }
+            do {
+                try self.protocolInstance.bleSetPeerMtu(peerId: peerId, maxPayload: UInt32(maxPayload))
+            } catch {
+                self.emitDiagnostic("error", "bleSetPeerMtu failed", context: [
+                    "deviceId": peerId,
+                    "error": error.localizedDescription,
+                    "cause": "uniffi_throw",
+                ])
+            }
+            if !alreadyAnnounced {
+                try? self.protocolInstance.blePeerDiscovered(peerId: peerId, rssi: rssi)
+            }
+        }
+
+        registerVerifiedLink(peerId: peerId, on: central.identifier, rssi: rssi)
+
+        // Reflects the egress MTU and delivers the fragments this central
+        // wrote before its hello, if it wrote any.
+        processPendingFragments(for: central.identifier, deviceId: peerId)
+        self.drainAndSendFragments()
+    }
+
     //  When a central subscribes to notifications, try to read its device ID
     // This helps resolve device IDs for Android devices that wrote to iOS before iOS connected to them
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
-        // If we don't have the device ID for this central yet, try to read it
-        if connections.centralDeviceId(for: central.identifier) == nil && 
-           connections.peripheralDeviceId(for: central.identifier) == nil {
-            print("[BleManager] Central subscribed but device ID unknown - attempting to resolve")
-            ensureDeviceId(for: central.identifier)
-        }
-        // When central subscribes, try to get device ID if we don't have it
         let observation = lastSeenMeshAdvertisements[central.identifier]
         let decision = meshController.shouldAcceptInboundConnection(
             remoteId: connections.peripheralDeviceId(for: central.identifier),
@@ -4651,13 +4796,80 @@ extension BleManager: CBPeripheralManagerDelegate {
         ])
 
         if connections.centralDeviceId(for: central.identifier) == nil && connections.peripheralDeviceId(for: central.identifier) == nil {
-            ensureDeviceId(for: central.identifier)
+            resolveDeviceIdUnlessHelloArrives(for: central.identifier)
         } else if let deviceId = connections.peripheralDeviceId(for: central.identifier) {
             connections.setCentralDeviceId(deviceId, for: central.identifier)
+            cancelCentralLostReport(for: deviceId)
             // Process any pending fragments
             processPendingFragments(for: central.identifier, deviceId: deviceId)
         }
         maybeHandleRebalance(reason: "inbound")
+    }
+
+    /// Dials a subscribed central back to read its identity, unless it names
+    /// itself with a hello first (`HELLO_WAIT_BEFORE_DIAL_BACK`).
+    /// `ensureDeviceId` checks the binding again when it runs, so a central
+    /// that wrote its hello in the meantime is never dialled. A Message write
+    /// from a central nobody has named still dials at once: by the chapter's
+    /// order a central that writes before its hello has none. Main only.
+    private func resolveDeviceIdUnlessHelloArrives(for centralId: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + HELLO_WAIT_BEFORE_DIAL_BACK) { [weak self] in
+            guard let self = self, self.state == .running else { return }
+            self.ensureDeviceId(for: centralId)
+        }
+    }
+
+    /// Reports `deviceId` lost `CENTRAL_LOST_GRACE` from now, unless a link
+    /// to it is up again by then. For a central that left this peripheral
+    /// when it was the peer's last link: no central-manager disconnect
+    /// callback covers that link, and a central named by its hello never had
+    /// any other. Without this the peer stays a neighbour in the core, its
+    /// per-peer MTU stays on file, and every send to it goes to a link that
+    /// is gone. Does nothing while another link is up or a report is already
+    /// pending, so the deadline runs from the first link to drop with nothing
+    /// left. Main only.
+    private func scheduleCentralLostReport(for deviceId: String, departed centralId: UUID) {
+        guard centralLostReports[deviceId] == nil,
+              !peerStillLinked(deviceId, afterCentralLeft: centralId) else { return }
+        let report = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.centralLostReports.removeValue(forKey: deviceId)
+            guard self.state == .running,
+                  !self.peerStillLinked(deviceId, afterCentralLeft: centralId) else { return }
+            self.notifyBlePeerLost(deviceId: deviceId)
+            self.meshController.registerDisconnection(peerId: deviceId)
+            self.connections.removeConnectionRole(for: deviceId)
+            self.refreshSelfMetrics()
+            self.refreshAdvertising(reason: "central_lost")
+            self.maybeHandleRebalance(reason: "central_lost")
+            self.emitDiagnostic("info", "BLE peer lost with its last subscribed central", context: [
+                "central": centralId.uuidString,
+                "deviceId": deviceId
+            ])
+        }
+        centralLostReports[deviceId] = report
+        DispatchQueue.main.asyncAfter(deadline: .now() + CENTRAL_LOST_GRACE, execute: report)
+    }
+
+    /// Whether `deviceId` still holds a link once the central `centralId`
+    /// left this peripheral: on another identifier, or on this same one,
+    /// either because this device's own dial to it is still connected or
+    /// because the central came back, subscribed and bound to the same peer.
+    /// `otherLiveLinks` excludes the departed identifier on both roles, so it
+    /// alone would miss the same-identifier cases.
+    private func peerStillLinked(_ deviceId: String, afterCentralLeft centralId: UUID) -> Bool {
+        if connections.connectedPeripheral(for: centralId) != nil,
+           connections.peripheralDeviceId(for: centralId) == deviceId {
+            return true
+        }
+        if isSubscribedCentral(centralId), connections.centralDeviceId(for: centralId) == deviceId {
+            return true
+        }
+        return !otherLiveLinks(of: deviceId, excluding: centralId).isEmpty
+    }
+
+    private func cancelCentralLostReport(for deviceId: String) {
+        centralLostReports.removeValue(forKey: deviceId)?.cancel()
     }
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
@@ -4679,6 +4891,8 @@ extension BleManager: CBPeripheralManagerDelegate {
         if let deviceId = deviceId {
             notifyFragments.removeAll(deviceId)
             reflectEgressMtu(forDeviceId: deviceId)
+            // If it was the peer's last link, nothing else reports it lost.
+            scheduleCentralLostReport(for: deviceId, departed: central.identifier)
         }
     }
 

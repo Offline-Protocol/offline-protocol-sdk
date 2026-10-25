@@ -14295,6 +14295,26 @@ mod tests {
             .unwrap_or(rest.len())
     }
 
+    /// The body of the Swift declaration that starts with `signature` in a
+    /// [`rn_source_code_only`] source: from the end of the signature to the
+    /// next function declared at any visibility. `" func "` alone would
+    /// cover the others; they are listed so the set reads like the Kotlin
+    /// one. A guard that sliced on `" private func "` only ran through the
+    /// next `public` delegate method and passed on code that was not in the
+    /// body it named. Panics when the signature is gone.
+    fn rn_swift_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
+        let rest = &source[start + signature.len()..];
+        let end = [" private func ", " public func ", " func "]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
     /// The Python counterpart of [`rn_source_code_only`], for module
     /// constants: reads a file under `bindings/python` and returns a lookup
     /// from a constant's name to the value the file assigns it.
@@ -14441,18 +14461,6 @@ mod tests {
     ///   policy that keeps a linked peer's address pair stable (ADR 0030).
     #[test]
     fn the_ble_bridges_keep_the_volume_test_wiring() {
-        fn swift_body<'a>(source: &'a str, signature: &str) -> &'a str {
-            let start = source
-                .find(signature)
-                .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
-            let rest = &source[start + signature.len()..];
-            let end = [" func ", " private func ", " public func "]
-                .iter()
-                .filter_map(|marker| rest.find(marker))
-                .min()
-                .unwrap_or(rest.len());
-            &rest[..end]
-        }
         let swift = rn_source_code_only("ios/BleManager.swift");
         let kotlin = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
@@ -14502,7 +14510,7 @@ mod tests {
         );
 
         // The connect timeout belongs to its attempt.
-        let attempt = swift_body(&swift, "private func performConnectionAttempt(");
+        let attempt = rn_swift_body(&swift, "private func performConnectionAttempt(");
         assert!(
             attempt.contains("connectTimeoutTokens[peripheral.identifier] = attempt")
                 && attempt.contains("self.connectTimeoutTokens[peripheral.identifier] == attempt,"),
@@ -14510,9 +14518,9 @@ mod tests {
         );
 
         // The stall clock and the timeout token do not outlive a link.
-        let did_connect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {");
-        let did_fail = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {");
-        let did_disconnect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {");
+        let did_connect = rn_swift_body(&swift, "func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {");
+        let did_fail = rn_swift_body(&swift, "func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {");
+        let did_disconnect = rn_swift_body(&swift, "func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {");
         for (name, body) in [
             ("didConnect", did_connect),
             ("didDisconnectPeripheral", did_disconnect),
@@ -14566,7 +14574,7 @@ mod tests {
         );
 
         // Only a write the link took, or a ready callback, ends a stall.
-        let ready = swift_body(
+        let ready = rn_swift_body(
             &swift,
             "public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {",
         );
@@ -14656,10 +14664,39 @@ mod tests {
              rather than leave completePeerHandshake waiting on a read nobody will issue"
         );
         assert!(
-            swift.matches("blePeerDiscovered(").count() == 1
-                && kotlin.matches("blePeerDiscovered(").count() == 1,
-            "Each platform must announce from exactly one place — the verified path. A second \
-             call site is how an unproven id gets surfaced without anyone noticing"
+            kotlin.matches("blePeerDiscovered(").count() == 1,
+            "CentralGattClient.kt must announce from exactly one place, the verified path. A \
+             second call site is how an unproven id gets surfaced without anyone noticing"
+        );
+        // iOS has two verified paths in one file: the central's, after the
+        // cross-check, and the peripheral's, after a hello verifies (Android's
+        // peripheral path lives in BleTransportFacade.kt). Each announces once,
+        // and nothing else does.
+        let central = rn_swift_body(
+            &swift,
+            "private func completePeerHandshake(for peripheral: CBPeripheral) {",
+        );
+        let hello = rn_swift_body(
+            &swift,
+            "private func handleInboundHello(_ value: Data, from central: CBCentral) {",
+        );
+        assert!(
+            swift.matches("blePeerDiscovered(").count() == 2
+                && central.matches("blePeerDiscovered(").count() == 1
+                && hello.matches("blePeerDiscovered(").count() == 1,
+            "BleManager.swift must announce from exactly two places, the central's cross-checked \
+             path and the peripheral's verified hello. A third call site is how an unproven id \
+             gets surfaced without anyone noticing"
+        );
+        let at = |body: &str, needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("BleManager.swift lost `{needle}` on a verified path"))
+        };
+        assert!(
+            at(central, "case let .verified(peerId) = outcome") < at(central, "blePeerDiscovered(")
+                && at(hello, "verifyIdentityAssertion(assertion:")
+                    < at(hello, "blePeerDiscovered("),
+            "each iOS announce must follow its proof"
         );
         assert!(
             kotlin
@@ -14916,6 +14953,190 @@ mod tests {
                 .matches("announcedPeripherals.remove(peripheral.identifier)")
                 .count(),
             "helloWritten must be cleared wherever announcedPeripherals is cleared for one link"
+        );
+    }
+
+    /// The iOS peripheral serves Hello, and binds a central only on what its
+    /// hello proves.
+    ///
+    /// A central that cannot be dialled back (a browser over Web Bluetooth,
+    /// which has no GATT server; an Android phone whose advertising address
+    /// rotated) is named only by its hello. Without Hello in the service, every
+    /// fragment such a central writes is queued behind a dial-back that never
+    /// completes. `BlePeripheralHelloPolicy` is unit-tested; this pins that
+    /// `BleManager` uses it:
+    ///
+    /// 1. Hello is in the published service, write-only, under the Rust UUID.
+    /// 2. A write to it is answered through the policy's verdict, and only an
+    ///    accepted one reaches `handleInboundHello`.
+    /// 3. The handler names only a central it kept, verifies before it binds,
+    ///    and flushes the per-peer MTU before it announces, as
+    ///    `completePeerHandshake` does.
+    /// 4. Both verified paths count the link through `registerVerifiedLink`,
+    ///    which registers it with the mesh unconditionally. The hello path
+    ///    left that to `processPendingFragments`, which registers only when
+    ///    fragments were queued, and a central that says hello first has none.
+    /// 5. A central leaving schedules the peer's loss report, and that report
+    ///    checks for a surviving link first: a central named by its hello has
+    ///    no central-manager disconnect callback to report it.
+    /// 6. A subscription defers the dial-back, so a central that is about to
+    ///    say hello is not dialled.
+    #[test]
+    fn react_native_ios_peripheral_serves_hello() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        assert!(
+            swift.contains("type: HELLO_CHAR_UUID, properties: [.write],"),
+            "BleManager.swift must create a write-only Hello characteristic"
+        );
+        let service = swift
+            .split("service.characteristics = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("BleManager.swift must set the service's characteristics");
+        assert!(
+            service.contains("helloCharacteristic!"),
+            "the published service must carry Hello ({service}])"
+        );
+
+        let write = rn_swift_body(&swift, "didReceiveWrite requests: [CBATTRequest]) {");
+        let verdict = write
+            .find("BlePeripheralHelloPolicy.verdict(")
+            .expect("a Hello write must be answered through BlePeripheralHelloPolicy");
+        let accepted = write
+            .find("case .accept:")
+            .expect("the verdict's accept arm must exist");
+        let handled = write
+            .find("handleInboundHello(value, from: request.central)")
+            .expect("an accepted hello must reach handleInboundHello");
+        assert!(
+            verdict < accepted && accepted < handled,
+            "only an accepted hello may reach handleInboundHello"
+        );
+        assert_eq!(
+            write.matches("handleInboundHello(").count(),
+            1,
+            "handleInboundHello must be reached from the accept arm only"
+        );
+
+        let body = rn_swift_body(
+            &swift,
+            "private func handleInboundHello(_ value: Data, from central: CBCentral) {",
+        );
+        let kept = body
+            .find("guard isSubscribedCentral(central.identifier) else {")
+            .expect("a hello from a central this peripheral did not keep must be refused");
+        let verified = body
+            .find("verifyIdentityAssertion(assertion:")
+            .expect("a hello must be verified");
+        let bound = body
+            .find("connections.setCentralDeviceId(peerId, for: central.identifier)")
+            .expect("a verified hello binds the central to the derived address");
+        let mtu = body
+            .find("bleSetPeerMtu(peerId: peerId")
+            .expect("the hello path must flush the per-peer MTU");
+        let announced = body
+            .find("blePeerDiscovered(peerId: peerId")
+            .expect("the hello path must announce the peer");
+        assert!(
+            verified < bound,
+            "a hello must be verified before it binds the central"
+        );
+        assert!(
+            kept < verified,
+            "the subscription check must come before anything is verified or bound"
+        );
+        assert!(
+            mtu < announced,
+            "ORDERING INVARIANT: the hello path must call bleSetPeerMtu BEFORE blePeerDiscovered"
+        );
+
+        // 4. One registration, unconditional, on both verified paths.
+        let registered = body
+            .find("registerVerifiedLink(peerId: peerId, on: central.identifier")
+            .expect("the hello path must count its link through registerVerifiedLink");
+        assert!(
+            bound < registered,
+            "the hello path registers the link only once it is bound"
+        );
+        let central = rn_swift_body(
+            &swift,
+            "private func completePeerHandshake(for peripheral: CBPeripheral) {",
+        );
+        assert!(
+            central.contains("registerVerifiedLink(peerId: peerId, on: peripheral.identifier"),
+            "the central's verified path must count its link through registerVerifiedLink"
+        );
+        let register = rn_swift_body(
+            &swift,
+            "private func registerVerifiedLink(peerId: String, on identifier: UUID, rssi: Int16) {",
+        );
+        for needle in [
+            "cancelCentralLostReport(for: peerId)",
+            "meshController.registerConnection(peerId: peerId, role: role)",
+            "self.refreshAdvertising(reason: \"membership_change\")",
+        ] {
+            assert!(
+                register.contains(needle),
+                "registerVerifiedLink must call `{needle}`"
+            );
+        }
+        assert!(
+            !register.contains("if ") && !register.contains("guard "),
+            "registerVerifiedLink must register unconditionally"
+        );
+
+        // 5. A central leaving reports the peer lost when nothing else holds it.
+        let unsubscribe = rn_swift_body(
+            &swift,
+            "didUnsubscribeFrom characteristic: CBCharacteristic) {",
+        );
+        assert!(
+            unsubscribe
+                .contains("scheduleCentralLostReport(for: deviceId, departed: central.identifier)"),
+            "didUnsubscribeFrom must schedule the peer's loss report"
+        );
+        let report = rn_swift_body(
+            &swift,
+            "private func scheduleCentralLostReport(for deviceId: String, departed centralId: UUID) {",
+        );
+        let checked = report
+            .rfind("self.peerStillLinked(deviceId, afterCentralLeft: centralId)")
+            .expect("the loss report must check for a surviving link when it fires");
+        let lost = report
+            .find("self.notifyBlePeerLost(deviceId: deviceId)")
+            .expect("the loss report must tell the core");
+        assert!(
+            checked < lost
+                && report.contains("self.meshController.registerDisconnection(peerId: deviceId)"),
+            "the loss report must check for a surviving link, then tell the core and the mesh"
+        );
+        let still_linked = rn_swift_body(
+            &swift,
+            "private func peerStillLinked(_ deviceId: String, afterCentralLeft centralId: UUID) -> Bool {",
+        );
+        assert!(
+            still_linked.contains("connections.connectedPeripheral(for: centralId) != nil")
+                && still_linked.contains("isSubscribedCentral(centralId)")
+                && still_linked.contains("otherLiveLinks(of: deviceId, excluding: centralId)"),
+            "peerStillLinked must count a same-identifier peripheral link and a returned central, \
+             which otherLiveLinks excludes"
+        );
+
+        // 6. No dial-back straight from a subscription.
+        let subscribe = rn_swift_body(&swift, "didSubscribeTo characteristic: CBCharacteristic) {");
+        assert!(
+            !subscribe.contains("ensureDeviceId(")
+                && subscribe.contains("resolveDeviceIdUnlessHelloArrives(for: central.identifier)"),
+            "didSubscribeTo must defer the dial-back until the central has had time to say hello"
+        );
+        let deferred = rn_swift_body(
+            &swift,
+            "private func resolveDeviceIdUnlessHelloArrives(for centralId: UUID) {",
+        );
+        assert!(
+            deferred.contains("asyncAfter(deadline: .now() + HELLO_WAIT_BEFORE_DIAL_BACK)")
+                && deferred.contains("self.ensureDeviceId(for: centralId)"),
+            "the dial-back must run only after HELLO_WAIT_BEFORE_DIAL_BACK"
         );
     }
 

@@ -216,6 +216,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **An iPhone names a central that cannot be dialled back.** The iOS
+  peripheral now serves the Hello characteristic, as Android and the Python
+  service do: a central writes its identity assertion once, and the iPhone
+  binds the link to the address it proves instead of queueing every fragment
+  behind a dial-back. A central with no GATT server of its own (a browser
+  over Web Bluetooth) could never be named before. Writes are refused before
+  verification when long, offset or out of bounds, and the per-peer MTU
+  reaches the core before the peer does. Only a central the iPhone kept is
+  named, its link counts toward the mesh's connection budget at once, and
+  the iPhone waits two seconds for a hello before it dials a new central
+  back. A peer whose last link was a central that left is now reported lost
+  after 15 seconds, as on Android; before, no callback reported it, and the
+  core kept sending to a link that was gone
+  (`react_native_ios_peripheral_serves_hello`).
+
 - **An old group message no longer blocks every later message to that
   device.** A group frame further behind the receiver's ratchet than the
   out-of-order window can never decrypt, and the sender resends the same

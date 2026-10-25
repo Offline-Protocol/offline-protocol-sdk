@@ -24,9 +24,11 @@ pub const BLE_APP_TAG_CHAR_UUID: &str = "6E400005-B5A3-F393-E0A9-E50E24DCCA9E";
 /// writes once on the link it opens, so the peripheral can map the central's
 /// address to a peer without dialling it back.
 ///
-/// Optional on both sides (`docs/spec/ble-framing.md`, "Hello"). Android
-/// serves and writes it; `react_native_android_ble_central_says_hello` pins
-/// the bridge's literal to this one.
+/// Optional on both sides (`docs/spec/ble-framing.md`, "Hello"). iOS,
+/// Android and the Python service serve and write it;
+/// `react_native_android_ble_central_says_hello`,
+/// `react_native_ios_central_writes_its_hello` and
+/// `react_native_ios_peripheral_serves_hello` pin the bridges' use of it.
 pub const BLE_HELLO_CHAR_UUID: &str = "6E400006-B5A3-F393-E0A9-E50E24DCCA9E";
 
 /// Fallback fragment size used when no MTU has been negotiated for a peer.
