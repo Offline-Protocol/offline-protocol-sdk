@@ -19,9 +19,16 @@
 //! - **The per-peer MTU reaches the transport before the peer does,** as in
 //!   every binding: a fragmenting send between the two would fall back to the
 //!   floor. A value under the 185-byte floor is the transport's to refuse.
-//! - **A link is lost once.** A peer linked over a peer stream as well as
-//!   Bluetooth is lost only when the last of them goes, as the FFI's
-//!   `ble_peer_lost` does.
+//! - **A peer is announced once and lost once.** A second link-up for an
+//!   address already linked (the page replaced a link to the same device)
+//!   updates its write payload and announces nothing. A peer linked over a
+//!   peer stream as well as Bluetooth is lost only when the last of them
+//!   goes, as the FFI's `ble_peer_lost` does, and [`Node::stop`] reports
+//!   every Bluetooth link lost before the engine stops.
+//! - **The engine hears of a neighbour on a message, not on a fragment.**
+//!   Its neighbour hook flushes the outbox, redelivers custody and kicks
+//!   sync, which is work per message; the FFI's `ble_fragment_received` does
+//!   not call it at all.
 //! - **The central says hello.** [`Node::ble_hello`] is this device's
 //!   identity assertion, which the page writes to the peripheral's Hello
 //!   characteristic: without it a peripheral has no way to name a central it
@@ -133,10 +140,15 @@ impl Node {
             )));
         }
         host.verified.remove(at);
-        host.linked.insert(peer.to_string());
+        let relinked = !host.linked.insert(peer.to_string());
         let transport = self.ble_slot()?;
         // ORDERING: the payload before the peer, as every binding does.
         transport.set_peer_mtu(peer, max_payload as usize);
+        if relinked {
+            // The page replaced its link to this address. The peer never
+            // left, so it is not announced a second time.
+            return Ok(());
+        }
         if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
             ble.on_peer_discovered(PeerDevice {
                 device_id: peer.to_string(),
@@ -171,8 +183,16 @@ impl Node {
         transport
             .on_fragment_received_from(fragment.to_vec(), peer.to_string())
             .map_err(|e| NodeError(e.to_string()))?;
-        while self.protocol.receive_message().is_some() {}
-        self.protocol.on_neighbor_discovered(peer);
+        let mut delivered = false;
+        while self.protocol.receive_message().is_some() {
+            delivered = true;
+        }
+        // Drained first, as on a peer stream, so a handshake confirmation in
+        // this message lands before the engine decides whether to re-arm a
+        // Welcome. Only on a whole message: a fragment says nothing new.
+        if delivered {
+            self.protocol.on_neighbor_discovered(peer);
+        }
         Ok(())
     }
 
@@ -220,6 +240,18 @@ impl Node {
                 peer_id: peer.to_string(),
             },
         );
+    }
+
+    /// Reports every Bluetooth link lost, for [`Node::stop`].
+    pub(crate) fn ble_links_down(&mut self) {
+        let linked: Vec<String> = self
+            .ble_host
+            .as_ref()
+            .map(|host| host.linked.iter().cloned().collect())
+            .unwrap_or_default();
+        for peer in linked {
+            self.ble_link_down(&peer);
+        }
     }
 
     /// Whether `peer` is linked over Bluetooth now.

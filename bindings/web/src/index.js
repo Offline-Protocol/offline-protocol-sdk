@@ -16,7 +16,7 @@ export class OfflineNode extends EventTarget {
   #tabs;
   // link -> { send(bytes), close() }: the page's carriers.
   #links = new Map();
-  // (peer, bytes) => void: where Bluetooth fragments go (W14).
+  // { write(peer, bytes), close() }: where Bluetooth fragments go (W14).
   #bleSink = null;
   #onPageHide = () => this.#worker.postMessage({ id: 0, op: "stop" });
   // A page restored from the back-forward cache had its node stopped on
@@ -253,9 +253,15 @@ export class OfflineNode extends EventTarget {
     return this.#call("bleLinkDown", { peer }).catch(() => {});
   }
 
-  /// Where the engine's outbound Bluetooth fragments go: `(peer, bytes)`.
-  /// One sink per node; BluetoothCarrier sets it.
+  /// Where the engine's outbound Bluetooth fragments go:
+  /// `{ write(peer, bytes), close() }`, `close` called once when the node
+  /// stops or fails. One sink per node, which BluetoothCarrier takes:
+  /// replacing a sink another carrier holds throws, since that carrier's
+  /// links would go deaf with no error. `null` gives it back.
   setBluetoothSink(sink) {
+    if (sink !== null && this.#bleSink !== null) {
+      throw new Error("another BluetoothCarrier holds this node's Bluetooth; release() it first");
+    }
     this.#bleSink = sink;
   }
 
@@ -354,6 +360,13 @@ export class OfflineNode extends EventTarget {
 
   #closeAllCarriers() {
     for (const link of [...this.#links.keys()]) this.#closeCarrier(link);
+    const ble = this.#bleSink;
+    this.#bleSink = null;
+    try {
+      ble?.close();
+    } catch {
+      // A carrier that throws on close is closed.
+    }
   }
 
   #call(op, args) {
@@ -372,7 +385,7 @@ export class OfflineNode extends EventTarget {
       if (message.error !== undefined) pending?.reject(new Error(message.error));
       else pending?.resolve(message.result);
     } else if (message.kind === "bleFragment") {
-      this.#bleSink?.(message.peer, new Uint8Array(message.data));
+      this.#bleSink?.write(message.peer, new Uint8Array(message.data));
     } else if (message.kind === "frame") {
       this.#links.get(message.link)?.send(new Uint8Array(message.data));
     } else if (message.kind === "linkClosed") {

@@ -542,6 +542,23 @@ and Python peripherals serve Hello. With several instances of the service
 behind one device, the carrier binds the one carrying this application's
 App tag, else the only untagged one, else the first, as the chapter says.
 
+**The hello is required, where the chapter makes it optional.** The
+chapter lets a central skip Hello, and keep a link whose hello was
+refused, because the peripheral can still dial that central back and read
+who it is. Nothing can dial a browser. A device that serves no Hello, or
+refuses the write, would be announced as a neighbour that neither receives
+nor sends, so the carrier refuses it and disconnects. A refused write is
+not rare: at an ATT MTU below 99 the browser sends the 96-byte hello as a
+prepared write, which a peripheral must refuse.
+
+**A link is announced only once the whole handshake held.** The carrier
+watches for a disconnect from the moment the GATT connects. A device that
+drops during the handshake is refused and never announced. One that drops
+later is reported lost once, and so is a link the page closes after its
+server already went away, when no disconnect event follows. A link that
+replaces an earlier one to the same address keeps the peer announced: the
+engine neither loses nor rediscovers it.
+
 **The write payload is the browser's if it says, and the floor if not.**
 Chromium does not expose the negotiated ATT MTU to a page; the carrier uses
 `maxWriteWithoutResponseSize` where the browser reports it, and otherwise
@@ -553,7 +570,19 @@ to negotiate one, but it has not been measured from Chrome on Android
 **Writes to a link go one at a time, in order, and a failed write closes
 it.** A fragment lost mid-message leaves the peer reassembling something
 that never completes. A peer linked over a peer stream as well as
-Bluetooth is lost only when the last link goes.
+Bluetooth is lost only when the last link goes, and stopping the node
+reports every Bluetooth link lost and closes the carrier's connections.
+
+**One carrier per node.** The node has one outbound Bluetooth sink. A
+second `BluetoothCarrier` on the same node throws until the first is
+released (`release()`); before, it took every outbound fragment and
+dropped those for links it did not hold, and the first carrier's links
+went silent with no error.
+
+**A remembered device can keep `connect` waiting.** `known()` returns
+devices the origin was granted, in range or not, and the browser's
+connect to one out of range may wait on its own timeout. An application
+that reconnects on load should bound the wait itself.
 
 ## Which shared rules apply
 
@@ -665,16 +694,20 @@ start there, because Firefox answers it by asking the user.
   redialled and never counts as live, and closing the driver reports it down
   before it ends a query (W12).
 
-- `bluetooth.html`: a node links to an SDK peripheral over its Bluetooth
+- `bluetooth.html`: a node links to SDK peripherals over its Bluetooth
   carrier, through a stand-in for `navigator.bluetooth`
-  (`test/fake-bluetooth.js`) whose device is a second node playing the
+  (`test/fake-bluetooth.js`) whose devices are other nodes playing the
   peripheral, so the engine runs on both sides. The chooser is asked for the
   SDK's service, the hello is the first write, a session forms and a
-  message of several fragments crosses each way; a peripheral serving a
-  Device id its identity does not prove is refused and disconnected; of two
-  instances behind one device the one tagged with this application is
-  bound; a disconnect reports the peer lost (W14). Moving the hello after
-  the link-up makes the page fail, which is how the page was checked.
+  message of several fragments crosses each way. A peripheral serving a
+  Device id its identity does not prove, one serving no Hello, one refusing
+  the hello and one dropping mid-handshake are each refused, disconnected
+  and never announced. A second carrier is refused until the first is
+  released. Of two instances behind one device the one tagged with this
+  application is bound; a disconnect reports the peer lost, as does closing
+  a link whose server is already gone; stopping the node closes the
+  carrier's links (W14). Moving the hello after the link-up makes the page
+  fail, which is how the page was checked.
 - `nearby.html`: four nodes in nearby rooms, three behind one address and
   one behind another. The address comes from the runner's STUN server, which
   reports a fixed one (`test/stun-server.mjs`); Firefox runs with

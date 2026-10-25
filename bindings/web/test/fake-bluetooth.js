@@ -99,7 +99,10 @@ class Device extends EventTarget {
 /// A device whose one instance of the service is `node`, a peripheral that
 /// expects the central at `centralAddress`. `options.servedId` overrides
 /// the Device id it serves (to serve one its identity does not prove);
-/// `options.extraInstances` puts other instances ahead of it.
+/// `options.extraInstances` puts other instances ahead of it;
+/// `options.noHello` serves no Hello characteristic; `options.refuseHello`
+/// rejects the hello write; `options.dropOnHello` disconnects as the hello
+/// arrives, mid-handshake.
 export async function peripheral(node, centralAddress, options = {}) {
   const encoder = new TextEncoder();
   let central = null;
@@ -115,20 +118,31 @@ export async function peripheral(node, centralAddress, options = {}) {
   const hello = new Characteristic(HELLO, {
     onWrite: async (bytes) => {
       order.push("hello");
+      if (options.refuseHello) throw new DOMException("hello refused", "NotSupportedError");
+      if (options.dropOnHello) {
+        device.gatt.disconnect();
+        return;
+      }
       const named = await node.bleVerify(encoder.encode(centralAddress), bytes);
       await node.bleLinkUp(named, 244);
       central = named;
     },
   });
-  node.setBluetoothSink((peer, bytes) => {
-    if (peer === central) message.notify(bytes);
+  // The node plays a peripheral here, never a central, so its sink is this
+  // fixture's to take.
+  node.setBluetoothSink(null);
+  node.setBluetoothSink({
+    write: (peer, bytes) => {
+      if (peer === central) message.notify(bytes);
+    },
+    close: () => {},
   });
   const ours = new Service([
     message,
     new Characteristic(DEVICE_ID, { value: encoder.encode(options.servedId ?? node.address) }),
     new Characteristic(IDENTITY, { value: await node.bleHello() }),
     ...(options.tag ? [new Characteristic(APP_TAG, { value: options.tag })] : []),
-    hello,
+    ...(options.noHello ? [] : [hello]),
   ]);
   const device = new Device(`peripheral ${node.address.slice(0, 12)}`, [...(options.extraInstances ?? []), ours], {
     onDisconnect: () => {

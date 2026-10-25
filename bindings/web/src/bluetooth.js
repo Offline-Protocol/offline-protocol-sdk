@@ -16,9 +16,21 @@
 //   instance, read and verify, subscribe to Message, write Hello, then tell
 //   the engine the link is up. Nothing is written to Message before the
 //   hello, so the peripheral can attribute every fragment.
+// - The hello is required here, though the chapter makes it optional. The
+//   chapter's leniency rests on the peripheral dialling an unnamed central
+//   back, and nothing can dial a browser: a device without Hello, or one
+//   that refuses the write, would be announced as a neighbour that neither
+//   receives nor sends. Such a device is refused.
+// - A disconnect is watched from the moment the GATT connects. A device that
+//   drops during the handshake is refused, never announced; one that drops
+//   later is reported lost exactly once, also when the page closed a link
+//   whose server was already gone and no event follows.
 // - Writes to one link go one at a time, in order. A link whose write fails
 //   is closed: a fragment lost mid-message leaves the peer reassembling
 //   something that never completes.
+// - One carrier per node. The node has one outbound Bluetooth sink, and a
+//   second carrier is refused rather than left to take the first one's
+//   fragments.
 
 const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const MESSAGE = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -50,16 +62,21 @@ async function characteristics(service) {
 export class BluetoothCarrier extends EventTarget {
   #node;
   #bluetooth;
-  // peer -> { device, message, queue, onDisconnect }
+  // peer -> link: { device, peer, message, queue, inbound, linked, announced, gone, onDisconnect }
   #links = new Map();
   #tag = null;
+  #released = false;
 
   constructor(node, { bluetooth = globalThis.navigator?.bluetooth } = {}) {
     super();
     if (!bluetooth) throw new Error("this browser has no Web Bluetooth");
     this.#node = node;
     this.#bluetooth = bluetooth;
-    node.setBluetoothSink((peer, bytes) => this.#write(peer, bytes));
+    // Throws when another carrier holds the node's sink.
+    node.setBluetoothSink({
+      write: (peer, bytes) => this.#write(peer, bytes),
+      close: () => this.#nodeStopped(),
+    });
   }
 
   /// Whether this browser exposes Web Bluetooth at all.
@@ -76,43 +93,71 @@ export class BluetoothCarrier extends EventTarget {
   /// links the one the person picks. Must run inside a user gesture (a
   /// click), as the browser requires. Resolves to the peer's address.
   async request() {
+    this.#usable();
     const device = await this.#bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
     return this.connect(device);
   }
 
   /// Devices this origin was granted before, where the browser remembers
-  /// them, to `connect` without the chooser.
+  /// them, to `connect` without the chooser. A remembered device that is out
+  /// of range may leave `connect` waiting on the browser's own timeout.
   async known() {
     return (await this.#bluetooth.getDevices?.()) ?? [];
   }
 
   /// Links `device`. Resolves to the address its identity proves; rejects,
-  /// with the connection closed, when it does not verify.
+  /// with the connection closed, when it does not verify, serves no Hello,
+  /// refuses the hello, or disconnects before the link is up.
   async connect(device) {
+    this.#usable();
     const server = await device.gatt.connect();
+    let ready;
+    const link = {
+      device,
+      peer: null,
+      message: null,
+      queue: Promise.resolve(),
+      // Notifications that arrive before the engine has the link wait for it.
+      inbound: new Promise((resolve) => (ready = resolve)),
+      // In #links, so the engine may have it.
+      linked: false,
+      // The page was told it is connected.
+      announced: false,
+      gone: false,
+      onDisconnect: null,
+    };
+    // Watched before the first await on the server, so a drop anywhere in
+    // the handshake is seen.
+    link.onDisconnect = () => {
+      link.gone = true;
+      if (link.linked) this.#lost(link);
+      else device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+    };
+    device.addEventListener("gattserverdisconnected", link.onDisconnect);
+    const goneCheck = () => {
+      if (link.gone || !device.gatt.connected) throw new Error("the device disconnected during the handshake");
+    };
     try {
       const service = await this.#choose(await server.getPrimaryServices(SERVICE));
       const chars = new Map((await characteristics(service)).map((c) => [c.uuid.toLowerCase(), c]));
       const deviceId = chars.get(DEVICE_ID);
       const identity = chars.get(IDENTITY);
       const message = chars.get(MESSAGE);
+      const hello = chars.get(HELLO);
       if (!deviceId || !identity || !message) {
         throw new Error("the device does not serve the SDK's handshake characteristics");
+      }
+      if (!hello) {
+        // Nothing can dial a browser back, so the hello is the only way the
+        // peripheral can attribute a write (W14).
+        throw new Error("the device serves no Hello, and a browser can be named no other way");
       }
       const peer = await this.#node.bleVerify(
         bytesOf(await deviceId.readValue()),
         bytesOf(await identity.readValue()),
       );
-      this.#links.get(peer)?.device.gatt.disconnect();
-      // Notifications that arrive before the engine has the link wait for it.
-      let ready;
-      const link = {
-        device,
-        message,
-        queue: Promise.resolve(),
-        onDisconnect: null,
-        inbound: new Promise((resolve) => (ready = resolve)),
-      };
+      link.peer = peer;
+      link.message = message;
       message.addEventListener("characteristicvaluechanged", ({ target }) => {
         const bytes = bytesOf(target.value);
         link.inbound = link.inbound
@@ -120,34 +165,55 @@ export class BluetoothCarrier extends EventTarget {
           .catch(() => {});
       });
       await message.startNotifications();
-      const hello = chars.get(HELLO);
-      if (hello) {
-        // A refused hello is not a reason to drop the link (the chapter's
-        // rule); the peripheral then resolves the central as it can.
-        await hello.writeValueWithResponse(await this.#node.bleHello()).catch(() => {});
+      try {
+        await hello.writeValueWithResponse(await this.#node.bleHello());
+      } catch (error) {
+        goneCheck();
+        throw new Error(`the device refused the hello: ${error?.message ?? error}`);
       }
-      link.onDisconnect = () => this.#lost(peer, link);
-      device.addEventListener("gattserverdisconnected", link.onDisconnect);
+      goneCheck();
+      // An earlier link to the same address is replaced. The engine keeps
+      // the peer across the swap, so it is not reported lost.
+      const previous = this.#links.get(peer);
       this.#links.set(peer, link);
+      link.linked = true;
+      if (previous) this.#retire(previous);
       const payload = server.maxWriteWithoutResponseSize ?? FLOOR_PAYLOAD;
+      // In #links before the engine hears of it: the fragments its link-up
+      // queues reach the sink ahead of this call's reply.
       await this.#node.bleLinkUp(peer, payload);
+      goneCheck();
       ready();
+      link.announced = true;
       this.dispatchEvent(new CustomEvent("connection", { detail: { peer, state: "connected" } }));
       return peer;
     } catch (error) {
-      device.gatt.disconnect();
+      if (link.linked) this.#lost(link);
+      else device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+      if (device.gatt.connected) device.gatt.disconnect();
       throw error;
     }
   }
 
-  /// Closes the link to `peer`.
+  /// Closes the link to `peer`, and reports it lost at once, whether or not
+  /// the browser still has a connection to close.
   close(peer) {
-    this.#links.get(peer)?.device.gatt.disconnect();
+    const link = this.#links.get(peer);
+    if (link) this.#drop(link);
   }
 
   /// Closes every link.
   closeAll() {
-    for (const peer of this.peers) this.close(peer);
+    for (const link of [...this.#links.values()]) this.#drop(link);
+  }
+
+  /// Closes every link and gives the node's Bluetooth sink back, so another
+  /// carrier can take it. This carrier links nothing afterwards.
+  release() {
+    if (this.#released) return;
+    this.closeAll();
+    this.#released = true;
+    this.#node.setBluetoothSink(null);
   }
 
   // The chapter's instance choice: with one instance, that one; with several,
@@ -177,19 +243,59 @@ export class BluetoothCarrier extends EventTarget {
     return candidates[0].service;
   }
 
+  #usable() {
+    if (this.#released) throw new Error("this Bluetooth carrier was released");
+  }
+
   #write(peer, bytes) {
     const link = this.#links.get(peer);
     if (!link) return;
     link.queue = link.queue
       .then(() => link.message.writeValueWithoutResponse(bytes))
-      .catch(() => link.device.gatt.disconnect());
+      .catch(() => this.#drop(link));
   }
 
-  #lost(peer, link) {
+  // Disconnects `link` and reports it lost now, not on an event that a
+  // server already gone never sends.
+  #drop(link) {
+    if (link.device.gatt.connected) link.device.gatt.disconnect();
+    this.#lost(link);
+  }
+
+  // A link replaced by a newer one to the same address: closed without
+  // telling the engine, which keeps the peer on the newer link.
+  #retire(link) {
     link.device.removeEventListener("gattserverdisconnected", link.onDisconnect);
-    if (this.#links.get(peer) !== link) return;
-    this.#links.delete(peer);
-    this.#node.bleLinkDown(peer);
-    this.dispatchEvent(new CustomEvent("connection", { detail: { peer, state: "closed" } }));
+    if (link.announced) {
+      this.dispatchEvent(new CustomEvent("connection", { detail: { peer: link.peer, state: "closed" } }));
+    }
+    link.announced = false;
+    if (link.device !== this.#links.get(link.peer)?.device && link.device.gatt.connected) {
+      link.device.gatt.disconnect();
+    }
+  }
+
+  #lost(link) {
+    link.device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+    if (this.#links.get(link.peer) !== link) return;
+    this.#links.delete(link.peer);
+    this.#node.bleLinkDown(link.peer);
+    if (link.announced) {
+      link.announced = false;
+      this.dispatchEvent(new CustomEvent("connection", { detail: { peer: link.peer, state: "closed" } }));
+    }
+  }
+
+  // The node stopped: its worker is gone, so the links carry nothing.
+  #nodeStopped() {
+    for (const link of [...this.#links.values()]) {
+      link.device.removeEventListener("gattserverdisconnected", link.onDisconnect);
+      if (link.device.gatt.connected) link.device.gatt.disconnect();
+      this.#links.delete(link.peer);
+      if (link.announced) {
+        this.dispatchEvent(new CustomEvent("connection", { detail: { peer: link.peer, state: "closed" } }));
+      }
+    }
+    this.#released = true;
   }
 }

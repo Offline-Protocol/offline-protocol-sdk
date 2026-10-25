@@ -287,13 +287,15 @@ impl Node {
         Ok(())
     }
 
-    /// Stops the engine. Every link is reported lost first, so the engine's
-    /// view of who is reachable ends empty rather than stale.
+    /// Stops the engine. Every link is reported lost first, peer streams and
+    /// Bluetooth alike, so the engine's view of who is reachable ends empty
+    /// rather than stale.
     pub fn stop(&mut self) -> NodeResult<()> {
         let links: Vec<LinkId> = self.links.keys().copied().collect();
         for link in links {
             self.close_link(link);
         }
+        self.ble_links_down();
         self.protocol.stop()?;
         Ok(())
     }

@@ -185,8 +185,12 @@ export class OfflineNode extends EventTarget {
   bleLinkUp(peer: string, maxPayload: number): Promise<void>;
   bleFragmentReceived(peer: string, bytes: Uint8Array): Promise<void>;
   bleLinkDown(peer: string): Promise<void>;
-  /** Where the engine's outbound Bluetooth fragments go; BluetoothCarrier sets it. */
-  setBluetoothSink(sink: ((peer: string, bytes: Uint8Array) => void) | null): void;
+  /**
+   * Where the engine's outbound Bluetooth fragments go; BluetoothCarrier sets
+   * it. `close` runs once when the node stops or fails. Throws when another
+   * carrier holds it; `null` gives it back.
+   */
+  setBluetoothSink(sink: { write(peer: string, bytes: Uint8Array): void; close(): void } | null): void;
   /** Registers a carrier the page opened; resolves to its link id. */
   openLink(carrier: PageCarrier): Promise<number>;
   /** Bytes the carrier delivered; resolves to the reason it was closed, if it was. */
@@ -357,7 +361,10 @@ export function publicAddress(
  * A `connection` event carries `{ peer, state: "connected" | "closed" }`.
  */
 export class BluetoothCarrier extends EventTarget {
-  /** `bluetooth` defaults to `navigator.bluetooth`. */
+  /**
+   * `bluetooth` defaults to `navigator.bluetooth`. One carrier per node:
+   * throws while another carrier on `node` has not been released.
+   */
   constructor(node: OfflineNode, options?: { bluetooth?: unknown });
   /** Whether this browser exposes Web Bluetooth at all. */
   static readonly supported: boolean;
@@ -367,8 +374,15 @@ export class BluetoothCarrier extends EventTarget {
   request(): Promise<string>;
   /** Devices this origin was granted before, where the browser remembers them. */
   known(): Promise<unknown[]>;
-  /** Links a device; resolves to the address its identity proves. */
+  /**
+   * Links a device; resolves to the address its identity proves. Rejects for
+   * a device that does not verify, serves no Hello, refuses the hello, or
+   * disconnects before the link is up.
+   */
   connect(device: unknown): Promise<string>;
+  /** Closes the link to `peer` and reports it lost at once. */
   close(peer: string): void;
   closeAll(): void;
+  /** Closes every link and gives the node's Bluetooth back to another carrier. */
+  release(): void;
 }

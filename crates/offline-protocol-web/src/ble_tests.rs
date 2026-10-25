@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::node::{Node, NodeOptions};
+use crate::node::{LinkId, Node, NodeOptions, MAX_LINKS};
 
 struct Side {
     node: Node,
@@ -179,4 +179,159 @@ fn a_node_without_bluetooth_has_no_slot() {
     node.initialize().expect("initialize");
     assert!(node.ble_verify(b"x", b"y").is_err());
     assert!(node.ble_next_fragment().is_none());
+}
+
+/// Collects the events a side has queued.
+fn drain(s: &mut Side) {
+    while let Some(json) = s.node.poll_event() {
+        s.events
+            .push(serde_json::from_str(&json).expect("event json"));
+    }
+}
+
+fn count(s: &Side, kind: &str, peer: &str) -> usize {
+    s.events
+        .iter()
+        .filter(|e| e["type"] == kind && e["peer_id"] == peer)
+        .count()
+}
+
+/// Verifies `peripheral` and links it on `central` only, as a page does
+/// when it opens a link to a device.
+fn central_link(central: &mut Side, peripheral: &Side, payload: u32) -> Result<(), String> {
+    let identity = peripheral.node.ble_hello().expect("identity");
+    let proved = central
+        .node
+        .ble_verify(peripheral.address.as_bytes(), &identity)
+        .map_err(|e| e.to_string())?;
+    central
+        .node
+        .ble_link_up(&proved, payload)
+        .map_err(|e| e.to_string())
+}
+
+/// Opens a peer stream between the two, as a tab or a data channel would,
+/// and moves its preambles across, so each announces the other on it.
+fn stream(a: &mut Side, b: &mut Side) -> (LinkId, LinkId) {
+    let (la, lb) = (
+        a.node.open_link().expect("link"),
+        b.node.open_link().expect("link"),
+    );
+    for _ in 0..4 {
+        while let Some((link, data)) = a.node.next_outbound() {
+            assert_eq!(link, la);
+            assert_eq!(b.node.link_received(lb, &data), None);
+        }
+        while let Some((link, data)) = b.node.next_outbound() {
+            assert_eq!(link, lb);
+            assert_eq!(a.node.link_received(la, &data), None);
+        }
+    }
+    (la, lb)
+}
+
+#[test]
+fn a_replaced_link_to_the_same_address_is_not_announced_again() {
+    let (mut a, b) = (side("browser"), side("phone"));
+    let b_addr = b.address.clone();
+    central_link(&mut a, &b, 244).expect("first link");
+    central_link(&mut a, &b, 300).expect("the page replaced its link");
+    drain(&mut a);
+    assert_eq!(count(&a, "neighbor_discovered", &b_addr), 1);
+    assert_eq!(count(&a, "neighbor_lost", &b_addr), 0);
+    a.node.ble_link_down(&b_addr);
+    drain(&mut a);
+    assert_eq!(count(&a, "neighbor_lost", &b_addr), 1);
+}
+
+#[test]
+fn a_peer_also_linked_over_a_stream_is_lost_only_with_its_last_link() {
+    // Bluetooth goes first.
+    let (mut a, mut b) = (side("browser"), side("phone"));
+    let b_addr = b.address.clone();
+    central_link(&mut a, &b, 244).expect("link");
+    let (la, _) = stream(&mut a, &mut b);
+    drain(&mut a);
+    a.node.ble_link_down(&b_addr);
+    drain(&mut a);
+    assert_eq!(
+        count(&a, "neighbor_lost", &b_addr),
+        0,
+        "the stream still reaches the peer"
+    );
+    a.node.close_link(la);
+    drain(&mut a);
+    assert_eq!(count(&a, "neighbor_lost", &b_addr), 1);
+
+    // The stream goes first.
+    let (mut c, mut d) = (side("browser-two"), side("phone-two"));
+    let d_addr = d.address.clone();
+    let (lc, _) = stream(&mut c, &mut d);
+    central_link(&mut c, &d, 244).expect("link");
+    drain(&mut c);
+    c.node.close_link(lc);
+    drain(&mut c);
+    assert_eq!(
+        count(&c, "neighbor_lost", &d_addr),
+        0,
+        "Bluetooth still reaches the peer"
+    );
+    c.node.ble_link_down(&d_addr);
+    drain(&mut c);
+    assert_eq!(count(&c, "neighbor_lost", &d_addr), 1);
+}
+
+#[test]
+fn links_past_the_ceiling_are_refused() {
+    let mut a = side("browser");
+    let devices: Vec<Side> = (0..=MAX_LINKS)
+        .map(|n| side(&format!("phone-{n}")))
+        .collect();
+    for device in &devices[..MAX_LINKS] {
+        central_link(&mut a, device, 244).expect("under the ceiling");
+    }
+    let refused = central_link(&mut a, &devices[MAX_LINKS], 244).expect_err("over the ceiling");
+    assert!(refused.contains("already open"), "{refused}");
+    a.node.ble_link_down(&devices[0].address);
+    central_link(&mut a, &devices[MAX_LINKS], 244).expect("a slot freed");
+}
+
+#[test]
+fn a_page_that_only_verifies_holds_a_bounded_list() {
+    let mut a = side("browser");
+    let devices: Vec<Side> = (0..=16).map(|n| side(&format!("phone-{n}"))).collect();
+    for device in &devices {
+        let identity = device.node.ble_hello().expect("identity");
+        a.node
+            .ble_verify(device.address.as_bytes(), &identity)
+            .expect("verify");
+    }
+    assert!(
+        a.node.ble_link_up(&devices[0].address, 244).is_err(),
+        "the oldest verification was evicted"
+    );
+    a.node
+        .ble_link_up(&devices[16].address, 244)
+        .expect("the newest is held");
+}
+
+#[test]
+fn a_blocked_peer_is_linked_but_not_announced() {
+    let (mut a, b) = (side("browser"), side("phone"));
+    let b_addr = b.address.clone();
+    a.node.protocol.block_user(&b_addr).expect("block");
+    central_link(&mut a, &b, 244).expect("link");
+    drain(&mut a);
+    assert_eq!(count(&a, "neighbor_discovered", &b_addr), 0);
+}
+
+#[test]
+fn stopping_reports_every_bluetooth_peer_lost() {
+    let (mut a, b) = (side("browser"), side("phone"));
+    let b_addr = b.address.clone();
+    central_link(&mut a, &b, 244).expect("link");
+    a.node.stop().expect("stop");
+    drain(&mut a);
+    assert_eq!(count(&a, "neighbor_lost", &b_addr), 1);
+    assert!(a.node.ble_fragment_received(&b_addr, b"OP").is_err());
 }
