@@ -823,7 +823,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         // reach JS in the order they were given out. See `eventSeq`.
         eventSeqLock.lock()
         defer { eventSeqLock.unlock() }
-        if eventName == Events.onEvent, var numbered = body as? [String: Any] {
+        // An unnumbered event reaches JS without a `seq`, which JS dispatches
+        // without gap tracking. See `EventReplayRing.isReplayed`.
+        if eventName == Events.onEvent, var numbered = body as? [String: Any],
+           EventReplayRing.isReplayed(numbered["eventJson"] as? String) {
             numbered[Self.eventSeqField] = eventSeq
             if let eventJson = numbered["eventJson"] as? String {
                 eventReplay.record(seq: eventSeq, eventJson: eventJson)

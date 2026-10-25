@@ -22967,6 +22967,154 @@ mod tests {
         );
     }
 
+    /// The bridges' signal-reading feed interval stays above the core's
+    /// `PeerRssi` cap.
+    ///
+    /// `PeerRssiFeedPolicy.kt` and `PeerRssiFeedPolicy.swift` each throttle
+    /// readings per address, and the core caps the event per peer at
+    /// [`PEER_RSSI_INTERVAL`]. The two are measured on different clocks with a
+    /// lock wait or queue hop between them, so a bridge interval at or under
+    /// the cap lets the core see a gap just short of it, drop the reading, and
+    /// deliver about half the rate, with nothing failing anywhere. Each
+    /// bridge's own test compares against a literal, so only this guard sees
+    /// the core constant move.
+    #[test]
+    fn peer_rssi_feed_interval_stays_above_the_core_cap() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn_dir = manifest.join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            std::fs::read_to_string(rn_dir.join(rel))
+                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+        };
+        // The number that follows `marker` on its line.
+        let value_after = |source: &str, marker: &str, file: &str| -> f64 {
+            let start = source
+                .find(marker)
+                .unwrap_or_else(|| panic!("{file} no longer declares `{marker}`"))
+                + marker.len();
+            source[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '_')
+                .filter(|c| *c != '_')
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|e| panic!("{file}: `{marker}` is not a number: {e}"))
+        };
+        let cap_ms = PEER_RSSI_INTERVAL.as_millis() as f64;
+
+        let kotlin_ms = value_after(
+            &read("android/src/main/java/com/offlineprotocol/PeerRssiFeedPolicy.kt"),
+            "const val INTERVAL_MS = ",
+            "PeerRssiFeedPolicy.kt",
+        );
+        let swift_ms = 1000.0
+            * value_after(
+                &read("ios/PeerRssiFeedPolicy.swift"),
+                "static let interval: TimeInterval = ",
+                "PeerRssiFeedPolicy.swift",
+            );
+        for (bridge, ms) in [("Kotlin", kotlin_ms), ("Swift", swift_ms)] {
+            assert!(
+                ms > cap_ms,
+                "the {bridge} feed interval ({ms} ms) must stay above the core's PeerRssi cap \
+                 ({cap_ms} ms), or the core drops readings and the event rate halves"
+            );
+        }
+        assert_eq!(
+            kotlin_ms, swift_ms,
+            "the two bridges feed at different intervals"
+        );
+    }
+
+    /// Both React Native bridges leave `peer_rssi` out of the numbered #514
+    /// replay ring, by matching the start of its JSON.
+    ///
+    /// Numbered, a reading per quarter second per peer would push the
+    /// `message_received` and `message_delivered` events the ring exists for
+    /// out of it within seconds. The bridges cannot parse every event to find
+    /// its type, so each holds the prefix the engine writes. If the engine's
+    /// serialisation moved the tag or renamed the event, the match would fail
+    /// silently and every reading would be numbered again: this reads the
+    /// engine's own output and both bridge sources.
+    #[test]
+    fn peer_rssi_is_left_out_of_the_replay_ring() {
+        let json = crate::CoreEvent::PeerRssi {
+            peer_id: "p".to_string(),
+            transport: "BLE".to_string(),
+            rssi: -50,
+        }
+        .to_json()
+        .unwrap();
+        let prefix = r#"{"type":"peer_rssi","#;
+        assert!(json.starts_with(prefix), "the engine now writes {json}");
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn_dir = manifest.join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            std::fs::read_to_string(rn_dir.join(rel))
+                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+        };
+        let escaped = prefix.replace('"', "\\\"");
+        for (file, declaration, use_site) in [
+            (
+                "android/src/main/java/com/offlineprotocol/EventReplayRing.kt",
+                format!("PEER_RSSI_PREFIX = \"{escaped}\""),
+                (
+                    "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+                    "EventReplayRing.isReplayed(",
+                ),
+            ),
+            (
+                "ios/EventReplayRing.swift",
+                format!("peerRssiPrefix = \"{escaped}\""),
+                (
+                    "ios/OfflineProtocolModule.swift",
+                    "EventReplayRing.isReplayed(",
+                ),
+            ),
+        ] {
+            assert!(
+                read(file).contains(&declaration),
+                "{file} must declare `{declaration}`"
+            );
+            assert!(
+                read(use_site.0).contains(use_site.1),
+                "{} must decide numbering through `{}`",
+                use_site.0,
+                use_site.1
+            );
+        }
+    }
+
+    /// The Android host honours `transports.ble.advertiseNodeHash`.
+    ///
+    /// The flag decides whether the BLE facade puts this device's node hash
+    /// in its scan response (R29). When the engine moved into
+    /// `ProtocolEngineHost.kt` both facade constructions were written with a
+    /// literal `false`, so the documented option stopped doing anything and
+    /// every check stayed green: the facade takes a plain `Boolean`. This reads
+    /// the host, where both constructions now live.
+    #[test]
+    fn react_native_android_host_honours_advertise_node_hash() {
+        let host =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt");
+        assert!(
+            host.contains("optBoolean(\"advertiseNodeHash\", false)"),
+            "ProtocolEngineHost.kt must read transports.ble.advertiseNodeHash at create"
+        );
+        assert_eq!(
+            host.matches("advertiseNodeHash = bleAdvertiseNodeHash,")
+                .count(),
+            2,
+            "both BleTransportFacade constructions in ProtocolEngineHost.kt (create and the \
+             on-demand enableTransport) must pass the configured flag"
+        );
+        assert!(
+            !host.contains("advertiseNodeHash = false,"),
+            "ProtocolEngineHost.kt hard-codes advertiseNodeHash; the config option is ignored"
+        );
+    }
+
     /// Every `DataValue` kind reaches the three places that enumerate them
     /// by hand.
     ///

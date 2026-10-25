@@ -31,6 +31,13 @@ class ProtocolEngineHost(
     var nostrManager: NostrManager? = null
     var currentConfig: ProtocolConfig? = null
 
+    // `transports.ble.advertiseNodeHash`, off by default: whether the
+    // facade puts this device's node hash in its scan response (R29). Kept
+    // from create so a facade `enableTransport` builds on demand advertises
+    // the same way as the one create builds.
+    @Volatile
+    var bleAdvertiseNodeHash = false
+
     val backgroundProcessor = ProtocolBackgroundProcessor(
         protocolProvider = { protocol },
         onDiagnostic = onDiagnostic,
@@ -53,6 +60,8 @@ class ProtocolEngineHost(
         val config = parsed.coreConfig
         val proto = OfflineProtocol(config)
         currentConfig = config
+        bleAdvertiseNodeHash = parsed.rawJson.optJSONObject("transports")
+            ?.optJSONObject("ble")?.optBoolean("advertiseNodeHash", false) ?: false
         onDiagnostic(
             "info",
             "Protocol core created",
@@ -78,7 +87,7 @@ class ProtocolEngineHost(
                 proto,
                 config.profile,
                 config.appId,
-                advertiseNodeHash = false,
+                advertiseNodeHash = bleAdvertiseNodeHash,
                 onDiagnostic,
             ).also { manager ->
                 manager.listener = transportListener(manager)
@@ -194,6 +203,7 @@ class ProtocolEngineHost(
         }
         meshServices = null
         currentConfig = null
+        bleAdvertiseNodeHash = false
     }
 
     fun startProtocolCore() {
@@ -295,7 +305,7 @@ class ProtocolEngineHost(
                         proto,
                         currentConfig?.profile ?: "unknown",
                         currentConfig?.appId ?: "",
-                        advertiseNodeHash = false,
+                        advertiseNodeHash = bleAdvertiseNodeHash,
                         onDiagnostic,
                     )
                     onDiagnostic("info", "BLE manager created on demand", emptyMap())
