@@ -14,8 +14,9 @@
 // that answered before a network change and now accepts and ignores a
 // redial. On `/reject` every event is refused with `OK false`, and on
 // `/closed` every subscription is ended with `CLOSED`, as a relay that wants
-// authentication does. Node's standard library only, so the test runner
-// installs nothing.
+// authentication does. On `/slow` everything is answered, SLOW_MS late: a
+// relay that answers after the others. Node's standard library only, so the
+// test runner installs nothing.
 //
 // Usage: node test/nostr-relay.mjs <port>
 
@@ -24,6 +25,7 @@ import { createHash } from "node:crypto";
 
 const port = Number(process.argv[2] ?? 8766);
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const SLOW_MS = 600;
 const clients = new Set();
 // Every event kept, oldest first.
 const stored = [];
@@ -109,7 +111,11 @@ class Client {
 
   send(message) {
     if (this.mode === "quiet") return;
-    if (!this.socket.destroyed) this.socket.write(frame(JSON.stringify(message)));
+    const write = () => {
+      if (!this.socket.destroyed) this.socket.write(frame(JSON.stringify(message)));
+    };
+    if (this.mode === "slow") setTimeout(write, SLOW_MS);
+    else write();
   }
 
   #read(chunk) {
@@ -200,7 +206,13 @@ server.on("upgrade", (request, socket) => {
     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
       `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
   );
-  let mode = { "/silent": "silent", "/once": "once", "/reject": "reject", "/closed": "closed" }[request.url] ?? "open";
+  let mode = {
+    "/silent": "silent",
+    "/once": "once",
+    "/reject": "reject",
+    "/closed": "closed",
+    "/slow": "slow",
+  }[request.url] ?? "open";
   if (request.url.startsWith("/first/")) {
     mode = served.has(request.url) ? "silent" : "open";
     served.add(request.url);

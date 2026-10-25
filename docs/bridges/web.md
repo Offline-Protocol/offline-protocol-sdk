@@ -393,7 +393,11 @@ flush in between would hand the next query to no relay and spend that peer's
 five-minute resolution limit on an empty answer. Nothing is published to a
 relay that is not live, and a relay the browser will not dial (a `ws://` URL
 from an `https:` page) or that closes the subscription reaches the page as
-an `error` event.
+an `error` event, once until that relay confirms a subscription again: a
+relay that wants authentication refuses every redial, and a page told on
+each one would hear it for ever. Stopping the node closes every socket and
+says "not live" before it ends the queries still open, for the same reason
+a lost relay does.
 
 **An event is confirmed by the first relay that accepts it.** It goes to
 every live relay, and fails only when each of them refused it or dropped.
@@ -538,8 +542,10 @@ start there, because Firefox answers it by asking the user.
   `OK false` fails the event with the relay's reason, a relay that goes
   quiet is reported down before its event fails and its query ends, a query
   one relay never answers ends at its deadline rather than on the first
-  answer, and a relay that closes the subscription is reported and never
-  counts as live (W12).
+  answer, a query two relays answer ends on the slower one's answer, a relay
+  that closes the subscription is reported once however often it is
+  redialled and never counts as live, and closing the driver reports it down
+  before it ends a query (W12).
 
   The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
   library. It keeps what is not ephemeral, replaces an addressable event by

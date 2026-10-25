@@ -29,10 +29,10 @@
 //   COMPLETION_TIMEOUT_MS at the latest, below the engine's 30 s sweep, so the
 //   driver that knows which relays answered is the one that ends it.
 
-const RETRY_MIN_MS = 1000;
-const RETRY_MAX_MS = 30000;
-const KEEP_ALIVE_MS = 60000;
-const PROBE_MS = 10000;
+const RETRY_MIN_MS = 1_000;
+const RETRY_MAX_MS = 30_000;
+const KEEP_ALIVE_MS = 60_000;
+const PROBE_MS = 10_000;
 const COMPLETION_TIMEOUT_MS = 10_000;
 // Events awaiting a verdict, at most. The transport bounds its own queue;
 // this bounds the driver's copy if the relays never answer.
@@ -101,7 +101,17 @@ export class NostrRelays {
     this.#probeMs = timers.probeMs ?? PROBE_MS;
     this.#completionMs = timers.completionMs ?? COMPLETION_TIMEOUT_MS;
     for (const url of checkRelays(relays)) {
-      this.#slots.push({ url, socket: null, live: false, confirm: null, retry: null, backoff: RETRY_MIN_MS });
+      // `refused`: this relay closed the subscription and has not confirmed
+      // one since, so the page has already been told.
+      this.#slots.push({
+        url,
+        socket: null,
+        live: false,
+        confirm: null,
+        retry: null,
+        backoff: RETRY_MIN_MS,
+        refused: false,
+      });
     }
   }
 
@@ -137,20 +147,27 @@ export class NostrRelays {
     for (const slot of live) slot.socket.send(reqJson);
   }
 
+  /// Closes every socket, then says "not live", then ends every query. In
+  /// that order, as #lost does: each step runs the engine and flushes, and a
+  /// flush that still saw this node live would hand the next event or query
+  /// to a socket already closing. Going down fails every unconfirmed event
+  /// in the transport, so the driver's copy is forgotten, not reported.
   close() {
     if (this.#closed) return;
     this.#closed = true;
     clearInterval(this.#keepAlive);
     self.removeEventListener?.("online", this.#wake);
-    for (const queryId of [...this.#queries.keys()]) this.#finish(queryId);
     for (const slot of this.#slots) {
       clearTimeout(slot.retry);
+      slot.retry = null;
       if (slot.socket?.readyState === WebSocket.OPEN) {
         slot.socket.send(JSON.stringify(["CLOSE", this.#subscriptionId]));
       }
       this.#drop(slot);
     }
     this.#setLive(false);
+    this.#pending.clear();
+    for (const queryId of [...this.#queries.keys()]) this.#finish(queryId);
   }
 
   #connect(slot) {
@@ -243,6 +260,7 @@ export class NostrRelays {
         clearTimeout(slot.confirm);
         slot.confirm = null;
         slot.backoff = RETRY_MIN_MS;
+        slot.refused = false;
         slot.live = true;
         this.#setLive(true);
       } else if (id === this.#probeId) {
@@ -253,11 +271,15 @@ export class NostrRelays {
     } else if (type === "CLOSED") {
       if (id === this.#subscriptionId) {
         // A relay that ends this device's subscription is not carrying it.
-        // Said once per drop, because the redial may meet the same refusal
-        // (a relay that wants authentication) every time.
-        this.#engine.warn?.(
-          `nostr: ${slot.url} closed this device's subscription: ${parts[2] ?? "no reason given"}`,
-        );
+        // Said once until the relay confirms a subscription again: the redial
+        // meets the same refusal (a relay that wants authentication) every
+        // time, and a page told every backoff would hear it for ever.
+        if (!slot.refused) {
+          slot.refused = true;
+          this.#engine.warn?.(
+            `nostr: ${slot.url} closed this device's subscription: ${parts[2] ?? "no reason given"}`,
+          );
+        }
         this.#lost(slot, slot.socket);
       } else if (id === this.#probeId) {
         // A refusal is still an answer from a live relay.

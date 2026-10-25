@@ -8,9 +8,11 @@
 // so a probe takes milliseconds rather than a minute (W12). It checks the
 // rules the engine cannot see: a keep-alive probe replays no stored history,
 // a refused event fails, a relay that goes quiet is reported down before what
-// it held is failed or completed, a query waits for every relay it went to,
-// and a relay that closes this device's subscription is reported. The title
-// ends as PASS or FAIL: <step>.
+// it held is failed or completed, a query waits for every relay it went to
+// and ends on the last one's answer, a relay that closes this device's
+// subscription is reported once however often it is redialled, and closing
+// the driver reports it down before it ends a query. The title ends as PASS
+// or FAIL: <step>.
 import { NostrRelays } from "../src/nostr-relays.js";
 import { log, run } from "./common.js";
 
@@ -150,11 +152,50 @@ await run(async (step) => {
     driver.open();
     const at = await until(trace, ([kind]) => kind === "warn", "the warning");
     if (!trace[at][1].includes("auth-required")) throw new Error(`the relay's reason was lost: ${trace[at][1]}`);
+    // Redialled after 1 s and again 2 s later, refused each time: the page
+    // hears it once, not on every redial.
+    await sleep(3500);
+    const warnings = trace.filter(([kind]) => kind === "warn").length;
+    if (warnings !== 1) throw new Error(`the same refusal was reported ${warnings} times`);
     if (trace.some(([kind, up]) => kind === "status" && up === true)) {
       throw new Error("a relay that refused the subscription counted as live");
     }
     driver.close();
-    log("a relay that closed the subscription was reported, with its reason, and never counted as live");
+    log("a relay that closed the subscription was reported once, with its reason, and never counted as live");
+  }
+
+  step.name = "a query ends on the last answer";
+  {
+    const { trace, engine } = recorder();
+    const driver = new NostrRelays([relay, `${relay}/slow`], engine, { completionMs: 5000 });
+    driver.open();
+    await live(trace);
+    // The slow relay confirms its subscription late; wait until it has.
+    await sleep(1500);
+    const sent = Date.now();
+    driver.query({ queryId: "q-slow", reqJson: JSON.stringify(["REQ", "q-slow", { kinds: [1], "#t": [tag] }]) });
+    await until(trace, ([kind, id]) => kind === "completed" && id === "q-slow", "the completion");
+    const waited = Date.now() - sent;
+    if (waited < 500) throw new Error(`the query ended on the fast relay's answer, after ${waited} ms`);
+    if (waited >= 4500) throw new Error(`the query waited out its deadline (${waited} ms) though both relays answered`);
+    driver.close();
+    log(`a query two live relays answered ended on the slower one's answer (${waited} ms)`);
+  }
+
+  step.name = "closing goes down first";
+  {
+    const { trace, engine } = recorder();
+    const driver = new NostrRelays([`${relay}/once`], engine);
+    driver.open();
+    await live(trace);
+    driver.query({ queryId: "q-closing", reqJson: JSON.stringify(["REQ", "q-closing", { kinds: [1], "#t": [tag] }]) });
+    driver.close();
+    const down = trace.findIndex(([kind, up]) => kind === "status" && up === false);
+    const done = trace.findIndex(([kind, id]) => kind === "completed" && id === "q-closing");
+    if (down === -1 || done === -1 || done < down) {
+      throw new Error(`a query ended while the node still looked live: ${JSON.stringify(trace)}`);
+    }
+    log("closing reported the node down before it ended the query it held");
   }
 });
 </script>
