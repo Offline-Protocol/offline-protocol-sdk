@@ -495,21 +495,19 @@ class OfflineProtocolPlugin :
         }
     }
 
+    /**
+     * The host's own sequence, as React Native runs it: the scheduler and every
+     * transport stop first, the foreground service after them, the core last,
+     * and each failure reaches the diagnostic sink. The service goes late on
+     * purpose: while the scheduler waits on its in-flight tick and the sockets
+     * close, it is what keeps a backgrounded process out of the cached state.
+     */
     private fun stopOnEngine(skipForegroundStop: Boolean = false) {
-        val teardown = TeardownSequence()
-        if (!skipForegroundStop) {
-            teardown.step("mesh foreground service") {
+        engineHost.stopTransportsAndProtocol {
+            if (!skipForegroundStop) {
                 applicationContext?.let { FlutterMeshForegroundKeepAlive.stop(it) }
             }
         }
-        teardown.step("process scheduler") { engineHost.backgroundProcessor.stopProcessScheduler() }
-        teardown.step("BLE manager") { engineHost.bleTransport?.stop() }
-        teardown.step("Internet manager") { engineHost.internetManager?.stop() }
-        teardown.step("Wi-Fi Direct manager") { engineHost.wifiDirectManager?.stop() }
-        teardown.step("Reticulum manager") { engineHost.reticulumManager?.stop() }
-        teardown.step("Nostr manager") { engineHost.nostrManager?.stop() }
-        teardown.step("protocol") { engineHost.protocol?.stop() }
-        teardown.firstFailureOrNull()?.let { throw it }
     }
 
     private fun tearDownProtocol(context: Context? = applicationContext) {
