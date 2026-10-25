@@ -44,6 +44,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0031](0031-telemetry-trusts-only-the-ingests-issuers.md) | The telemetry uploader trusts only the ingest's issuers | Accepted |
 | [0032](0032-ephemeral-sends-go-once-over-a-live-link.md) | Ephemeral sends go once, over a live link | Accepted |
 | [0033](0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md) | A session is confirmed only by proof of the same group | Accepted |
+| [0034](0034-browsers-find-each-other-through-their-network-address.md) | Browsers on one network find each other through its address | Accepted |
 
 ## Format
 

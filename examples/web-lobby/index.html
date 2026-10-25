@@ -17,6 +17,8 @@
   code { font-size: 13px; word-break: break-all; }
   section { border-top: 1px solid var(--line); padding: 14px 0; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input { width: 100%; font: 13px/1.4 ui-monospace, monospace; padding: 6px 8px; margin-bottom: 6px;
+          border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
   textarea { width: 100%; min-height: 64px; font: 12px/1.4 ui-monospace, monospace; padding: 8px;
              border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
   button { font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
@@ -28,7 +30,7 @@
   [hidden] { display: none !important; }
 </style>
 <h1>Pong Lobby</h1>
-<p>Each browser runs a full Offline Protocol node in a Web Worker. The host makes an MLS group, every device that connects is invited, and the game state travels end-to-end encrypted through the group, ten times a second, with no server. Devices connect over WebRTC on the local network with two codes; tabs of one browser find each other on their own.</p>
+<p>Each browser runs a full Offline Protocol node in a Web Worker. The host makes an MLS group, every device that connects is invited, and the game state travels end-to-end encrypted through the group, ten times a second, with no server. Devices connect over WebRTC on the local network with two codes, or find each other through relays you name; tabs of one browser find each other on their own.</p>
 
 <section>
   <div class="meta">This device</div>
@@ -61,6 +63,16 @@
 </section>
 
 <section>
+  <div class="meta">Devices on this network: through Nostr relays and a STUN server you choose. Nothing here names either.</div>
+  <input id="relays" placeholder="Relay URLs (wss://…), separated by spaces" autocomplete="off">
+  <input id="stun" placeholder="STUN server (stun:host:port)" autocomplete="off">
+  <input id="label" placeholder="Show this device as" maxlength="64" autocomplete="off">
+  <div class="row"><button id="nearby" class="quiet">Look for devices nearby</button></div>
+  <div id="asks"></div>
+  <ul id="nearby-peers" class="stats"></ul>
+</section>
+
+<section>
   <div class="meta">Players in the game, by address. A connection code proves nothing on its own: check that every address here is a device you meant to let in.</div>
   <ul id="players" class="stats"></ul>
 </section>
@@ -73,7 +85,7 @@
 <section class="stats" id="stats">no game yet</section>
 
 <script type="module">
-import { OfflineNode, WebRtcCarrier } from "../../bindings/web/src/index.js";
+import { OfflineNode, WebRtcCarrier, NearbyRoom } from "../../bindings/web/src/index.js";
 
 const RATE_HZ = 10;
 const PADDLE = 0.22;
@@ -329,6 +341,103 @@ $("make-answer").onclick = async () => {
     status(error.message);
   }
 };
+
+// --- Nearby ---------------------------------------------------------------
+
+// The devices behind this network's public address (W13). The relays and the
+// STUN server are the person's to choose, and remembered in this browser
+// only. Anyone who can guess the network's address can offer, so every offer
+// is asked about here before it is answered, and the label it carries is a
+// claim: the players list below shows the address that actually joined.
+let nearby = null;
+const remembered = ["relays", "stun", "label"];
+for (const id of remembered) {
+  try {
+    $(id).value = localStorage.getItem(`lobby.${id}`) ?? "";
+  } catch {
+    // No storage in this context: the fields start empty.
+  }
+}
+
+function ask({ label }) {
+  return new Promise((resolve) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const text = document.createElement("span");
+    text.textContent = `“${label || "a device"}” wants to connect.`;
+    const allow = document.createElement("button");
+    allow.textContent = "Allow";
+    const deny = document.createElement("button");
+    deny.textContent = "Deny";
+    deny.className = "quiet";
+    const settle = (answer) => {
+      row.remove();
+      resolve(answer);
+    };
+    allow.onclick = () => settle(true);
+    deny.onclick = () => settle(false);
+    row.append(text, allow, deny);
+    $("asks").append(row);
+  });
+}
+
+function renderNearby() {
+  const list = $("nearby-peers");
+  list.replaceChildren();
+  const peers = nearby?.peers ?? [];
+  if (nearby && peers.length === 0) {
+    const empty = document.createElement("li");
+    empty.textContent = "nobody else here yet";
+    list.append(empty);
+  }
+  for (const { peer, label } of peers) {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = `${label || "unnamed"} `;
+    const connect = document.createElement("button");
+    connect.className = "quiet";
+    connect.textContent = "Connect";
+    connect.onclick = async () => {
+      status(`asking ${label || "the device"} to let this one in…`);
+      try {
+        await nearby.connect(peer);
+        status("connecting…");
+      } catch (error) {
+        status(error.message);
+      }
+    };
+    item.append(name, connect);
+    list.append(item);
+  }
+}
+
+$("nearby").onclick = async () => {
+  nearby?.close();
+  nearby = null;
+  for (const id of remembered) {
+    try {
+      localStorage.setItem(`lobby.${id}`, $(id).value);
+    } catch {
+      // Not remembered; nothing else changes.
+    }
+  }
+  const stun = $("stun").value.trim();
+  try {
+    status("looking for devices on this network…");
+    nearby = await new NearbyRoom(node, rtc, {
+      relays: $("relays").value.split(/\s+/).filter(Boolean),
+      iceServers: stun ? [{ urls: stun }] : [],
+      label: $("label").value.trim(),
+      admit: ask,
+    }).open();
+    nearby.addEventListener("peers", renderNearby);
+    renderNearby();
+    status("listed below: the devices behind this network's address");
+  } catch (error) {
+    status(error.message);
+  }
+};
+addEventListener("pagehide", () => nearby?.close());
 
 $("copy-offer").onclick = () => navigator.clipboard.writeText($("offer-code").value);
 $("copy-answer").onclick = () => navigator.clipboard.writeText($("answer-code").value);

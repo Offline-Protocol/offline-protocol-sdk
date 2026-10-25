@@ -15,6 +15,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Browsers on one network find each other.** `NearbyRoom` meets the
+  browsers behind one public address in a Nostr room derived from that
+  address and the application id, lists them by the label each application
+  chose, and links over WebRTC to the one a person picks; the link runs on
+  the local network. The room key is public by construction, so every
+  connection code is sealed to one device's key, and a host answers only
+  what its `admit` callback accepts. Relays and STUN servers are the
+  application's ([W13](docs/bridges/web.md#w13-a-nearby-room-is-derived-from-the-networks-address),
+  [ADR 0034](docs/adr/0034-browsers-find-each-other-through-their-network-address.md)).
+
 - **The browser reaches devices it has no link to, over Nostr.**
   `OfflineNode.start({ nostr: { relays } })` adds the Nostr transport every
   binding shares, driven from the worker over the relays the application

@@ -66,14 +66,23 @@ function randomHex(bytes) {
   ).join("");
 }
 
+/// What a room channel subscribes with and opens through: `subscription(id)`
+/// resolves to the REQ text, and `open(text)` to what a relay message
+/// carries for the room, or null. Both run in the worker.
+export function signalRoom(node, room) {
+  return {
+    subscription: (id) => node.signalSubscription(room, id),
+    open: (text) => node.signalOpen(room, text),
+  };
+}
+
 /// One subscription to a room on every relay. `onSignal` gets each signal a
 /// relay delivers that opens for this room. A channel that `stays` (a hosted
 /// room) keeps every relay subscribed for as long as it is open; one that
 /// does not (a join, which lasts seconds) lets a relay that drops go.
-class RoomChannel {
-  #node;
+export class RoomChannel {
+  #source;
   #relays;
-  #room;
   #onSignal;
   #keepAliveMs;
   // One per relay: { url, socket, request, live, confirm, retry, backoff, refused }.
@@ -88,10 +97,9 @@ class RoomChannel {
   #shown = () => document.visibilityState === "visible" && this.#probe({ now: true });
 
   /// `keepAliveMs` makes the channel stay, probing each relay that often.
-  constructor(node, relays, room, onSignal, { keepAliveMs = null } = {}) {
-    this.#node = node;
+  constructor(source, relays, onSignal, { keepAliveMs = null } = {}) {
+    this.#source = source;
     this.#relays = relays;
-    this.#room = room;
     this.#onSignal = onSignal;
     this.#keepAliveMs = keepAliveMs === null ? null : Math.min(keepAliveMs, MAX_TIMER_MS);
   }
@@ -143,7 +151,7 @@ class RoomChannel {
   async #connect(slot) {
     try {
       // Built again for every socket, so a resubscription asks from now on.
-      slot.request = await this.#node.signalSubscription(this.#room, this.#subscriptionId);
+      slot.request = await this.#source.subscription(this.#subscriptionId);
     } catch (error) {
       // The node stopped: nothing this room hears could be answered.
       return this.#failed(error);
@@ -177,8 +185,8 @@ class RoomChannel {
         }
         return;
       }
-      this.#node
-        .signalOpen(this.#room, data)
+      this.#source
+        .open(data)
         .then((signal) => signal && !this.#closed && this.#onSignal(signal))
         .catch(() => {});
     };
@@ -355,7 +363,7 @@ export class NostrSignaller {
       clearTimeout(entry.timer);
       entry.timer = setTimeout(() => forget(session, entry), Math.max(0, freshUntilMs - Date.now()));
     };
-    const channel = new RoomChannel(this.#node, this.#relays, room, async (signal) => {
+    const channel = new RoomChannel(signalRoom(this.#node, room), this.#relays, async (signal) => {
       if (signal.role !== "offer") return;
       const known = sessions.get(signal.session);
       if (known) {
@@ -396,7 +404,7 @@ export class NostrSignaller {
     let settle;
     const answered = new Promise((resolve, reject) => (settle = { resolve, reject }));
     let accepted = false;
-    const channel = new RoomChannel(this.#node, this.#relays, room, async (signal) => {
+    const channel = new RoomChannel(signalRoom(this.#node, room), this.#relays, async (signal) => {
       if (accepted || signal.role !== "answer" || signal.session !== session) return;
       accepted = true;
       try {

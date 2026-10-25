@@ -1303,6 +1303,33 @@ other neighbours, and every frame is still authenticated above this
 layer. An application must not treat `peer_rssi`
 as evidence of who is physically near.
 
+### R30. A nearby room is readable by anyone who can guess the network's address
+
+A browser's nearby room is a Nostr topic and key derived from the
+application id and the network's public address
+([web bridge W13](../bridges/web.md#w13-a-nearby-room-is-derived-from-the-networks-address),
+[ADR 0034](../adr/0034-browsers-find-each-other-through-their-network-address.md)).
+An address is not a secret: anyone can derive every room for an application
+and read who is present in each, by key and label, and can offer a
+connection to any of them. Everyone behind the same address is in the same
+room, which on a carrier-grade NAT, a hotel or a campus is many strangers.
+The relays the application names see the topic, the times and sizes of the
+events, and the network address of every client.
+
+**Why it stands:** the address is the one thing two browsers on a network
+share without a person carrying something between them, and no browser
+exposes local discovery.
+
+**What bounds it:** a presence carries a key used for this room only and the
+label the application chose, and nothing that identifies the device. Every
+connection code is sealed with NIP-44 to one presence key, so a holder of
+the room key reads no code and learns no local address (R27). A host answers
+only offers its application admits, and the binding refuses a room without
+an `admit` decision; an application should show the label and ask. A link
+that forms proves nothing by itself: the engine's preamble names the device,
+and MLS admits it to nothing until it is invited. A host holds at most
+sixteen sessions, as a signalling room does (R28).
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

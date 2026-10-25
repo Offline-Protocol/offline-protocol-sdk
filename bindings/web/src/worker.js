@@ -33,6 +33,7 @@ import init, {
   signalEvent,
   signalOpen,
   parseInvite,
+  NearbyRoomKeys,
 } from "../pkg/offline_protocol_web.js";
 import { openDurableStore } from "./store.js";
 import { TabCarrier } from "./tab-carrier.js";
@@ -44,6 +45,11 @@ let engine = null;
 let carrier = null;
 let nostr = null;
 let store = null;
+let startedAppId = null;
+// Open nearby rooms, by id (W13). A page holds a few at most.
+const nearby = new Map();
+let nextNearby = 1;
+const MAX_NEARBY_ROOMS = 4;
 let timer = null;
 let dead = null;
 // Links whose carrier is on the page.
@@ -151,6 +157,12 @@ function post(message) {
   self.postMessage(message);
 }
 
+function nearbyRoom(id) {
+  const room = nearby.get(id);
+  if (!room) throw new Error("that nearby room is closed");
+  return room;
+}
+
 const handlers = {
   async start({ appId, profile, storage = "durable", tabs = true, instance, wasm, nostr: relays }) {
     if (engine) throw new Error("this worker already runs a node");
@@ -191,6 +203,7 @@ const handlers = {
       throw error;
     }
     engine = next;
+    startedAppId = appId;
     if (tabs) {
       carrier = new TabCarrier(
         appId,
@@ -280,6 +293,35 @@ const handlers = {
   parseInvite({ blob }) {
     return JSON.parse(parseInvite(blob));
   },
+  // A nearby room's half in the worker (W13). The page holds the relay
+  // sockets and the STUN lookup; these derive, seal and open.
+  nearbyOpen({ network, label = "" }) {
+    if (nearby.size >= MAX_NEARBY_ROOMS) throw new Error(`${MAX_NEARBY_ROOMS} nearby rooms are already open`);
+    const room = new NearbyRoomKeys(startedAppId, network, label);
+    const id = nextNearby++;
+    nearby.set(id, room);
+    return { id, key: room.key };
+  },
+  nearbySubscription({ id, subscriptionId }) {
+    return nearbyRoom(id).subscription(subscriptionId);
+  },
+  nearbyPresence({ id }) {
+    return nearbyRoom(id).presence();
+  },
+  nearbyOffer({ id, to, session, code }) {
+    return nearbyRoom(id).offer(to, session, code);
+  },
+  nearbyAnswer({ id, to, session, code }) {
+    return nearbyRoom(id).answer(to, session, code);
+  },
+  nearbyOpenMessage({ id, message }) {
+    const opened = nearby.get(id)?.open(message);
+    return opened === undefined ? null : JSON.parse(opened);
+  },
+  nearbyClose({ id }) {
+    nearby.get(id)?.free();
+    nearby.delete(id);
+  },
   sendGroupMessage({ groupId, content, ephemeral = false }) {
     return JSON.parse(engine.sendGroupMessage(groupId, content, Boolean(ephemeral)));
   },
@@ -289,6 +331,8 @@ const handlers = {
     carrier = null;
     nostr?.close();
     nostr = null;
+    for (const room of nearby.values()) room.free();
+    nearby.clear();
     engine.stop();
     flush();
     pageLinks.clear();

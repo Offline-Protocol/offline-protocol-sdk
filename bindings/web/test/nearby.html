@@ -1,0 +1,139 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// Three nodes behind one network address find each other in a nearby room
+// through a relay (the runner's local one): each sees the others' labels,
+// one links to another over WebRTC once that one admits it, and a third that
+// the host does not admit gets no answer. A room behind another address sees
+// none of them, and a room with no relays, no admit decision or no STUN
+// server refuses to open. The address is given, as an application that knows
+// it would give it; a runner has no STUN server to learn it from. The title
+// ends as PASS or FAIL: <step>.
+import { OfflineNode, WebRtcCarrier, NearbyRoom, publicAddress } from "../src/index.js";
+import { log, waitFor, run } from "./common.js";
+
+const params = new URLSearchParams(location.search);
+const relay = params.get("relay") ?? "ws://127.0.0.1:8766";
+// The runner's STUN server, which reports this fixed documentation address.
+const stun = params.get("stun") ?? "stun:127.0.0.1:8767";
+const STUN_REPORTS = "203.0.113.50";
+const appId = `web-nearby-${crypto.randomUUID()}`;
+const relays = [relay];
+// Documentation addresses (RFC 5737), unique to this page's run.
+const octet = 1 + Math.floor(Math.random() * 250);
+const network = `203.0.113.${octet}`;
+const elsewhere = `198.51.100.${octet}`;
+
+const seen = (room, label) =>
+  new Promise((resolve, reject) => {
+    const found = () => room.peers.find((p) => p.label === label);
+    if (found()) return resolve(found());
+    const timer = setTimeout(() => reject(new Error(`never saw ${label}`)), 15000);
+    room.addEventListener("peers", function on() {
+      if (!found()) return;
+      clearTimeout(timer);
+      room.removeEventListener("peers", on);
+      resolve(found());
+    });
+  });
+
+await run(async (step) => {
+  const [a, b, c, d] = await Promise.all(
+    ["host", "guest", "stranger", "away"].map((profile) =>
+      OfflineNode.start({ appId, profile, storage: "memory", tabs: false }),
+    ),
+  );
+
+  step.name = "refusals";
+  const throws = (make) => {
+    try {
+      make();
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  const carrier = new WebRtcCarrier(a);
+  if (!throws(() => new NearbyRoom(a, carrier, { relays: [], network, admit: () => true }))) {
+    throw new Error("a room with no relays was made");
+  }
+  if (!throws(() => new NearbyRoom(a, carrier, { relays, network }))) {
+    throw new Error("a room with no admit decision was made");
+  }
+  const noStun = await publicAddress([]).then(() => false, () => true);
+  if (!noStun) throw new Error("an address was learned with no STUN server");
+  log("no relays, no admit decision and no STUN server are each refused");
+
+  step.name = "stun";
+  const learned = await publicAddress([{ urls: stun }]);
+  if (learned !== STUN_REPORTS) throw new Error(`STUN reported ${learned}, not ${STUN_REPORTS}`);
+  log(`the network's address came from the STUN server: ${learned}`);
+
+  step.name = "open";
+  const asked = [];
+  const host = await new NearbyRoom(a, carrier, {
+    relays,
+    network,
+    label: "Alice",
+    admit: ({ label }) => {
+      asked.push(label);
+      return label === "Bob";
+    },
+  }).open();
+  const guest = await new NearbyRoom(b, new WebRtcCarrier(b), {
+    relays,
+    network,
+    label: "Bob",
+    admit: () => false,
+  }).open();
+  const stranger = await new NearbyRoom(c, new WebRtcCarrier(c), {
+    relays,
+    network,
+    label: "Mallory",
+    admit: () => false,
+  }).open();
+  const away = await new NearbyRoom(d, new WebRtcCarrier(d), {
+    relays,
+    network: elsewhere,
+    label: "Away",
+    admit: () => false,
+  }).open();
+
+  step.name = "presence";
+  const alice = await seen(guest, "Alice");
+  await seen(host, "Bob");
+  await seen(stranger, "Alice");
+  if (alice.peer !== host.key) throw new Error("the presence key is not the host's");
+  log("devices behind one address see each other's labels");
+
+  step.name = "admitted";
+  const sessions = Promise.all([
+    waitFor(a, "secure_session_established", (e) => e.peer_id === b.address),
+    waitFor(b, "secure_session_established", (e) => e.peer_id === a.address),
+  ]);
+  await guest.connect(alice.peer);
+  await sessions;
+  const received = waitFor(a, "message_received", (e) => e.content === "found you nearby");
+  await b.sendMessage(a.address, "found you nearby");
+  await received;
+  log("an admitted device linked over WebRTC and a message crossed");
+
+  step.name = "not admitted";
+  const refused = await stranger
+    .connect(alice.peer, { timeoutMs: 4000 })
+    .then(() => false, () => true);
+  if (!refused) throw new Error("a device the host did not admit got an answer");
+  if (!asked.includes("Mallory")) throw new Error("the host was never asked about the stranger");
+  log("a device the host did not admit got no answer");
+
+  step.name = "elsewhere";
+  if (away.peers.length !== 0) throw new Error(`a room elsewhere saw ${JSON.stringify(away.peers)}`);
+  if (host.peers.some((p) => p.label === "Away")) throw new Error("a room saw a device elsewhere");
+  log("a room behind another address saw none of them");
+
+  for (const room of [host, guest, stranger, away]) room.close();
+  await Promise.all([a, b, c, d].map((node) => node.stop()));
+});
+</script>

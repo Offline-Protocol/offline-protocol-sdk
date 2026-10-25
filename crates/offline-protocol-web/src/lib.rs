@@ -12,7 +12,8 @@
 //! [`signal`] lets two pages that share a room code exchange their WebRTC
 //! connection codes through Nostr relays instead of by hand, and
 //! [`nostr_host`] drives the Nostr transport itself from the worker, with
-//! relays the application names.
+//! relays the application names. [`nearby`] lets the browsers behind one
+//! network address find each other there.
 //!
 //! The crate also builds on every host, so the workspace's lint, docs and test
 //! runs cover it: everything below the bindings is plain Rust, and the tests
@@ -24,6 +25,7 @@
 pub mod bindings;
 pub mod log_store;
 pub mod memory_store;
+pub mod nearby;
 pub mod node;
 pub mod nostr_host;
 pub mod opfs;
