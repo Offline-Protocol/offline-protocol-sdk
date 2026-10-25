@@ -270,7 +270,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 | `transports.reticulum.autoReconnect` | boolean | true | Reconnect after the connection drops |
 | `transports.reticulum.maxReconnectAttempts` | number | 0 | Attempts before giving up (0 = infinite) |
 | `transports.nostr.enabled` | boolean | false | Enable Nostr relay transport (requires `relayUrls`) |
-| `transports.nostr.relayUrls` | string[] | `[]` | Nostr relay WebSocket URLs (e.g. `["wss://relay.damus.io"]`) |
+| `transports.nostr.relayUrls` | string[] | `[]` | Nostr relay WebSocket URLs (`wss://`) the application chooses. The SDK names none |
 | `transports.nostr.connectionTimeout` | number | 30 | Connection timeout in seconds |
 | `transports.nostr.autoReconnect` | boolean | true | Auto-reconnect on disconnect |
 | `transports.nostr.reconnectDelay` | number | 1000 | Reconnect delay in ms |

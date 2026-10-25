@@ -151,6 +151,13 @@ jobs:
               - 'bindings/swift/README.md'
               - 'bindings/web/scripts/**'
               - 'bindings/web/src/nostr-signal.js'
+              - 'bindings/web/src/nostr-relays.js'
+              # `no_shipped_file_names_a_relay` reads every shipped doc,
+              # example and binding source for a relay URL.
+              - 'bindings/**'
+              - 'docs/**'
+              - 'examples/**'
+              - '*.md'
               - 'docs/spec/**'
               - 'docs/bridges/README.md'
               - 'docs/bridges/c.md'

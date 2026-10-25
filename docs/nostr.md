@@ -70,11 +70,9 @@ const protocol = new OfflineProtocol({
     ble: { enabled: true },
     nostr: {
       enabled: true,
-      relayUrls: [
-        'wss://relay.damus.io',
-        'wss://nos.lol',
-        'wss://relay.nostr.band',
-      ],
+      // The relays you choose. The SDK names none, and starts Nostr on
+      // nothing but this list.
+      relayUrls: ['wss://relay-one.example', 'wss://relay-two.example'],
       autoReconnect: true,
     },
   },
@@ -189,10 +187,13 @@ nostrQueryCompleted(queryId)                  // after the relay's EOSE
 3. Route `["EVENT", queryId, {...}]` to `nostrQueryEventReceived` with the event
    **object** (the third element) serialized — *not* through the message path.
    These are not messages; their content is sealed to a different key.
-4. On `["EOSE", queryId]`, send `["CLOSE", queryId]` and call
-   `nostrQueryCompleted`. The first EOSE closes it: leaving the subscription
-   open for the other relays' stragglers would keep a live filter on a peer's
-   routing tag for the life of the connection.
+4. On `["EOSE", queryId]` from a relay, send `["CLOSE", queryId]` to that
+   relay, and call `nostrQueryCompleted` once every relay the query went to
+   has answered, or after `COMPLETION_TIMEOUT_MS` (10 s). Never on the first
+   EOSE: that hands the answer to the fastest relay, and an empty or hostile
+   one wins by having nothing to send. Closing each relay as it finishes is
+   what keeps a live filter off a peer's routing tag
+   ([the username chapter](spec/username-discovery.md#a-resolution-ends-when-every-relay-has-answered)).
 5. If no relay is connected when a query is drained, call
    `nostrQueryCompleted(queryId)` immediately rather than dropping it — the
    transport otherwise holds an entry no answer will arrive for.
@@ -585,7 +586,7 @@ and [R28](security/threat-model.md#r28-a-signalling-room-code-admits-whoever-hol
 
 1. Verify `relayUrls` is non-empty and uses `wss://` (not `ws://`)
 2. Check the device has Internet — Nostr is not a substitute for connectivity
-3. Try a known-good public relay (`wss://relay.damus.io`) to isolate relay-specific issues
+3. Try a second relay you trust, to tell a relay-specific problem from a local one
 4. Watch the `transport_state` telemetry record for the Nostr transport's status transitions
 
 ### Messages Sent But Not Delivered

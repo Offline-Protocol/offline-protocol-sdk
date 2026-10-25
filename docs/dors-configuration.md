@@ -32,7 +32,7 @@ const config = {
     },
     nostr: {
       enabled: false, // Requires at least one relay URL
-      relayUrls: ['wss://relay.damus.io'],
+      relayUrls: ['wss://your-relay.example'], // the relays you choose; the SDK names none
     },
   },
   

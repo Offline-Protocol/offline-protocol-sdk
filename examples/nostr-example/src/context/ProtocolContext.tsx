@@ -10,7 +10,7 @@ import {OfflineProtocol} from '@offline-protocol/mesh-sdk';
 import type {Neighbor, ChatMessage, Chat, LogEntry, ConnectionStatus} from '../types';
 import {
   PROTOCOL_CONFIG,
-  DEFAULT_RELAYS,
+  RELAYS,
   MAX_LOG_ENTRIES,
 } from '../constants';
 
@@ -346,7 +346,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
     addLog('info', 'Protocol started with Nostr transport');
     addLog('info', `User ID: ${uid}`);
-    addLog('info', `Relays: ${DEFAULT_RELAYS.join(', ')}`);
+    addLog('info', `Relays: ${RELAYS.join(', ')}`);
   }, [handleEvent, addLog]);
 
   const stop = useCallback(async () => {
@@ -440,7 +440,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       } else {
         await protocolRef.current.enableTransport('nostr', {
           enabled: true,
-          relayUrls: DEFAULT_RELAYS,
+          relayUrls: RELAYS,
           autoReconnect: true,
         });
         setIsTransportEnabled(true);

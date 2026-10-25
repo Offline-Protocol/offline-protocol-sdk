@@ -152,6 +152,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Changed
 
+- **No shipped file names a Nostr relay.** The docs, doc comments and the
+  Nostr example listed public relays; they now show a placeholder, and the
+  example starts with an empty list for the developer to fill.
+  `no_shipped_file_names_a_relay` keeps it so: a relay the SDK names becomes
+  the relay every application uses.
+- **The Nostr driver guide no longer completes a resolution on the first
+  EOSE.** `docs/nostr.md` said so while the bridges and the username chapter
+  wait for every relay; the guide now says what the code does.
+
 - **The workspace reads the clock through `offline_protocol_core::time`.** It
   is `std::time` on every target but the browser, where `std::time` compiles
   and panics on first use; there it is `web-time`. Nothing changes on any

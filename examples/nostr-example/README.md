@@ -44,10 +44,8 @@ npx react-native run-ios
 > To run on Android, scaffold an `android/` project for this directory first
 > (`npx react-native init` or an Expo prebuild).
 
-## Default Relays
+## Relays
 
-- `wss://relay.damus.io`
-- `wss://nos.lol`
-- `wss://relay.nostr.band`
-
-These are public relays. For production use, configure your own relay.
+The example ships with no relays, and neither does the SDK. List the ones you
+choose in `RELAYS` in `src/constants.ts` (`wss://` URLs) before running; with
+an empty list the Nostr transport stays down.
