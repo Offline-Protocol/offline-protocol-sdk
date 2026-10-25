@@ -21,28 +21,14 @@ HEADER = textwrap.dedent(
     """
     package com.offlineprotocol.flutter
 
-    import android.bluetooth.BluetoothAdapter
-    import android.content.Intent
-    import android.util.Base64
-    import android.util.Log
-    import com.offlineprotocol.InternetTransportBootstrap
     import com.offlineprotocol.ProtocolEngineHost
-    import com.offlineprotocol.TeardownSequence
-    import com.offlineprotocol.TransportBridge
-    import com.offlineprotocol.TransportState
-    import com.offlineprotocol.InitialRuntimeConfigApplier
-    import org.json.JSONArray
     import org.json.JSONObject
-    import uniffi.offline_protocol.*
-    import kotlin.math.max
-    import kotlin.math.min
 
     /**
      * Per-method bodies for [FlutterEngineChannel]. Arguments are the Dart-side
      * maps from `mesh_sdk.dart` (named keys, camelCase).
      */
     internal object EngineMethodHandlers {
-        private const val TAG = "EngineMethodHandlers"
     """
 )
 
@@ -50,7 +36,7 @@ FOOTER = "}\n"
 
 
 def fn(name: str, body: str) -> str:
-    indented = textwrap.indent(body.strip(), "    ")
+    indented = textwrap.indent(textwrap.dedent(body).strip(), "        ")
     return f"\n    @JvmStatic\n    fun {name}(\n        host: ProtocolEngineHost,\n        env: FlutterEngineChannel.Environment,\n        arguments: Any?,\n    ): Any? {{\n{indented}\n    }}\n"
 
 
@@ -192,34 +178,14 @@ CUSTOM["receiveMessage"] = """
     return host.receiveMessage()
 """
 
-# Data layer: map keys spaceId, docId, collection, etc.
-for m in [
-    "dataCreateDoc",
-    "dataDeleteDoc",
-    "dataRemoveDoc",
-    "dataRemoveSpace",
-    "dataFetchAttachmentFrom",
-    "dataMapSet",
-    "dataMapDelete",
-    "dataMapGetJson",
-    "dataListPush",
-    "dataListDelete",
-    "dataTextInsert",
-    "dataTextDelete",
-    "dataFlush",
-    "dataFetchAttachment",
-    "dataProvideAttachment",
-    "dataDeclineAttachment",
-]:
-    pass  # filled below in generic data builder
-
+# Data layer: map keys spaceId, docId, collection, and so on.
 DATA_METHODS = {
     "dataCreateDoc": "host.dataCreateDoc(FlutterBridgeArgs.requireString(map, \"spaceId\"), FlutterBridgeArgs.requireString(map, \"docId\"))",
     "dataDeleteDoc": "host.dataDeleteDoc(FlutterBridgeArgs.requireString(map, \"spaceId\"), FlutterBridgeArgs.requireString(map, \"docId\"))",
     "dataRemoveDoc": "host.dataRemoveDoc(FlutterBridgeArgs.requireString(map, \"spaceId\"), FlutterBridgeArgs.requireString(map, \"docId\"))",
     "dataRemoveSpace": "host.dataRemoveSpace(FlutterBridgeArgs.requireString(map, \"spaceId\"))",
     "dataFetchAttachmentFrom": "host.dataFetchAttachmentFrom(FlutterBridgeArgs.requireString(map, \"spaceId\"), FlutterBridgeArgs.requireString(map, \"peerId\"), FlutterBridgeArgs.requireString(map, \"hash\"))",
-    "dataSetInterest": "host.dataSetInterest(FlutterBridgeArgs.requireString(map, \"spaceId\"), FlutterBridgeArgs.requireStringList(map, \"patterns\"))",
+    "dataSetInterest": "host.dataSetInterest(FlutterBridgeArgs.requireString(map, \"spaceId\"), FlutterBridgeArgs.stringList(map, \"patterns\"))",
     "dataListDocs": "return host.dataListDocs(FlutterBridgeArgs.requireString(map, \"spaceId\"))",
     "dataListSpaces": "return host.dataListSpaces()",
     "dataMapSet": "host.dataMapSet(FlutterBridgeArgs.requireString(map, \"spaceId\"), FlutterBridgeArgs.requireString(map, \"docId\"), FlutterBridgeArgs.requireString(map, \"collection\"), FlutterBridgeArgs.requireString(map, \"key\"), FlutterBridgeArgs.requireString(map, \"valueJson\"))",
@@ -407,9 +373,6 @@ for m in BRIDGE_DELEGATE:
     return com.offlineprotocol.ProtocolEngineHostBridge.{m}(host, env.context, arguments)
 """
 
-HELPER = ""
-
-
 def render() -> str:
     parts = [HEADER]
     for m in METHODS:
@@ -417,7 +380,6 @@ def render() -> str:
         if not body:
             body = f'return com.offlineprotocol.ProtocolEngineHostBridge.{m}(host, env.context, arguments)'
         parts.append(fn(m, body))
-    parts.append(HELPER)
     parts.append(FOOTER)
     return "".join(parts)
 

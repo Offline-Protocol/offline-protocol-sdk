@@ -36,7 +36,8 @@ internal object FlutterBridgeArgs {
             else -> throw IllegalArgumentException("Missing number '$key'")
         }
 
-    fun requireStringList(map: Map<*, *>, key: String): List<String> {
+    /** Absent is an empty list, as iOS `BridgeArgumentMaps.stringList` reads it. */
+    fun stringList(map: Map<*, *>, key: String): List<String> {
         val raw = map[key] ?: return emptyList()
         if (raw is List<*>) {
             return raw.mapNotNull { it as? String }

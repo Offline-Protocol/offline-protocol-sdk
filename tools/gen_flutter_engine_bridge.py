@@ -24,15 +24,15 @@ def load_methods() -> list[str]:
 
 
 def render() -> str:
-    methods = load_methods()
-    arms: list[str] = []
-    for m in methods:
-        if m in PLUGIN_ONLY:
-            continue
-        arms.append(f'        "{m}" -> EngineMethodHandlers.{m}(host, env, arguments)')
-
-    body = textwrap.dedent(
-        f"""
+    arms = [
+        f'        "{m}" -> EngineMethodHandlers.{m}(host, env, arguments)'
+        for m in load_methods()
+        if m not in PLUGIN_ONLY
+    ]
+    # Dedented first and the arms substituted after: interpolated into the
+    # template, a multi-line block keeps only its first line's indent.
+    template = textwrap.dedent(
+        """
         package com.offlineprotocol.flutter
 
         import android.content.Context
@@ -42,7 +42,7 @@ def render() -> str:
          * Method-channel dispatch for the Flutter plugin (F3). Every name in
          * `method_channel_methods.txt` must have a matching arm here.
          */
-        object FlutterEngineChannel {{
+        object FlutterEngineChannel {
             data class Environment(
                 val context: Context,
                 val activityProvider: () -> android.app.Activity?,
@@ -65,15 +65,14 @@ def render() -> str:
                 env: Environment,
                 method: String,
                 arguments: Any?,
-            ): Any? = when (method) {{
-        {chr(10).join(arms)}
+            ): Any? = when (method) {
+        @ARMS@
                 else -> throw UnknownMethod(method)
-            }}
-        }}
+            }
+        }
         """
     ).strip() + "\n"
-
-    return body
+    return template.replace("@ARMS@", "\n".join(arms))
 
 
 def main() -> int:
