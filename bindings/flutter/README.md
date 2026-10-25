@@ -117,21 +117,16 @@ event-channel callbacks are delivered on the main isolate’s platform thread
 | Lifecycle | `createFromConfig`, `initializeMlsWithSecureStorage`, `start`, `stop`, `destroy` |
 | Identity | `localAddress` |
 | Messaging | `sendMessage` |
-| Events | `OfflineProtocol.events`, native `replayEvents` via `NativeEventPipeline` |
-| Internet | `enableInternetTransport`, auto-enable after `start()` when `transports.internet` has `serverAddress` |
-| BLE | Wired when `bleEnabled` is true; `enableTransport('ble', …)` |
-| Wi‑Fi Direct / peer stream | `enableTransport('wifiDirect', …)`, auto-enable when configured |
-| Config | Optional top-level `dors` and `relay` JSON (shared `InitialRuntimeConfigApplier`) |
+| Events | `OfflineProtocol.events` (sequence numbers and `replayEvents` when you subscribe early) |
+| Full native surface | `MeshSdk` (parity with React Native native methods) |
 
-**Not in the Flutter plugin yet:** Nostr, Reticulum, telemetry pipe, and the
-React Native foreground mesh service. `createFromConfig` refuses a config with
-`reticulumEnabled` or `nostrEnabled` set, rather than enabling a transport
-nothing serves. Use React Native for those, or host their managers in the
-plugin and take them off its exclude lists.
+Internet, BLE, Wi-Fi Direct, Nostr and Reticulum follow the same configuration model as React Native. Optional top-level `dors` and `relay` JSON use the shared runtime config applier.
 
-Configuration fields and transport behavior match the core and React Native;
-see [Configuration](../../docs/configuration.md) and the
-[React Native README](../react-native/README.md).
+**Android:** `MeshForegroundService` keeps mesh work alive while the engine is running; the notification Stop action matches React Native teardown.
+
+**Not in Flutter:** React Native `MeshHeadlessWakeService` (opt-in wake after process kill). Use React Native if you need that behavior.
+
+For every config field and transport, see [Configuration](../../docs/configuration.md) and the [React Native README](../react-native/README.md).
 
 ## Example app
 

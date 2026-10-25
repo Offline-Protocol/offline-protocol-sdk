@@ -392,8 +392,14 @@ React Native delegates the 107 methods listed in
 (`ProtocolEngineHostBridgeReactNative.{swift,kt}`). Both adapters and the
 Kotlin bridge are generated; the Swift bridge is written by hand, and
 `tools/check_swift_protocol_engine_host_bridge.py` holds it to one handler per
-shared method with no stubs. It does not compare bodies with Kotlin, so a
-behaviour change goes into both bridges by hand. The gate runs all four:
+manifest method with no stubs. It does not compare bodies with Kotlin, so a
+behaviour change goes into both bridges by hand. The Flutter plugin's 171
+method-channel names live in
+`bindings/flutter/offline_protocol/method_channel_methods.txt`, generated into
+`FlutterEngineChannel` (both platforms), `EngineMethodHandlers` (Android) and
+`MeshSdk` (Dart) by `tools/gen_flutter_{engine_bridge,swift_bridge}.py`,
+`tools/gen_engine_method_handlers.py` and `tools/gen_mesh_sdk_dart.py`. The
+gate runs every one:
 
 ```bash
 bash scripts/check-binding-generators.sh --check   # CI gate

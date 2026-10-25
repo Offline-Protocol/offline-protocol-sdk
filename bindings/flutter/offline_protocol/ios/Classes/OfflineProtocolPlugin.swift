@@ -1,7 +1,15 @@
 import Flutter
+import os
 import UIKit
 
 /// Flutter host for the Offline Protocol engine (lifecycle, events, transports).
+///
+/// The counterpart of Android's `OfflineProtocolPlugin.kt`: this class owns the
+/// channels, the event stream and the foreground bookkeeping, and holds one
+/// `ProtocolEngineHost` (shared with the React Native module's sources) that
+/// owns the core, every transport manager, the data store, mesh services,
+/// telemetry and the process scheduler. Every method on the channel is
+/// dispatched by `FlutterEngineChannel` into `ProtocolEngineHostBridge`.
 ///
 /// UniFFI calls run on `engineQueue`; Flutter callbacks run on the main queue (bridge K2).
 /// Nothing on the main thread waits for the engine queue: engine stop can block on
@@ -9,11 +17,19 @@ import UIKit
 public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var channel: FlutterMethodChannel?
     private var eventsChannel: FlutterEventChannel?
-    private var protocolInstance: OfflineProtocol?
-    private var currentConfig: ProtocolConfig?
-    private var internetManager: InternetManager?
-    private var bleManager: BleManager?
-    private var wifiDirectManager: WifiDirectManager?
+
+    private static let log = OSLog(subsystem: "com.offlineprotocol.flutter", category: "engine")
+
+    private let host = ProtocolEngineHost(onDiagnostic: { level, message, context in
+        let type: OSLogType
+        switch level {
+        case "error": type = .error
+        case "warning": type = .default
+        default: type = .info
+        }
+        // The context can carry user and peer ids, so it is logged private.
+        os_log("%{public}@ %{private}@", log: OfflineProtocolPlugin.log, type: type, message, "\(context)")
+    })
 
     /// One serial queue for every plugin instance in the process. Flutter
     /// registers a new instance for every engine, so a queue per instance would
@@ -24,6 +40,17 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         label: "com.offlineprotocol.flutter.engine",
         qos: .userInitiated
     )
+    /// Telemetry lifecycle edges, process-wide like `engineQueue` and apart
+    /// from it: the background edge's flush may block for three seconds, and on
+    /// the engine queue every method call would wait behind it. One serial
+    /// queue for both edges keeps a `.active` from overtaking the background
+    /// flush and rotating the session out from under it.
+    private static let telemetryQueue = DispatchQueue(
+        label: "com.offlineprotocol.flutter.telemetry"
+    )
+    /// Main-confined: armed by the background observer, ended by the flush's
+    /// completion or the assertion's expiry, whichever comes first.
+    private var backgroundTelemetryTaskId: UIBackgroundTaskIdentifier = .invalid
     private let attachmentLock = NSLock()
     private var isPluginAttached = false
 
@@ -34,6 +61,14 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     private var eventSeq = 0
     private let eventReplay = EventReplayRing()
     private var eventSink: FlutterEventSink?
+
+    /// Inbound message events Dart could not take (shared `InboundEventBuffer`).
+    private let inboundEvents = InboundEventBuffer()
+
+    /// Written on the main queue by the lifecycle observers, read on the engine
+    /// queue when telemetry is enabled; the lock makes the pair safe.
+    private let appStateLock = NSLock()
+    private var appStateValue: AppState = .active
 
     private let foregroundReconnectPolicy = ForegroundReconnectPolicy()
     private var foregroundObserver: NSObjectProtocol?
@@ -84,7 +119,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         // `self` strongly or weakly, so deinit can run on the engine queue
         // itself, where a sync onto it deadlocks. No block can be running
         // against this instance by the time it is deallocating.
-        tearDownProtocol()
+        host.tearDown()
     }
 
     private func installForegroundObserver() {
@@ -94,6 +129,8 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            self?.setAppState(.background)
+            self?.notifyTelemetryBackground()
             OfflineProtocolPlugin.engineQueue.async {
                 self?.foregroundReconnectPolicy.didEnterBackground(
                     nowMs: MonotonicClock.nowMs()
@@ -105,6 +142,8 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            self?.setAppState(.active)
+            self?.notifyTelemetryActive()
             OfflineProtocolPlugin.engineQueue.async {
                 self?.handleAppBecameActive()
             }
@@ -125,12 +164,84 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
 
     private func handleAppBecameActive() {
         if foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs: MonotonicClock.nowMs()) {
-            internetManager?.forceReconnect()
+            host.internetManager?.forceReconnect()
         }
+        DispatchQueue.main.async { [weak self] in
+            self?.restateInternetSupersededIfNeeded()
+            self?.flushInboundEvents()
+        }
+    }
+
+    /// Re-emits `internet_session_superseded` while the internet transport latch
+    /// is set. Same contract as React Native iOS `restateInternetSupersededIfNeeded`:
+    /// the event is level-triggered on foreground, not edge-triggered once.
+    private func restateInternetSupersededIfNeeded() {
+        guard let eventJson = host.internetManager?.supersedeRestatementJson() else { return }
+        emitEventJson(eventJson)
+    }
+
+    /// The telemetry session boundary, as React Native iOS draws it: the core
+    /// hears the edge and the pipe gets up to three seconds to upload, inside a
+    /// background assertion so iOS does not suspend the process before the
+    /// uploader's turn. Without the edge the session never rotates after
+    /// `enableTelemetry`, and a batch waits in the durable queue for the next
+    /// launch. A protocol with telemetry off ignores both calls.
+    private func notifyTelemetryBackground() {
+        guard let proto = host.protocolInstance else { return }
+        endBackgroundTelemetryTask(backgroundTelemetryTaskId)
+        let task = UIApplication.shared.beginBackgroundTask(
+            withName: "OfflineProtocol.telemetryFlush"
+        ) {
+            self.endBackgroundTelemetryTask(self.backgroundTelemetryTaskId)
+        }
+        // Assigned before the runloop turns, so the expiry handler, which is
+        // delivered on main, cannot run first.
+        backgroundTelemetryTaskId = task
+        // `self` held strongly: a weak capture that lost its referent would
+        // leave the assertion unbalanced, and the block is short-lived.
+        Self.telemetryQueue.async {
+            proto.notifyAppState(state: .background)
+            _ = proto.flushTelemetryBlocking(deadlineMs: 3000)
+            DispatchQueue.main.async { self.endBackgroundTelemetryTask(task) }
+        }
+    }
+
+    /// The first `.active` after a background rotates the session; one with no
+    /// background before it (an interruption, Control Center) is not an edge
+    /// and the core does nothing with it.
+    private func notifyTelemetryActive() {
+        guard let proto = host.protocolInstance else { return }
+        Self.telemetryQueue.async {
+            proto.notifyAppState(state: .active)
+        }
+    }
+
+    /// Ends the assertion only if it is still the current one: ending an
+    /// identifier twice is a hard error, and a superseded completion must not
+    /// end the next transition's assertion.
+    private func endBackgroundTelemetryTask(_ id: UIBackgroundTaskIdentifier) {
+        guard id != .invalid, backgroundTelemetryTaskId == id else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        backgroundTelemetryTaskId = .invalid
+    }
+
+    private func setAppState(_ state: AppState) {
+        appStateLock.lock()
+        appStateValue = state
+        appStateLock.unlock()
+    }
+
+    private func currentAppState() -> AppState {
+        appStateLock.lock()
+        defer { appStateLock.unlock() }
+        return appStateValue
     }
 
     public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         setEventSink(events)
+        DispatchQueue.main.async { [weak self] in
+            self?.flushInboundEvents()
+        }
         return nil
     }
 
@@ -145,6 +256,28 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         eventLock.unlock()
     }
 
+    private func hasEventSink() -> Bool {
+        eventLock.lock()
+        defer { eventLock.unlock() }
+        return eventSink != nil
+    }
+
+    /// What the bridge needs beyond the host: the pieces that also touch this
+    /// plugin's event bookkeeping. Closures hold `self` weakly so a retained
+    /// environment never keeps a detached plugin alive.
+    private var channelEnvironment: EngineBridgeEnvironment {
+        EngineBridgeEnvironment(
+            appState: { [weak self] in self?.currentAppState() ?? .active },
+            replayEvents: { [weak self] fromSeq, toSeq in
+                self?.replayEventsOnEngine(fromSeq: fromSeq, toSeq: toSeq) ?? []
+            },
+            tearDownProtocol: { [weak self] in self?.tearDownProtocol() },
+            createOnEngine: { [weak self] configJson in try self?.createOnEngine(configJson) },
+            startOnEngine: { [weak self] in try self?.startOnEngine() },
+            stopOnEngine: { [weak self] in try self?.stopOnEngine() }
+        )
+    }
+
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         guard isAttached() else {
             postDetachedError(to: result)
@@ -156,62 +289,21 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
                 return
             }
             do {
-                switch call.method {
-                case "create":
-                    try self.createOnEngine(call.arguments)
-                    DispatchQueue.main.async { result(nil) }
-                case "initializeMlsWithSecureStorage":
-                    try self.initializeMlsOnEngine()
-                    DispatchQueue.main.async { result(nil) }
-                case "start":
-                    try self.startOnEngine()
-                    DispatchQueue.main.async { result(nil) }
-                case "stop":
-                    try self.stopOnEngine()
-                    DispatchQueue.main.async { result(nil) }
-                case "destroy":
-                    self.tearDownProtocol()
-                    DispatchQueue.main.async { result(nil) }
-                case "localAddress":
-                    let address = self.protocolInstance?.localAddress()
-                    DispatchQueue.main.async { result(address) }
-                case "sendMessage":
-                    let messageId = try self.sendMessageOnEngine(call.arguments)
-                    DispatchQueue.main.async { result(messageId) }
-                case "enableInternetTransport":
-                    try self.enableTransportOnEngine(type: "internet", configJson: call.arguments as? String)
-                    DispatchQueue.main.async { result(nil) }
-                case "enableTransport":
-                    guard let map = call.arguments as? [String: Any],
-                          let type = map["type"] as? String else {
-                        throw NSError(
-                            domain: "OfflineProtocol",
-                            code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "enableTransport expects type and config"]
-                        )
-                    }
-                    let configJson = map["config"] as? String
-                    try self.enableTransportOnEngine(type: type, configJson: configJson)
-                    DispatchQueue.main.async { result(nil) }
-                case "replayEvents":
-                    guard let map = call.arguments as? [String: Any],
-                          let fromSeq = (map["fromSeq"] as? NSNumber)?.intValue,
-                          let toSeq = (map["toSeq"] as? NSNumber)?.intValue else {
-                        throw NSError(
-                            domain: "OfflineProtocol",
-                            code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "replayEvents expects fromSeq and toSeq"]
-                        )
-                    }
-                    let replayed = self.eventReplay.replay(fromSeq: fromSeq, toSeq: toSeq)
-                    let payload = replayed.map {
-                        ["seq": $0.seq, "eventJson": $0.eventJson] as [String: Any]
-                    }
-                    DispatchQueue.main.async { result(payload) }
-                default:
-                    DispatchQueue.main.async { result(FlutterMethodNotImplemented) }
-                }
+                let payload = try FlutterEngineChannel.dispatch(
+                    host: self.host,
+                    env: self.channelEnvironment,
+                    method: call.method,
+                    arguments: call.arguments
+                )
+                DispatchQueue.main.async { result(payload) }
             } catch {
+                os_log(
+                    "%{public}@ failed: %{public}@",
+                    log: OfflineProtocolPlugin.log,
+                    type: .error,
+                    call.method,
+                    "\(error)"
+                )
                 DispatchQueue.main.async {
                     if let mapped = mapProtocolBridgeError(error) {
                         result(FlutterError(code: mapped.code, message: mapped.message, details: nil))
@@ -241,11 +333,12 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         }
     }
 
-    private func emitEventJson(_ eventJson: String) {
+    @discardableResult
+    private func emitEventJson(_ eventJson: String) -> Bool {
         eventLock.lock()
         guard let sink = eventSink else {
             eventLock.unlock()
-            return
+            return false
         }
         let seq = eventSeq
         eventReplay.record(seq: seq, eventJson: eventJson)
@@ -257,297 +350,92 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
                 "seq": seq,
             ])
         }
+        return true
     }
 
-    private func createOnEngine(_ arguments: Any?) throws {
-        guard let configJson = arguments as? String else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "create expects a JSON string"]
-            )
+    private func holdInboundEventIfBuffered(_ eventJson: String, generation: Int) {
+        guard let key = inboundEvents.key(forEventJson: eventJson) else { return }
+        inboundEvents.hold(key: key, eventJson: eventJson, generation: generation)
+    }
+
+    private func flushInboundEvents() {
+        guard hasEventSink(), !inboundEvents.isEmpty else { return }
+        let drained = inboundEvents.drain()
+        var undelivered: [InboundEventBuffer.Entry] = []
+        for entry in drained {
+            guard entry.generation == inboundEvents.currentGeneration() else { continue }
+            if !emitEventJson(entry.eventJson) {
+                undelivered.append(entry)
+            }
         }
+        inboundEvents.restore(undelivered)
+    }
+
+    /// Core `EventCallback` delivery with inbound hold when Dart is not listening.
+    fileprivate func deliverCoreEvent(_ eventJson: String) {
+        let generation = inboundEvents.currentGeneration()
+        if !emitEventJson(eventJson) {
+            holdInboundEventIfBuffered(eventJson, generation: generation)
+        }
+    }
+
+    private func replayEventsOnEngine(fromSeq: Int, toSeq: Int) -> [[String: Any]] {
+        eventLock.lock()
+        let replayed = eventReplay.replay(fromSeq: fromSeq, toSeq: toSeq)
+        eventLock.unlock()
+        return replayed.map { ["seq": $0.seq, "eventJson": $0.eventJson] as [String: Any] }
+    }
+
+    private func createOnEngine(_ configJson: String) throws {
         // Validated before the running engine is torn down: a config this
         // plugin refuses must leave the current session as it was.
-        let parsed = try ProtocolConfigParser.parse(configJson)
-        try refuseUnhostedTransports(parsed.config)
+        _ = try ProtocolConfigParser.parse(configJson)
         tearDownProtocol()
-        let proto = try OfflineProtocol(config: parsed.config)
-        proto.setEventCallback(callback: FlutterEventCallback(emit: { [weak self] json in
-            self?.emitEventJson(json)
-        }))
-        InitialRuntimeConfigApplier.apply(proto: proto, rawConfig: parsed.raw)
-        protocolInstance = proto
-        currentConfig = parsed.config
-
-        if parsed.config.bleEnabled {
-            let manager = BleManager(
-                protocol: proto,
-                deviceId: parsed.config.profile,
-                appId: parsed.config.appId
-            )
-            bleManager = manager
-            proto.setBleTransportCallback(callback: FlutterBleTransportCallback(bleManager: manager))
-        }
-        wireWifiDirectCallbackIfNeeded(proto: proto)
-    }
-
-    /// Refuses a config that enables a transport this plugin has no manager for.
-    /// Accepted, the core would route to a transport nothing serves and messages
-    /// would wait on it with no error anywhere.
-    private func refuseUnhostedTransports(_ config: ProtocolConfig) throws {
-        var unhosted: [String] = []
-        if config.reticulumEnabled { unhosted.append("reticulumEnabled") }
-        if config.nostrEnabled { unhosted.append("nostrEnabled") }
-        guard unhosted.isEmpty else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "\(unhosted.joined(separator: ", ")) is not supported by the Flutter plugin yet; set it to false",
-                ]
-            )
-        }
-    }
-
-    private func wireWifiDirectCallbackIfNeeded(proto: OfflineProtocol) {
-        guard currentConfig?.wifiDirectEnabled == true,
-              let manager = wifiDirectManager else { return }
-        proto.setWifiDirectTransportCallback(
-            callback: FlutterWifiDirectTransportCallback(wifiDirectManager: manager)
-        )
-    }
-
-    private func initializeMlsOnEngine() throws {
-        guard let proto = protocolInstance else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"]
-            )
-        }
-        guard let config = currentConfig else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Protocol config not initialized"]
-            )
-        }
-        let accountNamespace = StorageNamespace.account(
-            appId: config.appId,
-            profile: config.profile
-        )
-        let secureStorage = try MlsSecureStorage(accountNamespace: accountNamespace)
-        let protocolStateStorage = try AppContainerProtocolStateStorage(
-            accountNamespace: accountNamespace
-        )
-        try proto.initializeMls(
-            secureStorage: secureStorage,
-            protocolStateStorage: protocolStateStorage
+        try host.create(
+            configJson: configJson,
+            eventCallback: FlutterEventCallback(plugin: self),
+            emitEventJson: { [weak self] json in
+                _ = self?.emitEventJson(json)
+            }
         )
     }
 
     private func startOnEngine() throws {
-        guard let proto = protocolInstance else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"]
-            )
-        }
-        try proto.start()
-        if let manager = bleManager, manager.state != .running {
-            try manager.start()
-        }
+        try host.startProtocolCore()
+        try host.startBleTransportIfPresent()
     }
 
-    /// The transports stop first and cannot fail; the core's failure reaches
-    /// Dart, as Android's `TeardownSequence` reports the first failure.
+    /// The scheduler and the transports stop first and cannot skip each other;
+    /// the first failure reaches Dart, as Android's `TeardownSequence` reports.
     private func stopOnEngine() throws {
-        bleManager?.stop()
-        internetManager?.stop()
-        wifiDirectManager?.stop()
-        try protocolInstance?.stop()
-    }
-
-    private func enableTransportOnEngine(type: String, configJson: String?) throws {
-        guard let proto = protocolInstance else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"]
-            )
-        }
-        guard let config = currentConfig else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Protocol config not initialized"]
-            )
-        }
-        let normalized = type.lowercased()
-        switch normalized {
-        case "internet":
-            var object: [String: Any] = [:]
-            if let configJson,
-               let data = configJson.data(using: .utf8),
-               let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                object = parsed
-            }
-            let manager = try ensureInternetManager(proto: proto, config: config)
-            if manager.state == .running || manager.state == .starting {
-                manager.stop()
-            }
-            try InternetTransportBootstrap.configureAndStart(manager: manager, config: object)
-        case "wifidirect", "wifi_direct":
-            if wifiDirectManager == nil {
-                let manager = WifiDirectManager(protocol: proto, deviceId: config.profile)
-                wifiDirectManager = manager
-                proto.setWifiDirectTransportCallback(
-                    callback: FlutterWifiDirectTransportCallback(wifiDirectManager: manager)
-                )
-            }
-            guard let manager = wifiDirectManager else {
-                throw NSError(
-                    domain: "OfflineProtocol",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Failed to create Wi-Fi Direct manager"]
-                )
-            }
-            if manager.state == .running || manager.state == .starting {
-                manager.stop()
-            }
-            try manager.start()
-        case "ble":
-            if bleManager == nil {
-                let manager = BleManager(
-                    protocol: proto,
-                    deviceId: config.profile,
-                    appId: config.appId
-                )
-                bleManager = manager
-                proto.setBleTransportCallback(callback: FlutterBleTransportCallback(bleManager: manager))
-            }
-            guard let manager = bleManager else {
-                throw NSError(
-                    domain: "OfflineProtocol",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Failed to create BLE manager"]
-                )
-            }
-            if manager.state != .running {
-                try manager.start()
-            }
-        case "reticulum", "nostr":
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "Transport \(type) is not compiled into the Flutter plugin yet",
-                ]
-            )
-        default:
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"]
-            )
-        }
-    }
-
-    private func ensureInternetManager(
-        proto: OfflineProtocol,
-        config: ProtocolConfig
-    ) throws -> InternetManager {
-        if let manager = internetManager {
-            return manager
-        }
-        let manager = InternetManager(
-            protocol: proto,
-            deviceId: config.profile,
-            appId: config.appId
-        )
-        InternetTransportBootstrap.attachEmitters(manager: manager, emitEventJson: { [weak self] json in
-            self?.emitEventJson(json)
-        })
-        internetManager = manager
-        return manager
-    }
-
-    private func sendMessageOnEngine(_ arguments: Any?) throws -> String {
-        guard let map = arguments as? [String: Any] else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "sendMessage expects a map"]
-            )
-        }
-        guard let recipient = map["recipient"] as? String else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "sendMessage requires recipient"]
-            )
-        }
-        guard let content = map["content"] as? String else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "sendMessage requires content"]
-            )
-        }
-        let priorityValue = (map["priority"] as? NSNumber)?.intValue ?? 1
-        let replyTo = map["replyToMsg"] as? String
-        let msgPriority: MessagePriority
-        switch priorityValue {
-        case 0: msgPriority = .low
-        case 1: msgPriority = .medium
-        case 2: msgPriority = .high
-        case 3: msgPriority = .critical
-        default: msgPriority = .medium
-        }
-        guard let proto = protocolInstance else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"]
-            )
-        }
-        return try proto.sendMessage(
-            recipient: recipient,
-            content: content,
-            priority: msgPriority,
-            replyToMsg: replyTo
-        )
+        try host.stopTransportsAndProtocol()
     }
 
     private func tearDownProtocol() {
-        bleManager?.stop()
-        bleManager = nil
-        internetManager?.stop()
-        internetManager = nil
-        wifiDirectManager?.stop()
-        wifiDirectManager = nil
-        try? protocolInstance?.stop()
-        protocolInstance = nil
-        currentConfig = nil
+        host.tearDown()
         eventLock.lock()
         eventSeq = 0
         eventReplay.clear()
         eventLock.unlock()
+        inboundEvents.bumpGeneration()
     }
 }
 
 private final class FlutterEventCallback: EventCallback, @unchecked Sendable {
-    private let emit: (String) -> Void
+    weak var plugin: OfflineProtocolPlugin?
 
-    init(emit: @escaping (String) -> Void) {
-        self.emit = emit
+    init(plugin: OfflineProtocolPlugin) {
+        self.plugin = plugin
     }
 
     func onEvent(eventJson: String) {
-        emit(eventJson)
+        let post = { [weak self] in
+            self?.plugin?.deliverCoreEvent(eventJson)
+        }
+        if Thread.isMainThread {
+            post()
+        } else {
+            DispatchQueue.main.async { post() }
+        }
     }
 }

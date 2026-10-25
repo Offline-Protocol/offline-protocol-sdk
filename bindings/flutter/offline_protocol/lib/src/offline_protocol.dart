@@ -61,15 +61,32 @@ class OfflineProtocol {
     };
   }
 
+  /// Smallest transport surface for production builds (F9): only enabled flags
+  /// start native managers. Disable mesh features you do not ship in nested
+  /// config sections the same way as on React Native.
+  static Map<String, dynamic> minimalFootprintConfig({
+    required String appId,
+    required String profile,
+    bool bleEnabled = true,
+    bool wifiDirectEnabled = false,
+    bool internetEnabled = false,
+  }) {
+    return {
+      'appId': appId,
+      'profile': profile,
+      'bleEnabled': bleEnabled,
+      'wifiDirectEnabled': wifiDirectEnabled,
+      'internetEnabled': internetEnabled,
+      'reticulumEnabled': false,
+      'nostrEnabled': false,
+    };
+  }
+
   /// Creates the Rust engine from a JSON config object (camelCase or snake_case).
   ///
   /// Optional top-level `dors` and `relay` sections are applied the same way as
   /// on React Native after [ProtocolConfig] is constructed. When Internet or
   /// Wi‑Fi Direct are configured, [start] auto-enables them (React Native JS layer).
-  ///
-  /// Throws a [PlatformException] when `reticulumEnabled` or `nostrEnabled` is
-  /// true: the plugin hosts no manager for either, and the core would otherwise
-  /// route messages to a transport nothing serves.
   ///
   /// Resets Dart `seq` tracking to match the native session (native [create]
   /// tears down the previous engine and restarts event numbering from zero).
@@ -115,16 +132,177 @@ class OfflineProtocol {
   /// Method-channel entry points implemented by the Flutter plugin (pinned in tests).
   @visibleForTesting
   static const List<String> nativeMethodChannelMethods = [
+    'acceptConnectionRequest',
+    'bleGetDiagnostics',
+    'bleGetPeerCount',
+    'blockUser',
+    'cancelConnectionRequest',
+    'cancelFileTransfer',
+    'checkInternetPresence',
     'create',
+    'createInvite',
+    'dataAttachmentHash',
+    'dataCounterIncrement',
+    'dataCounterValue',
+    'dataCreateDoc',
+    'dataDeclineAttachment',
+    'dataDeleteDoc',
+    'dataDocJson',
+    'dataDocSize',
+    'dataExportRaw',
+    'dataFetchAttachment',
+    'dataFetchAttachmentFrom',
+    'dataFlush',
+    'dataFlushAll',
+    'dataListDelete',
+    'dataListDocs',
+    'dataListLen',
+    'dataListPush',
+    'dataListSpaces',
+    'dataMapDelete',
+    'dataMapGetJson',
+    'dataMapSet',
+    'dataProvideAttachment',
+    'dataRemoveDoc',
+    'dataRemoveSpace',
+    'dataSetInterest',
+    'dataTextDelete',
+    'dataTextInsert',
+    'dataTextValue',
+    'dataWipeAll',
+    'deriveAddress',
+    'deriveUserIdFromPublicKey',
+    'destroy',
+    'disableTelemetry',
+    'disableTransport',
+    'discoverServices',
+    'emitTestEvent',
+    'enableTelemetry',
+    'enableTransport',
+    'endTelemetrySession',
+    'eraseCustody',
+    'establishSecureSession',
+    'finalizeFile',
+    'flushTelemetry',
+    'forceTransport',
+    'forwardMessage',
+    'getActiveTransports',
+    'getBatteryLevel',
+    'getBlockedUsers',
+    'getCustodyStats',
+    'getDedupStats',
+    'getDeliverySuccessRate',
+    'getDorsConfig',
+    'getEstablishmentState',
+    'getFileProgress',
+    'getIdentityPublicKey',
+    'getIsCharging',
+    'getMedianHops',
+    'getMedianLatency',
+    'getMeshRelayStats',
+    'getMeshRelayTunables',
+    'getMessageStats',
+    'getPendingAckCount',
+    'getRelayConfig',
+    'getRelayPriority',
+    'getRetryQueueSize',
+    'getState',
+    'getTopology',
+    'getTransportMetrics',
+    'hasPendingKeyPackage',
     'initializeMlsWithSecureStorage',
+    'internetConfirmSent',
+    'internetForceReconnect',
+    'internetGetNextMessage',
+    'internetIsReady',
+    'internetIsSuperseded',
+    'internetMessageReceived',
+    'internetSendFailed',
+    'internetSendRawCommand',
+    'internetStatusChanged',
+    'isBluetoothEnabled',
+    'isMlsInitialized',
+    'isRelay',
+    'isUserBlocked',
+    'localAddress',
+    'meshCreateGroup',
+    'meshForwardMessageToGroup',
+    'meshGetGroupInfo',
+    'meshGetGroupRoles',
+    'meshGetMemberRole',
+    'meshGroupRelaySyncState',
+    'meshGroupRichReadiness',
+    'meshInviteToGroup',
+    'meshLeaveGroup',
+    'meshListGroups',
+    'meshRemoveFromGroup',
+    'meshRenameGroup',
+    'meshRequestGroupRelayRegistration',
+    'meshSendGroupMessage',
+    'meshSetMemberRole',
+    'mlsCreateSession',
+    'mlsDecrypt',
+    'mlsDecryptFromUser',
+    'mlsDeleteSession',
+    'mlsEncryptForUser',
+    'mlsGenerateKeyPackage',
+    'mlsGetOrCreateKeyPackage',
+    'mlsGetPendingKeyPackages',
+    'mlsHasSession',
+    'mlsImportKeyPackage',
+    'mlsJoinSession',
+    'mlsListSessions',
+    'mlsMarkKeyPackageSynced',
+    'mlsProcessWelcome',
+    'parseInvite',
+    'pause',
+    'processFileChunk',
+    'receiveMessage',
+    'registerService',
+    'rejectConnectionRequest',
+    'rekeySession',
+    'releaseTransportLock',
+    'replayEvents',
+    'requestEnableBluetooth',
+    'resolveUsername',
+    'respondToServiceRequest',
+    'resume',
+    'sendConnectionRequest',
+    'sendFileFromPath',
+    'sendMedia',
+    'sendMediaRich',
+    'sendMessage',
+    'sendMessageRich',
+    'sendPresenceUpdate',
+    'sendReadReceipt',
+    'sendServiceRequest',
+    'sendTypingIndicator',
+    'setBatteryLevel',
+    'setBatteryState',
+    'setRelayPriority',
+    'setTelemetryEnabled',
+    'shouldEscalateToWifi',
+    'signData',
+    'signDataBase64',
     'start',
     'stop',
-    'destroy',
-    'localAddress',
-    'sendMessage',
-    'enableInternetTransport',
-    'enableTransport',
-    'replayEvents',
+    'telemetryInstallId',
+    'telemetryStats',
+    'unblockUser',
+    'unregisterService',
+    'updateAckConfig',
+    'updateDedupConfig',
+    'updateDorsConfig',
+    'updateRelayConfig',
+    'updateRetryConfig',
+    'verifySignature',
+    'verifySignatureBase64',
+    'wifiDirectGetNextMessage',
+    'wifiDirectMessageReceived',
+    'wifiDirectPeerConnected',
+    'wifiDirectPeerDisconnected',
+    'wifiDirectStatusChanged',
+    'wipePersistedState',
   ];
 
   /// This device's `off1…` address, or null before MLS is initialized.
@@ -254,6 +432,20 @@ class OfflineProtocol {
   ) =>
       _wifiDirectAutoEnableConfig(root);
 
+  /// Nostr auto-enable after [start]. Exposed for tests.
+  @visibleForTesting
+  static Map<String, dynamic>? resolveNostrAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) =>
+      _nostrAutoEnableConfig(root);
+
+  /// Reticulum auto-enable after [start]. Exposed for tests.
+  @visibleForTesting
+  static Map<String, dynamic>? resolveReticulumAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) =>
+      _reticulumAutoEnableConfig(root);
+
   static Map<String, dynamic>? _internetAutoEnableConfig(Map<String, dynamic> root) {
     final transports = root['transports'];
     Map<String, dynamic> internet = {};
@@ -315,6 +507,32 @@ class OfflineProtocol {
     return {...wifi, 'enabled': true};
   }
 
+  /// `transports.nostr` when enabled with at least one relay URL, as the React
+  /// Native `start()` does. The engine host builds the Nostr manager at
+  /// [createFromConfig] but only `enableTransport` starts it, so without this a
+  /// config that asks for Nostr runs without it and nothing says so.
+  static Map<String, dynamic>? _nostrAutoEnableConfig(Map<String, dynamic> root) {
+    final transports = root['transports'];
+    if (transports is! Map || transports['nostr'] is! Map) return null;
+    final nostr = Map<String, dynamic>.from(transports['nostr'] as Map);
+    final relayUrls = nostr['relayUrls'];
+    if (nostr['enabled'] != true || relayUrls is! List || relayUrls.isEmpty) {
+      return null;
+    }
+    return nostr;
+  }
+
+  /// `transports.reticulum` when enabled, as the React Native `start()` does.
+  static Map<String, dynamic>? _reticulumAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) {
+    final transports = root['transports'];
+    if (transports is! Map || transports['reticulum'] is! Map) return null;
+    final reticulum = Map<String, dynamic>.from(transports['reticulum'] as Map);
+    if (reticulum['enabled'] != true) return null;
+    return reticulum;
+  }
+
   static Future<void> _autoEnableTransportsIfConfigured() async {
     final root = _lastCreateConfig;
     if (root == null) return;
@@ -326,6 +544,31 @@ class OfflineProtocol {
       } catch (e, st) {
         debugPrint(
           '[OfflineProtocol] Failed to auto-enable internet transport: $e\n$st',
+        );
+      }
+    }
+
+    final nostrConfig = _nostrAutoEnableConfig(root);
+    if (nostrConfig != null) {
+      try {
+        await enableTransport('nostr', nostrConfig);
+      } catch (e, st) {
+        // Nothing retries this: the app is offline over Nostr for the whole
+        // session. Nostr also needs the identity MLS initialization creates.
+        debugPrint(
+          '[OfflineProtocol] Nostr transport is configured but was NOT enabled '
+          '(it needs the identity MLS initialization creates): $e\n$st',
+        );
+      }
+    }
+
+    final reticulumConfig = _reticulumAutoEnableConfig(root);
+    if (reticulumConfig != null) {
+      try {
+        await enableTransport('reticulum', reticulumConfig);
+      } catch (e, st) {
+        debugPrint(
+          '[OfflineProtocol] Failed to auto-enable Reticulum transport: $e\n$st',
         );
       }
     }
