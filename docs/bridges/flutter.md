@@ -27,9 +27,12 @@ decision 3 asks: a list of what to leave out, never a list of what to take.
 On Android that is the `KotlinCompile` excludes in `android/build.gradle`. On
 iOS it is `rn_only_swift` in `ios/offline_protocol.podspec`, which must agree
 with the `--exclude` list in `ios/sync_bridge_rn.sh`. What is left out needs
-React (the module, its package, the mesh foreground and wake services, the
-sticky event dispatcher) or is a transport the plugin does not host yet
-(Nostr, Reticulum).
+React: the module, its package, the headless wake service, and the React
+Native adapter layer (`ProtocolEngineHostBridgeReactNative`, plus
+`BridgeResults` and `BridgeArgumentMaps` on Android). The Nostr and Reticulum
+managers are compiled although the plugin does not host either transport,
+because the shared engine host names them; `create` refuses a config that
+enables either (F5).
 
 A new shared source reaches the plugin without being registered. A list of
 what to take would not: the Kotlin plugin ignores `java { include }`, so such
@@ -201,7 +204,7 @@ Flutter engine framework and the shared sources, from
 FLUTTER_FRAMEWORK="$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")/bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator"
 FILES=()
 for f in *.swift; do
-  case "$f" in Package.swift|OfflineProtocolModule.swift|NostrManager.swift|NostrQueryTracker.swift|ReticulumManager.swift|InboundEventBuffer.swift) ;;
+  case "$f" in Package.swift|OfflineProtocolModule.swift|ProtocolEngineHostBridgeReactNative.swift) ;;
   *) FILES+=("$f") ;;
   esac
 done

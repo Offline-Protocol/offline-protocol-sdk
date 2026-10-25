@@ -23,17 +23,13 @@ ios_deployment_target = rn_targets.first
 # The compile surface is every shared bridge source except the ones named here
 # (ADR 0025 decision 3): a list of what to leave out, never a list of what to
 # take, so a new shared source reaches this pod without being registered.
-# These need React, or are transports the plugin does not host yet. Keep in
-# step with the rsync excludes in sync_bridge_rn.sh; a Rust guard
+# These need React. Keep in step with the rsync excludes in sync_bridge_rn.sh; a Rust guard
 # (flutter_ios_exclude_lists_agree_and_name_real_files) holds both to the
 # sources that exist.
 rn_only_swift = [
   'BridgeRN/OfflineProtocolModule.swift',
   'BridgeRN/OfflineProtocolModule.m',
-  'BridgeRN/NostrManager.swift',
-  'BridgeRN/NostrQueryTracker.swift',
-  'BridgeRN/ReticulumManager.swift',
-  'BridgeRN/InboundEventBuffer.swift',
+  'BridgeRN/ProtocolEngineHostBridgeReactNative.swift',
 ]
 
 Pod::Spec.new do |s|

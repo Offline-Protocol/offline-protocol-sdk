@@ -99,10 +99,18 @@ const FLUTTER_SHARED_SOURCES: &[&str] = &[
     "InternetManager",
     "PresenceWatchPolicy",
     "EventReplayRing",
+    "InboundEventBuffer",
     "ForegroundReconnectPolicy",
     "WifiDirectManager",
     "ProtocolConfigParser",
     "InitialRuntimeConfigApplier",
+    "ProtocolBackgroundProcessor",
+    "ProtocolEngineHost",
+    "ProtocolEngineHostBridge",
+    "TransportBridge",
+    "ReticulumManager",
+    "NostrManager",
+    "NostrQueryTracker",
 ];
 
 /// Every `exclude('com/offlineprotocol/X.kt')` in the plugin's Gradle build.
