@@ -17,11 +17,19 @@
 //!   alone: a presence announces a key used for this room only and a label
 //!   the application chose, and nothing that identifies the device or its
 //!   local addresses.
-//! - **A connection code is sealed to one presence key.** An offer is sealed
-//!   with NIP-44 from the joiner's room key to the presence key it picked,
-//!   and the answer back to the joiner's, so a holder of the room key reads
-//!   neither, and cannot read the local addresses a code names (R27). Both
-//!   layers bind their role, so an answer is not replayed as an offer.
+//! - **A presence is signed by the key it announces.** The room key is
+//!   public, so it authenticates nothing: a presence sealed under it alone
+//!   let anyone list a key they do not hold, relabel a device that is there,
+//!   or keep one listed after it left. A presence opens only when its event's
+//!   author is the key it names.
+//! - **A connection code, and the label beside it, are sealed to one presence
+//!   key.** An offer is sealed with NIP-44 from the joiner's room key to the
+//!   presence key it picked, and the answer back to the joiner's, so a holder
+//!   of the room key reads neither, and cannot read the local addresses a
+//!   code names (R27). The label rides inside that seal: under the room key
+//!   alone, anyone could re-wrap a real joiner's offer under a label of their
+//!   choosing before the host was asked about it. Both layers bind their
+//!   role, so an answer is not replayed as an offer.
 //! - **A host admits by its application's decision.** Anyone holding the
 //!   room key can offer, so the page asks the application before it answers
 //!   one, and nothing here answers on its own. Who is on a link that forms is
@@ -30,9 +38,13 @@
 //!   share one public address; with IPv6 each has its own, from the
 //!   network's /64. The room is derived from the address for IPv4 and from
 //!   the /64 for IPv6.
-//! - **Events are ephemeral and fresh.** The signalling kind (25912), each
-//!   event signed by a key used once, refused when more than
-//!   [`signal::MAX_EVENT_AGE_SECS`] from this clock, as in a signalling room.
+//! - **Events are ephemeral and fresh.** The signalling kind (25912),
+//!   refused when more than [`signal::MAX_EVENT_AGE_SECS`] from this clock,
+//!   as in a signalling room. Offers and answers are signed by a key used
+//!   once. Every signature is checked, because it binds `created_at`: without
+//!   it a relay could re-stamp an old offer and replay it fresh. The room key
+//!   is checked first, as it is the cheaper of the two and refuses everything
+//!   not sealed for this room.
 
 use std::net::IpAddr;
 
@@ -179,6 +191,7 @@ impl Nearby {
         self.publish(
             Kind::Presence,
             serde_json::json!({ "v": VERSION, "key": self.key(), "label": self.label }),
+            &self.keys,
         )
     }
 
@@ -216,7 +229,7 @@ impl Nearby {
                 tag.len() >= 2 && tag[0] == "t" && tag[1].as_str() == Some(self.topic.as_str())
             })
         });
-        if !on_topic || !verify_event(event) {
+        if !on_topic {
             return None;
         }
         let (kind, body) = event.get("content")?.as_str()?.split_once(':')?;
@@ -237,14 +250,18 @@ impl Nearby {
             )
             .ok()?;
         let plain: serde_json::Value = serde_json::from_slice(&plain).ok()?;
-        if plain.get("v")?.as_u64()? != VERSION {
+        if plain.get("v")?.as_u64()? != VERSION || !verify_event(event) {
             return None;
         }
         match kind {
             Kind::Presence => {
                 let peer = plain.get("key")?.as_str()?.to_string();
                 let label = plain.get("label")?.as_str()?.to_string();
-                if peer == self.key() || !is_key(&peer) || check_label(&label).is_err() {
+                if peer == self.key()
+                    || !is_key(&peer)
+                    || event.get("pubkey")?.as_str()? != peer
+                    || check_label(&label).is_err()
+                {
                     return None;
                 }
                 Some(Opened {
@@ -261,8 +278,7 @@ impl Nearby {
                     return None;
                 }
                 let peer = plain.get("from")?.as_str()?.to_string();
-                let label = plain.get("label")?.as_str()?.to_string();
-                if !is_key(&peer) || check_label(&label).is_err() {
+                if !is_key(&peer) {
                     return None;
                 }
                 let sealed = BASE64.decode(plain.get("sealed")?.as_str()?).ok()?;
@@ -275,8 +291,10 @@ impl Nearby {
                 }
                 let session = inner.get("session")?.as_str()?.to_string();
                 let code = inner.get("code")?.as_str()?.to_string();
+                let label = inner.get("label")?.as_str()?.to_string();
                 check_session(&session).ok()?;
                 check_code(&code).ok()?;
+                check_label(&label).ok()?;
                 Some(Opened {
                     kind,
                     peer,
@@ -301,6 +319,7 @@ impl Nearby {
                 "kind": kind.as_str(),
                 "session": session,
                 "code": code,
+                "label": self.label,
             })
             .to_string(),
         );
@@ -311,13 +330,20 @@ impl Nearby {
                 "v": VERSION,
                 "from": self.key(),
                 "to": to,
-                "label": self.label,
                 "sealed": sealed,
             }),
+            &NostrKeypair::generate_ephemeral().map_err(|e| e.to_string())?,
         )
     }
 
-    fn publish(&self, kind: Kind, body: serde_json::Value) -> Result<String, String> {
+    /// Seals `body` under the room key for `kind` and signs the event as
+    /// `author`: the presence key for a presence, a key used once otherwise.
+    fn publish(
+        &self,
+        kind: Kind,
+        body: serde_json::Value,
+        author: &NostrKeypair,
+    ) -> Result<String, String> {
         let plain = Zeroizing::new(body.to_string());
         let mut nonce = [0u8; NONCE_BYTES];
         OsRng.fill_bytes(&mut nonce);
@@ -335,8 +361,7 @@ impl Nearby {
         let mut content = nonce.to_vec();
         content.extend_from_slice(&sealed);
         let content = format!("{}:{}", kind.as_str(), BASE64.encode(content));
-        let author = NostrKeypair::generate_ephemeral().map_err(|e| e.to_string())?;
-        NostrEvent::create_signal(&author, &self.topic, &content)
+        NostrEvent::create_signal(author, &self.topic, &content)
             .and_then(|event| event.to_relay_message())
             .map_err(|e| e.to_string())
     }
@@ -386,7 +411,21 @@ fn check_label(label: &str) -> Result<(), String> {
     if label.chars().any(char::is_control) {
         return Err("a nearby label cannot hold control characters".to_string());
     }
+    if label.chars().any(is_bidi_control) {
+        return Err("a nearby label cannot hold bidirectional controls".to_string());
+    }
     Ok(())
+}
+
+/// The Unicode bidirectional formatting characters. They are not control
+/// characters to `char::is_control`, and a label is shown in a prompt the
+/// host answers: one holding an override could make "Bob" out of another
+/// string, or reorder the words around it.
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// This clock in Unix seconds.
@@ -494,6 +533,73 @@ mod tests {
         assert!(Nearby::new(APP, "203.0.113.7", &"x".repeat(MAX_LABEL_CHARS)).is_ok());
         assert!(Nearby::new(APP, "203.0.113.7", &"x".repeat(MAX_LABEL_CHARS + 1)).is_err());
         assert!(Nearby::new(APP, "203.0.113.7", "a\nb").is_err());
+        assert!(Nearby::new(APP, "203.0.113.7", "Bob\u{202E}evil").is_err());
+        assert!(Nearby::new(APP, "203.0.113.7", "\u{2067}Bob").is_err());
+        assert!(Nearby::new(APP, "203.0.113.7", "Zoë's phone").is_ok());
+    }
+
+    #[test]
+    fn a_presence_opens_only_from_the_key_it_names() {
+        let (victim, eve, watcher) = (
+            room("203.0.113.7", "Bob"),
+            room("203.0.113.7", "Eve"),
+            room("203.0.113.7", ""),
+        );
+        // Eve holds the room key and lists Bob's key under her own label,
+        // signed by a key of hers: the relabel and ghost a public room key
+        // allowed.
+        let forged = eve.publish(
+            Kind::Presence,
+            serde_json::json!({ "v": VERSION, "key": victim.key(), "label": "Mallory" }),
+            &NostrKeypair::generate_ephemeral().unwrap(),
+        );
+        assert!(watcher.open(&relayed(forged), now()).is_none());
+        let genuine = watcher.open(&relayed(victim.presence()), now()).unwrap();
+        assert_eq!(
+            (genuine.peer.as_str(), genuine.label.as_str()),
+            (victim.key(), "Bob")
+        );
+    }
+
+    #[test]
+    fn a_label_re_wrapped_around_a_real_offer_is_not_what_the_host_is_shown() {
+        let (host, joiner, eve) = (
+            room("203.0.113.7", "Host"),
+            room("203.0.113.7", "Bob"),
+            room("203.0.113.7", "Eve"),
+        );
+        let offer: serde_json::Value =
+            serde_json::from_str(&joiner.offer(host.key(), SESSION, "op1.offer").unwrap()).unwrap();
+        // Eve opens the room-key layer of Bob's offer, which anyone can, and
+        // seals it again with her label beside the code.
+        let content = offer[1]["content"].as_str().unwrap();
+        let body = BASE64.decode(content.split_once(':').unwrap().1).unwrap();
+        let aad = eve.aad(Kind::Offer);
+        let plain = eve
+            .cipher
+            .decrypt(
+                Nonce::from_slice(&body[..NONCE_BYTES]),
+                Payload {
+                    msg: &body[NONCE_BYTES..],
+                    aad: &aad,
+                },
+            )
+            .unwrap();
+        let mut plain: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+        plain["label"] = "Mallory".into();
+        let rewrapped = eve.publish(
+            Kind::Offer,
+            plain,
+            &NostrKeypair::generate_ephemeral().unwrap(),
+        );
+        let opened = host
+            .open(&relayed(rewrapped), now())
+            .expect("still Bob's offer");
+        assert_eq!(opened.peer, joiner.key());
+        assert_eq!(
+            opened.label, "Bob",
+            "the host was shown a label Bob never sent"
+        );
     }
 
     #[test]

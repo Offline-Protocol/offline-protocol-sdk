@@ -6,11 +6,15 @@
 // Three nodes behind one network address find each other in a nearby room
 // through a relay (the runner's local one): each sees the others' labels,
 // one links to another over WebRTC once that one admits it, and a third that
-// the host does not admit gets no answer. A room behind another address sees
-// none of them, and a room with no relays, no admit decision or no STUN
-// server refuses to open. The address is given, as an application that knows
-// it would give it; a runner has no STUN server to learn it from. The title
-// ends as PASS or FAIL: <step>.
+// the host does not admit gets no answer and is asked about once. A stranger
+// holding sixteen refused sessions open does not keep the host from
+// admitting anyone; an offer past sixteen undecided ones is reported, and
+// closing the room takes every question down. A room behind another address
+// sees none of them, and a room with no relays, no admit decision or no STUN
+// server refuses to open, as does one closed. The address comes from the
+// runner's STUN server once, and is given to the rooms after that.
+// publicAddress prefers IPv4 over a stubbed connection. The title ends as
+// PASS or FAIL: <step>.
 import { OfflineNode, WebRtcCarrier, NearbyRoom, publicAddress } from "../src/index.js";
 import { log, waitFor, run } from "./common.js";
 
@@ -25,6 +29,57 @@ const relays = [relay];
 const octet = 1 + Math.floor(Math.random() * 250);
 const network = `203.0.113.${octet}`;
 const elsewhere = `198.51.100.${octet}`;
+
+const until = async (check, what, ms = 15000) => {
+  for (const end = Date.now() + ms; !check(); ) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+};
+
+// Offers to `to` from a room of node `from`, sent straight to the relay as
+// a stranger would: `sessions` of them, published again every second until
+// stopped. Their codes are never answered by anything real.
+async function flood(from, to, count) {
+  const room = await from.nearbyOpen(network, "Flood");
+  const socket = new WebSocket(relay);
+  await new Promise((resolve, reject) => {
+    socket.onopen = resolve;
+    socket.onerror = () => reject(new Error("the flood could not reach the relay"));
+  });
+  const sessions = Array.from({ length: count }, () =>
+    Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join(""),
+  );
+  const send = async () => {
+    for (const session of sessions) socket.send(await from.nearbyOffer(room.id, to, session, "op1.flood"));
+  };
+  await send();
+  const timer = setInterval(() => send().catch(() => {}), 1000);
+  return {
+    stop() {
+      clearInterval(timer);
+      socket.close();
+      from.nearbyClose(room.id);
+    },
+  };
+}
+
+// A stand-in RTCPeerConnection that gathers the given candidates in order.
+function fakeConnection(candidates) {
+  return class {
+    onicecandidate = null;
+    createDataChannel() {}
+    async createOffer() {
+      return {};
+    }
+    async setLocalDescription() {
+      candidates.forEach((candidate, i) =>
+        setTimeout(() => this.onicecandidate?.({ candidate }), 20 * (i + 1)),
+      );
+    }
+    close() {}
+  };
+}
 
 const seen = (room, label) =>
   new Promise((resolve, reject) => {
@@ -64,7 +119,38 @@ await run(async (step) => {
   }
   const noStun = await publicAddress([]).then(() => false, () => true);
   if (!noStun) throw new Error("an address was learned with no STUN server");
-  log("no relays, no admit decision and no STUN server are each refused");
+  const early = new NearbyRoom(a, carrier, { relays, network, admit: () => false });
+  if (await early.connect("00".repeat(32)).then(() => true, () => false)) {
+    throw new Error("a room that never opened connected");
+  }
+  early.close();
+  if (await early.open().then(() => true, () => false)) throw new Error("a closed room opened");
+  log("no relays, no admit decision, no STUN server and a closed room are each refused");
+
+  step.name = "address family";
+  const real = globalThis.RTCPeerConnection;
+  const servers = [{ urls: "stun:stun.invalid" }];
+  try {
+    // An IPv6 answer that came first, with no parsed fields, and an IPv4 one
+    // with `type` but no `address`: both read from the candidate line.
+    globalThis.RTCPeerConnection = fakeConnection([
+      { candidate: "candidate:1 1 udp 1 2001:db8:1:2::5 5000 typ srflx raddr 0.0.0.0 rport 0" },
+      { type: "srflx", candidate: "candidate:2 1 udp 1 203.0.113.9 5001 typ srflx raddr 0.0.0.0 rport 0" },
+      null,
+    ]);
+    const both = await publicAddress(servers);
+    if (both !== "203.0.113.9") throw new Error(`a dual-stack network gave ${both}, not its IPv4 address`);
+    globalThis.RTCPeerConnection = fakeConnection([
+      { type: "host", address: "192.168.1.4", candidate: "candidate:3 1 udp 1 192.168.1.4 5002 typ host" },
+      { candidate: "candidate:1 1 udp 1 2001:db8:1:2::5 5000 typ srflx raddr 0.0.0.0 rport 0" },
+      null,
+    ]);
+    const only = await publicAddress(servers);
+    if (only !== "2001:db8:1:2::5") throw new Error(`an IPv6-only network gave ${only}`);
+  } finally {
+    globalThis.RTCPeerConnection = real;
+  }
+  log("a dual-stack network gives its IPv4 address, whichever answer came first");
 
   step.name = "stun";
   const learned = await publicAddress([{ urls: stun }]);
@@ -108,6 +194,13 @@ await run(async (step) => {
   if (alice.peer !== host.key) throw new Error("the presence key is not the host's");
   log("devices behind one address see each other's labels");
 
+  step.name = "flooded";
+  // Sixteen refused sessions, kept fresh by a stranger, used to fill every
+  // place the host decides in: nobody was asked about after that.
+  const flooding = await flood(c, host.key, 16);
+  const floods = () => asked.filter((label) => label === "Flood").length;
+  await until(() => floods() === 16, "the host to be asked about every flooded session");
+
   step.name = "admitted";
   const sessions = Promise.all([
     waitFor(a, "secure_session_established", (e) => e.peer_id === b.address),
@@ -118,15 +211,49 @@ await run(async (step) => {
   const received = waitFor(a, "message_received", (e) => e.content === "found you nearby");
   await b.sendMessage(a.address, "found you nearby");
   await received;
-  log("an admitted device linked over WebRTC and a message crossed");
+  if (floods() !== 16) throw new Error(`the host was asked about ${floods()} flooded offers, not 16`);
+  flooding.stop();
+  log("an admitted device linked over WebRTC and a message crossed, past sixteen refused sessions");
 
   step.name = "not admitted";
   const refused = await stranger
     .connect(alice.peer, { timeoutMs: 4000 })
     .then(() => false, () => true);
   if (!refused) throw new Error("a device the host did not admit got an answer");
-  if (!asked.includes("Mallory")) throw new Error("the host was never asked about the stranger");
-  log("a device the host did not admit got no answer");
+  const mallory = asked.filter((label) => label === "Mallory").length;
+  if (mallory !== 1) throw new Error(`the host was asked about the stranger ${mallory} times, not once`);
+  if (await guest.connect("not a key", { timeoutMs: 2000 }).then(() => true, () => false)) {
+    throw new Error("an offer to something that is not a key was sent");
+  }
+  log("a device the host did not admit got no answer, and was asked about once");
+
+  step.name = "full";
+  // A host whose person has not answered: sixteen questions wait, the next
+  // offer is reported, and closing takes every question down.
+  let waiting = 0;
+  let withdrawn = 0;
+  const busy = await new NearbyRoom(a, new WebRtcCarrier(a), {
+    relays,
+    network,
+    label: "Busy",
+    admit: ({ signal }) => {
+      waiting++;
+      return new Promise((resolve) =>
+        signal.addEventListener("abort", () => {
+          withdrawn++;
+          resolve(false);
+        }),
+      );
+    },
+  }).open();
+  const full = new Promise((resolve) => busy.addEventListener("full", resolve, { once: true }));
+  const overflow = await flood(c, busy.key, 17);
+  await full;
+  overflow.stop();
+  if (waiting !== 16) throw new Error(`${waiting} questions were asked, not 16`);
+  busy.close();
+  if (withdrawn !== 16) throw new Error(`closing withdrew ${withdrawn} questions, not 16`);
+  log("an offer past sixteen undecided ones is reported, and closing withdraws every question");
 
   step.name = "elsewhere";
   if (away.peers.length !== 0) throw new Error(`a room elsewhere saw ${JSON.stringify(away.peers)}`);

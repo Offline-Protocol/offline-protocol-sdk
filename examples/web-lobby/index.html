@@ -359,8 +359,11 @@ for (const id of remembered) {
   }
 }
 
-function ask({ label }) {
+// `signal` aborts when the request is no longer fresh or the room closed:
+// the question comes down, as nobody is waiting for the answer any more.
+function ask({ label, signal }) {
   return new Promise((resolve) => {
+    if (signal.aborted) return resolve(false);
     const row = document.createElement("div");
     row.className = "row";
     const text = document.createElement("span");
@@ -376,6 +379,7 @@ function ask({ label }) {
     };
     allow.onclick = () => settle(true);
     deny.onclick = () => settle(false);
+    signal.addEventListener("abort", () => settle(false), { once: true });
     row.append(text, allow, deny);
     $("asks").append(row);
   });
@@ -431,6 +435,9 @@ $("nearby").onclick = async () => {
       admit: ask,
     }).open();
     nearby.addEventListener("peers", renderNearby);
+    nearby.addEventListener("full", () =>
+      status("too many requests are waiting: answer or deny some before more can arrive"),
+    );
     renderNearby();
     status("listed below: the devices behind this network's address");
   } catch (error) {

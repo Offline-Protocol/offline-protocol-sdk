@@ -20,8 +20,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   address and the application id, lists them by the label each application
   chose, and links over WebRTC to the one a person picks; the link runs on
   the local network. The room key is public by construction, so every
-  connection code is sealed to one device's key, and a host answers only
-  what its `admit` callback accepts. Relays and STUN servers are the
+  connection code is sealed to one device's key, every presence is signed
+  by the key it announces, and a host answers only what its `admit`
+  callback accepts, asking once per session. Relays and STUN servers are the
   application's ([W13](docs/bridges/web.md#w13-a-nearby-room-is-derived-from-the-networks-address),
   [ADR 0034](docs/adr/0034-browsers-find-each-other-through-their-network-address.md)).
 

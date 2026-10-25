@@ -296,8 +296,11 @@ export interface NearbyRoomOptions {
   /**
    * Decides every offer this device receives. Anyone who can guess the
    * network's address can offer, so ask the person; only `true` answers.
+   * `signal` aborts when the offer stops being fresh or the room closes:
+   * take the question down then, as nobody is waiting for the answer. A
+   * session is asked about once; its repeats are not asked again.
    */
-  admit(offer: { peer: string; label: string }): boolean | Promise<boolean>;
+  admit(offer: { peer: string; label: string; signal: AbortSignal }): boolean | Promise<boolean>;
 }
 
 /**
@@ -307,7 +310,9 @@ export interface NearbyRoomOptions {
  * person picks. The room is weak by construction: anyone who can guess the
  * address can read who is present and offer, and none can read a
  * connection code, which is sealed to one device's key. A `peers` event
- * carries the list whenever it changes.
+ * carries the list whenever it changes. A `full` event carries `{ peer,
+ * label }` for an offer dropped because sixteen were already waiting on
+ * `admit`.
  */
 export class NearbyRoom extends EventTarget {
   constructor(node: OfflineNode, carrier: WebRtcCarrier, options: NearbyRoomOptions);
@@ -315,7 +320,7 @@ export class NearbyRoom extends EventTarget {
   readonly peers: NearbyPeer[];
   /** This device's key in the room, once open. */
   readonly key: string | null;
-  /** Learns the address, subscribes, and starts announcing. */
+  /** Learns the address, subscribes, and starts announcing. A room opens once. */
   open(): Promise<NearbyRoom>;
   /** Links to `peer` once it admits this device; rejects when it does not answer. */
   connect(peer: string, options?: { timeoutMs?: number }): Promise<SignalledConnection>;
@@ -323,8 +328,11 @@ export class NearbyRoom extends EventTarget {
   close(): void;
 }
 
-/** The network's public address, from the first server-reflexive candidate. */
+/**
+ * The network's public address, from a server-reflexive candidate: IPv4 when
+ * one arrives, else IPv6 after waiting `settleMs` for an IPv4 one.
+ */
 export function publicAddress(
   iceServers: RTCIceServer[],
-  options?: { timeoutMs?: number },
+  options?: { timeoutMs?: number; settleMs?: number },
 ): Promise<string>;

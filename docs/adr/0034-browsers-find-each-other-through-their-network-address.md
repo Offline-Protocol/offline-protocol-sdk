@@ -31,10 +31,17 @@ The room key is derived from something anyone can enumerate, so the design
 treats it as public:
 
 - **A presence holds only a key used for this room and the application's
-  label.** Nothing identifies the device or its local addresses.
-- **Every connection code is sealed to one presence key** with NIP-44, under
-  the room key as a second layer. A holder of the room key reads presences
-  and nothing else.
+  label, and is signed by that key.** Nothing identifies the device or its
+  local addresses, and nobody can list a key they do not hold.
+- **Every connection code, and the label beside it, is sealed to one
+  presence key** with NIP-44, under the room key as a second layer. A holder
+  of the room key reads presences and nothing else, and cannot relabel an
+  offer.
+- **No limit copied from a secret room becomes a lock.** A signalling room
+  (W11) can hold refused sessions among the ones it decides on, because only
+  a code holder can offer. Here anyone can, so a refused session is kept
+  apart and a full list forgets its oldest entry: otherwise a stranger
+  anywhere could fill either for good.
 - **A host answers only what its application admits.** `admit` is required:
   a page that opens a room has said who it lets in. The label is a claim; the
   engine's preamble and MLS session are what identify the device on a link.
