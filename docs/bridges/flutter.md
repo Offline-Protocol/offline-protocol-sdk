@@ -265,22 +265,16 @@ requests; full run on pushes to `main`):
   `main` always run the full native gate. `flutter analyze` excludes
   `android/**`, so the plugin's own Kotlin is compiled only by this path.
 
-iOS pod compilation is not gated in CI yet (requires XCFramework assembly like
-the Swift Package job). Until it is, typecheck the plugin by hand against the
-Flutter engine framework and the shared sources, from
-`bindings/react-native/ios`:
+The `Flutter Binding (iOS bridge)` job typechecks the plugin's Swift together
+with the shared bridge sources the pod compiles, against the Flutter engine
+framework and the committed UniFFI header. It runs
+`bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh`, which copies the
+sources with `ios/sync_bridge_rn.sh`, the pod's own `prepare_command`, so the
+compile surface is the pod's and a React-only source that leaks into it fails
+here. A typecheck links nothing, so the job builds no Rust; the Swift Package
+job is the one that links the iOS library. Run the same check locally after
+`flutter precache --ios`:
 
 ```bash
-FLUTTER_FRAMEWORK="$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")/bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator"
-FILES=()
-for f in *.swift; do
-  case "$f" in Package.swift|OfflineProtocolModule.swift|ProtocolEngineHostBridgeReactNative.swift) ;;
-  *) FILES+=("$f") ;;
-  esac
-done
-xcrun --sdk iphonesimulator swiftc -typecheck -target arm64-apple-ios13.0-simulator \
-  -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" -F "$FLUTTER_FRAMEWORK" \
-  -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap -Xcc -IGenerated \
-  "${FILES[@]}" ble/*.swift mesh/*.swift Generated/offline_protocol.swift \
-  ../../flutter/offline_protocol/ios/Classes/*.swift
+bash bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh
 ```

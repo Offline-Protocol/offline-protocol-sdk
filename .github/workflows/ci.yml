@@ -343,11 +343,14 @@ jobs:
             flutter_lock:
               - 'Cargo.lock'
               - 'Cargo.toml'
+            # The typecheck reads Swift, the committed UniFFI header and the
+            # deployment target, never a Rust build, so no crate path is here.
             flutter_ios:
               - 'bindings/flutter/offline_protocol/ios/**'
               - 'bindings/react-native/ios/**'
+              - 'bindings/react-native/MeshSdk.podspec'
+              - 'bindings/react-native/scripts/shared/xcframework.sh'
               - 'bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh'
-              - 'crates/offline-protocol-uniffi/**'
               - 'scripts/ios-deployment-target.sh'
 
       # Every output is "true" or "false", never empty, so a job's `if` can
@@ -2052,14 +2055,16 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: bindings/flutter/scripts/measure-plugin-aar-size.sh --check
 
+  # Typechecks the plugin's Swift with the shared bridge sources it compiles,
+  # against the Flutter engine framework and the committed UniFFI header. It
+  # links nothing, so it builds no Rust: the Swift Package job is the one that
+  # builds and links the iOS library on a pull request.
   flutter-binding-ios:
     name: Flutter Binding (iOS bridge)
     needs: changes
-    if: >-
-      needs.changes.outputs.flutter_ios == 'true'
-      || needs.changes.outputs.flutter_lock == 'true'
+    if: needs.changes.outputs.flutter_ios == 'true'
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -2069,30 +2074,8 @@ jobs:
           flutter-version: "3.27.4"
           cache: true
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios-sim,x86_64-apple-ios
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-flutter-binding-ios
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
       - name: Precache Flutter iOS engine
         run: flutter precache --ios
-
-      - name: Build Rust library for the iOS simulator
-        run: |
-          set -euo pipefail
-          case "$(uname -m)" in
-            arm64) TARGET=aarch64-apple-ios-sim ;;
-            x86_64) TARGET=x86_64-apple-ios ;;
-            *) echo "::error::no iOS simulator target for $(uname -m)"; exit 1 ;;
-          esac
-          IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)"
-          export IPHONEOS_DEPLOYMENT_TARGET
-          cargo build --profile mobile --locked --target "$TARGET" \
-            --package offline-protocol-uniffi
 
       - name: Typecheck Flutter iOS plugin and BridgeRN copy
         run: bash bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh

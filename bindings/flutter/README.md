@@ -158,8 +158,9 @@ start), subscribes to events, and prints the device `off1…` address. Details:
   `flutter test`, `flutter analyze`, arm64 UniFFI into jniLibs, release AAR
   assembly, and `measure-plugin-aar-size.sh --check`. Path filters skip the
   native gate when only Dart or guard tests change; pushes to `main` run the
-  full job. No CI job compiles the iOS plugin yet; the manual typecheck is in
-  [docs/bridges/flutter.md](../../docs/bridges/flutter.md#what-ci-runs).
+  full job. `Flutter Binding (iOS bridge)` typechecks the iOS plugin with the
+  shared bridge Swift
+  ([docs/bridges/flutter.md](../../docs/bridges/flutter.md#what-ci-runs)).
 - **Version:** the podspec and the Gradle build read it from
   `bindings/react-native/package.json`. Bump `offline_protocol/pubspec.yaml`
   with it; the release refuses a tag the pubspec does not match.

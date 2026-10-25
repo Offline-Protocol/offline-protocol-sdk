@@ -42,9 +42,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 - **Flutter binding parity and iOS CI.** Rust guards pin React Native parity
   for mesh foreground keep-alive, sticky one-shot events, and inbound event
-  buffering on Android and iOS. GitHub Actions runs
-  `bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh` on macOS to
-  typecheck the Flutter pod against shared bridge Swift and simulator UniFFI.
+  buffering on Android and iOS. A new `Flutter Binding (iOS bridge)` job runs
+  `bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh`, which
+  typechecks the plugin's Swift with the shared bridge sources the pod
+  compiles; until now nothing in CI compiled the iOS plugin.
 
 - **The browser can remove a group member.** `OfflineNode.removeFromGroup`
   removes a member from a group this device administers: the others move to

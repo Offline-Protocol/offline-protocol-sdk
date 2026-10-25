@@ -416,32 +416,23 @@ fn flutter_aar_baseline_json_is_well_formed() {
     );
 }
 
+/// The bridge chapter, not the changelog: CHANGELOG.md holds the current
+/// release only and is archived at every cut, so a guard on it fails the
+/// release after this one.
 #[test]
 fn flutter_docs_describe_ios_bridge_ci() {
-    let changelog = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../CHANGELOG.md"),
-    )
-    .unwrap_or_else(|e| panic!("cannot read CHANGELOG.md: {e}"));
-    assert!(
-        !changelog.contains("nothing in CI compiles the iOS plugin yet"),
-        "CHANGELOG must describe the Flutter iOS bridge CI job, not claim iOS is unchecked"
-    );
-    assert!(
-        changelog.contains("ci-typecheck-flutter-ios-bridge.sh"),
-        "CHANGELOG must name the iOS bridge typecheck script"
-    );
     let bridge_doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/flutter.md"),
     )
     .unwrap_or_else(|e| panic!("cannot read docs/bridges/flutter.md: {e}"));
     assert!(
-        !bridge_doc.contains("nothing in CI compiles the iOS plugin yet")
-            && !bridge_doc.contains("No CI job compiles the iOS plugin yet"),
-        "docs/bridges/flutter.md must describe Flutter Binding (iOS bridge)"
+        !bridge_doc.contains("iOS pod compilation is not gated in CI yet"),
+        "docs/bridges/flutter.md must describe Flutter Binding (iOS bridge), not claim iOS is unchecked"
     );
     assert!(
-        bridge_doc.contains("Flutter Binding (iOS bridge)"),
-        "docs/bridges/flutter.md must name the iOS CI job"
+        bridge_doc.contains("Flutter Binding (iOS bridge)")
+            && bridge_doc.contains("ci-typecheck-flutter-ios-bridge.sh"),
+        "docs/bridges/flutter.md must name the iOS CI job and its script"
     );
 }
 
