@@ -1,6 +1,7 @@
 {
   "acceptConnectionRequest": {
     "code": "ERROR_CONNECTION_REQUEST",
+    "mapProtocolErrors": true,
     "message": "Failed to accept connection request"
   },
   "bleGetDiagnostics": {
@@ -17,6 +18,7 @@
   },
   "cancelConnectionRequest": {
     "code": "ERROR_CONNECTION_REQUEST",
+    "mapProtocolErrors": true,
     "message": "Failed to cancel connection request"
   },
   "cancelFileTransfer": {
@@ -25,6 +27,7 @@
   },
   "checkInternetPresence": {
     "code": "ERROR_INTERNET",
+    "mapProtocolErrors": true,
     "message": "Failed to query presence: Internet transport not initialized"
   },
   "createInvite": {
@@ -49,6 +52,7 @@
   },
   "eraseCustody": {
     "code": "ERROR_ERASECUSTODY",
+    "mapProtocolErrors": true,
     "message": "eraseCustody failed"
   },
   "establishSecureSession": {
@@ -65,6 +69,7 @@
   },
   "forwardMessage": {
     "code": "ERROR_FORWARD",
+    "mapProtocolErrors": true,
     "message": "Failed to forward message"
   },
   "getActiveTransports": {
@@ -93,7 +98,8 @@
   },
   "getDorsConfig": {
     "code": "ERROR_CONFIG",
-    "message": "Protocol not initialized"
+    "message": "Protocol not initialized",
+    "parseJsonResult": true
   },
   "getEstablishmentState": {
     "code": "ERROR_MLS",
@@ -193,6 +199,7 @@
   },
   "internetSendRawCommand": {
     "code": "ERROR_INTERNET",
+    "mapProtocolErrors": true,
     "message": "Failed to send raw server command: Internet transport not initialized"
   },
   "internetStatusChanged": {
@@ -277,6 +284,7 @@
   },
   "processFileChunk": {
     "code": "ERROR_FILE",
+    "mapProtocolErrors": true,
     "message": "Failed to process file chunk"
   },
   "registerService": {
@@ -285,6 +293,7 @@
   },
   "rejectConnectionRequest": {
     "code": "ERROR_CONNECTION_REQUEST",
+    "mapProtocolErrors": true,
     "message": "Failed to reject connection request"
   },
   "rekeySession": {
@@ -301,46 +310,57 @@
   },
   "resolveUsername": {
     "code": "ERROR_INVALID_ARGUMENT",
+    "mapProtocolErrors": true,
     "message": "Failed to resolve username"
   },
   "respondToServiceRequest": {
     "code": "ERROR_SERVICE_RESPONSE",
+    "mapProtocolErrors": true,
     "message": "Failed to respond to service request"
   },
   "sendConnectionRequest": {
     "code": "ERROR_CONNECTION_REQUEST",
+    "mapProtocolErrors": true,
     "message": "Failed to send connection request"
   },
   "sendFileFromPath": {
     "code": "ERROR_SEND_FILE",
+    "mapProtocolErrors": true,
     "message": "Failed to send file from path"
   },
   "sendMedia": {
     "code": "ERROR_SEND_MEDIA",
+    "mapProtocolErrors": true,
     "message": "Failed to send media"
   },
   "sendMediaRich": {
     "code": "ERROR_SEND_MEDIA",
+    "mapProtocolErrors": true,
     "message": "Failed to send media"
   },
   "sendMessageRich": {
     "code": "ERROR_SEND",
+    "mapProtocolErrors": true,
     "message": "Failed to send rich message"
   },
   "sendPresenceUpdate": {
     "code": "ERROR_PRESENCE_UPDATE",
+    "mapProtocolErrors": true,
     "message": "Failed to send presence update"
   },
   "sendReadReceipt": {
     "code": "ERROR_READ_RECEIPT",
+    "mapProtocolErrors": true,
     "message": "Failed to send read receipt"
   },
   "sendServiceRequest": {
     "code": "ERROR_SERVICE_REQUEST",
+    "mapProtocolErrors": true,
     "message": "Failed to send service request"
   },
   "sendTypingIndicator": {
     "code": "ERROR_TYPING_INDICATOR",
+    "mapProtocolErrors": true,
     "message": "Failed to send typing indicator"
   },
   "setBatteryLevel": {

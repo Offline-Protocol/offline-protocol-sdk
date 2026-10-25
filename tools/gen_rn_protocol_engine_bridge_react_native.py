@@ -44,6 +44,27 @@ def error_for(name: str, manifest: dict[str, dict[str, str]]) -> tuple[str, str]
     return entry["code"], entry["message"]
 
 
+def flags_for(name: str, manifest: dict) -> str:
+    """The `run` arguments after the code and message, in a fixed order.
+
+    `mapProtocolErrors` is true for the methods that rejected through
+    `rejectWithProtocolError` before the shared bridge, so they keep the typed
+    codes (`NoKeyPackage`, `SessionNotReady`) apps branch on; every other method
+    keeps the fixed code it always rejected with. `parseJsonResult` is true for a
+    method whose shared bridge returns a JSON string where React Native has
+    always resolved an object. Any other string reaches JavaScript unchanged,
+    because `src/index.ts` parses the ones it expects as strings and
+    `JSON.parse` on an object throws.
+    """
+    entry = manifest[name]
+    flags = ""
+    if entry.get("mapProtocolErrors"):
+        flags += ", mapProtocolErrors = true"
+    if entry.get("parseJsonResult"):
+        flags += ", parseJsonResult = true"
+    return flags
+
+
 def build_args_expr(params: str) -> str:
     if not params.strip():
         return "null"
@@ -93,20 +114,34 @@ def generate_react_native_kt(module: str, manifest: dict[str, dict[str, str]]) -
         " */",
         "internal object ProtocolEngineHostBridgeReactNative {",
         "",
+        "    /**",
+        "     * Runs one shared-bridge method for a React Native promise.",
+        "     *",
+        "     * A string result is resolved as the string: `src/index.ts` parses the",
+        "     * ones it expects as JSON, and `JSON.parse` on an object throws.",
+        "     * [parseJsonResult] is set only where React Native has always resolved",
+        "     * an object and the shared bridge returns its JSON. [mapProtocolErrors]",
+        "     * is set only for the methods that always surfaced typed protocol",
+        "     * codes. Both come from `tools/rn_engine_bridge_error_manifest.json`.",
+        "     */",
         "    private fun run(",
         "        module: OfflineProtocolModule,",
         "        promise: Promise,",
         "        errorCode: String,",
         "        errorMessage: String,",
+        "        mapProtocolErrors: Boolean = false,",
+        "        parseJsonResult: Boolean = false,",
         "        block: (ProtocolEngineHost, Context) -> Any?,",
         "    ) {",
         "        try {",
         "            val host = module.engineHost",
         "            val context = module.bridgeContext",
         "            val result = block(host, context)",
-        "            promise.resolve(BridgeResults.toReactNativeJsonStringOrPassThrough(result))",
+        "            promise.resolve(",
+        "                if (parseJsonResult) BridgeResults.parseJsonResult(result) else BridgeResults.toReactNative(result),",
+        "            )",
         "        } catch (e: Exception) {",
-        "            module.rejectBridgePromise(promise, e, errorCode, errorMessage)",
+        "            module.rejectBridgePromise(promise, e, errorCode, errorMessage, mapProtocolErrors)",
         "        }",
         "    }",
         "",
@@ -122,29 +157,14 @@ def generate_react_native_kt(module: str, manifest: dict[str, dict[str, str]]) -
             sig = "module: OfflineProtocolModule, promise: Promise"
             call_args = "module, promise"
         args_expr = build_args_expr(params)
-        if args_expr == "null":
-            invoke = delegate_call(name, params)
-            body = f"""
-    fun {name}({sig}) {{
-        run(module, promise, "{code}", "{msg}") {{ host, context ->
-            {invoke}
-        }}
-    }}
-"""
-        elif args_expr == "configJson":
-            invoke = f'ProtocolEngineHostBridge.{name}(host, context, configJson)'
-            body = f"""
-    fun {name}({sig}) {{
-        run(module, promise, "{code}", "{msg}") {{ host, context ->
-            {invoke}
-        }}
-    }}
-"""
+        if args_expr == "configJson":
+            invoke = f"ProtocolEngineHostBridge.{name}(host, context, configJson)"
         else:
             invoke = delegate_call(name, params)
-            body = f"""
+        flags = flags_for(name, manifest)
+        body = f"""
     fun {name}({sig}) {{
-        run(module, promise, "{code}", "{msg}") {{ host, context ->
+        run(module, promise, "{code}", "{msg}"{flags}) {{ host, context ->
             {invoke}
         }}
     }}
@@ -218,16 +238,20 @@ def ensure_module_helpers(module: str) -> str:
                 error: Throwable,
                 fallbackCode: String,
                 fallbackMessage: String,
+                mapProtocolErrors: Boolean,
             ) {
-                rejectWithProtocolError(promise, error, fallbackCode, fallbackMessage)
+                if (mapProtocolErrors) {
+                    rejectWithProtocolError(promise, error, fallbackCode, fallbackMessage)
+                } else {
+                    promise.reject(fallbackCode, "$fallbackMessage: ${error.message}", error)
+                }
             }
 
             """
         )
-        marker = "     * fallback code and \"$fallbackMessage: <cause>\".\n     */\n    private fun rejectWithProtocolError("
         module = module.replace(
-            marker,
-            "     * fallback code and \"$fallbackMessage: <cause>\".\n     */\n" + insert + "    private fun rejectWithProtocolError(",
+            "    private fun rejectWithProtocolError(",
+            insert + "    private fun rejectWithProtocolError(",
             1,
         )
     return module
@@ -236,7 +260,7 @@ def ensure_module_helpers(module: str) -> str:
 def verify_generated_errors(generated: str, manifest: dict[str, dict[str, str]]) -> list[str]:
     problems: list[str] = []
     for name, entry in manifest.items():
-        needle = f'run(module, promise, "{entry["code"]}", "{entry["message"]}"'
+        needle = f'run(module, promise, "{entry["code"]}", "{entry["message"]}"{flags_for(name, manifest)}) {{'
         if f"fun {name}(" in generated and needle not in generated:
             problems.append(f"{name}: expected `{needle}` in generated adapter")
     return problems

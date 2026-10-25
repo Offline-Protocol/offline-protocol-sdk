@@ -87,7 +87,7 @@ def normalize_message(msg: str) -> str:
     return msg.strip()
 
 
-def parse_ios_body(body: str, name: str) -> tuple[str, str] | None:
+def parse_ios_body(body: str, name: str) -> tuple[str, str, bool] | None:
     if "ProtocolEngineHostBridgeReactNative." in body:
         return None
     m = re.search(
@@ -95,7 +95,7 @@ def parse_ios_body(body: str, name: str) -> tuple[str, str] | None:
         body,
     )
     if m:
-        return m.group(1), normalize_message(m.group(2))
+        return m.group(1), normalize_message(m.group(2)), True
     codes = re.findall(r'rejecter\(\s*"([A-Z0-9_]+)"', body)
     if codes:
         code = codes[0]
@@ -103,11 +103,11 @@ def parse_ios_body(body: str, name: str) -> tuple[str, str] | None:
             code = codes[1]
         mm = re.search(rf'rejecter\(\s*"{re.escape(code)}"\s*,\s*"([^"]+)"', body)
         msg = normalize_message(mm.group(1)) if mm else DEFAULT_MSG.format(name=name)
-        return code, msg
+        return code, msg, False
     return None
 
 
-def parse_kotlin_body(body: str, name: str) -> tuple[str, str] | None:
+def parse_kotlin_body(body: str, name: str) -> tuple[str, str, bool] | None:
     if "ProtocolEngineHostBridgeReactNative." in body:
         return None
     m = re.search(
@@ -115,25 +115,31 @@ def parse_kotlin_body(body: str, name: str) -> tuple[str, str] | None:
         body,
     )
     if m:
-        return m.group(1), normalize_message(m.group(2))
+        return m.group(1), normalize_message(m.group(2)), True
     m = re.search(r'promise\.reject\("([A-Z0-9_]+)"', body)
     if m:
         mm = re.search(r'promise\.reject\("[^"]+",\s*"([^"]+)"', body)
         msg = normalize_message(mm.group(1)) if mm else DEFAULT_MSG.format(name=name)
-        return m.group(1), msg
+        return m.group(1), msg, False
     return None
 
 
-def extract(module: str, body_fn, parse_fn) -> dict[str, dict[str, str]]:
-    out: dict[str, dict[str, str]] = {}
+def extract(module: str, body_fn, parse_fn) -> dict[str, dict]:
+    """Code, message and whether the inline body mapped protocol errors.
+
+    `mapProtocolErrors` records a body that rejected through
+    `rejectWithProtocolError`: the generated adapter keeps the typed codes for
+    exactly those methods (see `flags_for` in both adapter generators).
+    """
+    out: dict[str, dict] = {}
     for name in METHODS:
         body = body_fn(module, name)
         if not body:
             continue
         parsed = parse_fn(body, name)
         if parsed:
-            code, msg = parsed
-            out[name] = {"code": code, "message": msg}
+            code, msg, maps = parsed
+            out[name] = {"code": code, "message": msg, "mapProtocolErrors": maps}
     return out
 
 
@@ -144,13 +150,25 @@ def main() -> int:
 
     ios = IOS.read_text()
     kt = KT.read_text()
-    scraped = {}
-    scraped.update(extract(kt, kotlin_method_body, parse_kotlin_body))
-    scraped.update(extract(ios, ios_method_body, parse_ios_body))
+    scraped: dict[str, dict] = {}
+    for found in (
+        extract(kt, kotlin_method_body, parse_kotlin_body),
+        extract(ios, ios_method_body, parse_ios_body),
+    ):
+        for name, entry in found.items():
+            # A method that mapped on either platform keeps mapping on both.
+            maps = entry["mapProtocolErrors"] or scraped.get(name, {}).get("mapProtocolErrors", False)
+            scraped[name] = {**entry, "mapProtocolErrors": maps}
 
-    manifest: dict[str, dict[str, str]] = {**base}
+    # Merge rather than replace, so a hand-set field (`parseJsonResult`) survives
+    # a re-run. A scraped body is authoritative for code, message and mapping.
+    manifest: dict[str, dict] = {name: dict(entry) for name, entry in base.items()}
     for name, entry in scraped.items():
-        manifest[name] = entry
+        merged = {**manifest.get(name, {}), "code": entry["code"], "message": entry["message"]}
+        merged.pop("mapProtocolErrors", None)
+        if entry["mapProtocolErrors"]:
+            merged["mapProtocolErrors"] = True
+        manifest[name] = merged
 
     for name in METHODS:
         if name not in manifest:

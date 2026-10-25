@@ -61,13 +61,28 @@ class OfflineProtocolModule: RCTEventEmitter {
         set { engineHost.nostrManager = newValue }
     }
 
+    /// Rejects a shared-bridge promise. With `mapProtocolErrors` the error goes
+    /// through `rejectWithProtocolError`, so a mapped error rejects with its
+    /// stable typed code (`NoKeyPackage`, `SessionNotReady`, ...); without it
+    /// the method keeps the fixed fallback code it has always rejected with.
+    ///
+    /// Per method, from `tools/rn_engine_bridge_error_manifest.json`, and true
+    /// exactly for the methods that mapped before the shared bridge existed.
+    /// Rejecting every method with the fallback is how the sends lost their
+    /// typed codes on iOS while Android kept them. Android makes the same
+    /// choice from the same file.
     func rejectBridgePromise(
         _ rejecter: @escaping RCTPromiseRejectBlock,
         error: Error,
         code: String,
-        message: String
+        message: String,
+        mapProtocolErrors: Bool
     ) {
-        rejecter(code, "\(message): \(error.localizedDescription)", error)
+        if mapProtocolErrors {
+            rejectWithProtocolError(error, rejecter, fallbackCode: code, fallbackMessage: message)
+        } else {
+            rejecter(code, "\(message): \(error.localizedDescription)", error)
+        }
     }
 
 

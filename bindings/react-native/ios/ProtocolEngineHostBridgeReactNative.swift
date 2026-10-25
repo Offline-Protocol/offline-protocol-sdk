@@ -3,25 +3,44 @@ import Foundation
 import React
 
 enum ProtocolEngineHostBridgeReactNative {
+    /// Runs one shared-bridge method for a React Native promise.
+    ///
+    /// A string result is resolved as the string: `src/index.ts` parses the
+    /// ones it expects as JSON, and `JSON.parse` on an object throws.
+    /// `parseJsonResult` is set only where React Native has always resolved
+    /// an object and the shared bridge returns its JSON. `mapProtocolErrors`
+    /// is set only for the methods that always surfaced typed protocol codes.
+    /// Both come from `tools/rn_engine_bridge_error_manifest.json`.
     static func run(
         _ module: OfflineProtocolModule,
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock,
         errorCode: String,
         errorMessage: String,
+        mapProtocolErrors: Bool = false,
+        parseJsonResult: Bool = false,
         env: EngineBridgeEnvironment = .inert(),
         _ body: (ProtocolEngineHost, EngineBridgeEnvironment) throws -> Any?
     ) {
         do {
             let result = try body(module.engineHost, env)
-            resolver(BridgeResults.toReactNative(result) ?? NSNull())
+            let payload = parseJsonResult
+                ? BridgeResults.parseJsonResult(result)
+                : BridgeResults.toReactNative(result)
+            resolver(payload ?? NSNull())
         } catch {
-            module.rejectBridgePromise(rejecter, error: error, code: errorCode, message: errorMessage)
+            module.rejectBridgePromise(
+                rejecter,
+                error: error,
+                code: errorCode,
+                message: errorMessage,
+                mapProtocolErrors: mapProtocolErrors
+            )
         }
     }
 
     static func acceptConnectionRequest(_ module: OfflineProtocolModule, _ recipient: String, accepterName: String, keyPackage: [NSNumber]?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to accept connection request") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to accept connection request", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.acceptConnectionRequest(host: host, env: env, arguments: ["recipient": recipient, "accepterName": accepterName, "keyPackage": BridgeResults.arrayFromNSNumberList(keyPackage as? [Any]) as Any])
         }
     }
@@ -45,7 +64,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func cancelConnectionRequest(_ module: OfflineProtocolModule, _ recipient: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to cancel connection request") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to cancel connection request", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.cancelConnectionRequest(host: host, env: env, arguments: ["recipient": recipient])
         }
     }
@@ -57,7 +76,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func checkInternetPresence(_ module: OfflineProtocolModule, _ userId: String, options: NSDictionary, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INTERNET", errorMessage: "Failed to query presence: Internet transport not initialized") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INTERNET", errorMessage: "Failed to query presence: Internet transport not initialized", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.checkInternetPresence(host: host, env: env, arguments: ["userId": userId, "options": BridgeResults.argumentMap(from: options as? [String: Any])])
         }
     }
@@ -93,7 +112,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func eraseCustody(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_ERASECUSTODY", errorMessage: "eraseCustody failed") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_ERASECUSTODY", errorMessage: "eraseCustody failed", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.eraseCustody(host: host, env: env, arguments: nil)
         }
     }
@@ -117,7 +136,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func forwardMessage(_ module: OfflineProtocolModule, _ originalMessageJson: String, newRecipient: String, priority: Int, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FORWARD", errorMessage: "Failed to forward message") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FORWARD", errorMessage: "Failed to forward message", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.forwardMessage(host: host, env: env, arguments: ["originalMessageJson": originalMessageJson, "newRecipient": newRecipient, "priority": priority])
         }
     }
@@ -159,7 +178,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func getDorsConfig(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONFIG", errorMessage: "Protocol not initialized") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONFIG", errorMessage: "Protocol not initialized", parseJsonResult: true) { host, env in
             try ProtocolEngineHostBridge.getDorsConfig(host: host, env: env, arguments: nil)
         }
     }
@@ -309,7 +328,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func internetSendRawCommand(_ module: OfflineProtocolModule, _ json: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INTERNET", errorMessage: "Failed to send raw server command: Internet transport not initialized") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INTERNET", errorMessage: "Failed to send raw server command: Internet transport not initialized", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.internetSendRawCommand(host: host, env: env, arguments: ["json": json])
         }
     }
@@ -435,7 +454,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func processFileChunk(_ module: OfflineProtocolModule, _ fileId: String, chunkIndex: Int, totalChunks: Int, fileSize: Double, fileName: String, fileChecksum: String, data: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FILE", errorMessage: "Failed to process file chunk") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FILE", errorMessage: "Failed to process file chunk", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.processFileChunk(host: host, env: env, arguments: ["fileId": fileId, "chunkIndex": chunkIndex, "totalChunks": totalChunks, "fileSize": fileSize, "fileName": fileName, "fileChecksum": fileChecksum, "data": BridgeResults.arrayFromNSNumberList(data as? [Any]) as Any])
         }
     }
@@ -447,7 +466,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func rejectConnectionRequest(_ module: OfflineProtocolModule, _ recipient: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to reject connection request") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to reject connection request", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.rejectConnectionRequest(host: host, env: env, arguments: ["recipient": recipient])
         }
     }
@@ -471,67 +490,67 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func resolveUsername(_ module: OfflineProtocolModule, _ username: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INVALID_ARGUMENT", errorMessage: "Failed to resolve username") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INVALID_ARGUMENT", errorMessage: "Failed to resolve username", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.resolveUsername(host: host, env: env, arguments: ["username": username])
         }
     }
 
     static func respondToServiceRequest(_ module: OfflineProtocolModule, _ requestId: String, requester: String, serviceId: String, status: String, body: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_RESPONSE", errorMessage: "Failed to respond to service request") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_RESPONSE", errorMessage: "Failed to respond to service request", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.respondToServiceRequest(host: host, env: env, arguments: ["requestId": requestId, "requester": requester, "serviceId": serviceId, "status": status, "body": body])
         }
     }
 
     static func sendConnectionRequest(_ module: OfflineProtocolModule, _ recipient: String, senderName: String, keyPackage: [NSNumber]?, initialMessage: String?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to send connection request") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to send connection request", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendConnectionRequest(host: host, env: env, arguments: ["recipient": recipient, "senderName": senderName, "keyPackage": BridgeResults.arrayFromNSNumberList(keyPackage as? [Any]) as Any, "initialMessage": initialMessage])
         }
     }
 
     static func sendFileFromPath(_ module: OfflineProtocolModule, _ recipient: String, filePath: String, fileName: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SEND_FILE", errorMessage: "Failed to send file from path") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SEND_FILE", errorMessage: "Failed to send file from path", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendFileFromPath(host: host, env: env, arguments: ["recipient": recipient, "filePath": filePath, "fileName": fileName])
         }
     }
 
     static func sendMedia(_ module: OfflineProtocolModule, _ recipient: String, fileData: String, fileName: String, contentType: String, mediaMetadata: NSDictionary?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SEND_MEDIA", errorMessage: "Failed to send media") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SEND_MEDIA", errorMessage: "Failed to send media", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendMedia(host: host, env: env, arguments: ["recipient": recipient, "fileData": fileData, "fileName": fileName, "contentType": contentType, "mediaMetadata": BridgeResults.argumentMap(from: mediaMetadata as? [String: Any])])
         }
     }
 
     static func sendMediaRich(_ module: OfflineProtocolModule, _ recipient: String, fileData: String, fileName: String, contentType: String, options: NSDictionary?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SEND_MEDIA", errorMessage: "Failed to send media") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SEND_MEDIA", errorMessage: "Failed to send media", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendMediaRich(host: host, env: env, arguments: ["recipient": recipient, "fileData": fileData, "fileName": fileName, "contentType": contentType, "options": BridgeResults.argumentMap(from: options as? [String: Any])])
         }
     }
 
     static func sendMessageRich(_ module: OfflineProtocolModule, _ recipient: String, content: String, priority: Int, replyToMsg: String?, options: NSDictionary?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SEND", errorMessage: "Failed to send rich message") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SEND", errorMessage: "Failed to send rich message", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendMessageRich(host: host, env: env, arguments: ["recipient": recipient, "content": content, "priority": priority, "replyToMsg": replyToMsg, "options": BridgeResults.argumentMap(from: options as? [String: Any])])
         }
     }
 
     static func sendPresenceUpdate(_ module: OfflineProtocolModule, _ recipient: String, status: Int, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_PRESENCE_UPDATE", errorMessage: "Failed to send presence update") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_PRESENCE_UPDATE", errorMessage: "Failed to send presence update", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendPresenceUpdate(host: host, env: env, arguments: ["recipient": recipient, "status": status])
         }
     }
 
     static func sendReadReceipt(_ module: OfflineProtocolModule, _ recipient: String, messageIds: [String], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_READ_RECEIPT", errorMessage: "Failed to send read receipt") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_READ_RECEIPT", errorMessage: "Failed to send read receipt", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendReadReceipt(host: host, env: env, arguments: ["recipient": recipient, "messageIds": messageIds])
         }
     }
 
     static func sendServiceRequest(_ module: OfflineProtocolModule, _ provider: String, serviceId: String, method: String, body: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_REQUEST", errorMessage: "Failed to send service request") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_REQUEST", errorMessage: "Failed to send service request", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendServiceRequest(host: host, env: env, arguments: ["provider": provider, "serviceId": serviceId, "method": method, "body": body])
         }
     }
 
     static func sendTypingIndicator(_ module: OfflineProtocolModule, _ recipient: String, conversationId: String, isTyping: Bool, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_TYPING_INDICATOR", errorMessage: "Failed to send typing indicator") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_TYPING_INDICATOR", errorMessage: "Failed to send typing indicator", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.sendTypingIndicator(host: host, env: env, arguments: ["recipient": recipient, "conversationId": conversationId, "isTyping": isTyping])
         }
     }
