@@ -455,6 +455,24 @@ fn flutter_android_hosts_mesh_foreground_keep_alive() {
             && plugin_kt.contains("FlutterMeshForegroundKeepAlive.stop"),
         "Flutter start/stop must drive the shared mesh foreground service"
     );
+    // Destroy, detach and re-create stop the service after every transport,
+    // as stop() and React Native do: while the sockets close it is what keeps
+    // a backgrounded process out of the cached state.
+    let teardown = plugin_kt
+        .split("private fun tearDownProtocol(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .unwrap_or_else(|| panic!("OfflineProtocolPlugin.kt must define tearDownProtocol"));
+    let service = teardown
+        .find("FlutterMeshForegroundKeepAlive.stop")
+        .unwrap_or_else(|| panic!("tearDownProtocol must stop the mesh foreground service"));
+    let last_transport = teardown
+        .find("nostrManager?.stop()")
+        .unwrap_or_else(|| panic!("tearDownProtocol must stop the Nostr manager"));
+    assert!(
+        last_transport < service,
+        "tearDownProtocol must stop the foreground service after the transports"
+    );
     assert!(
         plugin_kt.contains("StickyEventDispatcher")
             && plugin_kt.contains("sendStickyOneShotEvent")

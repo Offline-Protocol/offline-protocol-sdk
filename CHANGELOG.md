@@ -45,7 +45,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   buffering on Android and iOS. A new `Flutter Binding (iOS bridge)` job runs
   `bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh`, which
   typechecks the plugin's Swift with the shared bridge sources the pod
-  compiles; until now nothing in CI compiled the iOS plugin.
+  compiles; until now nothing in CI compiled the iOS plugin. On Android,
+  destroying or detaching the engine now stops the mesh foreground service
+  after the transports rather than before them, as `stop()` does.
 
 - **The browser can remove a group member.** `OfflineNode.removeFromGroup`
   removes a member from a group this device administers: the others move to
