@@ -14295,6 +14295,26 @@ mod tests {
             .unwrap_or(rest.len())
     }
 
+    /// The body of the Swift declaration that starts with `signature` in a
+    /// [`rn_source_code_only`] source: from the end of the signature to the
+    /// next function declared at any visibility. `" func "` alone would
+    /// cover the others; they are listed so the set reads like the Kotlin
+    /// one. A guard that sliced on `" private func "` only ran through the
+    /// next `public` delegate method and passed on code that was not in the
+    /// body it named. Panics when the signature is gone.
+    fn rn_swift_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
+        let rest = &source[start + signature.len()..];
+        let end = [" private func ", " public func ", " func "]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
     /// The Python counterpart of [`rn_source_code_only`], for module
     /// constants: reads a file under `bindings/python` and returns a lookup
     /// from a constant's name to the value the file assigns it.
@@ -14441,18 +14461,6 @@ mod tests {
     ///   policy that keeps a linked peer's address pair stable (ADR 0030).
     #[test]
     fn the_ble_bridges_keep_the_volume_test_wiring() {
-        fn swift_body<'a>(source: &'a str, signature: &str) -> &'a str {
-            let start = source
-                .find(signature)
-                .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
-            let rest = &source[start + signature.len()..];
-            let end = [" func ", " private func ", " public func "]
-                .iter()
-                .filter_map(|marker| rest.find(marker))
-                .min()
-                .unwrap_or(rest.len());
-            &rest[..end]
-        }
         let swift = rn_source_code_only("ios/BleManager.swift");
         let kotlin = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
@@ -14502,7 +14510,7 @@ mod tests {
         );
 
         // The connect timeout belongs to its attempt.
-        let attempt = swift_body(&swift, "private func performConnectionAttempt(");
+        let attempt = rn_swift_body(&swift, "private func performConnectionAttempt(");
         assert!(
             attempt.contains("connectTimeoutTokens[peripheral.identifier] = attempt")
                 && attempt.contains("self.connectTimeoutTokens[peripheral.identifier] == attempt,"),
@@ -14510,9 +14518,9 @@ mod tests {
         );
 
         // The stall clock and the timeout token do not outlive a link.
-        let did_connect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {");
-        let did_fail = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {");
-        let did_disconnect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {");
+        let did_connect = rn_swift_body(&swift, "func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {");
+        let did_fail = rn_swift_body(&swift, "func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {");
+        let did_disconnect = rn_swift_body(&swift, "func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {");
         for (name, body) in [
             ("didConnect", did_connect),
             ("didDisconnectPeripheral", did_disconnect),
@@ -14566,7 +14574,7 @@ mod tests {
         );
 
         // Only a write the link took, or a ready callback, ends a stall.
-        let ready = swift_body(
+        let ready = rn_swift_body(
             &swift,
             "public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {",
         );
@@ -14664,22 +14672,14 @@ mod tests {
         // cross-check, and the peripheral's, after a hello verifies (Android's
         // peripheral path lives in BleTransportFacade.kt). Each announces once,
         // and nothing else does.
-        let swift_body = |signature: &str| -> &str {
-            let start = swift
-                .find(signature)
-                .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
-            let rest = &swift[start + signature.len()..];
-            let end = [" private func ", " public func ", " func "]
-                .iter()
-                .filter_map(|next| rest.find(next))
-                .min()
-                .unwrap_or(rest.len());
-            &rest[..end]
-        };
-        let central =
-            swift_body("private func completePeerHandshake(for peripheral: CBPeripheral) {");
-        let hello =
-            swift_body("private func handleInboundHello(_ value: Data, from central: CBCentral) {");
+        let central = rn_swift_body(
+            &swift,
+            "private func completePeerHandshake(for peripheral: CBPeripheral) {",
+        );
+        let hello = rn_swift_body(
+            &swift,
+            "private func handleInboundHello(_ value: Data, from central: CBCentral) {",
+        );
         assert!(
             swift.matches("blePeerDiscovered(").count() == 2
                 && central.matches("blePeerDiscovered(").count() == 1
@@ -14988,16 +14988,7 @@ mod tests {
             "the published service must carry Hello ({service}])"
         );
 
-        let write = swift
-            .split("didReceiveWrite requests: [CBATTRequest]) {")
-            .nth(1)
-            .expect("BleManager.swift must implement didReceiveWrite");
-        let end = [" public func ", " private func "]
-            .iter()
-            .filter_map(|next| write.find(next))
-            .min()
-            .unwrap_or(write.len());
-        let write = &write[..end];
+        let write = rn_swift_body(&swift, "didReceiveWrite requests: [CBATTRequest]) {");
         let verdict = write
             .find("BlePeripheralHelloPolicy.verdict(")
             .expect("a Hello write must be answered through BlePeripheralHelloPolicy");
@@ -15017,11 +15008,10 @@ mod tests {
             "handleInboundHello must be reached from the accept arm only"
         );
 
-        let body = swift
-            .split("private func handleInboundHello(_ value: Data, from central: CBCentral) {")
-            .nth(1)
-            .expect("BleManager.swift must define handleInboundHello");
-        let body = &body[..body.find(" private func ").unwrap_or(body.len())];
+        let body = rn_swift_body(
+            &swift,
+            "private func handleInboundHello(_ value: Data, from central: CBCentral) {",
+        );
         let verified = body
             .find("verifyIdentityAssertion(assertion:")
             .expect("a hello must be verified");
