@@ -86,4 +86,24 @@ void main() {
       'out-id',
     );
   });
+
+  test('a map-argument wrapper sends its own name and the map unchanged',
+      () async {
+    MethodCall? captured;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+      captured = call;
+      return null;
+    });
+    final args = {
+      'spaceId': 'space',
+      'docId': 'doc',
+      'collection': 'notes',
+      'key': 'title',
+      'valueJson': '"hello"',
+    };
+    await MeshSdk.dataMapSet(args);
+    expect(captured?.method, 'dataMapSet');
+    expect(captured?.arguments, args);
+  });
 }

@@ -35,7 +35,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   generated `FlutterEngineChannel` on Android and iOS into the shared engine
   host, with `method_channel_methods.txt` as the single manifest. Reticulum
   and Nostr configs are no longer refused: the shared host serves both.
-  `MeshSdk` exposes typed Dart wrappers over the same surface, and
+  `MeshSdk` exposes the same surface to Dart (a few typed helpers, and a
+  map-argument wrapper per remaining method), and
   `scripts/check-binding-generators.sh` gates the Flutter generators
   ([docs/bridges/flutter.md](docs/bridges/flutter.md)).
 
