@@ -31,9 +31,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Android Gradle build use the same leave-out lists and pick staged UniFFI
   artifacts only when a real library is present ([ADR 0025](docs/adr/0025-native-packages-are-assembled-in-place.md)).
 
-- **Flutter engine method channel.** The plugin routes Dart calls through
-  `FlutterEngineChannel` and generated `EngineMethodHandlers` on Android and
-  iOS, with `method_channel_methods.txt` as the single manifest.
+- **Flutter engine method channel.** The plugin routes Dart calls through a
+  generated `FlutterEngineChannel` on Android and iOS into the shared engine
+  host, with `method_channel_methods.txt` as the single manifest. Reticulum
+  and Nostr configs are no longer refused: the shared host serves both.
   `MeshSdk` exposes typed Dart wrappers over the same surface, and
   `scripts/check-binding-generators.sh` gates the Flutter generators
   ([docs/bridges/flutter.md](docs/bridges/flutter.md)).

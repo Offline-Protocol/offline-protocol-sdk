@@ -7,8 +7,7 @@ compile ([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)).
 Read [the shared contract](README.md) first. This document covers what is
 specific to Flutter.
 
-App integration: [bindings/flutter/README.md](../../bindings/flutter/README.md) and
-[flutter-integration.md](../flutter-integration.md).
+Integration steps live in [bindings/flutter/README.md](../../bindings/flutter/README.md).
 
 ## The generated layer
 
@@ -30,10 +29,11 @@ iOS it is `rn_only_swift` in `ios/offline_protocol.podspec`, which must agree
 with the `--exclude` list in `ios/sync_bridge_rn.sh`. What is left out needs
 React: the module, its package, the headless wake service, and the React
 Native adapter layer (`ProtocolEngineHostBridgeReactNative`, plus
-`BridgeResults` and `BridgeArgumentMaps` on Android). The Nostr and Reticulum
-managers are compiled although the plugin does not host either transport,
-because the shared engine host names them; `create` refuses a config that
-enables either (F5).
+`BridgeResults` and `BridgeArgumentMaps` on Android). Everything else
+compiles with the plugin, including the Reticulum and Nostr managers, which the
+shared engine host starts and tears down when the config enables them, the
+mesh foreground service and, on Android, `StickyEventDispatcher`. Headless mesh
+wake stays React Native only.
 
 A new shared source reaches the plugin without being registered. A list of
 what to take would not: the Kotlin plugin ignores `java { include }`, so such
@@ -103,14 +103,18 @@ thread it kills the process and the call is never answered. It is reported as
 ## F3. Method-channel API is pinned across three languages
 
 Dart calls `MethodChannel('com.offlineprotocol/offline_protocol')`. The canonical
-list is `method_channel_methods.txt` (171 React Native–parity methods plus
-`replayEvents`). Dart mirrors it in `OfflineProtocol.nativeMethodChannelMethods`;
-Android dispatches in `FlutterEngineChannel.kt`; iOS declares the same surface in
-`FlutterEngineChannel.swift`. CI enforces parity via
+list is `method_channel_methods.txt` (171 methods: the React Native surface
+plus `replayEvents`). Dart mirrors it in `OfflineProtocol.nativeMethodChannelMethods`;
+Android dispatches in `FlutterEngineChannel.kt` and iOS in
+`FlutterEngineChannel.swift`, both generated from it. CI enforces parity via
 `flutter_method_channel_methods_match_native_plugins`.
 
-New surface area: add the Dart wrapper, both native handlers, and extend the
-const list (tests fail if the list drifts).
+New surface area: add the name to the manifest, a handler to
+`ProtocolEngineHostBridge.swift` and to `ProtocolEngineHostBridge.kt` or
+`tools/gen_engine_method_handlers.py`, then run the generators and
+`tools/gen_flutter_dart_manifest.py`. `scripts/check-binding-generators.sh
+--check` fails while any output is stale or a handler is missing
+([C9b](README.md#c9b-shared-engine-bridge-generators-and-rn-promise-codes)).
 
 ## F4. Events are opaque JSON with optional seq and replay
 
@@ -206,13 +210,14 @@ During in-app navigation you may call `MeshSdk.disableTelemetry()` without
 (for example `internetIsReadyTyped`) until that future completes or you call the
 matching `*AndWait` helper before `destroy`.
 
-## F8b. Staged native artifacts (pub.dev)
+## F8b. Staged native artifacts
 
-Release workflow runs `bindings/flutter/scripts/stage-plugin-native-artifacts.sh`
-after mobile UniFFI artifacts are assembled. The plugin Gradle build prefers
-`android/src/main/jniLibs` when staged; the podspec prefers
-`ios/Frameworks/offline_protocol_uniffi.xcframework` when present. See
-[flutter-integration.md](../flutter-integration.md).
+The plugin's Gradle build uses `android/src/main/jniLibs` when it holds the
+library, and the podspec uses `ios/Frameworks/offline_protocol_uniffi.xcframework`
+when its `ios-arm64` library exists. Otherwise both fall back to the React
+Native package's artifacts. Both are chosen by the library, not the directory,
+because an empty staged directory would otherwise win and link nothing. Neither
+is committed.
 
 ## F9. Binary footprint
 
@@ -230,20 +235,28 @@ the release AAR is larger than a BLE-and-Internet-only build. That growth is
 expected and gated by the baseline, not a silent regression. Runtime footprint
 still follows `ProtocolConfig`: disable transports and mesh features you do not
 ship so the engine does not start managers you never use (same guidance as React
-Native). [OfflineProtocol.minimalFootprintConfig](../flutter/offline_protocol/lib/src/offline_protocol.dart)
+Native). [OfflineProtocol.minimalFootprintConfig](../../bindings/flutter/offline_protocol/lib/src/offline_protocol.dart)
 builds a create payload with only the transport flags you enable; pair it with
 narrow nested sections for mesh and data features you actually ship.
 
 ## What CI runs
 
-GitHub Actions (see `.github/workflows/ci.yml`):
+The `Flutter Binding` job in `.github/workflows/ci.yml` (path-filtered on pull
+requests; full run on pushes to `main`):
 
-- **`Flutter Binding`:** `flutter test`, `flutter analyze`, Android arm64 UniFFI,
-  release AAR assembly, and `measure-plugin-aar-size.sh --check` (path-filtered
-  on pull requests; full run on pushes to `main`).
-- **`Flutter Binding (iOS bridge)`:** `bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh`
-  (syncs `BridgeRN/`, typechecks plugin and shared Swift against the Flutter
-  engine and simulator UniFFI archive).
+- **Dart (fast path):** `flutter test` and `flutter analyze` when the plugin,
+  `docs/bridges/flutter.md`, workflow, or `flutter_bridge_guards.rs` change.
+- **UniFFI production (`lib.rs`):** any edit runs the native path (jniLibs +
+  AAR gate), not the guard-only fast path.
+- **Android native (slow path):** arm64 UniFFI build, a check of the
+  example's committed Gradle wrapper, then `:offline_protocol:assembleRelease`
+  via `measure-plugin-aar-size.sh --check` when the plugin's own Android tree
+  or the example's, baselines, Flutter scripts, shared RN Android tree
+  (Kotlin, jniLibs, ProGuard consumer rules, Gradle), bindgen, UniFFI ABI
+  inputs, or root `Cargo.lock` / workspace `Cargo.toml` change. Changes
+  confined to Dart or guard-only tests can skip the NDK/Gradle path; pushes to
+  `main` always run the full native gate. `flutter analyze` excludes
+  `android/**`, so the plugin's own Kotlin is compiled only by this path.
 
 iOS pod compilation is not gated in CI yet (requires XCFramework assembly like
 the Swift Package job). Until it is, typecheck the plugin by hand against the

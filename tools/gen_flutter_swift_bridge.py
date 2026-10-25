@@ -5,8 +5,8 @@ The dispatcher is one `case` per name in method_channel_methods.txt, each a
 call to the same-named static function in ProtocolEngineHostBridge.swift. The
 Rust guard `flutter_method_channel_methods_match_native_plugins` reads every
 `case "..."` in the output, so a method that is added to the manifest and not
-regenerated fails there, and tools/gen_swift_protocol_engine_host_bridge.py
---check fails when the bridge lacks the function.
+regenerated fails there, and tools/check_swift_protocol_engine_host_bridge.py
+fails when the bridge lacks the function.
 
     python3 tools/gen_flutter_swift_bridge.py          # write
     python3 tools/gen_flutter_swift_bridge.py --check  # fail when stale

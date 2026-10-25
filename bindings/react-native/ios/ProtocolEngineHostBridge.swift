@@ -8,8 +8,8 @@ import Foundation
 /// camelCase), results are plain values the standard codec carries.
 ///
 /// One `static func` per name in `method_channel_methods.txt`, with the one
-/// signature, so the dispatcher and `tools/gen_swift_protocol_engine_host_bridge.py
-/// --check` can hold the two to each other. Every method does its work; none
+/// signature, so the dispatcher and `tools/check_swift_protocol_engine_host_bridge.py`
+/// can hold the two to each other. Every method does its work; none
 /// is a placeholder. Methods are called on the plugin's engine queue
 /// and may block it (a few wait for a transport's completion), never main.
 ///

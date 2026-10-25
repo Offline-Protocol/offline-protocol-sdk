@@ -18,6 +18,7 @@ object FlutterEngineChannel {
         val startOnEngine: () -> Unit,
         val stopOnEngine: () -> Unit,
         val seedAppState: () -> uniffi.offline_protocol.AppState,
+        val discardOneShotEvent: (key: String) -> Unit,
     )
 
     @Throws(Throwable::class)
