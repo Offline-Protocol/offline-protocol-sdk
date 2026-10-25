@@ -198,9 +198,13 @@ fills platform fields in `ProtocolEngineHost.parseTelemetryConfig` ([C12](README
 The binding owns the session boundary off UI pause granularity and never runs
 blocking flush on the main thread. `disableTelemetry`, `endTelemetrySession`, and
 `flushTelemetry` may block the dedicated engine thread for up to a few seconds
-(same as React Native); other method-channel calls queue behind that work. iOS
-and Android Flutter hosts seed and update `AppState` from process lifecycle
-observers so telemetry sessions follow foreground/background edges.
+(same as React Native); other method-channel calls queue behind that work. Both
+hosts seed `AppState` at `enableTelemetry` and forward every foreground and
+background edge to the core, so telemetry sessions rotate as they do on React
+Native. On iOS the background edge also flushes for up to three seconds inside a
+background task, on a queue of its own so method calls do not wait behind it;
+without the task iOS can suspend the process before the upload and the batch
+waits for the next launch.
 
 On shutdown or before tearing down the engine, prefer `MeshSdk.disableTelemetryAndWait`,
 `endTelemetrySessionAndWait`, or `flushTelemetryAndWait` so your Dart `await`

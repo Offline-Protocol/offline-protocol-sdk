@@ -40,6 +40,17 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         label: "com.offlineprotocol.flutter.engine",
         qos: .userInitiated
     )
+    /// Telemetry lifecycle edges, process-wide like `engineQueue` and apart
+    /// from it: the background edge's flush may block for three seconds, and on
+    /// the engine queue every method call would wait behind it. One serial
+    /// queue for both edges keeps a `.active` from overtaking the background
+    /// flush and rotating the session out from under it.
+    private static let telemetryQueue = DispatchQueue(
+        label: "com.offlineprotocol.flutter.telemetry"
+    )
+    /// Main-confined: armed by the background observer, ended by the flush's
+    /// completion or the assertion's expiry, whichever comes first.
+    private var backgroundTelemetryTaskId: UIBackgroundTaskIdentifier = .invalid
     private let attachmentLock = NSLock()
     private var isPluginAttached = false
 
@@ -119,6 +130,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             queue: .main
         ) { [weak self] _ in
             self?.setAppState(.background)
+            self?.notifyTelemetryBackground()
             OfflineProtocolPlugin.engineQueue.async {
                 self?.foregroundReconnectPolicy.didEnterBackground(
                     nowMs: MonotonicClock.nowMs()
@@ -131,6 +143,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             queue: .main
         ) { [weak self] _ in
             self?.setAppState(.active)
+            self?.notifyTelemetryActive()
             OfflineProtocolPlugin.engineQueue.async {
                 self?.handleAppBecameActive()
             }
@@ -167,6 +180,51 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         emitEventJson(eventJson)
     }
 
+    /// The telemetry session boundary, as React Native iOS draws it: the core
+    /// hears the edge and the pipe gets up to three seconds to upload, inside a
+    /// background assertion so iOS does not suspend the process before the
+    /// uploader's turn. Without the edge the session never rotates after
+    /// `enableTelemetry`, and a batch waits in the durable queue for the next
+    /// launch. A protocol with telemetry off ignores both calls.
+    private func notifyTelemetryBackground() {
+        guard let proto = host.protocolInstance else { return }
+        endBackgroundTelemetryTask(backgroundTelemetryTaskId)
+        let task = UIApplication.shared.beginBackgroundTask(
+            withName: "OfflineProtocol.telemetryFlush"
+        ) {
+            self.endBackgroundTelemetryTask(self.backgroundTelemetryTaskId)
+        }
+        // Assigned before the runloop turns, so the expiry handler, which is
+        // delivered on main, cannot run first.
+        backgroundTelemetryTaskId = task
+        // `self` held strongly: a weak capture that lost its referent would
+        // leave the assertion unbalanced, and the block is short-lived.
+        Self.telemetryQueue.async {
+            proto.notifyAppState(state: .background)
+            _ = proto.flushTelemetryBlocking(deadlineMs: 3000)
+            DispatchQueue.main.async { self.endBackgroundTelemetryTask(task) }
+        }
+    }
+
+    /// The first `.active` after a background rotates the session; one with no
+    /// background before it (an interruption, Control Center) is not an edge
+    /// and the core does nothing with it.
+    private func notifyTelemetryActive() {
+        guard let proto = host.protocolInstance else { return }
+        Self.telemetryQueue.async {
+            proto.notifyAppState(state: .active)
+        }
+    }
+
+    /// Ends the assertion only if it is still the current one: ending an
+    /// identifier twice is a hard error, and a superseded completion must not
+    /// end the next transition's assertion.
+    private func endBackgroundTelemetryTask(_ id: UIBackgroundTaskIdentifier) {
+        guard id != .invalid, backgroundTelemetryTaskId == id else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        backgroundTelemetryTaskId = .invalid
+    }
+
     private func setAppState(_ state: AppState) {
         appStateLock.lock()
         appStateValue = state
@@ -196,6 +254,12 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         eventLock.lock()
         eventSink = sink
         eventLock.unlock()
+    }
+
+    private func hasEventSink() -> Bool {
+        eventLock.lock()
+        defer { eventLock.unlock() }
+        return eventSink != nil
     }
 
     /// What the bridge needs beyond the host: the pieces that also touch this
@@ -295,7 +359,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     }
 
     private func flushInboundEvents() {
-        guard eventSink != nil, !inboundEvents.isEmpty else { return }
+        guard hasEventSink(), !inboundEvents.isEmpty else { return }
         let drained = inboundEvents.drain()
         var undelivered: [InboundEventBuffer.Entry] = []
         for entry in drained {
