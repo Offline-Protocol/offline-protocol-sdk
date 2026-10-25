@@ -202,7 +202,12 @@ only. Among the instances that expose both Device id and Identity, it takes:
 When no instance exposes both, it takes the first, and the handshake refuses it
 for the characteristic it lacks. "First" is the order the platform reports the
 instances in. A central that finds one instance has nothing to choose, and the
-shipped centrals do not read App tag at all in that case.
+shipped centrals do not read App tag at all in that case. The shipped
+centrals include the browser's Web Bluetooth carrier, which can never be
+dialled back: it writes Hello before any Message write, so a peripheral that
+serves Hello can attribute everything it sends. For the same reason it
+refuses an instance with no Hello, and a link whose hello was refused,
+where the rule above lets a central keep them.
 
 The choice never refuses a link. A phone running only other applications is
 still a mesh neighbour: relay forwarding is keyed on the recipient, never on the

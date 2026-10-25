@@ -3,6 +3,7 @@
 export { WebRtcCarrier } from "./webrtc.js";
 export { NostrSignaller } from "./nostr-signal.js";
 export { NearbyRoom, publicAddress } from "./nearby.js";
+export { BluetoothCarrier } from "./bluetooth.js";
 import { checkRelays } from "./nostr-relays.js";
 
 export class OfflineNode extends EventTarget {
@@ -15,6 +16,8 @@ export class OfflineNode extends EventTarget {
   #tabs;
   // link -> { send(bytes), close() }: the page's carriers.
   #links = new Map();
+  // { write(peer, bytes), close() }: where Bluetooth fragments go (W14).
+  #bleSink = null;
   #onPageHide = () => this.#worker.postMessage({ id: 0, op: "stop" });
   // A page restored from the back-forward cache had its node stopped on
   // pagehide; say so once rather than leave a node that answers nothing.
@@ -51,12 +54,16 @@ export class OfflineNode extends EventTarget {
   /// none, so `relays` is required. `coldContact` (default on) publishes key
   /// packages so a device that knows only this node's address can reach it;
   /// `usernameDiscovery` (default off) publishes `profile` as a username.
+  ///
+  /// `ble: true` adds the Bluetooth LE slot, which a BluetoothCarrier on this
+  /// page drives over Web Bluetooth (W14): Chromium only, as a central.
   static async start({
     appId,
     profile = "default",
     storage = "durable",
     tabs = true,
     nostr,
+    ble = false,
     workerUrl,
     wasm,
   } = {}) {
@@ -81,6 +88,7 @@ export class OfflineNode extends EventTarget {
         tabs,
         instance,
         wasm,
+        ble: Boolean(ble),
         // The worker applies the defaults; it is the one place that does.
         nostr:
           nostr === undefined
@@ -217,6 +225,46 @@ export class OfflineNode extends EventTarget {
     return this.#call("nearbyClose", { id });
   }
 
+  /// The Bluetooth slot's half in the worker (W14), for BluetoothCarrier:
+  /// this device's hello, this application's App tag, a peripheral's Device
+  /// id and Identity checked (resolving to the address proved), a verified
+  /// link announced with its write payload, a notified fragment, a link gone.
+  bleHello() {
+    return this.#call("bleHello");
+  }
+
+  bleAppTag() {
+    return this.#call("bleAppTag");
+  }
+
+  bleVerify(deviceId, identity) {
+    return this.#call("bleVerify", { deviceId, identity });
+  }
+
+  bleLinkUp(peer, maxPayload) {
+    return this.#call("bleLinkUp", { peer, maxPayload });
+  }
+
+  bleFragmentReceived(peer, bytes) {
+    return this.#call("bleFragmentReceived", { peer, bytes });
+  }
+
+  bleLinkDown(peer) {
+    return this.#call("bleLinkDown", { peer }).catch(() => {});
+  }
+
+  /// Where the engine's outbound Bluetooth fragments go:
+  /// `{ write(peer, bytes), close() }`, `close` called once when the node
+  /// stops or fails. One sink per node, which BluetoothCarrier takes:
+  /// replacing a sink another carrier holds throws, since that carrier's
+  /// links would go deaf with no error. `null` gives it back.
+  setBluetoothSink(sink) {
+    if (sink !== null && this.#bleSink !== null) {
+      throw new Error("another BluetoothCarrier holds this node's Bluetooth; release() it first");
+    }
+    this.#bleSink = sink;
+  }
+
   /// What the durable store has cost since the node started (flushes, log
   /// and live bytes, compactions per log), or null for a node in memory.
   stats() {
@@ -312,6 +360,13 @@ export class OfflineNode extends EventTarget {
 
   #closeAllCarriers() {
     for (const link of [...this.#links.keys()]) this.#closeCarrier(link);
+    const ble = this.#bleSink;
+    this.#bleSink = null;
+    try {
+      ble?.close();
+    } catch {
+      // A carrier that throws on close is closed.
+    }
   }
 
   #call(op, args) {
@@ -329,6 +384,8 @@ export class OfflineNode extends EventTarget {
       this.#pending.delete(message.id);
       if (message.error !== undefined) pending?.reject(new Error(message.error));
       else pending?.resolve(message.result);
+    } else if (message.kind === "bleFragment") {
+      this.#bleSink?.write(message.peer, new Uint8Array(message.data));
     } else if (message.kind === "frame") {
       this.#links.get(message.link)?.send(new Uint8Array(message.data));
     } else if (message.kind === "linkClosed") {

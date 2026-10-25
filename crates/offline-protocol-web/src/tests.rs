@@ -437,6 +437,49 @@ fn the_relay_guard_skips_test_files_by_word() {
     }
 }
 
+/// The Bluetooth carrier names the GATT contract's UUIDs as the Rust
+/// constants do, and its fallback payload is the transport's floor. A page
+/// looks every characteristic up by UUID on a peer built on another
+/// platform, so a drift here makes every device read as one without the
+/// SDK's service. Identity has no Rust constant; the chapter's table is its
+/// home.
+#[test]
+fn the_bluetooth_carrier_names_the_contracts_uuids() {
+    use offline_protocol_transport::constants::{
+        BLE_APP_TAG_CHAR_UUID, BLE_DEVICE_ID_CHAR_UUID, BLE_HELLO_CHAR_UUID, BLE_MAX_FRAGMENT_SIZE,
+        BLE_MESSAGE_CHAR_UUID, BLE_SERVICE_UUID,
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Some(carrier) = read_repo_file(&root.join("bindings/web/src/bluetooth.js")) else {
+        // A published .crate archive has no workspace around it.
+        return;
+    };
+    let spec = read_repo_file(&root.join("docs/spec/ble-framing.md")).expect("the BLE chapter");
+    let identity = "6E400004-B5A3-F393-E0A9-E50E24DCCA9E";
+    assert!(
+        spec.contains(&format!("| Identity | `{identity}` |")),
+        "the BLE chapter's table no longer names Identity as {identity}"
+    );
+    for (name, uuid) in [
+        ("SERVICE", BLE_SERVICE_UUID),
+        ("MESSAGE", BLE_MESSAGE_CHAR_UUID),
+        ("DEVICE_ID", BLE_DEVICE_ID_CHAR_UUID),
+        ("IDENTITY", identity),
+        ("APP_TAG", BLE_APP_TAG_CHAR_UUID),
+        ("HELLO", BLE_HELLO_CHAR_UUID),
+    ] {
+        let declared = format!("const {name} = \"{}\";", uuid.to_ascii_lowercase());
+        assert!(
+            carrier.contains(&declared),
+            "bluetooth.js must declare {declared} (Web Bluetooth takes lowercase UUIDs)"
+        );
+    }
+    assert!(
+        carrier.contains(&format!("const FLOOR_PAYLOAD = {BLE_MAX_FRAGMENT_SIZE};")),
+        "bluetooth.js must fall back to the transport's {BLE_MAX_FRAGMENT_SIZE}-byte floor"
+    );
+}
+
 /// No shipped file names a relay. The relays a node uses are the
 /// application's choice, through its configuration, and a URL in a doc, a
 /// doc comment or an example is a default by another name: it becomes the

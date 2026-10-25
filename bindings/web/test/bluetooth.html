@@ -1,0 +1,206 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// A node links to SDK peripherals over its one Bluetooth carrier, through a
+// stand-in for navigator.bluetooth (test/fake-bluetooth.js) whose devices are
+// other nodes playing the peripheral. The chooser is asked for the SDK's
+// service; the carrier verifies the peripheral, subscribes, writes its hello
+// before anything else, and the two form a session and exchange a message
+// that crosses in several fragments, each way. Refused, each disconnected and
+// never announced: a peripheral serving a Device id its identity does not
+// prove, one serving no Hello, one refusing the hello, and one that drops
+// during the handshake. Linking a device already linked hands back its peer
+// and delivers each fragment once; two connects at once share one handshake. A second carrier on the node is refused until the
+// first is released. Of two instances behind one device, the carrier binds
+// the one tagged with this application. A disconnect reports the peer lost,
+// and so does closing a link whose server is already gone, with no event to
+// say so. Stopping the node closes the carrier's links. The title ends as
+// PASS or FAIL: <step>.
+import { OfflineNode, BluetoothCarrier } from "../src/index.js";
+import { FakeBluetooth, peripheral, foreignInstance } from "./fake-bluetooth.js";
+import { log, waitFor, run } from "./common.js";
+
+const appId = `web-bluetooth-${crypto.randomUUID()}`;
+const start = (profile) => OfflineNode.start({ appId, profile, storage: "memory", tabs: false, ble: true });
+
+await run(async (step) => {
+  const [a, b] = await Promise.all([start("browser"), start("phone")]);
+  // Every BLE neighbour the browser was told of, by address.
+  const announced = [];
+  a.addEventListener("neighbor_discovered", ({ detail }) => {
+    if (detail.transport === "BLE") announced.push(detail.peer_id);
+  });
+  const connections = [];
+
+  step.name = "link";
+  const device = await peripheral(b, a.address);
+  const bluetooth = new FakeBluetooth([device]);
+  const carrier = new BluetoothCarrier(a, { bluetooth });
+  carrier.addEventListener("connection", ({ detail }) => connections.push(detail));
+  const sessions = Promise.all([
+    waitFor(a, "secure_session_established", (e) => e.peer_id === b.address),
+    waitFor(b, "secure_session_established", (e) => e.peer_id === a.address),
+  ]);
+  const discovered = waitFor(a, "neighbor_discovered", (e) => e.peer_id === b.address && e.transport === "BLE");
+  const peer = await carrier.request();
+  if (peer !== b.address) throw new Error(`linked ${peer}, not the peripheral's proved address`);
+  const asked = bluetooth.requests[0]?.filters?.[0]?.services ?? [];
+  if (!asked.includes("6e400001-b5a3-f393-e0a9-e50e24dcca9e")) {
+    throw new Error(`the chooser was not asked for the SDK's service: ${JSON.stringify(bluetooth.requests)}`);
+  }
+  if (device.hello.writes.length !== 1) throw new Error("the central did not write exactly one hello");
+  await discovered;
+  await sessions;
+  log("the carrier verified the peripheral, said hello, and a session formed over Bluetooth");
+
+  step.name = "hello first";
+  // Every Message write came after the hello, so the peripheral attributed all of them.
+  if (device.order[0] !== "hello" || device.order.indexOf("hello", 1) !== -1) {
+    throw new Error(`the hello was not the first and only hello write: ${device.order.slice(0, 5)}`);
+  }
+  if (device.message.writes.length === 0) throw new Error("nothing was written to Message");
+  log(`${device.message.writes.length} fragments written, all after the hello`);
+
+  step.name = "messages";
+  const long = "over Bluetooth ".repeat(40);
+  const toB = waitFor(b, "message_received", (e) => e.content === long && e.encrypted === true);
+  await a.sendMessage(b.address, long);
+  await toB;
+  const toA = waitFor(a, "message_received", (e) => e.content === long && e.encrypted === true);
+  await b.sendMessage(a.address, long);
+  await toA;
+  log("a message of several fragments crossed each way");
+
+  step.name = "relink";
+  // Linking a device already linked hands back the peer, and every fragment
+  // still reaches the engine once: the browser returns the same device and
+  // characteristics, so a second subscription would deliver each one twice.
+  let notified = 0;
+  let delivered = 0;
+  const notify = device.message.notify.bind(device.message);
+  device.message.notify = (bytes) => {
+    if (device.message.notifying) notified += 1;
+    notify(bytes);
+  };
+  const receive = a.bleFragmentReceived.bind(a);
+  a.bleFragmentReceived = (from, bytes) => {
+    if (from === b.address) delivered += 1;
+    return receive(from, bytes);
+  };
+  const again = await carrier.connect(device);
+  if (again !== b.address) throw new Error(`relinked ${again}`);
+  const afterRelink = waitFor(a, "message_received", (e) => e.content === long);
+  await b.sendMessage(a.address, long);
+  await afterRelink;
+  await new Promise((r) => setTimeout(r, 300));
+  delete a.bleFragmentReceived;
+  device.message.notify = notify;
+  if (notified === 0 || delivered !== notified) {
+    throw new Error(`${notified} fragments notified, ${delivered} reached the engine`);
+  }
+  if (device.hello.writes.length !== 1) throw new Error("a relink said hello again");
+  log(`after a relink, ${notified} fragments reached the engine once each`);
+
+  // Each refusal: the request rejects with `expected` in its message, the
+  // device is left disconnected, and the browser never hears of the peer.
+  const refusedBy = async (name, node, options, expected) => {
+    step.name = name;
+    const bad = await peripheral(node, a.address, options);
+    bluetooth.devices = [bad];
+    const reason = await carrier.request().then(() => null, (error) => error.message);
+    if (!reason) throw new Error("it was linked");
+    if (!reason.includes(expected)) throw new Error(`refused for the wrong reason: ${reason}`);
+    if (bad.gatt.connected) throw new Error("it was left connected");
+    await new Promise((r) => setTimeout(r, 300));
+    if (announced.includes(node.address)) throw new Error("the browser was told of it");
+    if (carrier.peers.includes(node.address)) throw new Error("the carrier holds it");
+    log(`${name}: refused (${reason})`);
+  };
+  const [c, f, g, h] = await Promise.all([start("liar"), start("no-hello"), start("refuses"), start("drops")]);
+  await refusedBy("a lying peripheral", c, { servedId: b.address }, "but proves");
+  await refusedBy("a peripheral with no Hello", f, { noHello: true }, "no Hello");
+  await refusedBy("a peripheral refusing the hello", g, { refuseHello: true }, "refused the hello");
+  await refusedBy("a drop mid-handshake", h, { dropOnHello: true }, "disconnected during the handshake");
+  if (!carrier.peers.includes(b.address)) throw new Error("a refusal cost the live link");
+
+  step.name = "concurrent connects";
+  // Two connects to one device at once: the page hears of the link once,
+  // and of its loss once.
+  const t = await start("twice");
+  const twice = await peripheral(t, a.address);
+  bluetooth.devices = [twice];
+  let open = 0;
+  carrier.addEventListener("connection", ({ detail }) => {
+    if (detail.peer === t.address) open += detail.state === "connected" ? 1 : -1;
+  });
+  const both = await Promise.all([carrier.connect(twice), carrier.connect(twice)]);
+  if (both.some((p) => p !== t.address)) throw new Error(`linked ${both}`);
+  if (open !== 1) throw new Error(`${open} links announced open to one device`);
+  if (twice.hello.writes.length !== 1) throw new Error("two connects at once ran two handshakes");
+  const lostT = waitFor(a, "neighbor_lost", (ev) => ev.peer_id === t.address);
+  twice.gatt.disconnect();
+  await lostT;
+  if (open !== 0) throw new Error(`${open} links still announced open after the disconnect`);
+  log("two connects at once shared one handshake, announced one link, and its loss once");
+
+  step.name = "one carrier per node";
+  let second = null;
+  try {
+    new BluetoothCarrier(a, { bluetooth });
+  } catch (error) {
+    second = error.message;
+  }
+  if (!second) throw new Error("a second carrier took the node's Bluetooth");
+  log(`a second carrier was refused: ${second}`);
+
+  step.name = "instances";
+  const [d, e] = await Promise.all([start("phone-two"), start("phone-app-two")]);
+  const tag = await d.bleAppTag();
+  const foreign = await foreignInstance(e, Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]));
+  const shared = await peripheral(d, a.address, { tag, extraInstances: [foreign] });
+  bluetooth.devices = [shared];
+  const picked = await carrier.request();
+  if (picked !== d.address) throw new Error(`bound ${picked}, not this application's instance`);
+  log("of two instances behind one device, the one tagged with this application was bound");
+
+  step.name = "disconnect";
+  const lost = waitFor(a, "neighbor_lost", (ev) => ev.peer_id === d.address);
+  shared.gatt.disconnect();
+  await lost;
+  log("a disconnect reported the peer lost");
+
+  step.name = "close a dead link";
+  // The server goes away with no event, as a link the browser already tore
+  // down does; closing it must still report the peer lost.
+  const lostB = waitFor(a, "neighbor_lost", (ev) => ev.peer_id === b.address);
+  device.gatt.connected = false;
+  carrier.close(b.address);
+  await lostB;
+  if (carrier.peers.length !== 0) throw new Error(`the carrier still holds ${carrier.peers}`);
+  const statesB = connections.filter((x) => x.peer === b.address).map((x) => x.state);
+  if (statesB.join() !== "connected,closed") throw new Error(`connection events for the phone: ${statesB}`);
+  log("closing a link whose server was already gone reported the peer lost");
+
+  step.name = "release";
+  carrier.release();
+  const next = new BluetoothCarrier(a, { bluetooth });
+  log("a released carrier gave the node's Bluetooth to the next");
+
+  step.name = "stop";
+  const k = await start("phone-three");
+  const third = await peripheral(k, a.address);
+  bluetooth.devices = [third];
+  await next.request();
+  const closed = new Promise((resolve) =>
+    next.addEventListener("connection", ({ detail }) => detail.state === "closed" && resolve(detail)),
+  );
+  await a.stop();
+  if ((await closed).peer !== k.address) throw new Error("stopping closed the wrong link");
+  if (next.peers.length !== 0 || third.gatt.connected) throw new Error("stopping left a link open");
+  log("stopping the node closed the carrier's links");
+
+  await Promise.all([b, c, d, e, f, g, h, k, t].map((node) => node.stop()));
+});
+</script>

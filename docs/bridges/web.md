@@ -8,7 +8,8 @@ devices on one network over WebRTC, set up with two codes and no server. A
 node the application gives relays also carries the Nostr transport, which
 reaches any device by its address and resolves usernames, mobile ones
 included (W12), and browsers behind one network address find each other in
-a nearby room (W13).
+a nearby room (W13). In Chromium a page can also link to a phone or a board
+over Bluetooth LE, as a central the person points at a device (W14).
 
 Read [the shared contract](README.md) first. This document covers what is
 specific to a page that runs the engine.
@@ -509,6 +510,90 @@ are signed by a key used once, a presence by its own key. The signature is
 checked on every event, after the room key, because it binds `created_at`:
 without it a relay could re-stamp an old offer and replay it fresh.
 
+### W14. Bluetooth is a central the person points at a device
+
+Web Bluetooth lets a Chromium page be a GATT central and nothing else. It
+cannot advertise, so nothing ever discovers a browser, and it serves no
+GATT, so a peripheral can never dial it back. `BluetoothCarrier` links the
+page's node to a phone or a board running the SDK as a peripheral, once its
+person picks the device in the browser's chooser (inside a click, as the
+browser requires) or from a device this origin was granted before. Firefox
+and Safari have no Web Bluetooth, and neither does any browser on iOS.
+
+The engine carries the same `BleTransport` every binding does, so the
+fragment codec is the one the conformance vectors check
+(`crates/offline-protocol-web/src/ble_host.rs`). The page holds the GATT
+connection and moves bytes.
+
+**A peer is announced only under the address its identity proves.** The
+page reads the Device id and Identity values and hands both over;
+`bleVerify` runs the one verifier, compares the derived address with the
+Device id exactly, and remembers it. `bleLinkUp` announces only an address
+verification produced, so a page cannot name a peer the engine did not
+check.
+
+**The contract's order, and the hello before anything else.** Choose the
+instance, read and verify, subscribe to Message (notify or indicate,
+whichever the peripheral offers), write Hello with response, then tell the
+engine the link is up. Nothing is written to Message before the hello: a
+peripheral cannot dial a browser back, so the hello is the only way it can
+attribute a write, and one it cannot attribute is dropped. The iOS, Android
+and Python peripherals serve Hello. With several instances of the service
+behind one device, the carrier binds the one carrying this application's
+App tag, else the only untagged one, else the first, as the chapter says.
+
+**The hello is required, where the chapter makes it optional.** The
+chapter lets a central skip Hello, and keep a link whose hello was
+refused, because the peripheral can still dial that central back and read
+who it is. Nothing can dial a browser. A device that serves no Hello, or
+refuses the write, would be announced as a neighbour that neither receives
+nor sends, so the carrier refuses it and disconnects. A refused write is
+not rare: at an ATT MTU below 99 the browser sends the 96-byte hello as a
+prepared write, which a peripheral must refuse.
+
+**A link is announced only once the whole handshake held.** The carrier
+watches for a disconnect from the moment the GATT connects. A device that
+drops during the handshake is refused and never announced. One that drops
+later is reported lost once, and so is a link the page closes after its
+server already went away, when no disconnect event follows. A link that
+replaces an earlier one to the same address keeps the peer announced: the
+engine neither loses nor rediscovers it. Linking a device that is already
+linked on a live connection hands back its peer and does nothing else: the
+browser returns the same device and the same characteristics for one
+physical device, so a second handshake would subscribe twice and deliver
+every fragment to the engine once per handshake. Every path that ends a
+link removes its notification listener for the same reason. Two connects
+to one device at once share one handshake: the engine holds one
+verification per address, so a second handshake would fail its link-up
+and take the first one's link down with it.
+
+**The write payload is the browser's if it says, and the floor if not.**
+Chromium does not expose the negotiated ATT MTU to a page. The carrier
+reads `maxWriteWithoutResponseSize` on the Message characteristic, where
+the Web Bluetooth proposal puts it, and otherwise uses the 185-byte floor
+every binding falls back to. No browser reports it yet, so the floor is
+what runs today. A link whose ATT MTU is
+below 188 cannot carry a 185-byte fragment, and no shipped device is known
+to negotiate one, but it has not been measured from Chrome on Android
+(see what is not built).
+
+**Writes to a link go one at a time, in order, and a failed write closes
+it.** A fragment lost mid-message leaves the peer reassembling something
+that never completes. A peer linked over a peer stream as well as
+Bluetooth is lost only when the last link goes, and stopping the node
+reports every Bluetooth link lost and closes the carrier's connections.
+
+**One carrier per node.** The node has one outbound Bluetooth sink. A
+second `BluetoothCarrier` on the same node throws until the first is
+released (`release()`); before, it took every outbound fragment and
+dropped those for links it did not hold, and the first carrier's links
+went silent with no error.
+
+**A remembered device can keep `connect` waiting.** `known()` returns
+devices the origin was granted, in range or not, and the browser's
+connect to one out of range may wait on its own timeout. An application
+that reconnects on load should bound the wait itself.
+
 ## Which shared rules apply
 
 | Rule | How it reaches the web binding |
@@ -538,6 +623,8 @@ without it a relay could re-stamp an old offer and replay it fresh.
 - Its own Nostr relays, if the node is to reach devices it has no link to
   (W12), and its own STUN server and an `admit` decision for a nearby room
   (W13). The SDK names no relay and no STUN server.
+- A click that calls `BluetoothCarrier.request()`, for a Bluetooth link
+  (W14): the browser opens its chooser only inside a user gesture.
 - The engine module where the worker can fetch it: beside `worker.js`, or
   handed to `OfflineNode.start({ wasm })` by a host whose worker starts from
   a Blob URL (an editor plugin, an extension), where a relative fetch has
@@ -617,6 +704,22 @@ start there, because Firefox answers it by asking the user.
   redialled and never counts as live, and closing the driver reports it down
   before it ends a query (W12).
 
+- `bluetooth.html`: a node links to SDK peripherals over its Bluetooth
+  carrier, through a stand-in for `navigator.bluetooth`
+  (`test/fake-bluetooth.js`) whose devices are other nodes playing the
+  peripheral, so the engine runs on both sides. The chooser is asked for the
+  SDK's service, the hello is the first write, a session forms and a
+  message of several fragments crosses each way. A peripheral serving a
+  Device id its identity does not prove, one serving no Hello, one refusing
+  the hello and one dropping mid-handshake are each refused, disconnected
+  and never announced. Linking a device already linked hands back its
+  peer and delivers each fragment once, and two connects to one device at
+  once share one handshake. A second carrier is refused until the first is
+  released. Of two instances behind one device the one tagged with this
+  application is bound; a disconnect reports the peer lost, as does closing
+  a link whose server is already gone; stopping the node closes the
+  carrier's links (W14). Moving the hello after the link-up makes the page
+  fail, which is how the page was checked.
 - `nearby.html`: four nodes in nearby rooms, three behind one address and
   one behind another. The address comes from the runner's STUN server, which
   reports a fixed one (`test/stun-server.mjs`); Firefox runs with
@@ -674,6 +777,12 @@ two-player game between devices over WebRTC with durable nodes.
   reliable rung that arrives behind more than 32 newer ephemeral frames is
   retried until it fails, and holds that member out of ephemeral frames
   meanwhile ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
+- **Bluetooth from a real browser to a real device.** No engine runs Web
+  Bluetooth without a person at the chooser, so CI drives the carrier
+  through a stand-in. Chrome on Android, macOS and Linux against an
+  Android phone and a board is a manual check, and so is the ATT MTU Chrome
+  negotiates on each (W14). Reaching an iPhone needs its peripheral to serve
+  Hello, which iOS releases before this one do not.
 - **A published package.** `bindings/web` is private on npm and the
   `offline-protocol-web` crate has not been released; build both from
   source.

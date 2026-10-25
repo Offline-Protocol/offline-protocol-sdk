@@ -103,6 +103,7 @@ fn peer(profile: &str, username_discovery: bool) -> Peer {
             cold_contact: true,
             username_discovery,
         }),
+        ..Default::default()
     };
     let mut node = Node::with_options("web-nostr-test", profile, options).expect("node");
     let address = node.initialize().expect("initialize");
@@ -392,6 +393,7 @@ fn a_linked_peer_is_not_looked_up_on_the_relays() {
 #[test]
 fn liveness_reported_before_an_address_is_not_kept() {
     let options = NodeOptions {
+        ble: false,
         nostr: Some(NostrOptions::default()),
     };
     let mut node = Node::with_options("web-nostr-test", "early", options).expect("node");
@@ -541,6 +543,7 @@ fn a_record_that_opens_but_does_not_decode_is_not_an_error() {
 
 fn nostr_node(cold_contact: bool, username_discovery: bool, profile: &str) -> Node {
     let options = NodeOptions {
+        ble: false,
         nostr: Some(NostrOptions {
             cold_contact,
             username_discovery,

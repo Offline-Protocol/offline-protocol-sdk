@@ -19,6 +19,8 @@ export interface StartOptions {
   tabs?: boolean;
   /** The Nostr transport over relays the application names (W12). */
   nostr?: NostrOptions;
+  /** The Bluetooth LE slot, driven by a BluetoothCarrier on this page (W14). */
+  ble?: boolean;
   /** Where worker.js is served, if not beside this module. */
   workerUrl?: string | URL;
   /**
@@ -176,6 +178,19 @@ export class OfflineNode extends EventTarget {
     freshUntilMs: number;
   } | null>;
   nearbyClose(id: number): Promise<void>;
+  /** BluetoothCarrier's half in the worker (W14). */
+  bleHello(): Promise<Uint8Array>;
+  bleAppTag(): Promise<Uint8Array>;
+  bleVerify(deviceId: Uint8Array, identity: Uint8Array): Promise<string>;
+  bleLinkUp(peer: string, maxPayload: number): Promise<void>;
+  bleFragmentReceived(peer: string, bytes: Uint8Array): Promise<void>;
+  bleLinkDown(peer: string): Promise<void>;
+  /**
+   * Where the engine's outbound Bluetooth fragments go; BluetoothCarrier sets
+   * it. `close` runs once when the node stops or fails. Throws when another
+   * carrier holds it; `null` gives it back.
+   */
+  setBluetoothSink(sink: { write(peer: string, bytes: Uint8Array): void; close(): void } | null): void;
   /** Registers a carrier the page opened; resolves to its link id. */
   openLink(carrier: PageCarrier): Promise<number>;
   /** Bytes the carrier delivered; resolves to the reason it was closed, if it was. */
@@ -336,3 +351,38 @@ export function publicAddress(
   iceServers: RTCIceServer[],
   options?: { timeoutMs?: number; settleMs?: number },
 ): Promise<string>;
+
+/**
+ * A Bluetooth LE carrier over Web Bluetooth (W14): this page as a GATT
+ * central to phones and boards running the SDK as a peripheral. Chromium
+ * only. The page is never discoverable: every link starts from a person
+ * picking a device in the browser's chooser, inside a user gesture, or from a
+ * device this origin was granted before. Start the node with `ble: true`.
+ * A `connection` event carries `{ peer, state: "connected" | "closed" }`.
+ */
+export class BluetoothCarrier extends EventTarget {
+  /**
+   * `bluetooth` defaults to `navigator.bluetooth`. One carrier per node:
+   * throws while another carrier on `node` has not been released.
+   */
+  constructor(node: OfflineNode, options?: { bluetooth?: unknown });
+  /** Whether this browser exposes Web Bluetooth at all. */
+  static readonly supported: boolean;
+  /** The addresses linked now. */
+  readonly peers: string[];
+  /** Opens the chooser and links the device picked; call inside a user gesture. */
+  request(): Promise<string>;
+  /** Devices this origin was granted before, where the browser remembers them. */
+  known(): Promise<unknown[]>;
+  /**
+   * Links a device; resolves to the address its identity proves. Rejects for
+   * a device that does not verify, serves no Hello, refuses the hello, or
+   * disconnects before the link is up.
+   */
+  connect(device: unknown): Promise<string>;
+  /** Closes the link to `peer` and reports it lost at once. */
+  close(peer: string): void;
+  closeAll(): void;
+  /** Closes every link and gives the node's Bluetooth back to another carrier. */
+  release(): void;
+}
