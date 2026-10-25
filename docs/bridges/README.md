@@ -389,7 +389,11 @@ with the one you changed.
 React Native delegates the 107 methods listed in
 `tools/gen_protocol_engine_host_bridge.py` through
 `ProtocolEngineHostBridge` plus thin adapters
-(`ProtocolEngineHostBridgeReactNative.{swift,kt}`). Generators must stay in sync:
+(`ProtocolEngineHostBridgeReactNative.{swift,kt}`). Both adapters and the
+Kotlin bridge are generated; the Swift bridge is written by hand, and
+`tools/check_swift_protocol_engine_host_bridge.py` holds it to one handler per
+shared method with no stubs. It does not compare bodies with Kotlin, so a
+behaviour change goes into both bridges by hand. The gate runs all four:
 
 ```bash
 bash scripts/check-binding-generators.sh --check   # CI gate

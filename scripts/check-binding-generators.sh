@@ -21,6 +21,8 @@ failures=0
 python3 tools/gen_rn_protocol_engine_bridge_react_native.py --check || failures=$((failures + 1))
 python3 tools/gen_rn_protocol_engine_bridge_react_native_swift.py --check || failures=$((failures + 1))
 python3 tools/gen_protocol_engine_host_bridge.py --check || failures=$((failures + 1))
+# The Swift bridge is hand-written: one handler per shared method, no stubs.
+python3 tools/check_swift_protocol_engine_host_bridge.py || failures=$((failures + 1))
 
 if [[ ! -f tools/rn_engine_bridge_error_manifest.json ]]; then
   echo "missing tools/rn_engine_bridge_error_manifest.json; run tools/extract_rn_bridge_error_manifest.py" >&2

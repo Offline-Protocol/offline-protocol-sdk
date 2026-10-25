@@ -264,6 +264,7 @@ jobs:
               - 'tools/rn_engine_bridge_error_manifest.json'
               - 'tools/bridge_impl_supplement.py'
               - 'tools/extract_rn_bridge_error_manifest.py'
+              - 'tools/check_swift_protocol_engine_host_bridge.py'
 
             android_unit:
               - 'bindings/react-native/android/**'
