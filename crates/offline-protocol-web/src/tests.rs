@@ -399,6 +399,44 @@ fn the_browser_tests_run_in_ci() {
     }
 }
 
+/// A file named as a test fixture: a `test` or `tests` word in its name
+/// (`nostr_tests.rs`, `relay.test.ts`, `test-utils.js`) or a `Test`/`Tests`
+/// suffix on its stem (`ConsumerCheckTest.java`). A word, not a substring: a
+/// shipped `docs/latest-relays.md` or `contest.md` is still read.
+fn is_test_file(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    name.split(['_', '-', '.'])
+        .any(|word| word.eq_ignore_ascii_case("test") || word.eq_ignore_ascii_case("tests"))
+        || stem.ends_with("Test")
+        || stem.ends_with("Tests")
+}
+
+#[test]
+fn the_relay_guard_skips_test_files_by_word() {
+    for fixture in [
+        "nostr_tests.rs",
+        "tests.rs",
+        "relay.test.ts",
+        "test-utils.js",
+        "test_bridge.py",
+        "ConsumerCheckTest.java",
+        "BridgeTests.swift",
+    ] {
+        assert!(
+            is_test_file(fixture),
+            "not taken for a test file: {fixture}"
+        );
+    }
+    for shipped in [
+        "latest-relays.md",
+        "contest.md",
+        "attestation.rs",
+        "nostr.md",
+    ] {
+        assert!(!is_test_file(shipped), "taken for a test file: {shipped}");
+    }
+}
+
 /// No shipped file names a relay. The relays a node uses are the
 /// application's choice, through its configuration, and a URL in a doc, a
 /// doc comment or an example is a default by another name: it becomes the
@@ -464,7 +502,7 @@ fn no_shipped_file_names_a_relay() {
                 .extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| SCANNED.contains(&e));
-            if !scanned || name.contains("test") || name == "CHANGELOG.md" {
+            if !scanned || is_test_file(&name) || name == "CHANGELOG.md" {
                 continue;
             }
             let Some(text) = read_repo_file(&path) else {
