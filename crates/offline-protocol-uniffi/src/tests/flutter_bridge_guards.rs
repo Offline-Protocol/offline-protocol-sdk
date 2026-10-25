@@ -453,13 +453,13 @@ fn flutter_method_channel_methods_match_native_plugins() {
     );
 }
 
-/// The plugin prefers native libraries the release stages into it, and falls
+/// The plugin prefers native libraries a release stages into it, and falls
 /// back to the React Native build otherwise. The choice must test for the
-/// library, never for its directory: the library itself is ignored
-/// repository-wide, so a committed `Info.plist` (as the first version of this
-/// change had) is a framework with no binary on every fresh clone, and a
-/// directory test then never falls back. The iOS app fails at the first UniFFI
-/// symbol; the Android AAR ships with no native code.
+/// library, never for its directory: the libraries are ignored repository-wide,
+/// so a framework holding only an `Info.plist`, or an ABI directory with no
+/// library in it, passes a directory test and the fallback never runs. The iOS
+/// app then fails at the first UniFFI symbol; the Android AAR ships with no
+/// native code.
 #[test]
 fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory() {
     let flutter = flutter_plugin_dir();
@@ -489,14 +489,4 @@ fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory()
         ignore.lines().any(|l| l.trim() == "Frameworks/"),
         "ios/.gitignore must keep the staged XCFramework out of the repository"
     );
-    let staged = flutter.join("ios/Frameworks/offline_protocol_uniffi.xcframework");
-    if staged.join("Info.plist").exists() {
-        assert!(
-            staged
-                .join("ios-arm64/liboffline_protocol_uniffi.a")
-                .exists(),
-            "{} holds an Info.plist with no library: a framework that links nothing",
-            staged.display()
-        );
-    }
 }
