@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# Copies prebuilt UniFFI mobile artifacts from the React Native tree into the
-# Flutter plugin so pub.dev consumers need not clone Rust or run build:uniffi.
+# Copies the UniFFI mobile libraries from the React Native tree into the
+# Flutter plugin's staged locations, which its Gradle build and podspec prefer
+# over the React Native ones when they hold the library (docs/bridges/flutter.md,
+# F8b). Both locations are gitignored, so nothing staged here is committed or
+# reaches a published package.
 #
-# Source of truth for release builds: bindings/react-native after
-# npm run build:uniffi:all (or the release workflow mobile matrix).
+# The source is bindings/react-native after npm run build:uniffi:all.
 #
 # Usage:
 #   ./bindings/flutter/scripts/stage-plugin-native-artifacts.sh          # write
@@ -40,12 +42,8 @@ sync_tree() {
   local dest="$2"
   mkdir -p "$(dirname "$dest")"
   rm -rf "$dest"
-  if [[ -d "$src" ]]; then
-    mkdir -p "$dest"
-    rsync -a "$src/" "$dest/"
-  else
-    rsync -a "$src" "$(dirname "$dest")/"
-  fi
+  mkdir -p "$dest"
+  rsync -a "$src/" "$dest/"
 }
 
 if $CHECK; then

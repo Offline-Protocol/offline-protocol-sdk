@@ -224,7 +224,8 @@ library, and the podspec uses `ios/Frameworks/offline_protocol_uniffi.xcframewor
 when its `ios-arm64` library exists. Otherwise both fall back to the React
 Native package's artifacts. Both are chosen by the library, not the directory,
 because an empty staged directory would otherwise win and link nothing. Neither
-is committed.
+is committed. `bindings/flutter/scripts/stage-plugin-native-artifacts.sh` copies
+the React Native package's libraries into both (`--check` verifies them).
 
 ## F9. Binary footprint
 

@@ -1,6 +1,8 @@
 # Flutter plugin size baselines (contributors)
 
 CI compares the release Android AAR against committed size baselines. App developers can ignore this directory.
+What the baseline measures, and why it is the arm64 `mobile` build, is in
+[docs/bridges/flutter.md](../../../docs/bridges/flutter.md#f9-binary-footprint).
 
 | File | What it measures |
 |------|------------------|
