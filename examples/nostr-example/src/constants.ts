@@ -1,8 +1,7 @@
-export const DEFAULT_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.nostr.band',
-];
+// The relays this app uses. Neither the SDK nor this example names one: a
+// relay the SDK picked would become the relay every app uses. List the ones
+// you choose (wss:// URLs) before running; with none, Nostr stays down.
+export const RELAYS: string[] = [];
 
 export const PROTOCOL_CONFIG = {
   appId: 'nostr-example',
@@ -10,7 +9,7 @@ export const PROTOCOL_CONFIG = {
     ble: {enabled: false},
     nostr: {
       enabled: true,
-      relayUrls: DEFAULT_RELAYS,
+      relayUrls: RELAYS,
       autoReconnect: true,
       maxReconnectAttempts: 0, // Infinite retries
     },

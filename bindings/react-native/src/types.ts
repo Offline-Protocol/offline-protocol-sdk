@@ -471,7 +471,7 @@ export interface ReticulumTransportConfig {
 export interface NostrTransportConfig {
   /** Enable Nostr transport (default: false) */
   enabled: boolean;
-  /** List of Nostr relay WebSocket URLs (e.g., ["wss://relay.damus.io"]) */
+  /** Nostr relay WebSocket URLs (`wss://`) the application chooses. The SDK names none. */
   relayUrls?: string[];
   /** Connection timeout in seconds (default: 30) */
   connectionTimeout?: number;

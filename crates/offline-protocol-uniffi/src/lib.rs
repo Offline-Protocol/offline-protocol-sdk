@@ -22930,7 +22930,7 @@ mod tests {
     /// bridge edited and the other left alone is the same drift in half the
     /// fleet.
     #[test]
-    fn nostr_query_completion_timeout_matches_across_both_bridges() {
+    fn nostr_query_completion_timeout_matches_across_every_bridge() {
         const EXPECTED_MS: u64 = 10_000;
 
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -22964,6 +22964,14 @@ mod tests {
         assert!(
             kotlin.contains("COMPLETION_TIMEOUT_MS = 10_000L"),
             "NostrQueryTracker.kt must declare COMPLETION_TIMEOUT_MS = {EXPECTED_MS} ms"
+        );
+
+        // The browser's driver is the third: it runs the same broadcast query
+        // over relays the page's application named.
+        let web = read_abs(manifest.join("../../bindings/web/src/nostr-relays.js"));
+        assert!(
+            web.contains("const COMPLETION_TIMEOUT_MS = 10_000;"),
+            "bindings/web/src/nostr-relays.js must declare COMPLETION_TIMEOUT_MS = {EXPECTED_MS} ms"
         );
     }
 

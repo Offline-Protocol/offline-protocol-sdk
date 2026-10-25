@@ -144,24 +144,17 @@ jobs:
             rust_tests:
               - *rust
               - 'tools/**'
-              - 'bindings/react-native/**'
-              - 'bindings/python/**'
-              - 'bindings/flutter/**'
-              - 'bindings/c/include/**'
-              - 'bindings/swift/README.md'
-              - 'bindings/web/scripts/**'
-              - 'bindings/web/src/nostr-signal.js'
-              - 'docs/spec/**'
-              - 'docs/bridges/README.md'
-              - 'docs/bridges/c.md'
-              - 'docs/bridges/flutter.md'
-              - 'docs/android-integration.md'
-              - 'docs/api-reference.md'
-              - 'docs/configuration.md'
-              - 'docs/ios-integration.md'
-              - 'docs/mls-integration.md'
-              - 'CLAUDE.md'
-              - 'QUICKSTART.md'
+              # The guards read binding sources (the bridges, the C header,
+              # the web driver's constants, the build scripts) by path, and
+              # `no_shipped_file_names_a_relay` reads every shipped doc,
+              # example, script and binding source for a relay URL, so every
+              # one of these trees and the top-level docs (CLAUDE.md,
+              # QUICKSTART.md, CHANGELOG.md) is a guard input.
+              - 'bindings/**'
+              - 'docs/**'
+              - 'examples/**'
+              - 'scripts/**'
+              - '*.md'
               - '.github/workflows/**'
 
             spec_vectors:

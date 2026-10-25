@@ -399,6 +399,146 @@ fn the_browser_tests_run_in_ci() {
     }
 }
 
+/// A file named as a test fixture: a `test` or `tests` word in its name
+/// (`nostr_tests.rs`, `relay.test.ts`, `test-utils.js`) or a `Test`/`Tests`
+/// suffix on its stem (`ConsumerCheckTest.java`). A word, not a substring: a
+/// shipped `docs/latest-relays.md` or `contest.md` is still read.
+fn is_test_file(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    name.split(['_', '-', '.'])
+        .any(|word| word.eq_ignore_ascii_case("test") || word.eq_ignore_ascii_case("tests"))
+        || stem.ends_with("Test")
+        || stem.ends_with("Tests")
+}
+
+#[test]
+fn the_relay_guard_skips_test_files_by_word() {
+    for fixture in [
+        "nostr_tests.rs",
+        "tests.rs",
+        "relay.test.ts",
+        "test-utils.js",
+        "test_bridge.py",
+        "ConsumerCheckTest.java",
+        "BridgeTests.swift",
+    ] {
+        assert!(
+            is_test_file(fixture),
+            "not taken for a test file: {fixture}"
+        );
+    }
+    for shipped in [
+        "latest-relays.md",
+        "contest.md",
+        "attestation.rs",
+        "nostr.md",
+    ] {
+        assert!(!is_test_file(shipped), "taken for a test file: {shipped}");
+    }
+}
+
+/// No shipped file names a relay. The relays a node uses are the
+/// application's choice, through its configuration, and a URL in a doc, a
+/// doc comment or an example is a default by another name: it becomes the
+/// relay every application copies. Test fixtures may name hosts, and the
+/// reserved names (`localhost`, loopback, `*.example`, `example.com` and its
+/// siblings, `*.invalid`, `*.test`) are placeholders, not relays.
+#[test]
+fn no_shipped_file_names_a_relay() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if read_repo_file(&root.join("Cargo.lock")).is_none() {
+        // A published .crate archive has no workspace around it.
+        return;
+    }
+    const SKIPPED_DIRS: &[&str] = &[
+        ".git",
+        "target",
+        "node_modules",
+        "pkg",
+        "build",
+        "Pods",
+        "DerivedData",
+        ".gradle",
+        "venv",
+        ".venv",
+        "dist",
+        "test",
+        "tests",
+        "__tests__",
+        "testdata",
+        "changelog",
+    ];
+    const SCANNED: &[&str] = &[
+        "md", "rs", "ts", "tsx", "js", "mjs", "swift", "kt", "py", "html", "toml", "yml", "yaml",
+        "dart", "rb", "java", "c", "h",
+    ];
+    let reserved = |host: &str| {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        host == "localhost"
+            || host.starts_with("127.")
+            || ["example", "invalid", "test", "localhost"]
+                .iter()
+                .any(|tld| host.ends_with(&format!(".{tld}")))
+            || ["example.com", "example.org", "example.net"]
+                .iter()
+                .any(|name| host == *name || host.ends_with(&format!(".{name}")))
+    };
+    let mut found = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if !SKIPPED_DIRS.contains(&name.as_str()) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let scanned = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| SCANNED.contains(&e));
+            if !scanned || is_test_file(&name) || name == "CHANGELOG.md" {
+                continue;
+            }
+            let Some(text) = read_repo_file(&path) else {
+                continue;
+            };
+            for (number, line) in text.lines().enumerate() {
+                for scheme in ["wss://", "ws://"] {
+                    let mut rest = line;
+                    while let Some(at) = rest.find(scheme) {
+                        let after = &rest[at + scheme.len()..];
+                        let host: String = after
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+                            .collect();
+                        let last = host.rsplit('.').next().unwrap_or("");
+                        let public = host.contains('.')
+                            && last.len() >= 2
+                            && last.chars().all(|c| c.is_ascii_alphabetic());
+                        if public && !reserved(&host) {
+                            let shown = path.strip_prefix(&root).unwrap_or(&path).display();
+                            found.push(format!("{shown}:{}: {scheme}{host}", number + 1));
+                        }
+                        rest = after;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "shipped files name relays; the application chooses its own, so show a \
+         placeholder (wss://relay.example) instead:\n{}",
+        found.join("\n")
+    );
+}
+
 /// The page remembers a signalling session until the newest offer it has
 /// seen for it stops being fresh, by the bound the worker reports, rather
 /// than for a fixed time from first sight. A fixed hold forgets a session

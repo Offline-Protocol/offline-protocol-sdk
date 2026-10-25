@@ -320,7 +320,8 @@ pub struct SignedNostrEvent {
 /// Nostr transport configuration.
 #[derive(Debug, Clone)]
 pub struct NostrConfig {
-    /// List of relay URLs to connect to (e.g., `["wss://relay.damus.io"]`).
+    /// Relay URLs to connect to (`wss://`), chosen by the application. The
+    /// SDK names none.
     /// The platform manages actual WebSocket connections.
     pub relay_urls: Vec<String>,
     /// Connection timeout for reaching Nostr relays.

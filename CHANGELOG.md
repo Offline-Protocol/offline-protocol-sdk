@@ -15,6 +15,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The browser reaches devices it has no link to, over Nostr.**
+  `OfflineNode.start({ nostr: { relays } })` adds the Nostr transport every
+  binding shares, driven from the worker over the relays the application
+  names; the SDK names none and refuses an empty list. A message to a bare
+  address fetches the key package the device published and forms the
+  session, so two nodes that share only a relay can talk. It is the
+  transport and wire format the mobile bindings run; a browser to phone pair
+  has not been run on devices yet.
+  `resolveUsername` reads the username directory (`usernameDiscovery`, off
+  by default, publishes this profile and resolves others'), and
+  `establishSecureSession`, `createInvite` and `parseInvite` match the
+  native calls ([W12](docs/bridges/web.md#w12-the-nostr-transport-is-driven-from-the-worker-over-the-applications-relays)).
+
 - **Shared React Native engine bridge.** Engine operations live in
   `ProtocolEngineHost` and `ProtocolEngineHostBridge`; `OfflineProtocolModule`
   delegates through `ProtocolEngineHostBridgeReactNative` with promise fallback
@@ -151,6 +164,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `RUBYGEMS_PUBLISH` switch. The contract is `docs/bridges/ruby.md`.
 
 ### Changed
+
+- **No shipped file names a Nostr relay.** The docs, doc comments and the
+  Nostr example listed public relays; they now show a placeholder, and the
+  example starts with an empty list for the developer to fill.
+  `no_shipped_file_names_a_relay` keeps it so: a relay the SDK names becomes
+  the relay every application uses.
+- **The Nostr driver guide no longer completes a resolution on the first
+  EOSE.** `docs/nostr.md` said so while the bridges and the username chapter
+  wait for every relay; the guide now says what the code does.
 
 - **The workspace reads the clock through `offline_protocol_core::time`.** It
   is `std::time` on every target but the browser, where `std::time` compiles

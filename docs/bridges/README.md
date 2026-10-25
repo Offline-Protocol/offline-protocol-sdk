@@ -192,9 +192,9 @@ is what pins the call ordering that the Rust guard
 textually for the other two: the declaration is written before the outbox
 flush, and a Python test can simply observe the calls happen in that order.
 
-**The resolution-query completion deadline** is the sixth, and the newest: the
-Swift and Kotlin `NostrQueryTracker` each hold a copy of
-`COMPLETION_TIMEOUT_MS`, and a Rust guard reads both sources. Unlike the others
+**The resolution-query completion deadline** is the sixth: the Swift and
+Kotlin `NostrQueryTracker` and the browser's `nostr-relays.js` each hold a
+copy of `COMPLETION_TIMEOUT_MS`, and a Rust guard reads all three sources. Unlike the others
 this one is pinned for a *relationship* rather than a spelling: it has to stay
 below the engine's 30s resolution sweep, because a bridge that gives up later
 than the engine hands every silent-relay resolution to the sweep instead of to

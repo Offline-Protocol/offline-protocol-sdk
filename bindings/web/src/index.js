@@ -2,6 +2,7 @@
 
 export { WebRtcCarrier } from "./webrtc.js";
 export { NostrSignaller } from "./nostr-signal.js";
+import { checkRelays } from "./nostr-relays.js";
 
 export class OfflineNode extends EventTarget {
   #worker;
@@ -43,15 +44,23 @@ export class OfflineNode extends EventTarget {
   /// worker, in sealed origin-private files) or "memory" (a new device every
   /// start). `tabs: false` leaves out the carrier between this origin's tabs,
   /// for a node that links only through carriers the page attaches.
+  ///
+  /// `nostr: { relays, coldContact, usernameDiscovery }` adds the Nostr
+  /// transport over the relays the application names (W12). The SDK names
+  /// none, so `relays` is required. `coldContact` (default on) publishes key
+  /// packages so a device that knows only this node's address can reach it;
+  /// `usernameDiscovery` (default off) publishes `profile` as a username.
   static async start({
     appId,
     profile = "default",
     storage = "durable",
     tabs = true,
+    nostr,
     workerUrl,
     wasm,
   } = {}) {
     if (!appId) throw new Error("appId is required");
+    if (nostr !== undefined) checkRelays(nostr?.relays);
     if (storage === "durable") {
       // Best effort: without it the browser may evict the origin's files
       // under storage pressure, identity included. Never awaited: Firefox
@@ -64,7 +73,23 @@ export class OfflineNode extends EventTarget {
     const instance = crypto.randomUUID();
     const node = new OfflineNode(new Worker(url, { type: "module" }), { appId, instance, tabs });
     try {
-      node.address = await node.#call("start", { appId, profile, storage, tabs, instance, wasm });
+      node.address = await node.#call("start", {
+        appId,
+        profile,
+        storage,
+        tabs,
+        instance,
+        wasm,
+        // The worker applies the defaults; it is the one place that does.
+        nostr:
+          nostr === undefined
+            ? undefined
+            : {
+                relays: [...nostr.relays],
+                coldContact: nostr.coldContact,
+                usernameDiscovery: nostr.usernameDiscovery,
+              },
+      });
     } catch (error) {
       // The worker kept nothing (no engine, lock or handle), but it is still
       // a running worker with a module in it.
@@ -106,6 +131,36 @@ export class OfflineNode extends EventTarget {
   /// `ephemeral` as for sendMessage, to every member holding a live link.
   sendGroupMessage(groupId, content, { ephemeral = false } = {}) {
     return this.#call("sendGroupMessage", { groupId, content, ephemeral });
+  }
+
+  /// Starts a session with `address`: "created" (the Welcome went out now),
+  /// "existing", or "pending" while its key package has not arrived. On a
+  /// node with relays, "pending" has asked them for the packages the device
+  /// published, and `secure_session_established` follows. A message sent
+  /// meanwhile waits for the session, so calling this first is optional.
+  establishSecureSession(address) {
+    return this.#call("establishSecureSession", { address });
+  }
+
+  /// Looks a username up in the directory the relays hold (W12). Resolves
+  /// once the lookup is under way; the answer is one `username_resolved`
+  /// event carrying every device that claims the name. A name is a claim,
+  /// not an identity: show the person the whole set, and keep the address
+  /// they choose.
+  resolveUsername(username) {
+    return this.#call("resolveUsername", { username });
+  }
+
+  /// An invite naming this device (base64url): its address and key, and an
+  /// optional petname that `sign: true` binds to the key.
+  createInvite({ petname, sign = false } = {}) {
+    return this.#call("createInvite", { petname, sign });
+  }
+
+  /// Opens an invite: `{ address, publicKey, petname, signed }`, the address
+  /// checked to derive from the key. Rejects an invite that does not verify.
+  parseInvite(blob) {
+    return this.#call("parseInvite", { blob });
   }
 
   /// A fresh room code for NostrSignaller: eighty bits a person can read out.

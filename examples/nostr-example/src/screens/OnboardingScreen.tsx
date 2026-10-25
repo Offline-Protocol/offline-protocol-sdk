@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import {generateUserId, generateUserName} from '../utils';
 import {useProtocol} from '../context/ProtocolContext';
-import {DEFAULT_RELAYS} from '../constants';
+import {RELAYS} from '../constants';
 
 interface OnboardingScreenProps {
   onComplete: () => void;
@@ -87,9 +87,15 @@ export function OnboardingScreen({onComplete}: OnboardingScreenProps) {
 
         <View style={styles.relaySection}>
           <Text style={styles.relayTitle}>Relays</Text>
-          {DEFAULT_RELAYS.map(relay => (
-            <Text key={relay} style={styles.relayUrl}>{relay}</Text>
-          ))}
+          {RELAYS.length === 0 ? (
+            <Text style={styles.relayUrl}>
+              None yet: list the relays you choose in src/constants.ts
+            </Text>
+          ) : (
+            RELAYS.map(relay => (
+              <Text key={relay} style={styles.relayUrl}>{relay}</Text>
+            ))
+          )}
         </View>
       </View>
     </SafeAreaView>
