@@ -15,6 +15,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The browser reaches devices it has no link to, over Nostr.**
+  `OfflineNode.start({ nostr: { relays } })` adds the Nostr transport every
+  binding shares, driven from the worker over the relays the application
+  names; the SDK names none and refuses an empty list. A message to a bare
+  address fetches the key package the device published and forms the
+  session, so two nodes that share only a relay can talk. It is the
+  transport and wire format the mobile bindings run; a browser to phone pair
+  has not been run on devices yet.
+  `resolveUsername` reads the username directory (`usernameDiscovery`, off
+  by default, publishes this profile and resolves others'), and
+  `establishSecureSession`, `createInvite` and `parseInvite` match the
+  native calls ([W12](docs/bridges/web.md#w12-the-nostr-transport-is-driven-from-the-worker-over-the-applications-relays)).
+
 - **Shared React Native engine bridge.** Engine operations live in
   `ProtocolEngineHost` and `ProtocolEngineHostBridge`; `OfflineProtocolModule`
   delegates through `ProtocolEngineHostBridgeReactNative` with promise fallback

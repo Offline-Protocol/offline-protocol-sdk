@@ -17,6 +17,8 @@ export interface StartOptions {
   storage?: "durable" | "memory";
   /** Link to this origin's other tabs over a BroadcastChannel. Default true. */
   tabs?: boolean;
+  /** The Nostr transport over relays the application names (W12). */
+  nostr?: NostrOptions;
   /** Where worker.js is served, if not beside this module. */
   workerUrl?: string | URL;
   /**
@@ -24,6 +26,40 @@ export interface StartOptions {
    * its bytes or a compiled module. By default the worker fetches it.
    */
   wasm?: BufferSource | WebAssembly.Module;
+}
+
+export interface NostrOptions {
+  /**
+   * The relays to use, as ws:// or wss:// URLs. Required: the SDK names no
+   * relay of its own.
+   */
+  relays: string[];
+  /**
+   * Publish key packages so a device that knows only this node's address
+   * can reach it, and fetch others' (cold first contact). Default true.
+   */
+  coldContact?: boolean;
+  /**
+   * Publish `profile` as a username in the relays' directory, and resolve
+   * others'. Default false: it binds a readable name to this address in
+   * public. Needs `coldContact`.
+   */
+  usernameDiscovery?: boolean;
+}
+
+/** Where `establishSecureSession` left a session. */
+export type SessionStart = "created" | "existing" | "pending";
+
+/** An invite another device shared, verified. */
+export interface InviteInfo {
+  /** The address, checked to derive from `publicKey`. */
+  address: string;
+  /** The Ed25519 identity key, base64. */
+  publicKey: string;
+  /** A suggested name; the person may change it. */
+  petname: string | null;
+  /** Whether a signature binds the petname to the key. */
+  signed: boolean;
 }
 
 /** A group as this device holds it. */
@@ -81,6 +117,21 @@ export class OfflineNode extends EventTarget {
    * or no session.
    */
   sendMessage(to: string, content: string, options?: SendOptions): Promise<string>;
+  /**
+   * Starts a session with a device. "pending" means its key package has not
+   * arrived; with relays, the node has asked them for it, and
+   * `secure_session_established` follows.
+   */
+  establishSecureSession(address: string): Promise<SessionStart>;
+  /**
+   * Starts a directory lookup; the answer is one `username_resolved` event
+   * with every claim. Needs `nostr.usernameDiscovery`.
+   */
+  resolveUsername(username: string): Promise<boolean>;
+  /** An invite naming this device, base64url. */
+  createInvite(options?: { petname?: string; sign?: boolean }): Promise<string>;
+  /** Opens and verifies an invite; rejects one that does not verify. */
+  parseInvite(blob: string): Promise<InviteInfo>;
   createGroup(name: string): Promise<{ group_id: string; [field: string]: unknown }>;
   inviteToGroup(groupId: string, member: string): Promise<void>;
   /**

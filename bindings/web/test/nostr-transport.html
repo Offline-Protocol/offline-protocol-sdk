@@ -1,0 +1,100 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// Two nodes that share no link and no code, only a relay (the runner's local
+// one, behind a dead one), reach each other over the Nostr transport: one
+// knows the other's address and sends to it, which fetches the key package
+// the other published, forms a session and delivers the message end-to-end
+// encrypted. Then a username the second published resolves to its address,
+// an invite opens to the address that made it and a tampered one is refused,
+// and a node offered no relays refuses to start rather than pick one. The
+// title ends as PASS or FAIL: <step>.
+import { OfflineNode } from "../src/index.js";
+import { log, waitFor, run } from "./common.js";
+
+const relay = new URLSearchParams(location.search).get("relay") ?? "ws://127.0.0.1:8766";
+const appId = `web-nostr-transport-${crypto.randomUUID()}`;
+// The relay outlives the page and serves every engine in a run, so each
+// page's name is its own.
+const name = `player${crypto.randomUUID().slice(0, 8)}`;
+const relays = ["ws://127.0.0.1:9", relay];
+
+const live = (node) => waitFor(node, "transport_switched", (e) => e.to === "Nostr");
+
+await run(async (step) => {
+  step.name = "no relays";
+  const refused = await OfflineNode.start({ appId, storage: "memory", nostr: { relays: [] } }).then(
+    () => null,
+    (error) => error.message,
+  );
+  if (!refused?.includes("names none")) throw new Error(`an empty relay list started: ${refused}`);
+  log("a node offered no relays refused to start");
+
+  step.name = "start";
+  const [a, b] = await Promise.all([
+    // The directory's one switch covers publishing and resolving alike.
+    OfflineNode.start({
+      appId,
+      profile: `sender${name.slice(6)}`,
+      storage: "memory",
+      tabs: false,
+      nostr: { relays, usernameDiscovery: true },
+    }),
+    OfflineNode.start({
+      appId,
+      profile: name,
+      storage: "memory",
+      tabs: false,
+      nostr: { relays, usernameDiscovery: true },
+    }),
+  ]);
+  // Up means a relay confirmed the subscription; give the receiver's key
+  // packages and its directory record a moment to land there.
+  await Promise.all([live(a), live(b)]);
+  await new Promise((r) => setTimeout(r, 1500));
+  log("both nodes are on the relay");
+
+  step.name = "a device known by its address";
+  const sessions = Promise.all([
+    waitFor(a, "secure_session_established", (e) => e.peer_id === b.address, 30000),
+    waitFor(b, "secure_session_established", (e) => e.peer_id === a.address, 30000),
+  ]);
+  const received = waitFor(
+    b,
+    "message_received",
+    (e) => e.content === "found you through a relay" && e.encrypted === true && e.sender === a.address,
+    30000,
+  );
+  await a.sendMessage(b.address, "found you through a relay");
+  await sessions;
+  await received;
+  log("a message to a bare address arrived end-to-end encrypted");
+  if ((await a.establishSecureSession(b.address)) !== "existing") {
+    throw new Error("the session the message formed is not reported as existing");
+  }
+
+  step.name = "a username";
+  const resolved = waitFor(a, "username_resolved", (e) => e.username === name, 20000);
+  await a.resolveUsername(name);
+  const answer = await resolved;
+  if (!answer.claims.some((claim) => claim.address === b.address)) {
+    throw new Error(`the directory did not name the claimant: ${JSON.stringify(answer)}`);
+  }
+  log(`${name} resolved to ${answer.claims.length} claim(s), the publisher's among them`);
+
+  step.name = "an invite";
+  const invite = await a.createInvite({ petname: "Sender", sign: true });
+  const opened = await b.parseInvite(invite);
+  if (opened.address !== a.address || opened.petname !== "Sender" || !opened.signed) {
+    throw new Error(`the invite opened wrong: ${JSON.stringify(opened)}`);
+  }
+  const flipped = invite.slice(0, -2) + (invite.at(-2) === "A" ? "B" : "A") + invite.at(-1);
+  const tampered = await b.parseInvite(flipped).then(() => false, () => true);
+  if (!tampered) throw new Error("a tampered invite opened");
+  log("an invite opened to its maker, and a tampered one was refused");
+
+  await Promise.all([a.stop(), b.stop()]);
+});
+</script>

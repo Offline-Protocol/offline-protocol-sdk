@@ -4,7 +4,10 @@ Covers the browser binding: the engine compiled for `wasm32-unknown-unknown`
 in `crates/offline-protocol-web`, and the JavaScript in `bindings/web` that
 runs it. Experimental. A node's identity and groups are durable, in sealed
 origin-private files; tabs of one origin link over a `BroadcastChannel`, and
-devices on one network over WebRTC, set up with two codes and no server.
+devices on one network over WebRTC, set up with two codes and no server. A
+node the application gives relays also carries the Nostr transport, which
+reaches any device by its address and resolves usernames, mobile ones
+included (W12).
 
 Read [the shared contract](README.md) first. This document covers what is
 specific to a page that runs the engine.
@@ -348,6 +351,78 @@ had no way to tell: a phone that had slept was unreachable until the app
 restarted. A join keeps none of this; it lasts seconds, and fails on its
 deadline.
 
+### W12. The Nostr transport is driven from the worker, over the application's relays
+
+A node started with `nostr: { relays }` registers the same `NostrTransport`
+every binding uses, once its address exists, and the worker holds the relay
+sockets beside the engine (`src/nostr-relays.js`). No binding opens a relay
+socket in Rust: the Swift, Kotlin and Python drivers each hold their own and
+move text, and this is the browser's copy of their host half
+(`crates/offline-protocol-web/src/nostr_host.rs`). The sockets sit in the
+worker rather than on the page, as the signalling ones do (W11), because
+nothing here hands bytes to a page-only object: a relay message goes to the
+engine and nowhere else.
+
+**The relays are the application's.** `start` refuses `nostr` without a
+non-empty list of `ws://` or `wss://` URLs, and no file the project ships
+names one (`no_shipped_file_names_a_relay`). A relay the SDK named would
+become the relay every application uses: a dependency nobody chose, and one
+place that sees every application's traffic timing.
+
+**The worker reads what every driver reads, and no more.** A relay
+message's type and subscription id, and an `OK`'s event id and verdict. An
+`EVENT` crosses to the engine whole, which decodes, unseals and attributes it
+along the FFI's own path: unseal once, deliver with no transport peer id (a
+Nostr key is not a protocol identity), drain, advance the receive watermark
+only for bytes that decoded into a message, then announce the message's own
+sender. In another order, junk addressed to this device's public routing tag
+would move the watermark past history a relay still owes it.
+
+**A relay is live while it confirms this device's subscription.** It is
+live from its first `EOSE`, and every 60 s the subscription is sent again
+under the same id (a NIP-01 replace); a relay that has not answered within
+10 s is dropped and redialled, from 1 s doubling to 30 s, and coming back
+`online` redials at once. The engine hears "live" when the first relay is,
+which flushes the outbox, and "not live" when the last one stops. Nothing is
+published to a relay that is not live.
+
+**An event is confirmed by the first relay that accepts it.** It goes to
+every live relay, and fails only when each of them refused it or dropped.
+The transport expires a confirmation nobody reported, so a silent relay costs
+a retry rather than a message.
+
+**A resolution query ends when every relay it went to has answered.** Each
+relay's `EOSE` closes the query there, and the query completes when the last
+one has, or after 10 s, below the engine's 30 s sweep, so the driver that
+knows which relays answered is the one that ends it. Completing on the first
+answer would hand the result to whichever relay is fastest, and an empty or
+hostile one wins that race by having nothing to send
+([the username chapter](../spec/username-discovery.md#a-resolution-ends-when-every-relay-has-answered)).
+The 10 s is the sixth hand-mirrored constant
+([C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language)),
+pinned here as in the two mobile trackers.
+
+**Reaching a device by its address alone asks the relays for its key
+packages.** `sendMessage` and `establishSecureSession` to a device with no
+session ask for the packages it published (cold contact, on by default);
+the first one that opens forms the session, and a message sent meanwhile
+waits for it. The engine does not ask on its own: a session-less send only
+queues, and its own key-package push reaches only the mesh. Without the
+request, two browsers that share only a relay never meet, which is what the
+negative control in `a_device_known_only_by_its_address_is_reached_over_nostr`
+shows. `establishSecureSession` answers `"created"`, `"existing"` or
+`"pending"`; for a device met only by its address, pending is the ordinary
+first answer.
+
+**The directory is one switch.** `usernameDiscovery` publishes `profile` as
+a username and lets this node resolve others', both or neither, as the
+chapter's gating rule requires, and it needs cold contact: a name that
+resolves to an address with no published key package dead-ends one hop
+later. `resolveUsername` resolves once the lookup is under way, and the
+answer is one `username_resolved` event carrying every claim. A name is a
+claim, not an identity: show the whole set and keep the address the person
+chooses.
+
 ## Which shared rules apply
 
 | Rule | How it reaches the web binding |
@@ -355,6 +430,7 @@ deadline.
 | [C1](README.md#c1-regenerate-every-binding-together) | Does not apply: nothing is generated from the definition. The surface is `#[wasm_bindgen]` on `WebEngine` |
 | [C2](README.md#c2-the-error-enum-is-append-only) | Does not apply yet: errors cross as a JavaScript `Error` carrying the engine's message, not a position |
 | [C3](README.md#c3-events-cross-as-opaque-json) | Applies unchanged: `pollEvent` returns the engine's JSON, and the client dispatches it as a DOM event named by its `type` |
+| [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language) | The resolution-query completion deadline is the one mirrored constant here, pinned in `nostr-relays.js` beside the two mobile trackers (W12) |
 | [C7](README.md#c7-ordering-constraints) | `initialize` before `start`: the address replaces the placeholder the transport was built on |
 | [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | The browser test page is the binding's own test; the Rust tests in the crate run two engines over links on the host |
 | [C11](README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified) | The durable log store passes both conformance suites on the host, and so does the in-memory protocol-state store (W8) |
@@ -373,6 +449,8 @@ deadline.
   `NostrSignaller` room and the relays it names), and the joining address
   shown to the people involved before anything is shared with it (R27, R28).
 - Its own STUN or TURN servers, if links must cross networks (W9).
+- Its own Nostr relays, if the node is to reach devices it has no link to
+  (W12). The SDK names none.
 - The engine module where the worker can fetch it: beside `worker.js`, or
   handed to `OfflineNode.start({ wasm })` by a host whose worker starts from
   a Blob URL (an editor plugin, an extension), where a relative fetch has
@@ -436,9 +514,18 @@ start there, because Firefox answers it by asking the user.
   socket, coming back `online` redials ahead of the backoff, and a redial
   the relay accepts and never confirms (its `/first/<token>` path) is
   dropped and dialled again.
+- `nostr-transport.html`: two nodes with no link and no code, only a relay
+  (behind a dead one), on the Nostr transport. A message to a bare address
+  forms a session and arrives end-to-end encrypted, a username the other
+  published resolves to its address, an invite opens to its maker and a
+  tampered one is refused, and a node offered no relays refuses to start
+  (W12).
+
   The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
-  library that stores and verifies nothing, so the page's own checks are what
-  refuse a forged event.
+  library. It keeps what is not ephemeral, replaces an addressable event by
+  kind, author and `d` tag, and answers a subscription with what it holds,
+  as the transport's key packages and directory records need; it verifies
+  nothing, so the engine's own checks are what refuse a forged event.
 
 `scripts/test-conformance.sh` runs
 `crates/offline-protocol-web/tests/browser_conformance.rs` in a dedicated
@@ -466,6 +553,10 @@ two-player game between devices over WebRTC with durable nodes.
   project runs none, and no page tests one.
 - **Signalling through the Offline Protocol relay.** Nostr carries it (W11);
   the relay's protocol has no frame for an unauthenticated room.
+- **The Offline Protocol relay as a transport.** Its handshake names the
+  device in an `X-Device-ID` header, which a browser cannot set on a
+  WebSocket, and it needs an application token. Nostr reaches the same
+  devices without either (W12).
 - **Ephemeral sends on the native bindings.** The engine has them and the
   browser exposes them; the UDL record does not yet carry the field
   ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).

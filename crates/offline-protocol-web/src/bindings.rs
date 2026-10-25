@@ -9,7 +9,8 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use crate::log_store::{Category, LogStats, LogStore, STORE_KEY_BYTES};
-use crate::node::{LinkId, Node, NodeError};
+use crate::node::{LinkId, Node, NodeError, NodeOptions};
+use crate::nostr_host::NostrOptions;
 use crate::opfs::{OpfsFile, SyncAccessHandle};
 use crate::signal;
 
@@ -61,6 +62,24 @@ pub fn signal_open(room: &str, relay_message: &str) -> Option<String> {
     signal::open(room, relay_message, signal::now_unix_secs()).map(|o| o.to_json())
 }
 
+/// Opens an invite someone shared: `{address, publicKey, petname, signed}` as
+/// JSON, the address already checked to derive from the key. Refuses a
+/// malformed blob, an address that is not the key's, and a signature that
+/// does not verify; each means the invite must not be shown at all.
+#[wasm_bindgen(js_name = parseInvite)]
+pub fn parse_invite(blob: &str) -> Result<String, JsError> {
+    use base64::Engine as _;
+    let invite = offline_protocol_mls::invite::parse_invite(blob)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(serde_json::json!({
+        "address": invite.address.to_string(),
+        "publicKey": base64::engine::general_purpose::STANDARD.encode(&invite.public_key),
+        "petname": invite.petname,
+        "signed": invite.signed,
+    })
+    .to_string())
+}
+
 type DurableStores = (Arc<LogStore<OpfsFile>>, Arc<LogStore<OpfsFile>>);
 
 fn js(error: NodeError) -> JsError {
@@ -104,6 +123,29 @@ impl WebEngine {
     pub fn new(app_id: &str, profile: &str) -> Result<WebEngine, JsError> {
         Ok(Self {
             node: Node::new(app_id, profile).map_err(js)?,
+            durable: None,
+        })
+    }
+
+    /// A stopped engine that also carries the Nostr slot (W12), which the
+    /// worker drives over relays the application named. `coldContact`
+    /// publishes key packages and resolves peers'; `usernameDiscovery`
+    /// publishes `profile` as a username and resolves others'.
+    #[wasm_bindgen(js_name = withNostr)]
+    pub fn with_nostr(
+        app_id: &str,
+        profile: &str,
+        cold_contact: bool,
+        username_discovery: bool,
+    ) -> Result<WebEngine, JsError> {
+        let options = NodeOptions {
+            nostr: Some(NostrOptions {
+                cold_contact,
+                username_discovery,
+            }),
+        };
+        Ok(Self {
+            node: Node::with_options(app_id, profile, options).map_err(js)?,
             durable: None,
         })
     }
@@ -265,6 +307,94 @@ impl WebEngine {
     #[wasm_bindgen(js_name = groupInfo)]
     pub fn group_info(&self, group_id: &str) -> Result<Option<String>, JsError> {
         self.node.group_info(group_id).map_err(js)
+    }
+
+    /// Starts a session with a peer: "created" when this call sent the
+    /// Welcome, "existing" when one already exists, "pending" while the
+    /// peer's key package has not arrived (a node with Nostr has asked the
+    /// relays for it).
+    #[wasm_bindgen(js_name = establishSecureSession)]
+    pub fn establish_secure_session(&mut self, peer: &str) -> Result<String, JsError> {
+        self.node
+            .establish_secure_session(peer)
+            .map(|start| start.as_str().to_string())
+            .map_err(js)
+    }
+
+    /// Resolves a username; exactly one `username_resolved` event follows.
+    #[wasm_bindgen(js_name = resolveUsername)]
+    pub fn resolve_username(&mut self, username: &str) -> Result<bool, JsError> {
+        self.node.resolve_username(username).map_err(js)
+    }
+
+    /// An invite for this device, base64url, optionally with a petname and
+    /// a signature binding it.
+    #[wasm_bindgen(js_name = createInvite)]
+    pub fn create_invite(&self, petname: Option<String>, sign: bool) -> Result<String, JsError> {
+        self.node
+            .create_invite(petname.as_deref(), sign)
+            .map_err(js)
+    }
+
+    /// The `REQ` text that receives this device's messages (W12). Sent on
+    /// every relay connect.
+    #[wasm_bindgen(js_name = nostrSubscription)]
+    pub fn nostr_subscription(&self, subscription_id: &str) -> Result<String, JsError> {
+        self.node.nostr_subscription(subscription_id).map_err(js)
+    }
+
+    /// The worker has a live relay, or none.
+    #[wasm_bindgen(js_name = nostrStatusChanged)]
+    pub fn nostr_status_changed(&mut self, live: bool) -> Result<(), JsError> {
+        self.node.nostr_status_changed(live).map_err(js)
+    }
+
+    /// The next event to publish as `{messageId, eventId, eventJson}` JSON,
+    /// or `undefined`. Nothing while no relay is live.
+    #[wasm_bindgen(js_name = nostrNextEvent)]
+    pub fn nostr_next_event(&mut self) -> Option<String> {
+        self.node.nostr_next_event().map(|event| {
+            serde_json::json!({
+                "messageId": event.message_id,
+                "eventId": event.event_id,
+                "eventJson": event.event_json,
+            })
+            .to_string()
+        })
+    }
+
+    /// A relay accepted the event carrying `messageId`.
+    #[wasm_bindgen(js_name = nostrConfirmSent)]
+    pub fn nostr_confirm_sent(&mut self, message_id: &str) {
+        self.node.nostr_confirm_sent(message_id);
+    }
+
+    /// No relay took the event carrying `messageId`.
+    #[wasm_bindgen(js_name = nostrSendFailed)]
+    pub fn nostr_send_failed(&mut self, message_id: &str, reason: Option<String>) {
+        self.node.nostr_send_failed(message_id, reason);
+    }
+
+    /// The next resolution query as `{queryId, reqJson}` JSON, or
+    /// `undefined`. Sent to every live relay under `queryId`.
+    #[wasm_bindgen(js_name = nostrNextQuery)]
+    pub fn nostr_next_query(&mut self) -> Option<String> {
+        self.node.nostr_next_query().map(|query| {
+            serde_json::json!({ "queryId": query.query_id, "reqJson": query.req_json }).to_string()
+        })
+    }
+
+    /// Every relay the query went to has answered, or the worker stopped
+    /// waiting.
+    #[wasm_bindgen(js_name = nostrQueryCompleted)]
+    pub fn nostr_query_completed(&mut self, query_id: &str) {
+        self.node.nostr_query_completed(query_id);
+    }
+
+    /// One `EVENT` message a relay sent, whole.
+    #[wasm_bindgen(js_name = nostrRelayEvent)]
+    pub fn nostr_relay_event(&mut self, relay_message: &str) -> Result<(), JsError> {
+        self.node.nostr_relay_event(relay_message).map_err(js)
     }
 
     /// Sends to a group; returns the per-member message ids as JSON.

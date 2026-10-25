@@ -4,7 +4,9 @@
 //! have (a `BroadcastChannel` between tabs, a WebRTC data channel between
 //! devices) delivers whole messages between two endpoints the page set up.
 //! Each one is a peer stream in the sense of `docs/spec/stream-framing.md`,
-//! carried in the engine's one host slot (`wifi_direct`, named for history).
+//! carried in the engine's peer-stream slot (`wifi_direct`, named for
+//! history). A node the application gives relays also carries the Nostr
+//! slot, driven from the worker ([`crate::nostr_host`]).
 //!
 //! # Invariants
 //!
@@ -42,12 +44,13 @@ use offline_protocol::{
 };
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_transport::{
-    frame, PeerStreamReader, StreamEvent, Transport, TransportStatus, TransportType,
-    WifiDirectTransport,
+    frame, NostrTransport, PeerStreamReader, StreamEvent, Transport, TransportStatus,
+    TransportType, WifiDirectTransport,
 };
 use tracing::warn;
 
 use crate::memory_store::MemoryProtocolStateStorage;
+use crate::nostr_host::{NostrHost, NostrOptions};
 
 /// The page's handle for one carrier.
 pub type LinkId = u32;
@@ -86,7 +89,36 @@ impl From<offline_protocol::Error> for NodeError {
     }
 }
 
-type NodeResult<T> = Result<T, NodeError>;
+pub(crate) type NodeResult<T> = Result<T, NodeError>;
+
+/// Where [`Node::establish_secure_session`] left a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionStart {
+    /// This call created it and sent the Welcome.
+    Created,
+    /// One already existed.
+    Existing,
+    /// Waiting for the peer's key package.
+    Pending,
+}
+
+impl SessionStart {
+    /// The name the page sees.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Existing => "existing",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+/// What a node carries beyond its peer-stream links.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeOptions {
+    /// The Nostr slot, when the application gives the node relays.
+    pub nostr: Option<NostrOptions>,
+}
 
 struct Link {
     reader: PeerStreamReader,
@@ -98,8 +130,10 @@ struct Link {
 
 /// One engine, its links, and the queues the page drains.
 pub struct Node {
-    protocol: OfflineProtocol,
-    events: Arc<Mutex<VecDeque<String>>>,
+    pub(crate) protocol: OfflineProtocol,
+    pub(crate) events: Arc<Mutex<VecDeque<String>>>,
+    /// The worker's half of the Nostr slot, when the node has one.
+    pub(crate) nostr_host: Option<NostrHost>,
     links: BTreeMap<LinkId, Link>,
     /// The one live link for each announced address.
     peers: HashMap<String, LinkId>,
@@ -113,16 +147,28 @@ pub struct Node {
 }
 
 impl Node {
+    /// A stopped engine with no identity yet, carrying peer-stream links only.
+    pub fn new(app_id: &str, profile: &str) -> NodeResult<Self> {
+        Self::with_options(app_id, profile, NodeOptions::default())
+    }
+
     /// A stopped engine with no identity yet.
     ///
-    /// Only the peer-stream slot is registered: a browser has no Bluetooth
-    /// peripheral, and the relay and Nostr sockets are not wired yet.
-    pub fn new(app_id: &str, profile: &str) -> NodeResult<Self> {
+    /// The peer-stream slot is always registered. The Nostr slot is
+    /// registered once the address exists, when `options.nostr` is set: the
+    /// transport derives its routing tag from the address it is built with.
+    /// A browser has no Bluetooth peripheral, and the internet relay's socket
+    /// is not wired.
+    pub fn with_options(app_id: &str, profile: &str, options: NodeOptions) -> NodeResult<Self> {
         let mut config = ProtocolConfig::new(app_id, profile);
         config.transport.ble_enabled = false;
         config.transport.internet_enabled = false;
         config.transport.reticulum_enabled = false;
-        config.transport.nostr_enabled = false;
+        config.transport.nostr_enabled = options.nostr.is_some();
+        if let Some(nostr) = options.nostr {
+            config.transport.nostr_cold_contact_enabled = nostr.cold_contact;
+            config.transport.nostr_username_discovery_enabled = nostr.username_discovery;
+        }
         config.transport.wifi_direct_enabled = true;
 
         let mut protocol = OfflineProtocol::new(config)?;
@@ -140,6 +186,7 @@ impl Node {
         Ok(Self {
             protocol,
             events,
+            nostr_host: options.nostr.map(|_| NostrHost::default()),
             links: BTreeMap::new(),
             peers: HashMap::new(),
             outbound: VecDeque::new(),
@@ -178,10 +225,30 @@ impl Node {
             .local_address()
             .ok_or_else(|| NodeError("MLS initialized without an address".to_string()))?
             .to_string();
+        // Every replacement is built before any is installed, as the FFI
+        // crate does, so the one fallible construction cannot leave the set
+        // half rebuilt.
+        let nostr = match self.nostr_host {
+            Some(_) => Some(
+                NostrTransport::new(address.as_str())
+                    .map_err(|e| NodeError(format!("could not create the Nostr transport: {e}")))?,
+            ),
+            None => None,
+        };
         self.protocol.transport_manager_mut().add_transport(
             TransportType::WiFiDirect,
             Box::new(WifiDirectTransport::new(address.as_str())),
         );
+        if let Some(nostr) = nostr {
+            self.protocol
+                .transport_manager_mut()
+                .add_transport(TransportType::Nostr, Box::new(nostr));
+            // The transport did not exist while `initialize_mls` restored
+            // state, so the persisted signing secret and receive watermark go
+            // in now. Without this the install's Nostr identity rotates on
+            // every start, stranding peers that seal to the key it advertised.
+            self.protocol.restore_nostr_transport_state();
+        }
         Ok(address)
     }
 
@@ -373,6 +440,7 @@ impl Node {
         content: &str,
         ephemeral: bool,
     ) -> NodeResult<String> {
+        self.reach_over_nostr(recipient);
         let id = self.protocol.send_message_with(
             recipient,
             content,
@@ -435,6 +503,83 @@ impl Node {
         )?;
         let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         serde_json::to_string(&ids).map_err(|e| NodeError(e.to_string()))
+    }
+
+    /// Starts, or advances, a session with `peer`, and says where it stands:
+    ///
+    /// - [`SessionStart::Created`]: this call built it and sent the Welcome;
+    /// - [`SessionStart::Existing`]: there already is one;
+    /// - [`SessionStart::Pending`]: no key package from `peer` yet. On a node
+    ///   with relays this call has asked them for the peer's published
+    ///   packages, and `secure_session_established` follows once one arrives.
+    ///
+    /// Pending is not an error here, as it is in the engine: for a device met
+    /// only by its address it is the ordinary first answer.
+    pub fn establish_secure_session(&mut self, peer: &str) -> NodeResult<SessionStart> {
+        self.reach_over_nostr(peer);
+        match self.protocol.establish_secure_session(peer) {
+            Ok(Some(_)) => Ok(SessionStart::Created),
+            Ok(None) => Ok(SessionStart::Existing),
+            Err(offline_protocol::Error::SessionNotReady(_)) => Ok(SessionStart::Pending),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Resolves a username to every device claiming it. `true` started the
+    /// lookup, `false` joined one in flight; either way exactly one
+    /// `username_resolved` event follows.
+    pub fn resolve_username(&mut self, username: &str) -> NodeResult<bool> {
+        Ok(self.protocol.resolve_username(username)?)
+    }
+
+    /// An invite for this device: its address and key, an optional petname,
+    /// and, when `sign` is set, a signature binding the petname to the key.
+    pub fn create_invite(&self, petname: Option<&str>, sign: bool) -> NodeResult<String> {
+        let manager = self
+            .protocol
+            .mls_manager()
+            .ok_or_else(|| NodeError("initialize before creating an invite".to_string()))?;
+        let guard = manager
+            .read()
+            .map_err(|_| NodeError("MLS manager lock poisoned".to_string()))?;
+        let mls = |e: offline_protocol_mls::MlsError| NodeError(e.to_string());
+        let public_key = guard.get_identity_public_key().map_err(mls)?;
+        let address = offline_protocol_mls::MlsManager::derive_address(&public_key).map_err(mls)?;
+        let signature = if sign {
+            let payload = offline_protocol_mls::invite::invite_signing_payload(
+                &address,
+                &public_key,
+                petname,
+            )
+            .map_err(mls)?;
+            Some(guard.sign_data(&payload).map_err(mls)?)
+        } else {
+            None
+        };
+        offline_protocol_mls::invite::encode_invite(
+            &address,
+            &public_key,
+            petname,
+            signature.as_deref(),
+        )
+        .map_err(mls)
+    }
+
+    /// Asks the relays for `peer`'s published key packages when there is no
+    /// session with it yet. Nothing else does: a session-less send only
+    /// queues, and the engine's own key-package push reaches only the mesh.
+    fn reach_over_nostr(&self, peer: &str) {
+        if !self.nostr_enabled() || self.has_session(peer) {
+            return;
+        }
+        self.request_nostr_key_packages(peer);
+    }
+
+    fn has_session(&self, peer: &str) -> bool {
+        self.protocol
+            .mls_manager()
+            .and_then(|manager| manager.read().ok()?.has_session(peer).ok())
+            .unwrap_or(false)
     }
 
     fn preamble(&self) -> NodeResult<Vec<u8>> {
@@ -524,7 +669,7 @@ impl WifiDirect {
     }
 }
 
-fn push_event(queue: &Mutex<VecDeque<String>>, event: &Event) {
+pub(crate) fn push_event(queue: &Mutex<VecDeque<String>>, event: &Event) {
     let Ok(json) = event.to_json() else {
         return;
     };
