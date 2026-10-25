@@ -33,26 +33,21 @@ await run(async (step) => {
   log("a node offered no relays refused to start");
 
   step.name = "start";
-  const [a, b] = await Promise.all([
-    // The directory's one switch covers publishing and resolving alike.
-    OfflineNode.start({
-      appId,
-      profile: `sender${name.slice(6)}`,
-      storage: "memory",
-      tabs: false,
-      nostr: { relays, usernameDiscovery: true },
-    }),
-    OfflineNode.start({
-      appId,
-      profile: name,
-      storage: "memory",
-      tabs: false,
-      nostr: { relays, usernameDiscovery: true },
-    }),
+  // Each node's listener goes on as its own start resolves: the relay's
+  // confirmation comes a round trip after the start reply, so it cannot be
+  // missed, where waiting for both starts first could miss the faster one's.
+  const startLive = async (options) => {
+    const node = await OfflineNode.start({ appId, storage: "memory", tabs: false, ...options });
+    return [node, live(node)];
+  };
+  // The directory's one switch covers publishing and resolving alike.
+  const [[a, aLive], [b, bLive]] = await Promise.all([
+    startLive({ profile: `sender${name.slice(6)}`, nostr: { relays, usernameDiscovery: true } }),
+    startLive({ profile: name, nostr: { relays, usernameDiscovery: true } }),
   ]);
   // Up means a relay confirmed the subscription; give the receiver's key
   // packages and its directory record a moment to land there.
-  await Promise.all([live(a), live(b)]);
+  await Promise.all([aLive, bLive]);
   await new Promise((r) => setTimeout(r, 1500));
   log("both nodes are on the relay");
 
