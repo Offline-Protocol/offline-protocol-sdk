@@ -1303,6 +1303,46 @@ other neighbours, and every frame is still authenticated above this
 layer. An application must not treat `peer_rssi`
 as evidence of who is physically near.
 
+### R30. A nearby room is readable by anyone who can guess the network's address
+
+A browser's nearby room is a Nostr topic and key derived from the
+application id and the network's public address
+([web bridge W13](../bridges/web.md#w13-a-nearby-room-is-derived-from-the-networks-address),
+[ADR 0034](../adr/0034-browsers-find-each-other-through-their-network-address.md)).
+An address is not a secret: anyone can derive every room for an application
+and read who is present in each, by key and label, and can offer a
+connection to any of them. Everyone behind the same address is in the same
+room, which on a carrier-grade NAT, a hotel or a campus is many strangers.
+The relays the application names see the topic, the times and sizes of the
+events, and the network address of every client.
+
+**Why it stands:** the address is the one thing two browsers on a network
+share without a person carrying something between them, and no browser
+exposes local discovery.
+
+**What bounds it:** a presence carries a key used for this room only and the
+label its sender chose, and nothing that identifies the device; it is signed
+by the key it names, so nobody lists a key they do not hold or relabels one
+that is there. Every connection code, and the joiner's label with it, is
+sealed with NIP-44 to one presence key, so a holder of the room key reads no
+code, learns no local address (R27), and cannot put another label on a real
+joiner's offer. A host answers only offers its application admits, and the
+binding refuses a room without an `admit` decision; an application should
+show the label and ask. A link that forms proves nothing by itself: the
+engine's preamble names the device, and MLS admits it to nothing until it is
+invited.
+
+**What it does not bound:** how often strangers ask. Anyone can mint presence
+keys and sessions, so the binding bounds what it holds and not who asks: at
+most sixteen offers wait on the application at once, a seventeenth is
+dropped and reported as `full`, each session is asked about once, and a
+refused one never takes a waiting one's place. Sixteen questions a stranger
+keeps coming can still crowd out a real joiner until the person answers
+them, and a list of sixty-four keys a stranger keeps announcing can push a
+real device off the list between its announcements. The application's own
+policy (who it asks about, how fast it lets questions come) is the limit
+here, not a count in the SDK.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

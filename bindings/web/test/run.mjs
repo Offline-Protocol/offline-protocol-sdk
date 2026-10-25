@@ -3,7 +3,8 @@
 // one API, so a page runs unchanged in all three.
 //
 // Usage: node test/run.mjs <base-url> <relay-url> <timeout-ms> <page>...
-// BROWSERS narrows the engines (default: chromium firefox webkit).
+// BROWSERS narrows the engines (default: chromium firefox webkit). STUN_URL,
+// when set, is passed to every page as `stun`.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,9 @@ const options = {
   firefox: {
     firefoxUserPrefs: {
       "media.peerconnection.ice.obfuscate_host_addresses": false,
+      // The nearby page's STUN server listens on loopback, which Firefox
+      // leaves out of ICE gathering unless told otherwise.
+      "media.peerconnection.ice.loopback": true,
     },
   },
   webkit: {},
@@ -53,7 +57,8 @@ for (const name of names) {
       page.on("pageerror", (error) => console.log("[page exception]", error.message));
       let title = "TIMEOUT";
       try {
-        await page.goto(`${base}/${path}?relay=${encodeURIComponent(relay)}`);
+        const stun = process.env.STUN_URL ? `&stun=${encodeURIComponent(process.env.STUN_URL)}` : "";
+        await page.goto(`${base}/${path}?relay=${encodeURIComponent(relay)}${stun}`);
         await page.waitForFunction(
           () => document.title === "PASS" || document.title.startsWith("FAIL"),
           null,

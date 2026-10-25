@@ -15,6 +15,8 @@ cd "$(dirname "$0")/.."
 PORT="${PORT:-8765}"
 # The local Nostr relay the signalling page publishes through.
 RELAY_PORT="${RELAY_PORT:-8766}"
+# The local STUN server the nearby page learns its network's address from.
+STUN_PORT="${STUN_PORT:-8767}"
 
 [ -f pkg/offline_protocol_web.js ] || bash scripts/build.sh
 [ -d node_modules/playwright ] || npm ci
@@ -23,9 +25,11 @@ python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
 server=$!
 node test/nostr-relay.mjs "$RELAY_PORT" >/dev/null 2>&1 &
 relay=$!
+node test/stun-server.mjs "$STUN_PORT" >/dev/null 2>&1 &
+stun=$!
 cleanup() {
-  kill "$server" "$relay" 2>/dev/null || true
-  wait "$server" "$relay" 2>/dev/null || true
+  kill "$server" "$relay" "$stun" 2>/dev/null || true
+  wait "$server" "$relay" "$stun" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -36,4 +40,5 @@ done
 
 pages=()
 for page in test/*.html; do pages+=("$page"); done
-node test/run.mjs "http://127.0.0.1:$PORT" "ws://127.0.0.1:$RELAY_PORT" 90000 "${pages[@]}"
+STUN_URL="stun:127.0.0.1:$STUN_PORT" \
+  node test/run.mjs "http://127.0.0.1:$PORT" "ws://127.0.0.1:$RELAY_PORT" 90000 "${pages[@]}"

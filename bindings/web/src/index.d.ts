@@ -157,6 +157,25 @@ export class OfflineNode extends EventTarget {
     room: string,
     message: string,
   ): Promise<{ role: "offer" | "answer"; session: string; code: string; freshUntilMs: number } | null>;
+  /** NearbyRoom's half in the worker (W13). */
+  nearbyOpen(network: string, label: string): Promise<{ id: number; key: string }>;
+  nearbySubscription(id: number, subscriptionId: string): Promise<string>;
+  nearbyPresence(id: number): Promise<string>;
+  nearbyOffer(id: number, to: string, session: string, code: string): Promise<string>;
+  nearbyAnswer(id: number, to: string, session: string, code: string): Promise<string>;
+  nearbyOpenMessage(
+    id: number,
+    message: string,
+  ): Promise<{
+    kind: "presence" | "offer" | "answer";
+    peer: string;
+    label: string;
+    session: string | null;
+    code: string | null;
+    createdAtMs: number;
+    freshUntilMs: number;
+  } | null>;
+  nearbyClose(id: number): Promise<void>;
   /** Registers a carrier the page opened; resolves to its link id. */
   openLink(carrier: PageCarrier): Promise<number>;
   /** Bytes the carrier delivered; resolves to the reason it was closed, if it was. */
@@ -251,3 +270,69 @@ export class NostrSignaller {
   /** Joins the device hosting `room`; rejects when no answer comes in time. */
   join(room: string, carrier: WebRtcCarrier, options?: { timeoutMs?: number }): Promise<SignalledConnection>;
 }
+
+/** A device announced in a nearby room. */
+export interface NearbyPeer {
+  /** Its key in this room; what `connect` takes. Not an identity. */
+  peer: string;
+  /** The label its application chose. A claim, not a name anyone checked. */
+  label: string;
+  /** When this device last heard it, in milliseconds since the epoch. */
+  seenAt: number;
+}
+
+export interface NearbyRoomOptions {
+  /** The relays to use, as ws:// or wss:// URLs. Required: the SDK names none. */
+  relays: string[];
+  /**
+   * Servers to learn the network's public address from, with at least one
+   * STUN server. Required unless `network` is given. The SDK names none.
+   */
+  iceServers?: RTCIceServer[];
+  /** The network's public address, when the application already knows it. */
+  network?: string;
+  /** What this device is shown as to the others. At most 64 characters. */
+  label?: string;
+  /**
+   * Decides every offer this device receives. Anyone who can guess the
+   * network's address can offer, so ask the person; only `true` answers.
+   * `signal` aborts when the offer stops being fresh or the room closes:
+   * take the question down then, as nobody is waiting for the answer. A
+   * session is asked about once; its repeats are not asked again.
+   */
+  admit(offer: { peer: string; label: string; signal: AbortSignal }): boolean | Promise<boolean>;
+}
+
+/**
+ * The devices behind this network's public address for one application,
+ * found through Nostr relays (W13). Each one announces a room key and a
+ * label, sees the others in `peers`, and links over WebRTC to the one its
+ * person picks. The room is weak by construction: anyone who can guess the
+ * address can read who is present and offer, and none can read a
+ * connection code, which is sealed to one device's key. A `peers` event
+ * carries the list whenever it changes. A `full` event carries `{ peer,
+ * label }` for an offer dropped because sixteen were already waiting on
+ * `admit`.
+ */
+export class NearbyRoom extends EventTarget {
+  constructor(node: OfflineNode, carrier: WebRtcCarrier, options: NearbyRoomOptions);
+  /** The devices present now, newest first. */
+  readonly peers: NearbyPeer[];
+  /** This device's key in the room, once open. */
+  readonly key: string | null;
+  /** Learns the address, subscribes, and starts announcing. A room opens once. */
+  open(): Promise<NearbyRoom>;
+  /** Links to `peer` once it admits this device; rejects when it does not answer. */
+  connect(peer: string, options?: { timeoutMs?: number }): Promise<SignalledConnection>;
+  /** Stops announcing and answering; links already made stay up. */
+  close(): void;
+}
+
+/**
+ * The network's public address, from a server-reflexive candidate: IPv4 when
+ * one arrives, else IPv6 after waiting `settleMs` for an IPv4 one.
+ */
+export function publicAddress(
+  iceServers: RTCIceServer[],
+  options?: { timeoutMs?: number; settleMs?: number },
+): Promise<string>;

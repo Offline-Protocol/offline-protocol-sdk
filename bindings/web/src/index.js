@@ -2,6 +2,7 @@
 
 export { WebRtcCarrier } from "./webrtc.js";
 export { NostrSignaller } from "./nostr-signal.js";
+export { NearbyRoom, publicAddress } from "./nearby.js";
 import { checkRelays } from "./nostr-relays.js";
 
 export class OfflineNode extends EventTarget {
@@ -182,6 +183,38 @@ export class OfflineNode extends EventTarget {
 
   signalOpen(room, message) {
     return this.#call("signalOpen", { room, message });
+  }
+
+  /// NearbyRoom's half in the worker (W13): open a room for this network's
+  /// address under a label (`{ id, key }`), its REQ text, sealed EVENT texts,
+  /// and what a relay message carries (`{ kind, peer, label, session, code,
+  /// createdAtMs, freshUntilMs }`, or null).
+  nearbyOpen(network, label) {
+    return this.#call("nearbyOpen", { network, label });
+  }
+
+  nearbySubscription(id, subscriptionId) {
+    return this.#call("nearbySubscription", { id, subscriptionId });
+  }
+
+  nearbyPresence(id) {
+    return this.#call("nearbyPresence", { id });
+  }
+
+  nearbyOffer(id, to, session, code) {
+    return this.#call("nearbyOffer", { id, to, session, code });
+  }
+
+  nearbyAnswer(id, to, session, code) {
+    return this.#call("nearbyAnswer", { id, to, session, code });
+  }
+
+  nearbyOpenMessage(id, message) {
+    return this.#call("nearbyOpenMessage", { id, message });
+  }
+
+  nearbyClose(id) {
+    return this.#call("nearbyClose", { id });
   }
 
   /// What the durable store has cost since the node started (flushes, log

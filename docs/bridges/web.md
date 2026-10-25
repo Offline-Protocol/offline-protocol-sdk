@@ -7,7 +7,8 @@ origin-private files; tabs of one origin link over a `BroadcastChannel`, and
 devices on one network over WebRTC, set up with two codes and no server. A
 node the application gives relays also carries the Nostr transport, which
 reaches any device by its address and resolves usernames, mobile ones
-included (W12).
+included (W12), and browsers behind one network address find each other in
+a nearby room (W13).
 
 Read [the shared contract](README.md) first. This document covers what is
 specific to a page that runs the engine.
@@ -440,6 +441,74 @@ answer is one `username_resolved` event carrying every claim. A name is a
 claim, not an identity: show the whole set and keep the address the person
 chooses.
 
+### W13. A nearby room is derived from the network's address
+
+A page cannot scan for Bluetooth, browse DNS-SD or join Wi-Fi Direct, so a
+browser has no local discovery of its own
+([ADR 0034](../adr/0034-browsers-find-each-other-through-their-network-address.md)).
+`NearbyRoom` gives the browsers behind one network address a place to meet:
+a Nostr topic and key derived from the application id and the address a
+STUN server reports (the IPv4 address, or the IPv6 /64, since each IPv6
+device has its own address). Each device publishes a presence every 5 s,
+lists the others it has heard within 15 s, and links over WebRTC to one its
+person picks. The relays carry only the setup; the link runs on the local
+network.
+
+**The room key is public.** Anyone can derive it from an address, so it
+seals only presences, and a presence holds a key used for this room and the
+application's label. Because the room key authenticates nothing, a presence
+is also signed by the key it announces: one sealed under the room key alone
+let anyone list a key they do not hold, relabel a device that is there, or
+keep one listed after it left. A connection code and the joiner's label are
+sealed with NIP-44 from the joiner's room key to the presence key it picked,
+and the answer back, under the room key as a second layer, with the role
+bound into both. A holder of the room key sees who is present and can offer,
+and reads no code
+([R30](../security/threat-model.md#r30-a-nearby-room-is-readable-by-anyone-who-can-guess-the-networks-address)).
+Sealing a code under the room key alone would hand every guesser the local
+addresses the code names (R27), and a label under it alone would let anyone
+re-wrap a real joiner's offer under a name of their choosing.
+
+**The application admits.** Anyone who can guess the address can offer, so
+`admit({ peer, label, signal })` is required and every offer goes to it;
+only `true` answers. Each session is asked about once: a refused session is
+ignored for as long as its offer stays fresh, so a joiner's republished
+offers do not ask again, and `signal` aborts when the offer stops being
+fresh or the room closes, so a question nobody answered comes down. The
+label is a claim: who is on a link that forms is what the preamble and MLS
+session prove (W3).
+
+**A cap never becomes a lock.** The limits a signalling room keeps (W11)
+assume only a holder of an eighty-bit code can offer; here anyone can. So a
+refused session is kept apart from the sixteen the host is deciding on or
+has admitted, and only so its repeats are not asked about again (at most
+256, oldest forgotten first). Kept among the sixteen, as it first was,
+sixteen refused sessions that a stranger kept fresh from anywhere on the
+internet stopped the host admitting anyone, with nothing to say so. An offer
+that arrives while sixteen are still waiting on the application is dropped
+and reported as a `full` event. A list of devices that reaches sixty-four
+forgets the one heard from longest ago, rather than refusing newcomers to
+whoever filled it first.
+
+**The relays and the STUN servers are the application's.** A room without
+relays, or without a STUN server and without a `network` the application
+already knows, refuses to open. `publicAddress` takes a server-reflexive
+candidate a throwaway connection gathers and gives up after 5 s. It prefers
+IPv4, and waits half a second for an IPv4 candidate after an IPv6 one: on a
+dual-stack network the family that answers first varies, and two devices
+that took different families would derive different rooms.
+
+**A room opens once.** A room that fails to open, or is closed (during
+`open()` included), holds no relay socket and no room in the worker, and
+refuses to open or connect again.
+
+**The room's events are signalling events.** Kind 25912, refused more than
+two minutes from this clock, on a topic derived under a different salt from
+a signalling room's, so the two never read each other. Offers and answers
+are signed by a key used once, a presence by its own key. The signature is
+checked on every event, after the room key, because it binds `created_at`:
+without it a relay could re-stamp an old offer and replay it fresh.
+
 ## Which shared rules apply
 
 | Rule | How it reaches the web binding |
@@ -467,7 +536,8 @@ chooses.
   shown to the people involved before anything is shared with it (R27, R28).
 - Its own STUN or TURN servers, if links must cross networks (W9).
 - Its own Nostr relays, if the node is to reach devices it has no link to
-  (W12). The SDK names none.
+  (W12), and its own STUN server and an `admit` decision for a nearby room
+  (W13). The SDK names no relay and no STUN server.
 - The engine module where the worker can fetch it: beside `worker.js`, or
   handed to `OfflineNode.start({ wasm })` by a host whose worker starts from
   a Blob URL (an editor plugin, an extension), where a relative fetch has
@@ -546,6 +616,20 @@ start there, because Firefox answers it by asking the user.
   that closes the subscription is reported once however often it is
   redialled and never counts as live, and closing the driver reports it down
   before it ends a query (W12).
+
+- `nearby.html`: four nodes in nearby rooms, three behind one address and
+  one behind another. The address comes from the runner's STUN server, which
+  reports a fixed one (`test/stun-server.mjs`); Firefox runs with
+  `media.peerconnection.ice.loopback` on so it gathers toward a server on
+  loopback. The three see each other's labels. One links to another that
+  admits it and a message crosses, while a stranger keeps sixteen refused
+  sessions fresh against the host. One the host does not admit gets no
+  answer and is asked about once. A host whose person never answers is asked
+  sixteen times, reports the seventeenth offer as `full`, and withdraws every
+  question when closed. The fourth sees nobody. A room with no relays, no
+  `admit` or no STUN server is refused, as is a closed one, and
+  `publicAddress` over a stubbed connection takes IPv4 on a dual-stack
+  network (W13).
 
   The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
   library. It keeps what is not ephemeral, replaces an addressable event by

@@ -121,6 +121,16 @@ Open the page on both devices. Each step names what to record.
    with the same URL. The second tab must not start a second engine over the
    same account (W8): it stays at "starting…", and its console shows
    "another node already runs this account in this browser".
+8. **Nearby, with no codes.** Reload both pages. On each, fill in the same
+   Nostr relays and a STUN server you choose, a name, and press **Look for
+   devices nearby** (W13). Each lists the other by its name within a few
+   seconds; press **Connect** beside A on B, and A asks whether to let B in.
+   **Allow** links them ("1 device connected" on both), and **Deny** leaves B
+   waiting until its request times out. Then put the phone on cellular data:
+   it is behind another address now, and the two must no longer list each
+   other. Fails as: an empty list on one network (the STUN server unreachable,
+   or the two leaving by different routes, which the page cannot tell), or a
+   link that forms without A being asked.
 
 ## What this does not show
 

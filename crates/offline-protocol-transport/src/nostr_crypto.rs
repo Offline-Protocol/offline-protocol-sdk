@@ -910,6 +910,37 @@ pub(crate) fn unwrap_gift_wrap(
     nip44::decrypt_bytes(sealed, &conversation_key)
 }
 
+/// Seals `plaintext` from `sender` to whoever holds the secret behind
+/// `recipient_pubkey_hex`, with NIP-44 v2, and returns the base64 payload.
+///
+/// For a page that has met another only through a public channel and wants
+/// what it says next readable by that one key alone: the browser's nearby
+/// room seals each connection code to the presence key its host announced,
+/// so a holder of the room's weak key reads presences and nothing else.
+/// Nothing here names or authenticates the sender; the recipient learns only
+/// that the payload was sealed by the holder of the key it opens it with.
+pub fn seal_to_key(
+    sender: &NostrKeypair,
+    recipient_pubkey_hex: &str,
+    plaintext: &[u8],
+) -> Result<String> {
+    let peer = hex::decode(recipient_pubkey_hex)
+        .map_err(|e| Error::CryptoError(format!("Invalid recipient pubkey: {}", e)))?;
+    let conversation_key = ConversationKey::derive(&sender.signing_key, &peer)?;
+    nip44::encrypt(plaintext, &conversation_key)
+}
+
+/// Opens what the holder of `sender_pubkey_hex` sealed to `recipient` with
+/// [`seal_to_key`]. `payload` is the base64-decoded payload. Fails on any
+/// other key, a forged MAC or bad padding.
+pub fn open_from_key(
+    recipient: &NostrKeypair,
+    sender_pubkey_hex: &str,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    unwrap_gift_wrap(recipient, sender_pubkey_hex, payload)
+}
+
 /// Opens a peer's published key-package record.
 ///
 /// Mechanically identical to [`unwrap_gift_wrap`] — NIP-44's conversation key
@@ -1170,6 +1201,23 @@ fn sign_event_id(signing_key: &SigningKey, event_id_hash: &[u8]) -> Result<Strin
 mod tests {
     use super::*;
     use base64::Engine;
+
+    #[test]
+    fn a_payload_sealed_to_a_key_opens_with_that_key_only() {
+        let sender = NostrKeypair::generate_ephemeral().unwrap();
+        let recipient = NostrKeypair::generate_ephemeral().unwrap();
+        let stranger = NostrKeypair::generate_ephemeral().unwrap();
+        let sealed = seal_to_key(&sender, recipient.public_key_hex(), b"op1.code").unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&sealed)
+            .unwrap();
+        assert_eq!(
+            open_from_key(&recipient, sender.public_key_hex(), &bytes).unwrap(),
+            b"op1.code"
+        );
+        assert!(open_from_key(&stranger, sender.public_key_hex(), &bytes).is_err());
+        assert!(open_from_key(&recipient, stranger.public_key_hex(), &bytes).is_err());
+    }
 
     /// The address a test label stands for.
     ///

@@ -294,7 +294,7 @@ fn normalise(code: &str) -> Result<String, String> {
     Ok(code)
 }
 
-fn check_session(session: &str) -> Result<(), String> {
+pub(crate) fn check_session(session: &str) -> Result<(), String> {
     if session.len() == 32 && session.bytes().all(|b| b.is_ascii_hexdigit()) {
         Ok(())
     } else {
@@ -302,7 +302,7 @@ fn check_session(session: &str) -> Result<(), String> {
     }
 }
 
-fn check_code(code: &str) -> Result<(), String> {
+pub(crate) fn check_code(code: &str) -> Result<(), String> {
     if code.starts_with("op1.") && code.len() <= MAX_CONNECTION_CODE_BYTES {
         Ok(())
     } else {
@@ -310,7 +310,7 @@ fn check_code(code: &str) -> Result<(), String> {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

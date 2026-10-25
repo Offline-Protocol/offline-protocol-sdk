@@ -80,6 +80,68 @@ pub fn parse_invite(blob: &str) -> Result<String, JsError> {
     .to_string())
 }
 
+/// One device's place in a nearby room (W13): the room behind one network
+/// address for one application, and the key this device announces there.
+#[wasm_bindgen(js_name = NearbyRoomKeys)]
+pub struct WebNearby {
+    inner: crate::nearby::Nearby,
+}
+
+#[wasm_bindgen(js_class = NearbyRoomKeys)]
+impl WebNearby {
+    /// Joins the room for `app_id` behind `network` (the address a STUN
+    /// server reports: IPv4, or IPv6 taken to its /64), under `label`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(app_id: &str, network: &str, label: &str) -> Result<WebNearby, JsError> {
+        crate::nearby::Nearby::new(app_id, network, label)
+            .map(|inner| Self { inner })
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// The key this device announces.
+    #[wasm_bindgen(getter)]
+    pub fn key(&self) -> String {
+        self.inner.key().to_string()
+    }
+
+    /// The `REQ` text receiving the room, from as far back as an event is
+    /// accepted.
+    pub fn subscription(&self, subscription_id: &str) -> Result<String, JsError> {
+        let since = signal::now_unix_secs().saturating_sub(signal::MAX_EVENT_AGE_SECS);
+        self.inner
+            .subscription(subscription_id, since)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// The `EVENT` text announcing this device.
+    pub fn presence(&self) -> Result<String, JsError> {
+        self.inner.presence().map_err(|e| JsError::new(&e))
+    }
+
+    /// The `EVENT` text offering `code` to the device that announced `to`.
+    pub fn offer(&self, to: &str, session: &str, code: &str) -> Result<String, JsError> {
+        self.inner
+            .offer(to, session, code)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// The `EVENT` text answering the joiner whose presence key is `to`.
+    pub fn answer(&self, to: &str, session: &str, code: &str) -> Result<String, JsError> {
+        self.inner
+            .answer(to, session, code)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Opens a relay message: `{kind, peer, label, session, code,
+    /// createdAtMs, freshUntilMs}` as JSON for a presence from another
+    /// device or an offer or answer sealed to this one, else `undefined`.
+    pub fn open(&self, relay_message: &str) -> Option<String> {
+        self.inner
+            .open(relay_message, signal::now_unix_secs())
+            .map(|opened| opened.to_json())
+    }
+}
+
 type DurableStores = (Arc<LogStore<OpfsFile>>, Arc<LogStore<OpfsFile>>);
 
 fn js(error: NodeError) -> JsError {
