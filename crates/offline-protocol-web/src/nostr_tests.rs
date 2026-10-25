@@ -463,10 +463,9 @@ fn junk_from_a_relay_moves_nothing() {
             .expect("nostr slot")
     };
     let before = watermark(&a.node);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs();
+    // Through the seam the browser can read (W4): the clock guard holds tests
+    // to it as well.
+    let now = crate::signal::now_unix_secs();
     let oversized = format!(
         "[\"EVENT\",\"{SUBSCRIPTION}\",{{\"content\":\"{}\"}}]",
         "A".repeat(70 * 1024)
