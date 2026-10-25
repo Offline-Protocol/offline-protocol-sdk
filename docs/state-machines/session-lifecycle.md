@@ -26,6 +26,7 @@ stateDiagram-v2
     [*] --> None
     None --> KeyPackageSent: push our key package
     None --> Establishing: peer's key package received
+    None --> Establishing: peer's published key package fetched from a relay
     KeyPackageSent --> Joined: peer built a Welcome against it
     KeyPackageSent --> KeyPackageSent: no session after the interval, push again
 
@@ -139,6 +140,37 @@ The recipient's side has three rules of its own:
   package would make both sides build a group for the tiebreak to discard,
   every frame of both crossing each device in between. The fresh package a
   new session sends for group invites still goes, after the Welcome.
+
+### A peer only a relay reaches is asked about
+
+**A session wanted with a peer this device holds no key package for is
+enough to ask every carrier that can produce one.** For a peer known only by
+address and reachable only through a Nostr relay, that carrier is the relay:
+the peer published single-use key packages there ([the Nostr
+guide](../nostr.md#published-key-packages-and-cold-first-contact)), and
+fetching one is the whole of cold first contact.
+
+Nothing asked before this rule (issue #633). A send with no session only
+queues, so no frame is built for the transport to attach a lookup to;
+discovery's first push never names a peer that has sent nothing; and the
+mesh push above stands down whenever Nostr claims to reach the peer. The
+records were published and never fetched.
+
+So three places ask the relays, each only where it has found no key package:
+a send, an explicit `establish_secure_session`, and the reconciliation tick
+for each peer holding a queued message that has never been pushed to. The
+tick is what repeats it: a lookup no relay could answer (none held a record
+yet, or none was live) is otherwise never asked again while the message
+waits. The transport allows one lookup per peer every 5 minutes, and that
+check runs before the session check so that a waiting peer costs one
+storage read per interval rather than one per tick.
+
+No lookup is made for a blocked peer, with cold contact off, for a peer that
+already has a session, or for a peer on a live mesh link: the link carries
+the exchange within a tick, and a lookup would only tell the relays which
+address this device wants. A fetched package is handled as a pushed one is,
+so the session is built on arrival and our own package goes back, which is
+what heals a fetched package that was already consumed.
 
 ### An unconfirmed session holds one probe
 

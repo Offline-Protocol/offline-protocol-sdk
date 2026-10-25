@@ -431,9 +431,11 @@ pub struct TransportConfig {
     /// which is itself off by default, so nothing is published unless an app
     /// deliberately turns Nostr on.
     ///
-    /// Buys **cold first contact**: a peer known only by username becomes
+    /// Buys **cold first contact**: a peer known only by address becomes
     /// reachable over Nostr with no prior key-package exchange over some other
-    /// transport, which is otherwise impossible. It also bounds the sealing
+    /// transport, which is otherwise impossible. A send to, or a session
+    /// asked for with, a peer this device holds no key package for asks the
+    /// relays for one that peer published. It also bounds the sealing
     /// downgrade that follows a peer-key eviction, since a forgotten key is
     /// re-resolved on the next send instead of waiting for a fresh exchange.
     ///

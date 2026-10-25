@@ -418,6 +418,20 @@ impl TransportManager {
             .unwrap_or(false)
     }
 
+    /// Whether asking the relays for `peer_id`'s published key packages would
+    /// queue a query now. `false` when Nostr is not installed. Reads only.
+    pub fn nostr_resolution_due(&self, peer_id: &str) -> bool {
+        self.nostr_transport()
+            .is_some_and(|nostr| nostr.resolution_due(peer_id))
+    }
+
+    /// Asks the relays for `peer_id`'s published key packages. Returns whether
+    /// a query was queued; `false` when Nostr is not installed.
+    pub fn request_nostr_key_packages(&self, peer_id: &str) -> bool {
+        self.nostr_transport()
+            .is_some_and(|nostr| nostr.request_peer_key_packages(peer_id))
+    }
+
     /// Enables or disables username discovery on the Nostr transport.
     pub fn set_nostr_username_discovery_enabled(&mut self, enabled: bool) {
         if let Some(nostr) = self.nostr_transport() {

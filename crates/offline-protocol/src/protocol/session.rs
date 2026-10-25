@@ -1792,7 +1792,9 @@ impl OfflineProtocol {
     ///
     /// Only a peer already pushed to qualifies; the first push belongs to
     /// discovery, except for a peer only the mesh reaches, which discovery
-    /// never names (see [`Self::push_key_package_across_mesh`]). The stamp is taken before the send, so a send that fails
+    /// never names (see [`Self::push_key_package_across_mesh`]), and a peer
+    /// only a relay reaches, whose published package is fetched instead (see
+    /// [`Self::request_nostr_key_package_for`]). The stamp is taken before the send, so a send that fails
     /// still waits out the interval instead of being retried on every tick.
     /// A send that fails does not count as a repeat, though: the backoff is
     /// for a peer that was asked and did not answer, and a peer whose frame
@@ -1814,6 +1816,13 @@ impl OfflineProtocol {
         }
         let Some((sent_at, repeats)) = self.key_package_sent_to.get_mut(peer_id) else {
             self.push_key_package_across_mesh(peer_id);
+            // A peer only a relay reaches is asked about instead, on the
+            // transport's own interval: a query no relay answered (none held
+            // a record yet, or none was live) is not asked again by anything
+            // else while the message waits.
+            if !self.pending_key_packages.contains_key(peer_id) {
+                self.request_nostr_key_package_for(peer_id);
+            }
             return;
         };
         if sent_at.elapsed() < StdDuration::from_secs(key_package_resend_wait_secs(*repeats)) {
@@ -1864,7 +1873,8 @@ impl OfflineProtocol {
     ///   addresses the application asked to reach, never to whoever is heard.
     /// - **Only when nothing else reaches the peer.** A direct link means
     ///   discovery has already pushed, and an infrastructure carrier has its
-    ///   own exchange; both are left alone.
+    ///   own exchange (for Nostr, fetching the peer's published package; see
+    ///   [`Self::request_nostr_key_package_for`]); both are left alone.
     /// - **Only once by this route.** A push that a neighbour took is recorded
     ///   like any other, so every repeat after it is the re-push ladder's, on
     ///   its doubling wait. A push nobody took is tried again on the next

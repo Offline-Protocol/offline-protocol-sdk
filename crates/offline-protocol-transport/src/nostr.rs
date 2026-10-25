@@ -932,24 +932,31 @@ impl NostrTransport {
         queued
     }
 
-    /// Queues a resolution without waking the platform.
+    /// Whether a request for `user_id`'s published key packages would be
+    /// queued now, without queueing one.
     ///
-    /// Used from the send path, which is already running inside the platform's
-    /// poll loop: waking it from there would re-enter the transport partway
-    /// through building an event, to tell it something it is about to look for
-    /// anyway.
-    fn enqueue_resolution(&self, user_id: &str) -> bool {
+    /// The engine asks this before it reads storage to decide whether it
+    /// wants the packages at all, so that a peer with a message waiting costs
+    /// one storage read per `RESOLUTION_RETRY_INTERVAL` rather than one per
+    /// tick. It is advisory: the answer can change before
+    /// [`Self::request_peer_key_packages`] runs, which re-checks everything.
+    pub fn resolution_due(&self, user_id: &str) -> bool {
+        self.admissible_resolution(user_id).is_some()
+    }
+
+    /// The checks a resolution request must pass, read without changing
+    /// anything: cold contact on, the id an address, the rate limit lapsed,
+    /// and room in the queue for an id not already in it.
+    fn admissible_resolution(&self, user_id: &str) -> Option<Address> {
         // A queued id becomes the `#p` tag of a relay query, so it is held to
         // the same address requirement as a send recipient — and held here,
         // at the queue's only gate, so `next_query` can never pop an id whose
         // tag derivation fails after the entry was already consumed. Subsumes
         // the emptiness check this replaces: an empty id is not an address.
         if !self.cold_contact_enabled() {
-            return false;
+            return None;
         }
-        let Ok(address) = user_id.parse::<Address>() else {
-            return false;
-        };
+        let address = user_id.parse::<Address>().ok()?;
 
         // Read the rate limit without stamping it. Stamping here would burn the
         // whole interval on a request the queue then refuses, so a peer dropped
@@ -960,12 +967,40 @@ impl NostrTransport {
             let attempts = self.resolve_attempts.lock_or_recover();
             if let Some(last) = attempts.get(user_id) {
                 if last.elapsed() < RESOLUTION_RETRY_INTERVAL {
-                    return false;
+                    return None;
                 }
             }
         }
 
+        let queue = self.resolve_queue.lock_or_recover();
+        if queue.iter().any(|q| *q == address) || queue.len() >= MAX_PENDING_RESOLUTIONS {
+            return None;
+        }
+        Some(address)
+    }
+
+    /// Forgets every resolution attempt, as if `RESOLUTION_RETRY_INTERVAL`
+    /// had lapsed for every peer. For tests that drive a retry without
+    /// waiting out the interval.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn forget_resolution_attempts_for_test(&self) {
+        self.resolve_attempts.lock_or_recover().clear();
+    }
+
+    /// Queues a resolution without waking the platform.
+    ///
+    /// Used from the send path, which is already running inside the platform's
+    /// poll loop: waking it from there would re-enter the transport partway
+    /// through building an event, to tell it something it is about to look for
+    /// anyway.
+    fn enqueue_resolution(&self, user_id: &str) -> bool {
+        let Some(address) = self.admissible_resolution(user_id) else {
+            return false;
+        };
+
         {
+            // Checked again under the lock that pushes, so two callers racing
+            // past the read above cannot queue one peer twice or overrun the cap.
             let mut queue = self.resolve_queue.lock_or_recover();
             if queue.iter().any(|q| *q == address) {
                 return false;
@@ -3794,6 +3829,34 @@ mod tests {
             "a peer who has published nothing must not mint a round-trip per frame"
         );
         assert!(transport.request_peer_key_packages(&addr("carol")));
+    }
+
+    /// The probe says what a request would do and does none of it: the engine
+    /// asks it before a storage read, so a probe that queued or stamped would
+    /// spend the interval on a peer the engine then decides not to ask for.
+    #[test]
+    fn test_resolution_due_agrees_with_the_request_and_changes_nothing() {
+        let transport = NostrTransport::new(addr("alice")).unwrap();
+        assert!(transport.resolution_due(&addr("bob")));
+        assert!(
+            transport.resolution_due(&addr("bob")),
+            "asking twice changes nothing"
+        );
+        assert!(
+            transport.next_query().unwrap().is_none(),
+            "the probe queued nothing"
+        );
+
+        assert!(transport.request_peer_key_packages(&addr("bob")));
+        assert!(
+            !transport.resolution_due(&addr("bob")),
+            "queued, then rate-limited"
+        );
+        assert!(transport.resolution_due(&addr("carol")));
+        assert!(!transport.resolution_due("not-an-address"));
+
+        transport.set_cold_contact_enabled(false);
+        assert!(!transport.resolution_due(&addr("carol")));
     }
 
     #[test]
