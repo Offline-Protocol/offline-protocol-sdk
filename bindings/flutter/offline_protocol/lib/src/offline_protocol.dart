@@ -432,6 +432,20 @@ class OfflineProtocol {
   ) =>
       _wifiDirectAutoEnableConfig(root);
 
+  /// Nostr auto-enable after [start]. Exposed for tests.
+  @visibleForTesting
+  static Map<String, dynamic>? resolveNostrAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) =>
+      _nostrAutoEnableConfig(root);
+
+  /// Reticulum auto-enable after [start]. Exposed for tests.
+  @visibleForTesting
+  static Map<String, dynamic>? resolveReticulumAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) =>
+      _reticulumAutoEnableConfig(root);
+
   static Map<String, dynamic>? _internetAutoEnableConfig(Map<String, dynamic> root) {
     final transports = root['transports'];
     Map<String, dynamic> internet = {};
@@ -493,6 +507,32 @@ class OfflineProtocol {
     return {...wifi, 'enabled': true};
   }
 
+  /// `transports.nostr` when enabled with at least one relay URL, as the React
+  /// Native `start()` does. The engine host builds the Nostr manager at
+  /// [createFromConfig] but only `enableTransport` starts it, so without this a
+  /// config that asks for Nostr runs without it and nothing says so.
+  static Map<String, dynamic>? _nostrAutoEnableConfig(Map<String, dynamic> root) {
+    final transports = root['transports'];
+    if (transports is! Map || transports['nostr'] is! Map) return null;
+    final nostr = Map<String, dynamic>.from(transports['nostr'] as Map);
+    final relayUrls = nostr['relayUrls'];
+    if (nostr['enabled'] != true || relayUrls is! List || relayUrls.isEmpty) {
+      return null;
+    }
+    return nostr;
+  }
+
+  /// `transports.reticulum` when enabled, as the React Native `start()` does.
+  static Map<String, dynamic>? _reticulumAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) {
+    final transports = root['transports'];
+    if (transports is! Map || transports['reticulum'] is! Map) return null;
+    final reticulum = Map<String, dynamic>.from(transports['reticulum'] as Map);
+    if (reticulum['enabled'] != true) return null;
+    return reticulum;
+  }
+
   static Future<void> _autoEnableTransportsIfConfigured() async {
     final root = _lastCreateConfig;
     if (root == null) return;
@@ -504,6 +544,31 @@ class OfflineProtocol {
       } catch (e, st) {
         debugPrint(
           '[OfflineProtocol] Failed to auto-enable internet transport: $e\n$st',
+        );
+      }
+    }
+
+    final nostrConfig = _nostrAutoEnableConfig(root);
+    if (nostrConfig != null) {
+      try {
+        await enableTransport('nostr', nostrConfig);
+      } catch (e, st) {
+        // Nothing retries this: the app is offline over Nostr for the whole
+        // session. Nostr also needs the identity MLS initialization creates.
+        debugPrint(
+          '[OfflineProtocol] Nostr transport is configured but was NOT enabled '
+          '(it needs the identity MLS initialization creates): $e\n$st',
+        );
+      }
+    }
+
+    final reticulumConfig = _reticulumAutoEnableConfig(root);
+    if (reticulumConfig != null) {
+      try {
+        await enableTransport('reticulum', reticulumConfig);
+      } catch (e, st) {
+        debugPrint(
+          '[OfflineProtocol] Failed to auto-enable Reticulum transport: $e\n$st',
         );
       }
     }

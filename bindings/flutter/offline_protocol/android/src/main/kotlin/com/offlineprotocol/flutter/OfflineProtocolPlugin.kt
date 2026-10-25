@@ -6,12 +6,14 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.content.Context
 import android.util.Log
 import java.util.Collections
 import com.offlineprotocol.EventReplayRing
 import com.offlineprotocol.ForegroundReconnectPolicy
 import com.offlineprotocol.ProtocolEngineHost
 import com.offlineprotocol.StickyEventBuffer
+import com.offlineprotocol.ProtocolConfigParser
 import com.offlineprotocol.StickyEventDispatcher
 import com.offlineprotocol.TeardownSequence
 import com.offlineprotocol.mapProtocolBridgeError
@@ -150,8 +152,11 @@ class OfflineProtocolPlugin :
         if (::channel.isInitialized) {
             channel.setMethodCallHandler(null)
         }
+        // Captured before it is cleared: teardown stops the mesh foreground
+        // service with it, and without one the notification outlives the engine.
+        val ctx = applicationContext
         applicationContext = null
-        runOnEngine("detach teardown") { tearDownProtocol() }
+        runOnEngine("detach teardown") { tearDownProtocol(ctx) }
     }
 
     private fun runOnEngine(what: String, block: () -> Unit) {
@@ -311,6 +316,8 @@ class OfflineProtocolPlugin :
                         call.arguments,
                     )
                     mainHandler.post { result.success(payload) }
+                } catch (e: FlutterEngineChannel.UnknownMethod) {
+                    mainHandler.post { result.notImplemented() }
                 } catch (e: Throwable) {
                     Log.e(TAG, "${call.method} failed", e)
                     mainHandler.post {
@@ -398,6 +405,9 @@ class OfflineProtocolPlugin :
         }
 
     private fun createOnEngine(configJson: String) {
+        // Validated before the running engine is torn down: a config that does
+        // not parse must leave the current session as it was (iOS does the same).
+        ProtocolConfigParser.parse(configJson)
         tearDownProtocol()
         val ctx = applicationContext ?: throw IllegalStateException("Plugin not attached")
         engineHost.create(
@@ -456,7 +466,14 @@ class OfflineProtocolPlugin :
         oneShotEvents.beginSession()
         inboundEvents.beginSession()
         engineHost.startProtocolCore()
-        engineHost.startBleTransportIfPresent()
+        // The core is running by now: a BLE failure (permission denied, radio
+        // off) is logged, as React Native does, so start() still succeeds and
+        // the other transports and the foreground service come up.
+        try {
+            engineHost.startBleTransportIfPresent()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start BLE manager", e)
+        }
         val ctx = applicationContext
         if (ctx != null) {
             FlutterMeshForegroundKeepAlive.start(ctx, ::handleUserRequestedMeshStop)
@@ -495,10 +512,10 @@ class OfflineProtocolPlugin :
         teardown.firstFailureOrNull()?.let { throw it }
     }
 
-    private fun tearDownProtocol() {
+    private fun tearDownProtocol(context: Context? = applicationContext) {
         oneShotEvents.endSession()
         inboundEvents.endSession()
-        applicationContext?.let { FlutterMeshForegroundKeepAlive.stop(it) }
+        context?.let { FlutterMeshForegroundKeepAlive.stop(it) }
         engineHost.backgroundProcessor.stopProcessScheduler()
         val teardown = TeardownSequence()
         teardown.step("BLE manager") { engineHost.bleTransport?.stop() }

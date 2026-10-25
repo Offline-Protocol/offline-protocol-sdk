@@ -21,6 +21,9 @@ object FlutterEngineChannel {
         val discardOneShotEvent: (key: String) -> Unit,
     )
 
+    /** A name outside the manifest. The plugin answers `notImplemented`, as iOS does. */
+    class UnknownMethod(method: String) : IllegalArgumentException("Unknown method: $method")
+
     @Throws(Throwable::class)
     fun dispatch(
         host: ProtocolEngineHost,
@@ -199,6 +202,6 @@ object FlutterEngineChannel {
 "wifiDirectPeerDisconnected" -> EngineMethodHandlers.wifiDirectPeerDisconnected(host, env, arguments)
 "wifiDirectStatusChanged" -> EngineMethodHandlers.wifiDirectStatusChanged(host, env, arguments)
 "wipePersistedState" -> EngineMethodHandlers.wipePersistedState(host, env, arguments)
-        else -> throw IllegalArgumentException("Unknown method: $method")
+        else -> throw UnknownMethod(method)
     }
 }

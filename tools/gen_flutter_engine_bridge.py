@@ -56,6 +56,9 @@ def render() -> str:
                 val discardOneShotEvent: (key: String) -> Unit,
             )
 
+            /** A name outside the manifest. The plugin answers `notImplemented`, as iOS does. */
+            class UnknownMethod(method: String) : IllegalArgumentException("Unknown method: $method")
+
             @Throws(Throwable::class)
             fun dispatch(
                 host: ProtocolEngineHost,
@@ -64,7 +67,7 @@ def render() -> str:
                 arguments: Any?,
             ): Any? = when (method) {{
         {chr(10).join(arms)}
-                else -> throw IllegalArgumentException("Unknown method: $method")
+                else -> throw UnknownMethod(method)
             }}
         }}
         """

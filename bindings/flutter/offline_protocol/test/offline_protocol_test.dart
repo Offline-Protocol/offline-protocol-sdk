@@ -76,6 +76,56 @@ void main() {
     expect(config['autoAccept'], isTrue);
   });
 
+  test('resolveNostrAutoEnableConfig needs enabled and a relay URL', () {
+    final config = OfflineProtocol.resolveNostrAutoEnableConfig({
+      'transports': {
+        'nostr': {
+          'enabled': true,
+          'relayUrls': ['wss://relay.example.com'],
+        },
+      },
+    });
+    expect(config, isNotNull);
+    expect(config!['relayUrls'], ['wss://relay.example.com']);
+    expect(
+      OfflineProtocol.resolveNostrAutoEnableConfig({
+        'transports': {
+          'nostr': {'enabled': true, 'relayUrls': <String>[]},
+        },
+      }),
+      isNull,
+    );
+    expect(
+      OfflineProtocol.resolveNostrAutoEnableConfig({
+        'transports': {
+          'nostr': {
+            'enabled': false,
+            'relayUrls': ['wss://relay.example.com'],
+          },
+        },
+      }),
+      isNull,
+    );
+  });
+
+  test('resolveReticulumAutoEnableConfig nested transports.reticulum', () {
+    final config = OfflineProtocol.resolveReticulumAutoEnableConfig({
+      'transports': {
+        'reticulum': {'enabled': true, 'daemonAddress': '10.0.0.2:4242'},
+      },
+    });
+    expect(config, isNotNull);
+    expect(config!['daemonAddress'], '10.0.0.2:4242');
+    expect(
+      OfflineProtocol.resolveReticulumAutoEnableConfig({
+        'transports': {
+          'reticulum': {'enabled': false},
+        },
+      }),
+      isNull,
+    );
+  });
+
   test('nativeMethodChannelMethods includes replay and enableTransport', () {
     expect(
       OfflineProtocol.nativeMethodChannelMethods,

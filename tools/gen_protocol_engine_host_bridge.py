@@ -180,6 +180,9 @@ HEADER = textwrap.dedent(
 
         private fun ubyteList(map: Map<String, Any?>, key: String): List<UByte> {
             val raw = map[key] ?: return emptyList()
+            // Flutter's standard codec hands a Dart Uint8List over as a
+            // ByteArray; iOS takes the same value as FlutterStandardTypedData.
+            if (raw is ByteArray) return raw.map { it.toUByte() }
             if (raw is List<*>) {
                 return raw.map {
                     when (it) {

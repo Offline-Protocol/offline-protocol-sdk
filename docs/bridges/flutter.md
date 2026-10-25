@@ -140,8 +140,11 @@ possible. Other event types still require an attached listener at emit time.
 `createFromConfig` accepts JSON (camelCase or snake_case). Native
 `ProtocolConfigParser` and `InitialRuntimeConfigApplier` are shared with React
 Native ([C6](README.md#c6-config-parsers-must-not-default-to-literals)). Dart
-may auto-enable transports after `start()` mirroring the React Native JS layer
-(Internet, Wi‑Fi Direct).
+auto-enables transports after `start()` as the React Native JS layer does
+(Internet, Nostr with at least one relay URL, Reticulum, Wi-Fi Direct). The
+engine host builds the Nostr and Reticulum managers at `create` but only
+`enableTransport` starts them, so without this step a config that enables
+either runs without it and nothing reports it.
 
 ## F5b. iOS BLE and `Info.plist`
 

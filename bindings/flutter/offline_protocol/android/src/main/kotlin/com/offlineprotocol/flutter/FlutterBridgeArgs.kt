@@ -46,6 +46,8 @@ internal object FlutterBridgeArgs {
 
     fun requireUByteList(map: Map<*, *>, key: String): List<UByte> {
         val raw = map[key] ?: throw IllegalArgumentException("Missing '$key'")
+        // A Dart Uint8List arrives as a ByteArray (the standard codec).
+        if (raw is ByteArray) return raw.map { it.toUByte() }
         if (raw is List<*>) {
             return raw.map {
                 when (it) {

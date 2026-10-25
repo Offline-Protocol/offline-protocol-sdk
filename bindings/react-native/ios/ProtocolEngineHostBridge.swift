@@ -708,7 +708,9 @@ enum ProtocolEngineHostBridge {
 
     static func getMedianLatency(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let latency = try host.requireProtocol().getMedianLatency()
-        return latency == 0 ? nil : Double(latency)
+        // An integer, as Android's `toLong()`: Dart sees `int` on both
+        // platforms, where a Double here would be a `double` on iOS only.
+        return latency == 0 ? nil : Int64(truncatingIfNeeded: latency)
     }
 
     static func getMeshRelayStats(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
