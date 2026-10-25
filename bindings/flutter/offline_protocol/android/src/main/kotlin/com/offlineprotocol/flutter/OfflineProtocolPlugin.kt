@@ -510,21 +510,28 @@ class OfflineProtocolPlugin :
         }
     }
 
+    /**
+     * Destroy, detach and re-create. The order is [stopOnEngine]'s, for the
+     * same reason: the foreground service stops after every transport, so a
+     * backgrounded process is not cached while the sockets close. Each step
+     * runs even when an earlier one throws.
+     */
     private fun tearDownProtocol(context: Context? = applicationContext) {
         oneShotEvents.endSession()
         inboundEvents.endSession()
-        context?.let { FlutterMeshForegroundKeepAlive.stop(it) }
-        engineHost.backgroundProcessor.stopProcessScheduler()
         val teardown = TeardownSequence()
+        teardown.step("process scheduler") { engineHost.backgroundProcessor.stopProcessScheduler() }
         teardown.step("BLE manager") { engineHost.bleTransport?.stop() }
         teardown.step("Internet manager") { engineHost.internetManager?.stop() }
         teardown.step("Wi-Fi Direct manager") { engineHost.wifiDirectManager?.stop() }
         teardown.step("Reticulum manager") { engineHost.reticulumManager?.stop() }
         teardown.step("Nostr manager") { engineHost.nostrManager?.stop() }
-        try {
-            engineHost.protocol?.stop()
-        } catch (e: Exception) {
-            Log.w(TAG, "stop during teardown", e)
+        teardown.step("mesh foreground service") {
+            context?.let { FlutterMeshForegroundKeepAlive.stop(it) }
+        }
+        teardown.step("protocol core") { engineHost.protocol?.stop() }
+        for (failure in teardown.failures) {
+            Log.w(TAG, "Teardown step failed: ${failure.step}", failure.cause)
         }
         engineHost.releaseHandlesAfterStop()
         synchronized(eventSeqLock) {
