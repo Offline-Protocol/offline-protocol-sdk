@@ -216,6 +216,13 @@ pub struct EncryptionConfig {
     /// injection rather than a real fork — is visible to the app. The residual
     /// is bounded re-key churn on a single pair: delivery delayed, never lost.
     /// `OfflineProtocol::schedule_session_rekey` carries the full analysis.
+    ///
+    /// **The split-session heal is not governed by this switch.** Any ordinary
+    /// decrypt failure on a 1:1 session asks the peer to corroborate it, and
+    /// only a signed answer to that side's own live challenge, showing the two
+    /// hold different groups, makes the greater side give up its group (ADR
+    /// 0033). That trigger is authenticated, unlike the epoch re-key above, so
+    /// turning recovery off does not turn it off.
     pub crypto_recovery_enabled: bool,
 
     /// Whether service request and response bodies (`__SVC_REQ__`,
