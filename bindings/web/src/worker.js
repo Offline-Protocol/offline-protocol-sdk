@@ -125,7 +125,18 @@ function guarded(run) {
 
 function relaysFor() {
   return {
-    subscription: (id) => engine.nostrSubscription(id),
+    // Not `guarded`: it returns text rather than running the engine, and the
+    // driver treats a throw as a relay lost. A trap is still fatal here, as
+    // everywhere: without this the driver would take it for a lost relay and
+    // call the stopped module again on every redial.
+    subscription: (id) => {
+      try {
+        return engine.nostrSubscription(id);
+      } catch (error) {
+        if (trapped(error)) die(error);
+        throw error;
+      }
+    },
     event: guarded((text) => engine.nostrRelayEvent(text)),
     status: guarded((live) => engine.nostrStatusChanged(live)),
     confirmed: guarded((messageId) => engine.nostrConfirmSent(messageId)),

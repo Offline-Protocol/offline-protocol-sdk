@@ -80,13 +80,14 @@ export class OfflineNode extends EventTarget {
         tabs,
         instance,
         wasm,
+        // The worker applies the defaults; it is the one place that does.
         nostr:
           nostr === undefined
             ? undefined
             : {
                 relays: [...nostr.relays],
-                coldContact: nostr.coldContact ?? true,
-                usernameDiscovery: nostr.usernameDiscovery ?? false,
+                coldContact: nostr.coldContact,
+                usernameDiscovery: nostr.usernameDiscovery,
               },
       });
     } catch (error) {
