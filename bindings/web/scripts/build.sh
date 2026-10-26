@@ -31,6 +31,16 @@ dir="$PROFILE"
 wasm-bindgen --target web --out-dir bindings/web/pkg \
   "target/wasm32-unknown-unknown/$dir/offline_protocol_web.wasm"
 
+# One id over every file the lobby's service worker caches, so a change to
+# any of them installs a new cache whole (docs/bridges/web.md, W15).
+# ponytail: names the lobby's own files; take the list as arguments when a
+# second page caches the SDK.
+id="$(cat bindings/web/pkg/offline_protocol_web.js bindings/web/pkg/offline_protocol_web_bg.wasm \
+  bindings/web/src/*.js examples/web-lobby/{index.html,sw.js,engine-worker.js} \
+  examples/web-lobby/{manifest.webmanifest,icon.svg} \
+  | shasum -a 256 | cut -c1-16)"
+echo "self.BUILD_ID = \"$id\";" > bindings/web/pkg/build-id.js
+
 size="$(wc -c < bindings/web/pkg/offline_protocol_web_bg.wasm | tr -d ' ')"
 gz="$(gzip -9 -c bindings/web/pkg/offline_protocol_web_bg.wasm | wc -c | tr -d ' ')"
 echo "bindings/web/pkg: module $size bytes, $gz gzipped"

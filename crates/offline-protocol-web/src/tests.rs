@@ -399,6 +399,45 @@ fn the_browser_tests_run_in_ci() {
     }
 }
 
+/// The lobby's service worker caches every file the SDK loads (W15). A file
+/// it leaves out still loads online, where everyone works, and the page
+/// fails only offline, when its node starts and the worker imports it.
+#[test]
+fn the_lobby_caches_every_sdk_file() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Some(sw) = read_repo_file(&root.join("examples/web-lobby/sw.js")) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(root.join("bindings/web/src")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(stem) = name.strip_suffix(".js") else {
+            continue;
+        };
+        assert!(
+            sw.contains(&format!("\"{stem}\"")),
+            "examples/web-lobby/sw.js does not cache bindings/web/src/{name}"
+        );
+    }
+    for needle in [
+        "pkg/offline_protocol_web.js",
+        "pkg/offline_protocol_web_bg.wasm",
+        "pkg/build-id.js",
+    ] {
+        assert!(
+            sw.contains(needle),
+            "examples/web-lobby/sw.js lost `{needle}`"
+        );
+    }
+    let build = read_repo_file(&root.join("bindings/web/scripts/build.sh")).expect("build.sh");
+    assert!(
+        build.contains("pkg/build-id.js"),
+        "build.sh no longer writes the build id the lobby's cache is named by"
+    );
+}
+
 /// A file named as a test fixture: a `test` or `tests` word in its name
 /// (`nostr_tests.rs`, `relay.test.ts`, `test-utils.js`) or a `Test`/`Tests`
 /// suffix on its stem (`ConsumerCheckTest.java`). A word, not a substring: a

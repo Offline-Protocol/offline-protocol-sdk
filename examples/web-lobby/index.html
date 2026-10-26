@@ -3,6 +3,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pong Lobby</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
 <style>
   :root { --bg: #fafaf7; --fg: #1c1c1a; --muted: #6b6b66; --line: #ddddd6; --accent: #2457c5; --court: #10100f; }
   @media (prefers-color-scheme: dark) {
@@ -36,6 +38,7 @@
   <div class="meta">This device</div>
   <code id="me">starting…</code>
   <div class="meta" id="role"></div>
+  <div class="row" id="update" hidden><span class="meta">A new version is ready.</span> <button id="reload" class="quiet">Update</button></div>
 </section>
 
 <section>
@@ -95,11 +98,31 @@ const status = (text) => ($("status").textContent = text);
 // One durable node per account per origin: a second tab of this browser
 // needs its own profile (?profile=b).
 const profile = new URLSearchParams(location.search).get("profile") ?? "player";
-const node = await OfflineNode.start({ appId: "web-pong-lobby", profile });
+// From inside the service worker's scope, so the engine loads offline too.
+const workerUrl = new URL("./engine-worker.js", import.meta.url);
+const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl });
 const rtc = new WebRtcCarrier(node);
 $("me").textContent = node.address;
 node.addEventListener("fatal", ({ detail }) => status(`the node ended: ${detail}. Reload to start it again.`));
 addEventListener("pagehide", () => rtc.close());
+
+// Offline once opened online (W15). A new version waits until the node has
+// stopped: the page and its worker must run the same build.
+const registration = await navigator.serviceWorker?.register("./sw.js").catch(() => null);
+function offerUpdate() {
+  if (!registration?.waiting || !navigator.serviceWorker.controller) return;
+  $("update").hidden = false;
+}
+offerUpdate();
+registration?.addEventListener("updatefound", () => {
+  registration.installing?.addEventListener("statechange", offerUpdate);
+});
+$("reload").onclick = async () => {
+  $("reload").disabled = true;
+  await node.stop().catch(() => {});
+  navigator.serviceWorker.addEventListener("controllerchange", () => location.reload(), { once: true });
+  registration.waiting?.postMessage("activate");
+};
 
 let groupId = null;
 let hosting = false;

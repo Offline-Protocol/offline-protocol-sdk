@@ -16,6 +16,8 @@ python3 -m http.server 8000 --bind 0.0.0.0                   # from the reposito
 
 The identity survives a reload: the same profile is the same `off1…` address, and still a member of the group.
 
+**With no network at all.** Once opened online, the page loads offline: a service worker (`sw.js`) caches the page, the SDK and the engine module as one build, and the browser can install it as an app. Two devices on a Wi-Fi network with no internet, or on a phone's hotspot, still connect with two codes. A new build shows **Update**, which stops the node before the new build takes over, because the page and its worker must run the same build ([W15](../../docs/bridges/web.md#w15-a-page-that-loads-offline-caches-one-build-whole)). Editing the page needs `bindings/web/scripts/build.sh` again, which names the cache; until then the browser serves the cached page, so tick **Update on reload** in the developer tools while working on it.
+
 Before a release, [docs/bridges/web-devices.md](../../docs/bridges/web-devices.md) is the checklist for running this page on a laptop and a phone.
 
 **When a device goes away.** A phone that leaves the page, locks its screen or loses the network drops its link. Both pages say so: "connection unstable" while the browser still waits for an answer, then that the other device disconnected, with what to press to carry on. Two new codes bring it back with no second invite, as both devices are still in the group. A host that reloads comes back hosting the same game; **End this game** forgets it. A host that cannot add a device, or whose game updates stop reaching it, says why on screen.
