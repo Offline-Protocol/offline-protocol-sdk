@@ -26,12 +26,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   example loads offline, and carries a manifest to install it as an app
   (not yet run on a phone, which is step 9 of the two-device checklist): a
   service worker caches the page, the SDK and the engine module as one
-  build, named by an id `scripts/build.sh` writes, and a new build takes
-  over only when a page asks, whereupon every open page stops its node and
-  reloads. The engine's worker starts from inside the service worker's
-  scope, or offline its script comes from the network. The SDK ships no
-  service worker; the lobby's is the worked example, and the browser run
-  reloads it offline in three engines
+  build, named by an id `scripts/build-id.sh` writes, and a new build
+  takes over only when a page asks, whereupon every page with a running
+  node stops it and reloads. The engine's worker starts from inside the
+  service worker's scope, or offline its script comes from the network.
+  The SDK ships no service worker; the lobby's is the worked example, and
+  the browser run reloads it offline in three engines
   ([W15](docs/bridges/web.md#w15-a-page-that-loads-offline-caches-one-build-whole)).
 
 - **A browser links to a phone or a board over Bluetooth LE.** In

@@ -608,30 +608,30 @@ builds fail in ways no test covers. The cache is named for a build id that
 a change to a served file that needs no Rust build must run it before it is
 served, or the change reaches no device that has the page). A deploy
 publishes `pkg/build-id.js` last, or swaps the whole tree at once: an update
-check that reads a new id while other files are still the old build's
-caches a mixed set under that id, and keeps it until the next one. The cache
-is filled with
-`addAll`, which keeps a cache complete or absent; it skips the HTTP cache,
-which could hand back the last build's glue beside this build's module. Only
-the current build's cache answers, and the update check fetches the build
-id past the HTTP cache too (`updateViaCache: "none"`): the service worker's
-own script is the same in every build, so a stale build id hides a new
-build for as long as the HTTP cache calls it fresh, hours on a server that
-sends only `Last-Modified`. A new build never runs under a page of the old
-one: a worker the page starts again after a trap (W5) would load the new
-build under the old page. It waits until every page of the scope has closed,
-or until one page asks it to take over. Taking over moves every page of the
-scope at once and deletes the old build's cache, so every page, not only
-the one that asked, stops its node and reloads on `controllerchange`. A
-page with no running node, its start refused or not yet finished, does not:
-reloading at once, it would queue for the account's lock (W8) ahead of the
-tab still stopping the node it plays on, which would then come back
-refused. It asks its person to reload instead. A start still waiting for
-the lock would take it the moment that tab released it, reload or not, and
-hold it while it replayed the logs, which on a phone can outlast the two
-seconds the other tab's reload waits; so the page aborts it
-(`start({ signal })`), which ends its worker and with it the lock or its
-place in the queue.
+check that reads a new id while other files are still the old build's caches
+a mixed set under that id, and keeps it until the next one. The cache is
+filled with `addAll`, which keeps a cache complete or absent; it skips the
+HTTP cache, which could hand back the last build's glue beside this build's
+module. Only the current build's cache answers, a navigation to the page by
+any of its URLs (the directory, `index.html`, any query) is the cached page,
+and the update check fetches the build id past the HTTP cache too
+(`updateViaCache: "none"`): the service worker's own script is the same in
+every build, so a stale build id hides a new build for as long as the HTTP
+cache calls it fresh, hours on a server that sends only `Last-Modified`. A
+new build never runs under a page of the old one: a worker the page starts
+again after a trap (W5) would load the new build under the old page. It
+waits until every page of the scope has closed, or until one page asks it to
+take over. Taking over moves every page of the scope at once and deletes the
+old build's cache, so every page, not only the one that asked, stops its
+node and reloads on `controllerchange`. A page with no running node, its
+start refused or not yet finished, does not: reloading at once, it would
+queue for the account's lock (W8) ahead of the tab still stopping the node
+it plays on, which would then come back refused. It asks its person to
+reload instead. A start still waiting for the lock would take it the moment
+that tab released it, reload or not, and hold it while it replayed the logs,
+which on a phone can outlast the two seconds the other tab's reload waits;
+so the page aborts it (`start({ signal })`), which ends its worker and with
+it the lock or its place in the queue.
 
 **Registering comes before the node and never waits.** A page that throws
 before it registers, because its node could not start (a bad deploy, a
@@ -817,29 +817,30 @@ start there, because Firefox answers it by asking the user.
   `publicAddress` over a stubbed connection takes IPv4 on a dual-stack
   network (W13).
 
-- `offline.mjs`, after the pages: the lobby example opened once online,
-  then reloaded with the browser offline. It must come back controlled by
-  its service worker and as the same address, and a second profile's page
-  (a URL the cache was not filled with) must start a node too. Then, online,
-  a new build with two tabs open: Update in one must bring both onto the
-  new build as the same addresses, with only the new build's cache left,
-  and a third tab whose node was refused (its account open in the second,
-  W8) must be offered the update too, and must not reload on it, nor must a
-  fourth tab on that account still in its lock wait when Update is pressed
-  (W15). Reloading only the tab that pressed Update makes it fail, so does
-  registering after `start`, and so does reloading either of those tabs,
-  whose reload takes the second tab's account.
-  Starting the worker from `bindings/web/src/worker.js` instead makes it
-  fail in all three engines, which is how it was checked. The server
-  (`test/serve.py`) serves the repository root and marks every response
-  `no-store`: with Python's plain server, Chromium and Firefox answered the
-  out-of-scope worker from their HTTP cache and passed it.
-
   The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
   library. It keeps what is not ephemeral, replaces an addressable event by
   kind, author and `d` tag, and answers a subscription with what it holds,
   as the transport's key packages and directory records need; it verifies
   nothing, so the engine's own checks are what refuse a forged event.
+
+- `offline.mjs`, after the pages: the lobby example opened once online, then
+  reloaded with the browser offline. It must come back controlled by its
+  service worker and as the same address, and a second profile's page (a URL
+  the cache was not filled with) must start a node too, and so must the page
+  opened by `index.html`, answered by the same cached page. Then, online, a
+  new build with two tabs open: Update in one must bring both onto the new
+  build as the same addresses, with only the new build's cache left, and a
+  third tab whose node was refused (its account open in the second, W8) must
+  be offered the update too, and must not reload on it, nor must a fourth
+  tab on that account still in its lock wait when Update is pressed (W15).
+  Reloading only the tab that pressed Update makes it fail, so does
+  registering after `start`, and so does reloading either of those tabs,
+  whose reload takes the second tab's account. Starting the worker from
+  `bindings/web/src/worker.js` instead makes it fail in all three engines,
+  which is how it was checked. The server (`test/serve.py`) serves the
+  repository root and marks every response `no-store`: with Python's plain
+  server, Chromium and Firefox answered the out-of-scope worker from their
+  HTTP cache and passed it.
 
 `scripts/test-conformance.sh` runs
 `crates/offline-protocol-web/tests/browser_conformance.rs` in a dedicated

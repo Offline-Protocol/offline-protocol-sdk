@@ -1,6 +1,7 @@
 // The lobby, opened once online, loads and starts its node with no network
 // (W15): the same address after an offline reload, and a second profile's
-// node from the cached page under another query (the cache holds none).
+// node from the cached page under another query (the cache holds none),
+// and by index.html, which must be answered by the same cached page.
 // Then, online, a new build with two tabs open: pressing Update in one must
 // bring both onto the new build, each as the same address, because the new
 // build takes over every page of the scope at once. A third tab whose node
@@ -75,6 +76,12 @@ for (const name of names) {
       const second = await address(page);
       console.log(`offline second profile as ${second}`);
       if (second === online) verdict = "FAIL: a second profile came back as the first";
+    }
+
+    if (verdict === "PASS") {
+      await page.goto(`${lobby}index.html?profile=c-${run}`);
+      const third = await address(page);
+      console.log(`offline by index.html as ${third}`);
     }
 
     if (verdict === "PASS") {

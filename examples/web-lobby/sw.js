@@ -52,7 +52,11 @@ self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET" || new URL(request.url).origin !== location.origin) return;
   // Only this build's cache answers; anything it lacks goes to the network.
-  // ignoreSearch on a navigation, so ?profile=b loads offline too.
+  // A navigation to the page, by the directory or by index.html and with any
+  // query (?profile=b), is the cached page: one from the network would still
+  // be controlled, start the in-scope worker and drive this build's engine
+  // from another build's page, and offline it would not load at all.
+  const page = request.mode === "navigate" && /\/(index\.html)?$/.test(new URL(request.url).pathname);
   event.respondWith(caches.open(CACHE).then(async (cache) =>
-    (await cache.match(request, { ignoreSearch: request.mode === "navigate" })) ?? fetch(request)));
+    (await cache.match(page ? "./" : request)) ?? fetch(request)));
 });
