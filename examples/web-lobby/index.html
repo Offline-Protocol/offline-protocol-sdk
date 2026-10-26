@@ -145,8 +145,12 @@ navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((r
   };
 }, () => {});
 
-// From inside the service worker's scope, so the engine loads offline too.
-const workerUrl = new URL("./engine-worker.js", import.meta.url);
+// From inside the service worker's scope, so the engine loads offline too,
+// but only under a page the service worker serves. A page it does not (a
+// hard reload, the first visit) came from the network, while a worker in
+// the scope would still come from the cache: a new page driving an old
+// engine. Out of the scope, the worker comes from the network with it.
+const workerUrl = navigator.serviceWorker?.controller ? new URL("./engine-worker.js", import.meta.url) : undefined;
 const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl }).catch((error) => {
   startFailed = true;
   throw error;

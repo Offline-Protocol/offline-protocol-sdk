@@ -634,20 +634,26 @@ build, so it is never awaited: awaited between `start` and the listeners,
 it let the engine's first events, a tab carrier's `neighbor_discovered`
 among them, go to a target nobody listened on yet.
 
-**The engine's worker must be inside the scope.** A dedicated worker is
-matched to a service worker by its own URL, not by the page that started it.
-The lobby's scope is its own directory, so it starts the engine through a
-one-line module there (`engine-worker.js`, through `start({ workerUrl })`)
-that imports `worker.js`; the worker's imports and its module fetch are then
-its own requests, which the scope covers. Started from
-`bindings/web/src/worker.js` the worker loads online and fails offline, which
-is what `test/offline.mjs` was checked against. An application that serves
-the SDK under its own scope needs no such module.
+**The engine's worker must be inside the scope, under a page the scope
+serves.** A dedicated worker is matched to a service worker by its own URL,
+not by the page that started it. The lobby's scope is its own directory, so
+it starts the engine through a one-line module there (`engine-worker.js`,
+through `start({ workerUrl })`) that imports `worker.js`; the worker's
+imports and its module fetch are then its own requests, which the scope
+covers. Started from `bindings/web/src/worker.js` the worker loads online
+and fails offline, which is what `test/offline.mjs` was checked against. It
+does so only when the service worker controls the page: a page it does not
+control (a hard reload, the first visit) came from the network, and an
+in-scope worker under it would still come from the cache, the old build's
+engine under the new build's page. That page starts the worker from its
+default URL, out of the scope, so it comes from the network with the page.
+An application that serves the SDK under its own scope needs no such module.
 
 **The cache is not the node.** OPFS, IndexedDB and Web Locks are apart from
-the cache, so an update or an evicted cache leaves the identity as it was.
-Clearing a site's data clears both, and only the cache comes back with the
-next visit online. The first visit must be online. On iOS a page added to
+the cache, so an update, which replaces only the cache, leaves the identity
+as it was. A browser that evicts storage takes the origin's whole, the
+identity included unless `persist()` was granted, and clearing a site's data
+clears both; only the cache comes back with the next visit online. The first visit must be online. On iOS a page added to
 the home screen has storage apart from Safari's, so it is a second device
 with its own identity.
 
