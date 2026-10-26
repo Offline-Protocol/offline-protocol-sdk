@@ -593,6 +593,46 @@ devices the origin was granted, in range or not, and the browser's
 connect to one out of range may wait on its own timeout. An application
 that reconnects on load should bound the wait itself.
 
+### W15. A page that loads offline caches one build whole
+
+A node that links over a local network with no internet is no use if its
+page cannot load without one. A service worker makes it load: the lobby
+(`examples/web-lobby/sw.js`) is the worked example, and the SDK ships none,
+because the scope, the files and the update policy are the application's.
+
+**One build serves the page and the worker.** `index.js` on the page and
+`worker.js` speak a message protocol of their own, and the wasm-bindgen glue
+loads only the module it was built with, so a page and a worker from two
+builds fail in ways no test covers. The cache is named for a build id that
+`scripts/build.sh` derives from every file it holds, and filled with
+`addAll`, which keeps a cache complete or absent; it skips the HTTP cache,
+which could hand back the last build's glue beside this build's module. Only
+the current build's cache answers. A new build never takes over a running
+page: a worker the page starts again after a trap (W5) would load the new
+build under the old page. It waits until every page of the scope has closed,
+or until the page stops its node and asks it to take over.
+
+**The engine's worker must be inside the scope.** A dedicated worker is
+matched to a service worker by its own URL, not by the page that started it.
+The lobby's scope is its own directory, so it starts the engine through a
+one-line module there (`engine-worker.js`, through `start({ workerUrl })`)
+that imports `worker.js`; the worker's imports and its module fetch are then
+its own requests, which the scope covers. Started from
+`bindings/web/src/worker.js` the worker loads online and fails offline, which
+is what `test/offline.mjs` was checked against. An application that serves
+the SDK under its own scope needs no such module.
+
+**The cache is not the node.** OPFS, IndexedDB and Web Locks are apart from
+the cache, so an update or an evicted cache leaves the identity as it was.
+Clearing a site's data clears both, and only the cache comes back with the
+next visit online. The first visit must be online. On iOS a page added to
+the home screen has storage apart from Safari's, so it is a second device
+with its own identity.
+
+`the_lobby_caches_every_sdk_file` holds the cached list to every file in
+`bindings/web/src`: a file left out still loads online, where everyone
+works.
+
 ## Which shared rules apply
 
 | Rule | How it reaches the web binding |
@@ -628,6 +668,9 @@ that reconnects on load should bound the wait itself.
   handed to `OfflineNode.start({ wasm })` by a host whose worker starts from
   a Blob URL (an editor plugin, an extension), where a relative fetch has
   nothing to resolve against.
+- A service worker that caches the page, the SDK and the module as one
+  build, with the engine's worker inside its scope, if the page is to load
+  offline (W15).
 - Nothing about framing, identity, encryption or storage: those are the
   engine's. The client posts `stop` to the worker on `pagehide` itself.
 
@@ -732,6 +775,16 @@ start there, because Firefox answers it by asking the user.
   `admit` or no STUN server is refused, as is a closed one, and
   `publicAddress` over a stubbed connection takes IPv4 on a dual-stack
   network (W13).
+
+- `offline.mjs`, after the pages: the lobby example opened once online,
+  then reloaded with the browser offline. It must come back controlled by
+  its service worker and as the same address, and a second profile's page
+  (a URL the cache was not filled with) must start a node too (W15).
+  Starting the worker from `bindings/web/src/worker.js` instead makes it
+  fail in all three engines, which is how it was checked. The server
+  (`test/serve.py`) serves the repository root and marks every response
+  `no-store`: with Python's plain server, Chromium and Firefox answered the
+  out-of-scope worker from their HTTP cache and passed it.
 
   The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
   library. It keeps what is not ephemeral, replaces an addressable event by
