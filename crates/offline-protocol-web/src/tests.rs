@@ -468,13 +468,19 @@ fn the_lobby_caches_every_sdk_file() {
             "examples/web-lobby/sw.js does not cache examples/web-lobby/{name}"
         );
     }
-    // And the other way: an entry with no file fails the install whole.
-    for asset in quoted.iter().filter_map(|q| q.strip_prefix("./")) {
-        if !asset.is_empty() {
-            assert!(
-                lobby.join(asset).is_file(),
-                "examples/web-lobby/sw.js caches ./{asset}, which does not exist"
-            );
+    // And the other way: an entry with no file fails the install whole, so
+    // every device keeps the build it has and a first visit caches nothing.
+    for asset in &quoted {
+        match asset.strip_prefix("./") {
+            Some("") => {}
+            Some(file) => assert!(
+                lobby.join(file).is_file(),
+                "examples/web-lobby/sw.js caches ./{file}, which does not exist"
+            ),
+            None => assert!(
+                root.join(format!("bindings/web/src/{asset}.js")).is_file(),
+                "examples/web-lobby/sw.js caches bindings/web/src/{asset}.js, which does not exist"
+            ),
         }
     }
 

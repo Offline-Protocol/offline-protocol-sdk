@@ -54,7 +54,12 @@ for (const name of names) {
     page.on("pageerror", (error) => console.log("[page exception]", error.message));
     await page.goto(`${lobby}?profile=a-${run}`);
     const online = await address(page);
-    const state = await page.evaluate(async () => (await navigator.serviceWorker.ready).active.state);
+    // ready never settles when the install fails (a cached entry the server
+    // cannot serve), and evaluate has no deadline of its own.
+    const state = await Promise.race([
+      page.evaluate(async () => (await navigator.serviceWorker.ready).active.state),
+      new Promise((_, reject) => setTimeout(reject, timeout, new Error("the service worker never activated"))),
+    ]);
     console.log(`online as ${online}, service worker ${state}`);
 
     await context.setOffline(true);
