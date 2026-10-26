@@ -5,7 +5,8 @@
 // bring both onto the new build, each as the same address, because the new
 // build takes over every page of the scope at once. A third tab whose node
 // is refused (its account is open in the second, W8) must still be offered
-// the update, or a build whose node cannot start could never be replaced.
+// the update, and must not reload on it: reloading, it would take the
+// account from the second tab while that tab stops its node.
 //
 // Removing the page's workerUrl makes this fail: the engine's worker is then
 // outside the service worker's scope and its script comes from the network.
@@ -78,18 +79,20 @@ for (const name of names) {
       const before = await Promise.all(tabs.map(address));
       await Promise.all(tabs.map((tab) => tab.evaluate(() => (window.oldBuild = true))));
       const refused = await context.newPage();
-      const refusal = new Promise((resolve) => refused.once("pageerror", resolve));
+      const refusal = new Promise((resolve) => refused.once("pageerror", (error) => resolve(error.message)));
       await refused.goto(`${lobby}?profile=a-${run}`);
-      console.log(`a third tab on the second's account: ${(await refusal).message}`);
+      const refusedWith = await Promise.race([refusal, new Promise((resolve) => setTimeout(resolve, timeout, null))]);
+      console.log(`a third tab on the second's account: ${refusedWith}`);
+      if (!refusedWith?.includes("another node already runs this account")) {
+        throw new Error(`the third tab was not refused: ${refusedWith ?? "no error before the deadline"}`);
+      }
+      await refused.evaluate(() => (window.oldBuild = true));
       const id = `update${name}${run}`;
       writeFileSync(buildId, `self.BUILD_ID = "${id}";\n`);
       try {
         await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update());
         await page.locator("#update").waitFor({ state: "visible", timeout });
-        // Closed before the takeover: reloaded, it would race the second
-        // tab for the account's lock.
         await refused.locator("#update").waitFor({ state: "visible", timeout });
-        await refused.close();
         await page.click("#reload");
         for (const tab of tabs) {
           await tab.waitForFunction(
@@ -101,10 +104,13 @@ for (const name of names) {
       } finally {
         writeFileSync(buildId, realBuildId);
       }
+      await refused.locator("#status", { hasText: "A new version of this page is running" }).waitFor({ timeout });
+      const refusedReloaded = await refused.evaluate(() => !window.oldBuild);
       const after = await Promise.all(tabs.map((tab) => tab.locator("#me").textContent()));
       const caches = await page.evaluate(() => caches.keys());
       console.log(`updated both tabs as ${after.join(", ")}, caches ${caches.join(", ")}`);
-      if (after.some((value, i) => value !== before[i])) verdict = "FAIL: a tab changed address across the update";
+      if (refusedReloaded) verdict = "FAIL: the refused tab reloaded on the update";
+      else if (after.some((value, i) => value !== before[i])) verdict = "FAIL: a tab changed address across the update";
       else if (caches.length !== 1 || caches[0] !== `web-lobby-${id}`) verdict = `FAIL: caches after the update ${caches}`;
     }
   } catch (error) {

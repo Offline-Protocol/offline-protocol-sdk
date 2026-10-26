@@ -111,9 +111,19 @@ const profile = new URLSearchParams(location.search).get("profile") ?? "player";
 // pressed, stops its node and reloads: a page left running would drive the
 // old build's engine over the new build's cache. A first install never
 // fires this, as the service worker claims no page.
+//
+// A page whose start was refused runs no engine (its worker is gone), so it
+// does not reload: reloading at once, it would win the account's lock from
+// the tab still stopping the node it plays on (W8). A page whose start is
+// still under way reloads, as its worker may load the new build's files.
+let startFailed = false;
 navigator.serviceWorker?.addEventListener("controllerchange", async () => {
+  if (startFailed) {
+    status("A new version of this page is running: reload this tab to use it.");
+    return;
+  }
   // Before start has returned, `node` is not yet defined and this throws,
-  // which is what a page with no node needs: reload.
+  // which is what a page whose node is still starting needs: reload.
   try {
     await node.stop();
   } catch {}
@@ -137,7 +147,10 @@ navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((r
 
 // From inside the service worker's scope, so the engine loads offline too.
 const workerUrl = new URL("./engine-worker.js", import.meta.url);
-const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl });
+const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl }).catch((error) => {
+  startFailed = true;
+  throw error;
+});
 const rtc = new WebRtcCarrier(node);
 $("me").textContent = node.address;
 node.addEventListener("fatal", ({ detail }) => status(`the node ended: ${detail}. Reload to start it again.`));

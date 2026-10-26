@@ -424,6 +424,11 @@ fn the_lobby_caches_every_sdk_file() {
     let entries = std::fs::read_dir(root.join("bindings/web/src")).expect("bindings/web/src");
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
+        // A dotfile (Finder's .DS_Store, an editor's swap file) is no one's
+        // asset, and build.sh's globs skip it too.
+        if name.starts_with('.') {
+            continue;
+        }
         let Some(stem) = name.strip_suffix(".js") else {
             continue;
         };
@@ -455,7 +460,7 @@ fn the_lobby_caches_every_sdk_file() {
     let entries = std::fs::read_dir(&lobby).expect("examples/web-lobby");
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if ["index.html", "sw.js", "README.md"].contains(&name.as_str()) {
+        if name.starts_with('.') || ["index.html", "sw.js", "README.md"].contains(&name.as_str()) {
             continue;
         }
         assert!(

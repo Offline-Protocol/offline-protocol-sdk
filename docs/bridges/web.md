@@ -616,7 +616,12 @@ one: a worker the page starts again after a trap (W5) would load the new
 build under the old page. It waits until every page of the scope has closed,
 or until one page asks it to take over. Taking over moves every page of the
 scope at once and deletes the old build's cache, so every page, not only
-the one that asked, stops its node and reloads on `controllerchange`.
+the one that asked, stops its node and reloads on `controllerchange`. A
+page whose node was refused does not: it runs no engine, and reloading at
+once it would take the account's lock (W8) from the tab still stopping the
+node it plays on, which then comes back refused. It asks its person to
+reload instead. A page whose node is still starting reloads, as its worker
+may yet fetch the new build's files.
 
 **Registering comes before the node and never waits.** A page that throws
 before it registers, because its node could not start (a bad deploy, a
@@ -798,8 +803,10 @@ start there, because Firefox answers it by asking the user.
   a new build with two tabs open: Update in one must bring both onto the
   new build as the same addresses, with only the new build's cache left,
   and a third tab whose node was refused (its account open in the second,
-  W8) must be offered the update too (W15). Reloading only the tab that
-  pressed Update makes it fail, and so does registering after `start`.
+  W8) must be offered the update too, and must not reload on it (W15).
+  Reloading only the tab that pressed Update makes it fail, so does
+  registering after `start`, and so does reloading the refused tab, whose
+  reload takes the second tab's account.
   Starting the worker from `bindings/web/src/worker.js` instead makes it
   fail in all three engines, which is how it was checked. The server
   (`test/serve.py`) serves the repository root and marks every response
