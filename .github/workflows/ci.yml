@@ -1184,6 +1184,7 @@ jobs:
       # entropy, OPFS store and glue work in a browser, and only a run in more
       # than one engine catches what one engine forgives (Firefox's
       # persist() waits for the user, so awaiting it hung every durable start).
+      # Then the lobby example, reloaded offline from its service worker (W15).
       - name: Run the browser tests
         run: bash bindings/web/scripts/test-browser.sh
 
