@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs every browser test page in Chromium, Firefox and WebKit, headless,
 # through Playwright. Builds the module first only when bindings/web/pkg is
-# missing: after a Rust change, run scripts/build.sh (CI always does, in the
+# incomplete: after a Rust change, run scripts/build.sh (CI always does, in the
 # step before this one).
 #
 # BROWSERS narrows the engines (default: chromium firefox webkit). The
@@ -19,7 +19,9 @@ RELAY_PORT="${RELAY_PORT:-8766}"
 # The local STUN server the nearby page learns its network's address from.
 STUN_PORT="${STUN_PORT:-8767}"
 
-[ -f pkg/offline_protocol_web.js ] || bash scripts/build.sh
+# build-id.js is written last, and the lobby's service worker cannot start
+# without it, so a pkg/ built before it existed is built again.
+[ -f pkg/build-id.js ] || bash scripts/build.sh
 [ -d node_modules/playwright ] || npm ci
 
 python3 test/serve.py "$PORT" ../.. >/dev/null 2>&1 &
