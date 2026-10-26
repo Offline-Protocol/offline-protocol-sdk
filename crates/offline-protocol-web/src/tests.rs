@@ -390,6 +390,8 @@ fn the_browser_tests_run_in_ci() {
         "bash bindings/web/scripts/test-browser.sh",
         "npx playwright install --with-deps chromium firefox webkit",
         "bash bindings/web/scripts/test-conformance.sh",
+        // A lobby-only change must run the job that reloads it offline (W15).
+        "- 'examples/web-lobby/**'",
     ] {
         assert!(
             ci.contains(needle),
@@ -397,6 +399,14 @@ fn the_browser_tests_run_in_ci() {
             needle.trim()
         );
     }
+    // The only check of W15's behaviour runs after the page loop, where a
+    // tidy-up that kept only the loop would drop it with every job green.
+    let script = read_repo_file(&root.join("bindings/web/scripts/test-browser.sh"))
+        .expect("bindings/web/scripts/test-browser.sh");
+    assert!(
+        script.contains("node test/offline.mjs"),
+        "test-browser.sh no longer runs test/offline.mjs"
+    );
 }
 
 /// The lobby's service worker caches every file the page loads (W15): the
