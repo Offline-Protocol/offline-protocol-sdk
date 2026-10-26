@@ -606,7 +606,11 @@ loads only the module it was built with, so a page and a worker from two
 builds fail in ways no test covers. The cache is named for a build id that
 `scripts/build-id.sh` derives from every file it holds (`build.sh` runs it;
 a change to a served file that needs no Rust build must run it before it is
-served, or the change reaches no device that has the page), and filled with
+served, or the change reaches no device that has the page). A deploy
+publishes `pkg/build-id.js` last, or swaps the whole tree at once: an update
+check that reads a new id while other files are still the old build's
+caches a mixed set under that id, and keeps it until the next one. The cache
+is filled with
 `addAll`, which keeps a cache complete or absent; it skips the HTTP cache,
 which could hand back the last build's glue beside this build's module. Only
 the current build's cache answers, and the update check fetches the build
@@ -623,9 +627,11 @@ page with no running node, its start refused or not yet finished, does not:
 reloading at once, it would queue for the account's lock (W8) ahead of the
 tab still stopping the node it plays on, which would then come back
 refused. It asks its person to reload instead. A start still waiting for
-the lock would take it the moment that tab released it, reload or not, so a
-start that finishes after the takeover stops its node at once and hands the
-lock back.
+the lock would take it the moment that tab released it, reload or not, and
+hold it while it replayed the logs, which on a phone can outlast the two
+seconds the other tab's reload waits; so the page aborts it
+(`start({ signal })`), which ends its worker and with it the lock or its
+place in the queue.
 
 **Registering comes before the node and never waits.** A page that throws
 before it registers, because its node could not start (a bad deploy, a
@@ -733,10 +739,13 @@ start there, because Firefox answers it by asking the user.
 - `restart.html`: a durable node in a group is terminated mid-session and
   started again. It must come back with the same address, read the group's
   next message with no decryption failure, and a second node for the running
-  account must be refused (W5, W8). With its wrapping key taken out of
-  IndexedDB the node must refuse to start and leave its files as they were,
-  and with the key put back it must start as the same device. Restarting it in memory instead makes
-  the page fail, which is how the page was checked.
+  account must be refused (W5, W8). A start aborted through its `signal`,
+  one queued for the running account's lock and one for an account of its
+  own, must reject at once and leave that account free to start. With its
+  wrapping key taken out of IndexedDB the node must refuse to start and
+  leave its files as they were, and with the key put back it must start as
+  the same device. Restarting it in memory instead makes the page fail,
+  which is how the page was checked.
 - `webrtc.html`: two nodes with no tab carrier, linked only by a data channel
   set up from two codes. A session, an encrypted direct message, a 100 KiB
   message that crosses in chunks, a group at 10 Hz sent acknowledged and

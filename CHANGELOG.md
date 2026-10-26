@@ -15,6 +15,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A browser node's start can be aborted.** `OfflineNode.start({ signal })`
+  ends the worker of a start that has not finished, and with it the
+  account's lock or its place in the queue for one, and rejects with the
+  signal's reason. A page that gives up on a start no longer holds the
+  account while that start replays the logs
+  ([W15](docs/bridges/web.md#w15-a-page-that-loads-offline-caches-one-build-whole)).
+
 - **The lobby loads with no network.** Opened once online, the `web-lobby`
   example loads offline, and carries a manifest to install it as an app
   (not yet run on a phone, which is step 9 of the two-device checklist): a

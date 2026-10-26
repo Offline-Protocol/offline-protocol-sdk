@@ -97,6 +97,8 @@ for (const name of names) {
         await refused.locator("#update").waitFor({ state: "visible", timeout });
         // In its lock wait (two seconds, W8) when the takeover comes.
         const waiting = await context.newPage();
+        const waitingErrors = [];
+        waiting.on("pageerror", (error) => waitingErrors.push(error.message));
         await waiting.goto(`${lobby}?profile=a-${run}`, { waitUntil: "domcontentloaded" });
         await waiting.evaluate(() => (window.oldBuild = true));
         await page.click("#reload");
@@ -114,11 +116,15 @@ for (const name of names) {
         await waiting.locator("#status", { hasText: "A new version of this page is running" }).waitFor({ timeout });
         const refusedReloaded = await refused.evaluate(() => !window.oldBuild);
         const waitingReloaded = await waiting.evaluate(() => !window.oldBuild);
+        // Its start was aborted, not refused: a refusal would mean its lock
+        // wait ran out before the takeover and the abort was never exercised.
+        const waitingAborted = waitingErrors.some((message) => message.includes("start was abandoned for a new version"));
         const after = await Promise.all(tabs.map((tab) => tab.locator("#me").textContent()));
         const caches = await page.evaluate(() => caches.keys());
         console.log(`updated both tabs as ${after.join(", ")}, caches ${caches.join(", ")}`);
         if (refusedReloaded) verdict = "FAIL: the refused tab reloaded on the update";
         else if (waitingReloaded) verdict = "FAIL: the tab waiting for its lock reloaded on the update";
+        else if (!waitingAborted) verdict = `FAIL: the waiting tab's start was not aborted (${waitingErrors.join("; ") || "no error"})`;
         else if (after.some((value, i) => value !== before[i])) verdict = "FAIL: a tab changed address across the update";
         else if (caches.length !== 1 || caches[0] !== `web-lobby-${id}`) verdict = `FAIL: caches after the update ${caches}`;
       } finally {

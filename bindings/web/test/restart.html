@@ -32,6 +32,27 @@ await run(async (step) => {
   }
   log("a second node for the account was refused");
 
+  step.name = "an aborted start lets the account go";
+  // One in the queue for the running account's lock, which would otherwise
+  // wait two seconds, and one that may already hold its own.
+  for (const profile of ["player", "spare"]) {
+    const abort = new AbortController();
+    const started = performance.now();
+    const pending = OfflineNode.start({ appId, profile, signal: abort.signal });
+    setTimeout(() => abort.abort(), 100);
+    const error = await pending.then((node) => node, (error) => error);
+    if (error instanceof OfflineNode) {
+      await error.stop();
+      if (profile === "player") throw new Error("a start for a running account resolved");
+      continue;
+    }
+    if (error?.name !== "AbortError") throw error;
+    if (performance.now() - started > 1500) throw new Error("the abort waited out the lock");
+  }
+  const spare = await OfflineNode.start({ appId, profile: "spare" });
+  await spare.stop();
+  log("an aborted start rejected at once and left the account free");
+
   step.name = "session";
   await session;
 
