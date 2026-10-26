@@ -855,6 +855,10 @@ two-player game between devices over WebRTC with durable nodes.
   Android phone and a board is a manual check, and so is the ATT MTU Chrome
   negotiates on each (W14). Reaching an iPhone needs its peripheral to serve
   Hello, which iOS releases before this one do not.
+- **The lobby offline and installed on a phone.** `offline.mjs` reloads it
+  offline in three engines on one machine, which installs nothing and is
+  not Safari. Opening it offline on two phones and installing it is step 9
+  of the [two-device checklist](web-devices.md), not run yet (W15).
 - **A published package.** `bindings/web` is private on npm and the
   `offline-protocol-web` crate has not been released; build both from
   source.

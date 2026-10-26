@@ -399,9 +399,10 @@ fn the_browser_tests_run_in_ci() {
     }
 }
 
-/// The lobby's service worker caches every file the SDK loads (W15). A file
-/// it leaves out still loads online, where everyone works, and the page
-/// fails only offline, when its node starts and the worker imports it.
+/// The lobby's service worker caches every file the page loads (W15): the
+/// SDK's, and every file beside the page. A file left out still loads
+/// online, where everyone works, and fails only offline. The build id covers
+/// the whole directory, so a file beside the page is never left out of it.
 #[test]
 fn the_lobby_caches_every_sdk_file() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -411,8 +412,15 @@ fn the_lobby_caches_every_sdk_file() {
     }
     // Inside the workspace a missing file fails: a guard that skipped a
     // moved sw.js would pass while checking nothing.
-    let sw =
-        read_repo_file(&root.join("examples/web-lobby/sw.js")).expect("examples/web-lobby/sw.js");
+    let lobby = root.join("examples/web-lobby");
+    let sw = read_repo_file(&lobby.join("sw.js")).expect("examples/web-lobby/sw.js");
+    let assets = sw
+        .split_once("const ASSETS = [")
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .map(|(list, _)| list)
+        .expect("sw.js has an ASSETS list");
+    let quoted: Vec<&str> = assets.split('"').skip(1).step_by(2).collect();
+
     let entries = std::fs::read_dir(root.join("bindings/web/src")).expect("bindings/web/src");
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -420,25 +428,58 @@ fn the_lobby_caches_every_sdk_file() {
             continue;
         };
         assert!(
-            sw.contains(&format!("\"{stem}\"")),
+            quoted.contains(&stem),
             "examples/web-lobby/sw.js does not cache bindings/web/src/{name}"
         );
     }
     for needle in [
         "pkg/offline_protocol_web.js",
         "pkg/offline_protocol_web_bg.wasm",
-        "pkg/build-id.js",
     ] {
         assert!(
-            sw.contains(needle),
-            "examples/web-lobby/sw.js lost `{needle}`"
+            assets.contains(needle),
+            "examples/web-lobby/sw.js does not cache `{needle}`"
         );
     }
-    let build = read_repo_file(&root.join("bindings/web/scripts/build.sh")).expect("build.sh");
     assert!(
-        build.contains("pkg/build-id.js"),
-        "build.sh no longer writes the build id the lobby's cache is named by"
+        sw.contains("pkg/build-id.js"),
+        "examples/web-lobby/sw.js no longer imports the build id"
     );
+
+    // The page itself is cached as `./`. The README is not loaded, and the
+    // service worker is not one of its own assets.
+    assert!(
+        quoted.contains(&"./"),
+        "examples/web-lobby/sw.js does not cache the page"
+    );
+    let entries = std::fs::read_dir(&lobby).expect("examples/web-lobby");
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if ["index.html", "sw.js", "README.md"].contains(&name.as_str()) {
+            continue;
+        }
+        assert!(
+            quoted.contains(&format!("./{name}").as_str()),
+            "examples/web-lobby/sw.js does not cache examples/web-lobby/{name}"
+        );
+    }
+    // And the other way: an entry with no file fails the install whole.
+    for asset in quoted.iter().filter_map(|q| q.strip_prefix("./")) {
+        if !asset.is_empty() {
+            assert!(
+                lobby.join(asset).is_file(),
+                "examples/web-lobby/sw.js caches ./{asset}, which does not exist"
+            );
+        }
+    }
+
+    let build = read_repo_file(&root.join("bindings/web/scripts/build.sh")).expect("build.sh");
+    for needle in ["pkg/build-id.js", "examples/web-lobby/*"] {
+        assert!(
+            build.contains(needle),
+            "build.sh no longer has `{needle}`: the build id names the lobby's cache"
+        );
+    }
 }
 
 /// A file named as a test fixture: a `test` or `tests` word in its name

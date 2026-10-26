@@ -13,13 +13,16 @@ importScripts("../../bindings/web/pkg/build-id.js");
 
 const CACHE = `web-lobby-${self.BUILD_ID}`;
 const SDK = "../../bindings/web/";
-// Every file the lobby loads. `the_lobby_caches_every_sdk_file` holds the
-// SDK's half to bindings/web/src: a file missing here fails only offline.
+// Every file the lobby loads. `the_lobby_caches_every_sdk_file` holds this
+// list to bindings/web/src and to the files beside this one: a file missing
+// here fails only offline.
 const ASSETS = [
   "./",
   "./engine-worker.js",
   "./manifest.webmanifest",
   "./icon.svg",
+  "./icon-192.png",
+  "./icon-512.png",
   ...["bluetooth", "index", "nearby", "nostr-relays", "nostr-signal", "store",
       "tab-carrier", "webrtc", "worker"].map((file) => `${SDK}src/${file}.js`),
   `${SDK}pkg/offline_protocol_web.js`,
@@ -39,7 +42,8 @@ self.addEventListener("activate", (event) => {
     .map((key) => caches.delete(key)))));
 });
 
-// The page's update button, once it has stopped its node.
+// The page's update button. Every page stops its node and reloads once this
+// build has taken over (controllerchange), the one that asked included.
 self.addEventListener("message", (event) => {
   if (event.data === "activate") self.skipWaiting();
 });

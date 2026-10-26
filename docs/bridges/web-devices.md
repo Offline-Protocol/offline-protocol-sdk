@@ -131,6 +131,17 @@ Open the page on both devices. Each step names what to record.
    other. Fails as: an empty list on one network (the STUN server unreachable,
    or the two leaving by different routes, which the page cannot tell), or a
    link that forms without A being asked.
+9. **Offline, and installed** (W15). With both pages loaded once online,
+   stop the laptop's server and put both devices on a network with no
+   internet (a phone's hotspot with its mobile data off, or a router
+   unplugged from the wall). Reload each: it shows the same `off1…` address
+   it had. Link them with two codes and play. Then install the page (Chrome:
+   **Install app**; Safari: **Add to Home Screen**) and open it from the home
+   screen, still offline: it opens, with the Pong icon. On Android it is the
+   same address as the tab; on iOS the installed page has storage apart from
+   Safari's, so it is a new address, which must stay the same across
+   launches. Fails as: the browser's offline page, "starting…" that never
+   ends, a different address after an offline reload, or a generic icon.
 
 ## What this does not show
 
