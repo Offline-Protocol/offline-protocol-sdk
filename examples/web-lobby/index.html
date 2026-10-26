@@ -98,6 +98,42 @@ const status = (text) => ($("status").textContent = text);
 // One durable node per account per origin: a second tab of this browser
 // needs its own profile (?profile=b).
 const profile = new URLSearchParams(location.search).get("profile") ?? "player";
+// Offline once opened online (W15). Registered before the node starts, so a build whose node cannot start
+// (a bad deploy, a store that refuses to open) can still be replaced: a
+// page that threw before this would be served that build from the cache
+// with no way to update. Never awaited: the wait is a network fetch (on an
+// update, the whole new build), and the module must not yield between start
+// and the node's listeners below, or the events in between are lost.
+// "none": the update check fetches build-id.js past the HTTP cache, which
+// could otherwise hide a new build for hours. A new build takes over every
+// page of the scope at once, so each one, not only the one whose button was
+// pressed, stops its node and reloads: a page left running would drive the
+// old build's engine over the new build's cache. A first install never
+// fires this, as the service worker claims no page.
+navigator.serviceWorker?.addEventListener("controllerchange", async () => {
+  // Before start has returned, `node` is not yet defined and this throws,
+  // which is what a page with no node needs: reload.
+  try {
+    await node.stop();
+  } catch {}
+  location.reload();
+}, { once: true });
+navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((registration) => {
+  const offerUpdate = () => {
+    if (registration.waiting && navigator.serviceWorker.controller) $("update").hidden = false;
+  };
+  // The browser checks for a new build on every navigation, without waiting
+  // for this: by now it may be installing one whose updatefound has fired.
+  const watch = () => registration.installing?.addEventListener("statechange", offerUpdate);
+  offerUpdate();
+  watch();
+  registration.addEventListener("updatefound", watch);
+  $("reload").onclick = () => {
+    $("reload").disabled = true;
+    registration.waiting?.postMessage("activate");
+  };
+}, () => {});
+
 // From inside the service worker's scope, so the engine loads offline too.
 const workerUrl = new URL("./engine-worker.js", import.meta.url);
 const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl });
@@ -618,34 +654,4 @@ setInterval(async () => {
   counters.statesOut = counters.statesIn = 0;
 }, 1000);
 
-// --- Offline (W15) ---------------------------------------------------------
-
-// Registered last and never awaited: the wait is a network fetch (on an
-// update, the whole new build), and every node listener above must be in
-// place before the module yields, or the events in between are lost.
-// "none": the update check fetches build-id.js past the HTTP cache, which
-// could otherwise hide a new build for hours. A new build takes over every
-// page of the scope at once, so each one, not only the one whose button was
-// pressed, stops its node and reloads: a page left running would drive the
-// old build's engine over the new build's cache. A first install never
-// fires this, as the service worker claims no page.
-navigator.serviceWorker?.addEventListener("controllerchange", async () => {
-  await node.stop().catch(() => {});
-  location.reload();
-}, { once: true });
-navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((registration) => {
-  const offerUpdate = () => {
-    if (registration.waiting && navigator.serviceWorker.controller) $("update").hidden = false;
-  };
-  // The browser checks for a new build on every navigation, without waiting
-  // for this: by now it may be installing one whose updatefound has fired.
-  const watch = () => registration.installing?.addEventListener("statechange", offerUpdate);
-  offerUpdate();
-  watch();
-  registration.addEventListener("updatefound", watch);
-  $("reload").onclick = () => {
-    $("reload").disabled = true;
-    registration.waiting?.postMessage("activate");
-  };
-}, () => {});
 </script>

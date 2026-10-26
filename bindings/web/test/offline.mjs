@@ -3,7 +3,9 @@
 // node from the cached page under another query (the cache holds none).
 // Then, online, a new build with two tabs open: pressing Update in one must
 // bring both onto the new build, each as the same address, because the new
-// build takes over every page of the scope at once.
+// build takes over every page of the scope at once. A third tab whose node
+// is refused (its account is open in the second, W8) must still be offered
+// the update, or a build whose node cannot start could never be replaced.
 //
 // Removing the page's workerUrl makes this fail: the engine's worker is then
 // outside the service worker's scope and its script comes from the network.
@@ -75,11 +77,19 @@ for (const name of names) {
       const tabs = [page, other];
       const before = await Promise.all(tabs.map(address));
       await Promise.all(tabs.map((tab) => tab.evaluate(() => (window.oldBuild = true))));
+      const refused = await context.newPage();
+      const refusal = new Promise((resolve) => refused.once("pageerror", resolve));
+      await refused.goto(`${lobby}?profile=a-${run}`);
+      console.log(`a third tab on the second's account: ${(await refusal).message}`);
       const id = `update${name}${run}`;
       writeFileSync(buildId, `self.BUILD_ID = "${id}";\n`);
       try {
         await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update());
         await page.locator("#update").waitFor({ state: "visible", timeout });
+        // Closed before the takeover: reloaded, it would race the second
+        // tab for the account's lock.
+        await refused.locator("#update").waitFor({ state: "visible", timeout });
+        await refused.close();
         await page.click("#reload");
         for (const tab of tabs) {
           await tab.waitForFunction(

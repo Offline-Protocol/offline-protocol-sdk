@@ -618,11 +618,14 @@ or until one page asks it to take over. Taking over moves every page of the
 scope at once and deletes the old build's cache, so every page, not only
 the one that asked, stops its node and reloads on `controllerchange`.
 
-**Registering never delays the node's listeners.** Registration waits on the
-network, and on an update on the whole new build, so the lobby registers
-last and does not await it. Awaited between `start` and the listeners, it
-let the engine's first events, a tab carrier's `neighbor_discovered` among
-them, go to a target nobody listened on yet.
+**Registering comes before the node and never waits.** A page that throws
+before it registers, because its node could not start (a bad deploy, a
+store that refuses to open), is served that build from the cache with no
+way to be offered the next one, so the lobby registers before `start`.
+Registration waits on the network, and on an update on the whole new
+build, so it is never awaited: awaited between `start` and the listeners,
+it let the engine's first events, a tab carrier's `neighbor_discovered`
+among them, go to a target nobody listened on yet.
 
 **The engine's worker must be inside the scope.** A dedicated worker is
 matched to a service worker by its own URL, not by the page that started it.
@@ -793,8 +796,10 @@ start there, because Firefox answers it by asking the user.
   its service worker and as the same address, and a second profile's page
   (a URL the cache was not filled with) must start a node too. Then, online,
   a new build with two tabs open: Update in one must bring both onto the
-  new build as the same addresses, with only the new build's cache left
-  (W15). Reloading only the tab that pressed Update makes it fail.
+  new build as the same addresses, with only the new build's cache left,
+  and a third tab whose node was refused (its account open in the second,
+  W8) must be offered the update too (W15). Reloading only the tab that
+  pressed Update makes it fail, and so does registering after `start`.
   Starting the worker from `bindings/web/src/worker.js` instead makes it
   fail in all three engines, which is how it was checked. The server
   (`test/serve.py`) serves the repository root and marks every response
