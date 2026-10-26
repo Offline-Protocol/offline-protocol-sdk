@@ -106,7 +106,10 @@ for (const name of names) {
         // landed earlier would never test what letting go of the queue does.
         // A poll of evaluate, which awaits the query: waitForFunction takes a
         // returned promise as a truthy value and would not wait at all.
-        const queuedBy = performance.now() + 1500;
+        // Generous: the two-second lock wait starts once the request is
+        // queued, after the worker has compiled the module, so this bounds
+        // only how slowly a loaded runner gets there.
+        const queuedBy = performance.now() + 10000;
         while (!(await waiting.evaluate(async () =>
           (await navigator.locks.query()).pending.some((l) => l.name.startsWith("offline-protocol/"))))) {
           if (performance.now() > queuedBy) throw new Error("the fourth tab never queued for the account's lock");
