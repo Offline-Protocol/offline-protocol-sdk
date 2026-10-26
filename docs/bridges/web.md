@@ -665,6 +665,29 @@ clears both; only the cache comes back with the next visit online. The first
 visit must be online. On iOS a page added to the home screen has storage
 apart from Safari's, so it is a second device with its own identity.
 
+**Retiring it is a served file, not a deleted one.** A browser keeps a
+registration whose update check fails, so a `sw.js` (or a `build-id.js` it
+imports) that now answers 404 leaves every device that opened the page on
+the build it cached, online included, for good: a checkout of a branch
+without the service worker, on a machine that opened the lobby from one
+with it, never shows an edit to the page. Retiring it means serving, at the
+same URL, one that takes over, deletes the caches and unregisters, and that
+imports nothing, as `build-id.js` may be gone with it:
+
+```js
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => event.waitUntil((async () => {
+  for (const key of await caches.keys()) if (key.startsWith("web-lobby-")) await caches.delete(key);
+  await self.registration.unregister();
+})()));
+```
+
+With no fetch handler it answers nothing, so the pages it takes over reload
+from the network, and the next visit to a page that no longer registers is
+uncontrolled, with no cache left; checked in all three engines. On one
+machine, the developer tools' **Unregister** (or clearing the site's data,
+identity included) does the same.
+
 `the_lobby_caches_every_sdk_file` holds the cached list to every file in
 `bindings/web/src`: a file left out still loads online, where everyone
 works.
