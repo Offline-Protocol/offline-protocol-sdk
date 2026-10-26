@@ -18,8 +18,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **The lobby loads with no network.** Opened once online, the
   `web-lobby` example loads offline and installs as an app: a service worker
   caches the page, the SDK and the engine module as one build, named by an
-  id `scripts/build.sh` writes, and a new build waits until the page has
-  stopped its node. The engine's worker starts from inside the service
+  id `scripts/build.sh` writes, and a new build takes over only when a page
+  asks, whereupon every open page stops its node and reloads. The engine's worker starts from inside the service
   worker's scope, or offline its script comes from the network. The SDK
   ships no service worker; the lobby's is the worked example, and the
   browser run reloads it offline in three engines

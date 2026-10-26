@@ -1,14 +1,19 @@
 // The lobby, opened once online, loads and starts its node with no network
 // (W15): the same address after an offline reload, and a second profile's
 // node from the cached page under another query (the cache holds none).
+// Then, online, a new build with two tabs open: pressing Update in one must
+// bring both onto the new build, each as the same address, because the new
+// build takes over every page of the scope at once.
 //
 // Removing the page's workerUrl makes this fail: the engine's worker is then
 // outside the service worker's scope and its script comes from the network.
+// So does listening for controllerchange only in the tab that pressed
+// Update: the other tab keeps running the old build.
 //
 // Usage: node test/offline.mjs <base-url> <timeout-ms>, where the base URL
 // serves the repository root. BROWSERS narrows the engines, as in run.mjs.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, firefox, webkit } from "playwright";
@@ -22,6 +27,10 @@ const lobby = `${base}/examples/web-lobby/`;
 // the profile directory, so a fixed account finds the last run's log with no
 // wrapping key beside it, and its node rightly refuses to start (W8).
 const run = crypto.randomUUID().slice(0, 8);
+// The update phase writes a new build id and puts the real one back; a run
+// killed in between leaves it changed until build.sh writes it again.
+const buildId = new URL("../pkg/build-id.js", import.meta.url);
+const realBuildId = readFileSync(buildId);
 
 const address = (page) =>
   page.waitForFunction(() => document.getElementById("me").textContent.startsWith("off1"), null, {
@@ -56,6 +65,37 @@ for (const name of names) {
       const second = await address(page);
       console.log(`offline second profile as ${second}`);
       if (second === online) verdict = "FAIL: a second profile came back as the first";
+    }
+
+    if (verdict === "PASS") {
+      await context.setOffline(false);
+      const other = await context.newPage();
+      other.on("pageerror", (error) => console.log("[page exception]", error.message));
+      await other.goto(`${lobby}?profile=a-${run}`);
+      const tabs = [page, other];
+      const before = await Promise.all(tabs.map(address));
+      await Promise.all(tabs.map((tab) => tab.evaluate(() => (window.oldBuild = true))));
+      const id = `update${name}${run}`;
+      writeFileSync(buildId, `self.BUILD_ID = "${id}";\n`);
+      try {
+        await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update());
+        await page.locator("#update").waitFor({ state: "visible", timeout });
+        await page.click("#reload");
+        for (const tab of tabs) {
+          await tab.waitForFunction(
+            () => !window.oldBuild && document.getElementById("me").textContent.startsWith("off1"),
+            null,
+            { timeout, polling: 250 },
+          );
+        }
+      } finally {
+        writeFileSync(buildId, realBuildId);
+      }
+      const after = await Promise.all(tabs.map((tab) => tab.locator("#me").textContent()));
+      const caches = await page.evaluate(() => caches.keys());
+      console.log(`updated both tabs as ${after.join(", ")}, caches ${caches.join(", ")}`);
+      if (after.some((value, i) => value !== before[i])) verdict = "FAIL: a tab changed address across the update";
+      else if (caches.length !== 1 || caches[0] !== `web-lobby-${id}`) verdict = `FAIL: caches after the update ${caches}`;
     }
   } catch (error) {
     verdict = `FAIL: ${error.message.split("\n")[0]}`;

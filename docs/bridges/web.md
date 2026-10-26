@@ -607,10 +607,22 @@ builds fail in ways no test covers. The cache is named for a build id that
 `scripts/build.sh` derives from every file it holds, and filled with
 `addAll`, which keeps a cache complete or absent; it skips the HTTP cache,
 which could hand back the last build's glue beside this build's module. Only
-the current build's cache answers. A new build never takes over a running
-page: a worker the page starts again after a trap (W5) would load the new
+the current build's cache answers, and the update check fetches the build
+id past the HTTP cache too (`updateViaCache: "none"`): the service worker's
+own script is the same in every build, so a stale build id hides a new
+build for as long as the HTTP cache calls it fresh, hours on a server that
+sends only `Last-Modified`. A new build never runs under a page of the old
+one: a worker the page starts again after a trap (W5) would load the new
 build under the old page. It waits until every page of the scope has closed,
-or until the page stops its node and asks it to take over.
+or until one page asks it to take over. Taking over moves every page of the
+scope at once and deletes the old build's cache, so every page, not only
+the one that asked, stops its node and reloads on `controllerchange`.
+
+**Registering never delays the node's listeners.** Registration waits on the
+network, and on an update on the whole new build, so the lobby registers
+last and does not await it. Awaited between `start` and the listeners, it
+let the engine's first events, a tab carrier's `neighbor_discovered` among
+them, go to a target nobody listened on yet.
 
 **The engine's worker must be inside the scope.** A dedicated worker is
 matched to a service worker by its own URL, not by the page that started it.
@@ -779,7 +791,10 @@ start there, because Firefox answers it by asking the user.
 - `offline.mjs`, after the pages: the lobby example opened once online,
   then reloaded with the browser offline. It must come back controlled by
   its service worker and as the same address, and a second profile's page
-  (a URL the cache was not filled with) must start a node too (W15).
+  (a URL the cache was not filled with) must start a node too. Then, online,
+  a new build with two tabs open: Update in one must bring both onto the
+  new build as the same addresses, with only the new build's cache left
+  (W15). Reloading only the tab that pressed Update makes it fail.
   Starting the worker from `bindings/web/src/worker.js` instead makes it
   fail in all three engines, which is how it was checked. The server
   (`test/serve.py`) serves the repository root and marks every response

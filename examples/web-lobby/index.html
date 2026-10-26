@@ -106,24 +106,6 @@ $("me").textContent = node.address;
 node.addEventListener("fatal", ({ detail }) => status(`the node ended: ${detail}. Reload to start it again.`));
 addEventListener("pagehide", () => rtc.close());
 
-// Offline once opened online (W15). A new version waits until the node has
-// stopped: the page and its worker must run the same build.
-const registration = await navigator.serviceWorker?.register("./sw.js").catch(() => null);
-function offerUpdate() {
-  if (!registration?.waiting || !navigator.serviceWorker.controller) return;
-  $("update").hidden = false;
-}
-offerUpdate();
-registration?.addEventListener("updatefound", () => {
-  registration.installing?.addEventListener("statechange", offerUpdate);
-});
-$("reload").onclick = async () => {
-  $("reload").disabled = true;
-  await node.stop().catch(() => {});
-  navigator.serviceWorker.addEventListener("controllerchange", () => location.reload(), { once: true });
-  registration.waiting?.postMessage("activate");
-};
-
 let groupId = null;
 let hosting = false;
 let resumed = false; // hosting a game saved before a reload
@@ -635,4 +617,33 @@ setInterval(async () => {
     `store flushes ${perSecond}/s, log ${stats ? stats.mls.log_bytes + stats.protocol_state.log_bytes : 0} bytes`;
   counters.statesOut = counters.statesIn = 0;
 }, 1000);
+
+// --- Offline (W15) ---------------------------------------------------------
+
+// Registered last and never awaited: the wait is a network fetch (on an
+// update, the whole new build), and every node listener above must be in
+// place before the module yields, or the events in between are lost.
+// "none": the update check fetches build-id.js past the HTTP cache, which
+// could otherwise hide a new build for hours. A new build takes over every
+// page of the scope at once, so each one, not only the one whose button was
+// pressed, stops its node and reloads: a page left running would drive the
+// old build's engine over the new build's cache. A first install never
+// fires this, as the service worker claims no page.
+navigator.serviceWorker?.addEventListener("controllerchange", async () => {
+  await node.stop().catch(() => {});
+  location.reload();
+}, { once: true });
+navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((registration) => {
+  const offerUpdate = () => {
+    if (registration.waiting && navigator.serviceWorker.controller) $("update").hidden = false;
+  };
+  offerUpdate();
+  registration.addEventListener("updatefound", () => {
+    registration.installing?.addEventListener("statechange", offerUpdate);
+  });
+  $("reload").onclick = () => {
+    $("reload").disabled = true;
+    registration.waiting?.postMessage("activate");
+  };
+}, () => {});
 </script>
