@@ -637,10 +637,12 @@ navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((r
   const offerUpdate = () => {
     if (registration.waiting && navigator.serviceWorker.controller) $("update").hidden = false;
   };
+  // The browser checks for a new build on every navigation, without waiting
+  // for this: by now it may be installing one whose updatefound has fired.
+  const watch = () => registration.installing?.addEventListener("statechange", offerUpdate);
   offerUpdate();
-  registration.addEventListener("updatefound", () => {
-    registration.installing?.addEventListener("statechange", offerUpdate);
-  });
+  watch();
+  registration.addEventListener("updatefound", watch);
   $("reload").onclick = () => {
     $("reload").disabled = true;
     registration.waiting?.postMessage("activate");

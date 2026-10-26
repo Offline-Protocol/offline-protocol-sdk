@@ -405,12 +405,15 @@ fn the_browser_tests_run_in_ci() {
 #[test]
 fn the_lobby_caches_every_sdk_file() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let Some(sw) = read_repo_file(&root.join("examples/web-lobby/sw.js")) else {
+    if read_repo_file(&root.join("Cargo.lock")).is_none() {
+        // A published .crate archive has no workspace around it.
         return;
-    };
-    let Ok(entries) = std::fs::read_dir(root.join("bindings/web/src")) else {
-        return;
-    };
+    }
+    // Inside the workspace a missing file fails: a guard that skipped a
+    // moved sw.js would pass while checking nothing.
+    let sw =
+        read_repo_file(&root.join("examples/web-lobby/sw.js")).expect("examples/web-lobby/sw.js");
+    let entries = std::fs::read_dir(root.join("bindings/web/src")).expect("bindings/web/src");
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let Some(stem) = name.strip_suffix(".js") else {
