@@ -101,6 +101,17 @@ for (const name of names) {
         waiting.on("pageerror", (error) => waitingErrors.push(error.message));
         await waiting.goto(`${lobby}?profile=a-${run}`, { waitUntil: "domcontentloaded" });
         await waiting.evaluate(() => (window.oldBuild = true));
+        // Queued for the account's lock behind the second tab, as the
+        // origin's lock manager shows, before the takeover: an abort that
+        // landed earlier would never test what letting go of the queue does.
+        // A poll of evaluate, which awaits the query: waitForFunction takes a
+        // returned promise as a truthy value and would not wait at all.
+        const queuedBy = performance.now() + 1500;
+        while (!(await waiting.evaluate(async () =>
+          (await navigator.locks.query()).pending.some((l) => l.name.startsWith("offline-protocol/"))))) {
+          if (performance.now() > queuedBy) throw new Error("the fourth tab never queued for the account's lock");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
         await page.click("#reload");
         for (const tab of tabs) {
           await tab.waitForFunction(

@@ -739,13 +739,15 @@ start there, because Firefox answers it by asking the user.
 - `restart.html`: a durable node in a group is terminated mid-session and
   started again. It must come back with the same address, read the group's
   next message with no decryption failure, and a second node for the running
-  account must be refused (W5, W8). A start aborted through its `signal`,
-  one queued for the running account's lock and one for an account of its
-  own, must reject at once and leave that account free to start. With its
-  wrapping key taken out of IndexedDB the node must refuse to start and
-  leave its files as they were, and with the key put back it must start as
-  the same device. Restarting it in memory instead makes the page fail,
-  which is how the page was checked.
+  account must be refused (W5, W8). A start aborted through its `signal`
+  once the origin's lock manager shows it queued for the running account's
+  lock must leave the queue and reject within a second, well before its own
+  two-second wait would have dropped it; a check that awaited the rejection
+  first passed with the abort disabled, as that start still rejects with the
+  signal's reason once its wait runs out. With its wrapping key taken out of
+  IndexedDB the node must refuse to start and leave its files as they were,
+  and with the key put back it must start as the same device. Restarting it
+  in memory instead makes the page fail, which is how the page was checked.
 - `webrtc.html`: two nodes with no tab carrier, linked only by a data channel
   set up from two codes. A session, an encrypted direct message, a 100 KiB
   message that crosses in chunks, a group at 10 Hz sent acknowledged and
