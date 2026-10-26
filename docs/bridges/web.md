@@ -619,11 +619,13 @@ build under the old page. It waits until every page of the scope has closed,
 or until one page asks it to take over. Taking over moves every page of the
 scope at once and deletes the old build's cache, so every page, not only
 the one that asked, stops its node and reloads on `controllerchange`. A
-page whose node was refused does not: it runs no engine, and reloading at
-once it would take the account's lock (W8) from the tab still stopping the
-node it plays on, which then comes back refused. It asks its person to
-reload instead. A page whose node is still starting reloads, as its worker
-may yet fetch the new build's files.
+page with no running node, its start refused or not yet finished, does not:
+reloading at once, it would queue for the account's lock (W8) ahead of the
+tab still stopping the node it plays on, which would then come back
+refused. It asks its person to reload instead. A start still waiting for
+the lock would take it the moment that tab released it, reload or not, so a
+start that finishes after the takeover stops its node at once and hands the
+lock back.
 
 **Registering comes before the node and never waits.** A page that throws
 before it registers, because its node could not start (a bad deploy, a
@@ -653,9 +655,9 @@ An application that serves the SDK under its own scope needs no such module.
 the cache, so an update, which replaces only the cache, leaves the identity
 as it was. A browser that evicts storage takes the origin's whole, the
 identity included unless `persist()` was granted, and clearing a site's data
-clears both; only the cache comes back with the next visit online. The first visit must be online. On iOS a page added to
-the home screen has storage apart from Safari's, so it is a second device
-with its own identity.
+clears both; only the cache comes back with the next visit online. The first
+visit must be online. On iOS a page added to the home screen has storage
+apart from Safari's, so it is a second device with its own identity.
 
 `the_lobby_caches_every_sdk_file` holds the cached list to every file in
 `bindings/web/src`: a file left out still loads online, where everyone
@@ -811,10 +813,11 @@ start there, because Firefox answers it by asking the user.
   a new build with two tabs open: Update in one must bring both onto the
   new build as the same addresses, with only the new build's cache left,
   and a third tab whose node was refused (its account open in the second,
-  W8) must be offered the update too, and must not reload on it (W15).
-  Reloading only the tab that pressed Update makes it fail, so does
-  registering after `start`, and so does reloading the refused tab, whose
-  reload takes the second tab's account.
+  W8) must be offered the update too, and must not reload on it, nor must a
+  fourth tab on that account still in its lock wait when Update is pressed
+  (W15). Reloading only the tab that pressed Update makes it fail, so does
+  registering after `start`, and so does reloading either of those tabs,
+  whose reload takes the second tab's account.
   Starting the worker from `bindings/web/src/worker.js` instead makes it
   fail in all three engines, which is how it was checked. The server
   (`test/serve.py`) serves the repository root and marks every response

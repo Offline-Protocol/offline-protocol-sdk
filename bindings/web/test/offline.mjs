@@ -6,7 +6,9 @@
 // build takes over every page of the scope at once. A third tab whose node
 // is refused (its account is open in the second, W8) must still be offered
 // the update, and must not reload on it: reloading, it would take the
-// account from the second tab while that tab stops its node.
+// account from the second tab while that tab stops its node. Nor must a
+// fourth tab on that account still waiting for its lock when the new build
+// takes over, which would take the lock as the second tab released it.
 //
 // Removing the page's workerUrl makes this fail: the engine's worker is then
 // outside the service worker's scope and its script comes from the network.
@@ -93,6 +95,10 @@ for (const name of names) {
         await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update());
         await page.locator("#update").waitFor({ state: "visible", timeout });
         await refused.locator("#update").waitFor({ state: "visible", timeout });
+        // In its lock wait (two seconds, W8) when the takeover comes.
+        const waiting = await context.newPage();
+        await waiting.goto(`${lobby}?profile=a-${run}`, { waitUntil: "domcontentloaded" });
+        await waiting.evaluate(() => (window.oldBuild = true));
         await page.click("#reload");
         for (const tab of tabs) {
           await tab.waitForFunction(
@@ -105,11 +111,14 @@ for (const name of names) {
         // whose update check, run after the restore, would install the real
         // build as a third cache.
         await refused.locator("#status", { hasText: "A new version of this page is running" }).waitFor({ timeout });
+        await waiting.locator("#status", { hasText: "A new version of this page is running" }).waitFor({ timeout });
         const refusedReloaded = await refused.evaluate(() => !window.oldBuild);
+        const waitingReloaded = await waiting.evaluate(() => !window.oldBuild);
         const after = await Promise.all(tabs.map((tab) => tab.locator("#me").textContent()));
         const caches = await page.evaluate(() => caches.keys());
         console.log(`updated both tabs as ${after.join(", ")}, caches ${caches.join(", ")}`);
         if (refusedReloaded) verdict = "FAIL: the refused tab reloaded on the update";
+        else if (waitingReloaded) verdict = "FAIL: the tab waiting for its lock reloaded on the update";
         else if (after.some((value, i) => value !== before[i])) verdict = "FAIL: a tab changed address across the update";
         else if (caches.length !== 1 || caches[0] !== `web-lobby-${id}`) verdict = `FAIL: caches after the update ${caches}`;
       } finally {

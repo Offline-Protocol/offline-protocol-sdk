@@ -112,21 +112,20 @@ const profile = new URLSearchParams(location.search).get("profile") ?? "player";
 // old build's engine over the new build's cache. A first install never
 // fires this, as the service worker claims no page.
 //
-// A page whose start was refused runs no engine (its worker is gone), so it
-// does not reload: reloading at once, it would win the account's lock from
-// the tab still stopping the node it plays on (W8). A page whose start is
-// still under way reloads, as its worker may load the new build's files.
-let startFailed = false;
+// A page with no running node, its start refused or not yet finished, does
+// not reload: reloading at once, it would queue for the account's lock (W8)
+// ahead of the tab still stopping the node it plays on, which would come
+// back refused. It asks its person to reload instead, and a start that
+// finishes after this stops its node at once, handing the lock back.
+let started = false;
+let superseded = false;
 navigator.serviceWorker?.addEventListener("controllerchange", async () => {
-  if (startFailed) {
+  if (!started) {
+    superseded = true;
     status("A new version of this page is running: reload this tab to use it.");
     return;
   }
-  // Before start has returned, `node` is not yet defined and this throws,
-  // which is what a page whose node is still starting needs: reload.
-  try {
-    await node.stop();
-  } catch {}
+  await node.stop().catch(() => {});
   location.reload();
 }, { once: true });
 navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((registration) => {
@@ -151,10 +150,12 @@ navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((r
 // the scope would still come from the cache: a new page driving an old
 // engine. Out of the scope, the worker comes from the network with it.
 const workerUrl = navigator.serviceWorker?.controller ? new URL("./engine-worker.js", import.meta.url) : undefined;
-const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl }).catch((error) => {
-  startFailed = true;
-  throw error;
-});
+const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl });
+started = true;
+if (superseded) {
+  await node.stop().catch(() => {});
+  throw new Error("a new version took over while this node started");
+}
 const rtc = new WebRtcCarrier(node);
 $("me").textContent = node.address;
 node.addEventListener("fatal", ({ detail }) => status(`the node ended: ${detail}. Reload to start it again.`));
