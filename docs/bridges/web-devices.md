@@ -32,6 +32,10 @@ cargo install wasm-bindgen-cli --version 0.2.105 --locked   # once
 bash bindings/web/scripts/build.sh
 ```
 
+The lobby is cached under a build id (W15). After pulling a change that
+needs no Rust build, run `bash bindings/web/scripts/build-id.sh` before
+serving it, or every device that opened the page keeps the old one.
+
 **Android, no certificate.** Serve on the laptop and forward the port over
 USB, so the phone opens `localhost`, which is a secure context:
 

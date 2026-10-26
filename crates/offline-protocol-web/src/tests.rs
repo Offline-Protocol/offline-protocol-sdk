@@ -478,13 +478,18 @@ fn the_lobby_caches_every_sdk_file() {
         }
     }
 
-    let build = read_repo_file(&root.join("bindings/web/scripts/build.sh")).expect("build.sh");
+    let id = read_repo_file(&root.join("bindings/web/scripts/build-id.sh")).expect("build-id.sh");
     for needle in ["pkg/build-id.js", "examples/web-lobby/*"] {
         assert!(
-            build.contains(needle),
-            "build.sh no longer has `{needle}`: the build id names the lobby's cache"
+            id.contains(needle),
+            "build-id.sh no longer has `{needle}`: the build id names the lobby's cache"
         );
     }
+    let build = read_repo_file(&root.join("bindings/web/scripts/build.sh")).expect("build.sh");
+    assert!(
+        build.contains("bash bindings/web/scripts/build-id.sh"),
+        "build.sh no longer writes the build id after the module"
+    );
 }
 
 /// A file named as a test fixture: a `test` or `tests` word in its name

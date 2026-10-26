@@ -101,17 +101,20 @@ for (const name of names) {
             { timeout, polling: 250 },
           );
         }
+        // Read before the real id goes back: each reload is a navigation,
+        // whose update check, run after the restore, would install the real
+        // build as a third cache.
+        await refused.locator("#status", { hasText: "A new version of this page is running" }).waitFor({ timeout });
+        const refusedReloaded = await refused.evaluate(() => !window.oldBuild);
+        const after = await Promise.all(tabs.map((tab) => tab.locator("#me").textContent()));
+        const caches = await page.evaluate(() => caches.keys());
+        console.log(`updated both tabs as ${after.join(", ")}, caches ${caches.join(", ")}`);
+        if (refusedReloaded) verdict = "FAIL: the refused tab reloaded on the update";
+        else if (after.some((value, i) => value !== before[i])) verdict = "FAIL: a tab changed address across the update";
+        else if (caches.length !== 1 || caches[0] !== `web-lobby-${id}`) verdict = `FAIL: caches after the update ${caches}`;
       } finally {
         writeFileSync(buildId, realBuildId);
       }
-      await refused.locator("#status", { hasText: "A new version of this page is running" }).waitFor({ timeout });
-      const refusedReloaded = await refused.evaluate(() => !window.oldBuild);
-      const after = await Promise.all(tabs.map((tab) => tab.locator("#me").textContent()));
-      const caches = await page.evaluate(() => caches.keys());
-      console.log(`updated both tabs as ${after.join(", ")}, caches ${caches.join(", ")}`);
-      if (refusedReloaded) verdict = "FAIL: the refused tab reloaded on the update";
-      else if (after.some((value, i) => value !== before[i])) verdict = "FAIL: a tab changed address across the update";
-      else if (caches.length !== 1 || caches[0] !== `web-lobby-${id}`) verdict = `FAIL: caches after the update ${caches}`;
     }
   } catch (error) {
     verdict = `FAIL: ${error.message.split("\n")[0]}`;

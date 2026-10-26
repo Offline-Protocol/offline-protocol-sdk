@@ -604,7 +604,9 @@ because the scope, the files and the update policy are the application's.
 `worker.js` speak a message protocol of their own, and the wasm-bindgen glue
 loads only the module it was built with, so a page and a worker from two
 builds fail in ways no test covers. The cache is named for a build id that
-`scripts/build.sh` derives from every file it holds, and filled with
+`scripts/build-id.sh` derives from every file it holds (`build.sh` runs it;
+a change to a served file that needs no Rust build must run it before it is
+served, or the change reaches no device that has the page), and filled with
 `addAll`, which keeps a cache complete or absent; it skips the HTTP cache,
 which could hand back the last build's glue beside this build's module. Only
 the current build's cache answers, and the update check fetches the build
