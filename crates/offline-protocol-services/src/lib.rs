@@ -10,6 +10,9 @@ pub mod events;
 pub(crate) mod payloads;
 /// Core service registry and message handling logic.
 pub mod services;
+/// Subscriptions: a consumer's lease on a provider's topic, and the updates
+/// sent to it (ADR 0035).
+pub mod subscriptions;
 
 pub use error::ServiceError;
 pub use events::ServiceEvent;
@@ -30,4 +33,8 @@ pub use payloads::{
 pub use services::{
     DiscoverResult, MeshServices, OutboundMessage, SendRequestResult, SendResponseResult,
     ServiceAction,
+};
+pub use subscriptions::{
+    Admission, Provider, PublishOutcome, RulesFallback, SubscriberInfo, SubscriptionDelivery,
+    SubscriptionFrame, SubscriptionOutput, SubscriptionPolicy, SubscriptionRole, SubscriptionState,
 };
