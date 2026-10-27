@@ -193,8 +193,10 @@ explicit trackers and bounded attempts.
 ### Service discovery
 
 Service messages use their own prefix family: `__SVC_DISC_Q__`,
-`__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__`, plus the generic service
-message prefix `__SVC_`. They are reserved on the same terms.
+`__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__`, the four subscription frames
+`__SVC_SUB__`, `__SVC_SUB_R__`, `__SVC_UPD__` and `__SVC_UNSUB__` (below),
+plus the generic service message prefix `__SVC_`. They are reserved on the
+same terms.
 
 `__SVC_` is a prefix of the other four rather than a sibling of them, which is
 deliberate and is the one entry in this registry that MUST NOT be read as a
@@ -202,7 +204,8 @@ frame type. It reserves the whole family, so a service frame added later is
 refused as application content before it is specified. A conformance check that
 treats the registry as a set of mutually non-prefixing frame tags fails on this
 entry alone; the correct reading is that `__SVC_` bounds a namespace and the
-four spellings above name the frames currently in it.
+eight spellings above name the frames currently in it. None of the eight is a
+prefix of another, so a `starts_with` test names exactly one frame.
 
 They are signature-gated like any control frame, and they are **exempt from the
 encryption requirement**. Discovery gossip is always sent in cleartext.
@@ -222,6 +225,33 @@ gated. The signed plaintext form remains the floor. Neither form changes the
 exemption classes in this chapter, since the sealed form is `__MLS_ENC__`. See
 [residual risk R9](../security/threat-model.md#r9-service-bodies-are-sealed-only-toward-capable-peers-discovery-is-signed-not-encrypted) for what the
 fallback leaves exposed.
+
+#### Subscription frames
+
+The four subscription frames ([ADR 0035](../adr/0035-a-service-can-be-subscribed-to.md))
+have **no plaintext form**. Each travels only inside `__MLS_ENC__`, in the 1:1
+session between the consumer and the provider, toward a peer that advertised
+`svc_versions` entry 2 or has not yet said otherwise.
+
+| Prefix | Direction | Body (JSON) |
+|--------|-----------|-------------|
+| `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, lease_ms, resume?: {stream, seq, digest}, resync}`. Subscribe, renew (with `resume`) or resync |
+| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost}`. `status` is `accepted`, `rejected`, `not_found`, `mode_mismatch` or `full` |
+| `__SVC_UPD__` | provider to consumer | `{v, sub_id, stream, seq, key?, body, snapshot}` |
+| `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
+
+A sender MUST NOT send a subscription frame in plaintext, and a sender that
+cannot seal one (no confirmed session yet, or a fault) does not send it. A
+receiver that decrypts one from a 1:1 session slot MUST hand it to its
+subscription layer with the MLS-authenticated sender, and MUST drop one that
+arrives as plaintext whatever its signature says. It MUST accept an
+`__SVC_UPD__` or `__SVC_SUB_R__` only from the provider the subscription
+names, and an `__SVC_UNSUB__` only from the other side of it.
+
+A `latest` update to a subscriber with no live link is queued so that it
+supersedes the one queued before it for the same subscription and key; one
+that has already left can still arrive late, so the receiver drops an update
+whose `seq` is not above the one it holds for that key.
 
 ### Custody
 

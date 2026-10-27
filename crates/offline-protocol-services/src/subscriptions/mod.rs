@@ -11,9 +11,9 @@
 //! in the ADR. The ones enforced here:
 //!
 //! - a consumer never surfaces an older value after a newer one for the same
-//!   subscription and key ([`consumer`]),
+//!   subscription and key ([`consumer`](crate::subscriptions::consumer)),
 //! - a lease that is not renewed ends the subscription on both sides,
-//! - a provider at capacity refuses rather than evicts ([`provider`]),
+//! - a provider at capacity refuses rather than evicts ([`provider`](crate::subscriptions::provider)),
 //! - one subscription per (consumer, service, topic) on a provider,
 //! - a consumer that missed updates gets the state back, or an event saying
 //!   it cannot.

@@ -13,6 +13,22 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Added
+
+- **A service can be subscribed to.** `subscribe_service` gives a consumer a
+  lease on one topic of a provider's service, and the provider's
+  `publish_service_update` reaches every subscriber as it happens: once over a
+  live link, or through the reliable ladder across hops, where a `latest`
+  value replaces the one still queued for its key rather than waiting behind
+  it. A topic is `latest` (current state per key) or `log` (every event, with
+  a checkpoint), and a consumer that missed updates gets the state back at its
+  next renewal, after a provider restart, or on `resync_service_subscription`.
+  Every subscription frame is sealed in the 1:1 MLS session with no plaintext
+  fallback. Who may subscribe is the service's policy: ask the application
+  (the default), accept every peer with a session, or rules by peer and group.
+  Rust only in this release; the TypeScript event types are in place. The
+  decision is ADR 0035, the behaviour `docs/state-machines/service-subscriptions.md`.
+
 ### Fixed
 
 - **`sendReadReceipt` works again from React Native on Android.** Since the

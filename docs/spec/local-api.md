@@ -686,6 +686,9 @@ and is the one a client is written against.
 | `service_discovered` | `query_id`, `service_id`, `version`, `provider_peer_id`, `capabilities` (object), `hop_count #` | `query_id` |
 | `service_request_received` | `request_id`, `service_id`, `method`, `body`, `sender`, `encrypted !` | `service_id` |
 | `service_response_received` | `request_id`, `service_id`, `status`, `body`, `provider_peer_id`, `encrypted !` | `request_id` |
+| `service_subscribe_received` | `sub_id`, `service_id`, `topic`, `mode`, `params`, `sender`, `renewal !` | `service_id` |
+| `service_subscription_changed` | `sub_id`, `role`, `service_id`, `topic`, `peer`, `state`, `reason` | `service_id` |
+| `service_update_received` | `sub_id`, `service_id`, `topic`, `key?`, `seq #`, `body`, `snapshot !`, `provider_peer_id` | `service_id` |
 | `presence_updated` | `peer_id`, `status <PresenceStatus>`, `timestamp #`, `last_seen_ms #?`, `source <PresenceSource>` | `all` |
 | `typing_indicator_received` | `sender`, `conversation_id`, `is_typing !`, `timestamp #` | `all` |
 | `read_receipt_received` | `sender`, `message_ids []`, `timestamp #` | `all` |
