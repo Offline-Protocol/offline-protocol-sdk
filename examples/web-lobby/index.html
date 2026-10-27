@@ -20,9 +20,10 @@
   code { font-size: 13px; word-break: break-all; }
   section { border-top: 1px solid var(--line); padding: 14px 0; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  input { width: 100%; font: 13px/1.4 ui-monospace, monospace; padding: 6px 8px; margin-bottom: 6px;
+  /* 16px: Safari zooms the page in on a field smaller than that, and stays zoomed. */
+  input { width: 100%; font: 16px/1.4 ui-monospace, monospace; padding: 6px 8px; margin-bottom: 6px;
           border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
-  textarea { width: 100%; min-height: 64px; font: 12px/1.4 ui-monospace, monospace; padding: 8px;
+  textarea { width: 100%; min-height: 64px; font: 16px/1.4 ui-monospace, monospace; padding: 8px;
              border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
   button { font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
            border: 1px solid var(--accent); background: var(--accent); color: #fff; }

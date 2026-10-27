@@ -14,6 +14,9 @@
 # ponytail: hashes the lobby's directory; take it as an argument when a
 # second page caches the SDK.
 set -euo pipefail
+# The globs below expand in collation order; a locale's order would give the
+# same files two ids, and every device a needless update.
+export LC_ALL=C
 cd "$(dirname "$0")/../../.."
 
 id="$(cat bindings/web/pkg/offline_protocol_web.js bindings/web/pkg/offline_protocol_web_bg.wasm \
