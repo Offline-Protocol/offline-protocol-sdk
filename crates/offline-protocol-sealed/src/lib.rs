@@ -90,7 +90,7 @@ pub use identity_assertion::{
 };
 pub use keypackage::{
     KeyPackagePayload, ACK_COALESCED_V1, ACK_UNDECRYPTABLE_V1, CTRL_SIGN_V2,
-    MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1,
+    MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1, SVC_SUB_V1,
 };
 
 #[cfg(all(test, feature = "std"))]
