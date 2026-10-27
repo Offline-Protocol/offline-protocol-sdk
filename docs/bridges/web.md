@@ -663,7 +663,9 @@ as it was. A browser that evicts storage takes the origin's whole, the
 identity included unless `persist()` was granted, and clearing a site's data
 clears both; only the cache comes back with the next visit online. The first
 visit must be online. On iOS a page added to the home screen has storage
-apart from Safari's, so it is a second device with its own identity.
+apart from Safari's, its service worker and cache included: it is a second
+device with its own identity, and it loads offline only once it has itself
+been opened online, whatever Safari has cached (seen on iOS 26.6).
 
 **Retiring it is a served file, not a deleted one.** A browser keeps a
 registration whose update check fails, so a `sw.js` (or a `build-id.js` it
