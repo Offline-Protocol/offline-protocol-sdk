@@ -32,7 +32,7 @@ use crate::protocol::types::KeyPackagePayload;
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage, MAX_ENCRYPTION_CAPABLE_PEERS};
 use crate::test_identity::id;
 use crate::{Event, ProtocolConfig};
-use offline_protocol_sealed::SVC_SEALED_V1;
+use offline_protocol_sealed::{SVC_SEALED_V1, SVC_SUB_V1};
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -411,12 +411,14 @@ fn svc_sealed_kill_switch_stops_recording_and_advertising() {
     };
     assert_eq!(
         on.build_key_package_payload(&bundle, false).svc_versions,
-        vec![SVC_SEALED_V1]
+        vec![SVC_SEALED_V1, SVC_SUB_V1]
     );
-    assert!(off
-        .build_key_package_payload(&bundle, false)
-        .svc_versions
-        .is_empty());
+    // The switch withdraws entry 1 only. Entry 2 (subscriptions) has no
+    // plaintext form for it to govern, and has a switch of its own.
+    assert_eq!(
+        off.build_key_package_payload(&bundle, false).svc_versions,
+        vec![SVC_SUB_V1]
+    );
 }
 
 /// The list sits beside a confidentiality decision, so it is honoured only

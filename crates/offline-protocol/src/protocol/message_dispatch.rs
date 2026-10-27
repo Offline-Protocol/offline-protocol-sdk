@@ -17,8 +17,10 @@ use crate::SessionStateError;
 use chrono::Utc;
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_mls::{EncryptedMessage, WelcomeMessage};
-use offline_protocol_sealed::{SessionCorroboration, SVC_SEALED_V1};
-use offline_protocol_services::{ServiceAction, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE};
+use offline_protocol_sealed::{SessionCorroboration, SVC_SEALED_V1, SVC_SUB_V1};
+use offline_protocol_services::{
+    is_subscription_frame, ServiceAction, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE,
+};
 use offline_protocol_transport::TransportType;
 use tracing::{debug, error, info, warn};
 
@@ -170,6 +172,16 @@ impl OfflineProtocol {
             // sent us a sealed service frame stays in
             // `svc_sealed_proved_peers`, which nothing here touches, and the
             // send path seals on either set.
+            // Entry 2: subscription frames. Only from a signed key package,
+            // like entry 1; a replayed older one can only make subscribing
+            // fail at the call, never send a frame in the clear, because
+            // subscription frames have no plaintext form.
+            if signed && self.config.service_subscriptions.enabled {
+                self.record_svc_sub_advertisement(
+                    sender,
+                    payload.svc_versions.contains(&SVC_SUB_V1),
+                );
+            }
             let advertises_svc_sealed = signed && payload.svc_versions.contains(&SVC_SEALED_V1);
             if self.config.encryption.encrypt_service_messages && advertises_svc_sealed {
                 self.record_svc_sealed_peer(sender);
@@ -1573,8 +1585,12 @@ impl OfflineProtocol {
                     // any other service frame found here is dropped, and like
                     // every service frame it never surfaces as a message.
                     let in_session = group_id.starts_with("session:");
+                    // Subscription frames (ADR 0035) are sealed-only, and this
+                    // is the one place they are routed from.
                     let sealed_service_frame = (in_session
-                        && (text.starts_with(SVC_REQUEST) || text.starts_with(SVC_RESPONSE)))
+                        && (text.starts_with(SVC_REQUEST)
+                            || text.starts_with(SVC_RESPONSE)
+                            || is_subscription_frame(&text)))
                     .then(|| std::mem::take(&mut text));
                     let unroutable_service_frame = sealed_service_frame.is_none()
                         && in_session
@@ -2520,6 +2536,12 @@ impl OfflineProtocol {
         // encryption-capability fact itself. Recorded first because the
         // ratchet below is a subset of that set and refuses anyone outside it.
         self.record_encryption_capable(sender);
+        if is_subscription_frame(content) {
+            // Proves entry 2, not entry 1: a subscription frame says nothing
+            // about how this peer routes a sealed request.
+            self.handle_subscription_frame(sender, content);
+            return;
+        }
         self.record_svc_sealed_proved(sender);
         self.handle_service_message(sender, content, message, true);
     }
@@ -2536,6 +2558,9 @@ impl OfflineProtocol {
         message: &Message,
         sealed: bool,
     ) {
+        if !sealed && self.drop_plaintext_subscription_frame(sender, content) {
+            return;
+        }
         let peers: Vec<String> = self
             .known_peers
             .keys()

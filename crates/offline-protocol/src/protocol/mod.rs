@@ -22,6 +22,7 @@ mod receive;
 mod security;
 mod send;
 mod service_seal;
+mod service_subscriptions;
 mod session;
 pub(crate) mod state_crypto;
 mod storage;
@@ -990,6 +991,11 @@ pub struct OfflineProtocol {
     /// Mesh service registry and handler (extracted crate).
     mesh_services: MeshServices,
 
+    /// Service subscriptions (ADR 0035): both halves, and the frames that
+    /// wait superseded in the outbox. In memory only: a subscription is a
+    /// lease, and a restart ends it on both sides.
+    pub(crate) service_subscriptions: service_subscriptions::ServiceSubscriptions,
+
     /// Bundled state for mesh group messaging (member cache, dedup, pending commits).
     pub(crate) group_mesh: crate::group_mesh::GroupMeshState,
 
@@ -1236,6 +1242,8 @@ impl OfflineProtocol {
         // across any later `install_telemetry_sink` call that does not
         // supply its own `scrub_secret`.
         let telemetry_fallback_secret = *uuid::Uuid::new_v4().as_bytes();
+        let service_subscriptions =
+            service_subscriptions::ServiceSubscriptions::new(&config.service_subscriptions);
 
         Ok(Self {
             transport_manager,
@@ -1356,6 +1364,7 @@ impl OfflineProtocol {
             outbound_media_windows: HashMap::new(),
             restored_media_descriptors: HashMap::new(),
             mesh_services: MeshServices::new(),
+            service_subscriptions,
             group_mesh: crate::group_mesh::GroupMeshState::default(),
             blocked_users: HashSet::new(),
             last_reconciliation_at: None,

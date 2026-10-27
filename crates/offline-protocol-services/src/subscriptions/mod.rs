@@ -254,6 +254,14 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(content: &str, prefix: &str
     }
 }
 
+/// The service a `__SVC_SUB__` names, so that the engine can work out the
+/// service's registration and the subscriber's admission before handing the
+/// frame to [`Provider::handle_subscribe`].
+pub fn requested_service(content: &str) -> Option<String> {
+    decode::<crate::payloads::SubscribePayload>(content, crate::payloads::SVC_SUBSCRIBE)
+        .map(|payload| payload.service_id)
+}
+
 /// The event every state change is reported with.
 pub(crate) fn changed(
     sub_id: &str,

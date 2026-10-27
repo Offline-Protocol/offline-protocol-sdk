@@ -316,6 +316,7 @@ impl OfflineProtocol {
         self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
+        self.prune_superseded();
         self.cleanup_group_message_dedup();
         self.check_epoch_forks();
         self.check_leave_election_timeouts();

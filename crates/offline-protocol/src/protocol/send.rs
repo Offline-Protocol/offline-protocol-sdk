@@ -6765,10 +6765,17 @@ impl OfflineProtocol {
             // sealed form seals toward us, and with the switch off we still
             // route it (parsing is unconditional), so this gates only whether
             // peers are invited to.
-            svc_versions: if self.config.encryption.encrypt_service_messages {
-                vec![offline_protocol_sealed::SVC_SEALED_V1]
-            } else {
-                Vec::new()
+            // Entry 2 under the subscription switch: subscription frames are
+            // always sealed, so they do not depend on the service-sealing one.
+            svc_versions: {
+                let mut versions = Vec::new();
+                if self.config.encryption.encrypt_service_messages {
+                    versions.push(offline_protocol_sealed::SVC_SEALED_V1);
+                }
+                if self.config.service_subscriptions.enabled {
+                    versions.push(offline_protocol_sealed::SVC_SUB_V1);
+                }
+                versions
             },
             // Present only when the Nostr transport is installed. Advertised
             // regardless of the sealing kill switch, which gates what *we*
