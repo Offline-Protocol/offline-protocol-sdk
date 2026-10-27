@@ -40,17 +40,17 @@ upstream source on each crate's page) — the exact versions are listed below.
 
 Used by:
 
-- [offline-protocol 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-core 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-data 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-mls 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-reliability 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-router 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-sealed 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-services 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-telemetry-wire 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-transport 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-uniffi 0.30.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-core 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-data 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-mls 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-reliability 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-router 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-sealed 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-services 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-telemetry-wire 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-transport 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-uniffi 0.31.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 
 ```
 GNU AFFERO GENERAL PUBLIC LICENSE
@@ -4213,7 +4213,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [crypto-bigint 0.7.6](https://github.com/RustCrypto/crypto-bigint)
+- [crypto-bigint 0.7.10](https://github.com/RustCrypto/crypto-bigint)
 - [sec1 0.8.1](https://github.com/RustCrypto/formats)
 - [spki 0.8.0](https://github.com/RustCrypto/formats)
 
@@ -4476,7 +4476,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [ctutils 0.4.5](https://github.com/RustCrypto/utils)
+- [ctutils 0.4.6](https://github.com/RustCrypto/utils)
 
 ```
 Copyright (c) 2025-2026 The RustCrypto Project Developers

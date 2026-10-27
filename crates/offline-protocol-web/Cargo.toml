@@ -30,7 +30,7 @@ workspace = true
 # (with a warning that is easy to miss), and an inherited entry would put the
 # telemetry thread and its TLS stack into the browser build. The version moves
 # with the workspace's, like every internal dependency's.
-offline-protocol = { path = "../offline-protocol", version = "0.30.0", default-features = false, features = ["data"] }
+offline-protocol = { path = "../offline-protocol", version = "0.31.0", default-features = false, features = ["data"] }
 offline-protocol-core = { workspace = true }
 offline-protocol-transport = { workspace = true }
 offline-protocol-mls = { workspace = true }
