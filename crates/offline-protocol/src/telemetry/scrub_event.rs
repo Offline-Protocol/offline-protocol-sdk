@@ -742,6 +742,40 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         } => {
             hash_string(provider_peer_id, scrubber);
         }
+        Event::ServiceSubscribeReceived {
+            sender,
+            sub_id: _,
+            service_id: _,
+            topic: _,
+            mode: _,
+            params: _,
+            renewal: _,
+        } => {
+            hash_string(sender, scrubber);
+        }
+        Event::ServiceSubscriptionChanged {
+            peer,
+            sub_id: _,
+            role: _,
+            service_id: _,
+            topic: _,
+            state: _,
+            reason: _,
+        } => {
+            hash_string(peer, scrubber);
+        }
+        Event::ServiceUpdateReceived {
+            provider_peer_id,
+            sub_id: _,
+            service_id: _,
+            topic: _,
+            key: _,
+            seq: _,
+            body: _,
+            snapshot: _,
+        } => {
+            hash_string(provider_peer_id, scrubber);
+        }
         Event::PresenceUpdated {
             peer_id,
             status: _,
@@ -959,6 +993,9 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::ServiceDiscovered { .. }
         | Event::ServiceRequestReceived { .. }
         | Event::ServiceResponseReceived { .. }
+        | Event::ServiceSubscribeReceived { .. }
+        | Event::ServiceSubscriptionChanged { .. }
+        | Event::ServiceUpdateReceived { .. }
         | Event::PresenceUpdated { .. }
         | Event::TypingIndicatorReceived { .. }
         | Event::ReadReceiptReceived { .. }
