@@ -13,6 +13,31 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [0.31.0] — 2026-10-27
 
+> **The engine runs in a browser (experimental).** `offline-protocol-web` and
+> `bindings/web` run the full engine, MLS included, in a Web Worker. A browser
+> node is durable over origin-private files, links to other devices over
+> WebRTC, Nostr and Web Bluetooth, and finds the browsers on its own network
+> through a nearby room.
+>
+> **Two devices that share only a Nostr relay form a session.** A send to a
+> peer with no session now asks the relays for the key packages it published,
+> on iOS, Android and Flutter as in the browser, so an application that turned
+> Nostr on sends new queries to its relays. A pair split into two sessions, or
+> left without one by a lost reset, now heals, and an old group message no
+> longer fills a peer's send window.
+>
+> **Also new:** a Ruby binding, published to RubyGems; live Bluetooth LE signal
+> strength as a `peer_rssi` event; and an iPhone that names a central it
+> cannot dial back.
+>
+> **Rust code that names every case or every field breaks in four places.**
+> `Event` gains `PeerRssi`, `SendMessageOptions` and `GroupSendOptions` gain
+> `ephemeral`, and `offline-protocol-sealed`'s `KeyPackagePayload` gains
+> `no_session`. An exhaustive TypeScript `switch` over the event union needs a
+> `peer_rssi` case. Nothing is removed from any binding; what behaves
+> differently is in
+> [§29](docs/UPGRADING.md#29-behaviour-that-changes-without-a-compile-error-v0310).
+
 ### Security
 
 - **Nostr signing and NIP-44 key agreement no longer run on a timing-leaky
@@ -186,8 +211,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh`, which
   typechecks the plugin's Swift with the shared bridge sources the pod
   compiles; until now nothing in CI compiled the iOS plugin. On Android,
-  destroying or detaching the engine now stops the mesh foreground service
-  after the transports rather than before them, as `stop()` does.
+  `start()` now runs the mesh foreground service React Native runs, so the
+  plugin's manifest adds `FOREGROUND_SERVICE`,
+  `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `CHANGE_WIFI_STATE` and a
+  `connectedDevice` service, and the device shows the service's notification
+  while the mesh runs. `stop()`, and destroying or detaching the engine, stop
+  the service after the transports rather than before them.
 
 ### Changed
 
@@ -230,8 +259,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
-- **A device known only by its address is reached over Nostr on every
-  binding.** Cold first contact never started outside the browser: a send to
+- **A device known only by its address is reached over Nostr from a phone
+  too.** Cold first contact never started outside the browser: a send to
   a peer with no session only queued, and nothing asked the relays for the
   key packages that peer published, so two phones sharing only a relay never
   formed a session. The engine now asks when a send or

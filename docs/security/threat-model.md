@@ -1414,11 +1414,14 @@ device log is readable by anything on the device that can run `logcat`, which
 is why the filter is on the target and not on a level. See
 [the debug tap](../telemetry.md#the-debug-tap).
 
-The browser binding's page code opens connections only where the application
-says: WebSockets to the Nostr relays it names for `NostrSignaller` (R28), and
-ICE traffic to the STUN or TURN servers it names for `WebRtcCarrier` (R27).
-With neither, a browser node opens nothing beyond its own origin and the
-devices it links to.
+The browser binding, worker and page together, opens connections only where
+the application says: WebSockets to the Nostr relays it names for the Nostr
+transport (`nostr: { relays }`, W12), for `NostrSignaller` (R28) and for
+`NearbyRoom` (R30); a query to the STUN server it names for `NearbyRoom`,
+which learns the network's public address; and ICE traffic to the STUN or
+TURN servers it names for `WebRtcCarrier` (R27). Web Bluetooth (R31) opens
+no network connection. With none of these, a browser node opens nothing
+beyond its own origin and the devices it links to.
 
 The bound is on the core, not on the whole SDK. The React Native bridge
 sources log through `android.util.Log` and `print` on their own account, and

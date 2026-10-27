@@ -150,7 +150,9 @@ failure on every retry, about fifteen a second per device.
 
 **Some events are counted and never sent.** `protocol.message.sent` carries
 the message content, so only its count survives, folded into the rollup's
-`sends_attempted_sum`. `mls.session_establishing`, `mls.session_ready` and
+`sends_attempted_sum`, and only for a send that asks for an acknowledgement:
+an ephemeral send is never delivered or failed, so counting it would lower
+the delivery ratio by every one. `mls.session_establishing`, `mls.session_ready` and
 `mls.encryption_used` are consumed on the device to compute the session
 summary, and `mls.initialized` is dropped outright: it fires once per process
 for no peer, so it starts nothing and counts nothing. `protocol.neighbor.discovered` and `.lost` are read as neighbour
