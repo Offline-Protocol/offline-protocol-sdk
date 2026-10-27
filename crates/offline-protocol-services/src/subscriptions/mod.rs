@@ -22,6 +22,8 @@
 //! the engine's, which sends through a path with no plaintext fallback and
 //! drops a subscription frame that arrives in plaintext.
 
+/// The consumer half: subscriptions this device holds on other devices.
+pub mod consumer;
 /// The provider half: subscriptions other devices hold on this one.
 pub mod provider;
 
@@ -34,6 +36,7 @@ use crate::payloads::{
     MAX_SUBSCRIPTION_TOPIC_LEN,
 };
 
+pub use consumer::{Consumer, SubscriptionInfo};
 pub use provider::{Provider, PublishOutcome, SubscriberInfo};
 
 /// How the engine must send one subscription frame.
@@ -271,3 +274,6 @@ pub(crate) fn changed(
         reason: reason.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests;

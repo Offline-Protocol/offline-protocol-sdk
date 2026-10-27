@@ -35,6 +35,7 @@ pub use services::{
     ServiceAction,
 };
 pub use subscriptions::{
-    Admission, Provider, PublishOutcome, RulesFallback, SubscriberInfo, SubscriptionDelivery,
-    SubscriptionFrame, SubscriptionOutput, SubscriptionPolicy, SubscriptionRole, SubscriptionState,
+    Admission, Consumer, Provider, PublishOutcome, RulesFallback, SubscriberInfo,
+    SubscriptionDelivery, SubscriptionFrame, SubscriptionInfo, SubscriptionOutput,
+    SubscriptionPolicy, SubscriptionRole, SubscriptionState,
 };

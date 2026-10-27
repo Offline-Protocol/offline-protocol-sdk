@@ -811,6 +811,8 @@ impl Provider {
     /// that far; and `history_lost` when neither covers it. A new subscriber
     /// with no position is sent the checkpoint, if there is one, and nothing
     /// else: the checkpoint is the topic's state, the buffer its recent news.
+    /// A resync is sent the checkpoint and what follows it when there is one,
+    /// and otherwise what follows its position.
     fn answer(
         &mut self,
         sub_id: &str,
@@ -885,12 +887,23 @@ impl Provider {
                     ));
                     Some(*seq)
                 };
-                match same_stream {
-                    Some(position) if topic.buffer_covers_after(position.seq) => {
+                // A resync asks for the state, so the checkpoint comes first
+                // when there is one; the consumer has forgotten its position.
+                let resynced = if resync {
+                    from_checkpoint(&mut catch_up)
+                } else {
+                    None
+                };
+                match (resynced, same_stream) {
+                    (Some(seq), _) => {
+                        baseline = seq;
+                        replay_after(seq, &mut catch_up);
+                    }
+                    (None, Some(position)) if topic.buffer_covers_after(position.seq) => {
                         baseline = position.seq.min(topic.last_seq());
                         replay_after(baseline, &mut catch_up);
                     }
-                    Some(_) => match from_checkpoint(&mut catch_up) {
+                    (None, Some(_)) => match from_checkpoint(&mut catch_up) {
                         Some(seq) => {
                             baseline = seq;
                             replay_after(seq, &mut catch_up);
@@ -900,7 +913,7 @@ impl Provider {
                     // New, or a previous life of this topic: the checkpoint is
                     // the state, if there is one. The consumer reports a
                     // stream change itself, so it is not also history lost.
-                    None => {
+                    (None, None) => {
                         if let Some(seq) = from_checkpoint(&mut catch_up) {
                             baseline = seq;
                             replay_after(seq, &mut catch_up);
