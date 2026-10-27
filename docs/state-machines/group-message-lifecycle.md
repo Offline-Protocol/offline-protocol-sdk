@@ -82,10 +82,13 @@ stateDiagram-v2
 
     Decrypt --> Delivered: plaintext, mark logical id
     Decrypt --> Buffered: local group state lags (Retriable)
+    Decrypt --> Spent: behind the out-of-order window, never decrypts
     Decrypt --> SecurityRejected: identity binding refusal
     Decrypt --> PolicyRejected: permanent policy refusal
 
     Buffered --> Deferred: no ack, unmark transport dedup
+    Spent --> Consumed: sender on the roster, ack
+    Spent --> Buffered: sender off the roster, no ack
     Deferred --> [*]
     SecurityRejected --> [*]: no ack, release both dedup layers
     PolicyRejected --> [*]: ack, stays marked
@@ -102,6 +105,17 @@ so the drain does **not** re-mark the transport layer either.
 **Difference 2: a duplicate of a still-pending message returns `Deferred`, not a
 re-acknowledgement.** It is checked before decrypt. Only a duplicate of an
 already-delivered identifier is `Consumed`.
+
+**A frame too far behind the ratchet to decrypt is acknowledged only for a
+member.** OpenMLS keeps a bounded window of past generations, and a frame
+behind it (`too_distant_in_the_past`) can never decrypt, while the sender
+resends the same ciphertext because it never re-seals a group frame. Left
+unacknowledged, it holds a slot in that peer's send window for the outbox
+lifetime; sixteen of them stopped every other message to a device for hours.
+From a roster member it is `Consumed`, so the sender stops. From anyone else
+it stays unanswered like a buffered frame, because anyone holding an old
+ciphertext can replay it under their own identity, and an acknowledgement
+would tell them the device is up.
 
 The unacknowledged sender's recovery path when a buffered entry is evicted or
 expires is an explicit release of replay protection, which clears both

@@ -251,12 +251,14 @@ One number identifies a release across every channel: the `vX.Y.Z` git tag, the
 `@offline-protocol/mesh-sdk` npm package, the `offline-protocol*` crates on
 crates.io, the GitHub release assets (the Python wheels among them), the Swift
 package's `X.Y.Z` tag in `Offline-Protocol/offline-protocol-swift`,
-`com.offlineprotocol:offline-protocol-sdk` on Maven Central,
-`offline-protocol-sdk` on PyPI, and the service image
-`ghcr.io/offline-protocol/offline-protocol-service`, which installs that PyPI
-release. Pushing the tag is what publishes, so everything below happens on a
-`chore/release-X.Y.Z` branch that merges first. Maven Central and PyPI are
-switched on one by one, the image follows PyPI's switch, and the Swift package
+`com.offlineprotocol:offline-protocol-sdk` and
+`com.offlineprotocol:offline-protocol-java` on Maven Central,
+`offline-protocol-sdk` on PyPI, the `offline_protocol` gem on RubyGems, and the
+service image `ghcr.io/offline-protocol/offline-protocol-service`, which
+installs that PyPI release. Pushing the tag is what publishes, so everything
+below happens on a `chore/release-X.Y.Z` branch that merges first. Maven
+Central, PyPI and RubyGems are switched on one by one, the image follows
+PyPI's switch, and the Swift package
 is pulled rather than pushed; see
 [the native packages and PyPI](#the-native-packages-and-pypi).
 
@@ -265,7 +267,7 @@ Version files to bump together:
 | File | How |
 | --- | --- |
 | `Cargo.toml` | `[workspace.package].version` **and** the eleven internal-dependency versions in `[workspace.dependencies]`. A partial *minor* bump fails to resolve immediately and locally; a partial *patch* bump resolves silently, because `version = "X.Y.Z"` is a caret requirement that a sibling one patch ahead still satisfies. Harmless if it ships, but move them together |
-| `crates/offline-protocol-sealed/Cargo.toml`, `crates/offline-protocol-leaf/Cargo.toml` | Four more internal-dependency versions live here, not in the workspace table: the dual `std`/`no_std` crates declare their dependencies locally, because cargo silently ignores `default-features = false` on an inherited dependency (ADR [0020](docs/adr/0020-core-compiles-without-std.md), [0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)). Miss these and the workspace stops resolving; `local_dep_versions_match_the_workspace_table` is the guard |
+| `crates/offline-protocol-sealed/Cargo.toml`, `crates/offline-protocol-leaf/Cargo.toml`, `crates/offline-protocol-web/Cargo.toml` | Five more internal-dependency versions live here, not in the workspace table: the dual `std`/`no_std` crates declare their dependencies locally, because cargo silently ignores `default-features = false` on an inherited dependency (ADR [0020](docs/adr/0020-core-compiles-without-std.md), [0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)), and the browser crate declares `offline-protocol` locally for the same reason, to keep the telemetry thread and its TLS stack out of the browser build. Miss these and the workspace stops resolving; `local_dep_versions_match_the_workspace_table` is the guard |
 | `Cargo.lock` | any `cargo` command refreshes it once the manifests change |
 | `tools/embedded-footprint/Cargo.lock`, `tools/mls-interop/Cargo.lock` | Separate workspaces that depend on the SDK crates by path, so their lockfiles pin the versions too. CI builds both with `--locked`, so a stale one fails the run. `cargo metadata --manifest-path <tool>/Cargo.toml` refreshes each |
 | `bindings/python/pyproject.toml` | `version` — release.yml gates this one against the tag too |

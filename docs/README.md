@@ -93,7 +93,7 @@ implementation written against these documents should interoperate.
 
 | Document | Scope |
 |----------|-------|
-| [ADR index](adr/README.md) | Twenty-eight decisions that are expensive to reverse or easy to undo by accident |
+| [ADR index](adr/README.md) | Thirty-four decisions that are expensive to reverse or easy to undo by accident |
 
 If something in the codebase looks redundant or over-engineered, check here
 before simplifying it.
@@ -105,7 +105,7 @@ in here fails **silently** when violated.
 
 | Document | Scope |
 |----------|-------|
-| [Shared contract](bridges/README.md) | The thirteen rules every binding shares |
+| [Shared contract](bridges/README.md) | The fourteen rules every binding shares |
 | [Swift](bridges/swift.md) | iOS native and the React Native iOS bridge |
 | [Kotlin](bridges/kotlin.md) | Android native and the React Native Android bridge |
 | [Python](bridges/python.md) | Desktop and tooling |
@@ -114,6 +114,9 @@ in here fails **silently** when violated.
 | [C](bridges/c.md) | The C API: the local API called in process, for C and every language that calls C |
 | [Java](bridges/java.md) | The generated Java binding for the JVM, over the foreign function API |
 | [Ruby](bridges/ruby.md) | The generated Ruby binding, over the ffi gem |
+| [Flutter](bridges/flutter.md) | The Flutter plugin for iOS and Android, over the shared React Native bridge sources |
+| [Web](bridges/web.md) | The engine in a browser Web Worker, and the JavaScript in `bindings/web` that runs it |
+| [Web on two devices](bridges/web-devices.md) | The manual checklist for the browser binding between two real devices |
 
 ## Release history
 
@@ -136,6 +139,8 @@ in here fails **silently** when violated.
 | [Offline Demo](../examples/demo-app/README.md) | The reference React Native app: discovery, 1:1 chat, groups, mesh services and telemetry in one place |
 | [Service Discovery](../examples/service-discovery-app/README.md) | React Native app registering, discovering and invoking services over the mesh |
 | [Nostr Transport](../examples/nostr-example/README.md) | Minimal React Native app using the Nostr relay transport |
+| [Mesh between tabs](../examples/web-two-tabs/README.md) | Browser tabs, each a full node in a Web Worker, messaging end-to-end encrypted with no server |
+| [Pong lobby](../examples/web-lobby/README.md) | A two-player Pong game between browsers over WebRTC, with no server |
 | [Java](../examples/java-app/README.md) | Two devices in one JVM pairing, messaging, sending a file and forming a group over the Java binding |
 | [Ruby](../examples/ruby-app/README.md) | The same two devices in one Ruby process, over the Ruby binding |
 | `cargo run -p offline-protocol --example replicated_notes` | Replicated documents: open a store, edit, persist, reopen |

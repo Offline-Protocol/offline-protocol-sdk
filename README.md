@@ -38,7 +38,7 @@ Every channel carries the version number of the release it came from.
 | Flutter (iOS, Android, preview) | [`offline_protocol`](bindings/flutter/README.md) plugin in this repository | Path dependency; see [bindings/flutter](bindings/flutter/README.md) |
 | Java (JVM 22+, desktop and server) | [`com.offlineprotocol:offline-protocol-java`](https://central.sonatype.com/artifact/com.offlineprotocol/offline-protocol-java) on Maven Central, over the native library in each release's desktop archives | `implementation("com.offlineprotocol:offline-protocol-java:0.30.0")`, see [bindings/java](bindings/java/README.md) |
 | Ruby (desktop and server) | Generated source in [bindings/ruby](bindings/ruby/README.md), over the native library in each release's desktop archives; not on RubyGems yet | See [bindings/ruby](bindings/ruby/README.md) |
-| Browser (Chrome, experimental) | [`bindings/web`](bindings/web) in this repository, over the `offline-protocol-web` crate; not yet published | Build from source; see [docs/bridges/web.md](docs/bridges/web.md) |
+| Browser (Chromium, Firefox, Safari; experimental) | [`bindings/web`](bindings/web) in this repository, over the `offline-protocol-web` crate; not yet published | Build from source; see [docs/bridges/web.md](docs/bridges/web.md) |
 
 **Python.** Wheels are published for Python 3.10 or later on macOS arm64
 (macOS 14 or later), Linux x86_64 and aarch64 (`manylinux_2_34`, so glibc

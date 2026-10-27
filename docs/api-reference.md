@@ -1269,7 +1269,7 @@ room.
 
 ## UniFFI Bindings
 
-Native platform integration uses UniFFI-generated type-safe bindings for Swift, Kotlin and Python. The bindings are auto-generated from the UDL definition in `crates/offline-protocol-uniffi/src/offline_protocol.udl`.
+Native platform integration uses UniFFI-generated type-safe bindings for Swift, Kotlin, Python, Ruby and Java. The bindings are auto-generated from the UDL definition in `crates/offline-protocol-uniffi/src/offline_protocol.udl`.
 
 See [React Native Integration](react-native-integration.md) for the complete TypeScript API, [iOS Integration](ios-integration.md) for Swift usage, and [Android Integration](android-integration.md) for Kotlin usage.
 
