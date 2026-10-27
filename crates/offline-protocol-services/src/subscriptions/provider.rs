@@ -854,7 +854,12 @@ impl Provider {
                         ));
                     }
                     sub.dirty.clear();
-                    sub.last_sent = Some(now);
+                    // The interval runs from a value sent, not from an
+                    // empty snapshot, or the first publish to a new
+                    // subscriber of an empty topic would wait for it.
+                    if !topic.latest.is_empty() {
+                        sub.last_sent = Some(now);
+                    }
                 }
             }
             SubscriptionMode::Log => {

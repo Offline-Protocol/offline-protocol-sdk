@@ -32,6 +32,7 @@ pub use custody::{CustodyRefusal, CustodyStats};
 pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
+pub use service_subscriptions::PublishReport;
 #[cfg(feature = "file-store")]
 pub(crate) use storage::{sealed_state_key_types, stored_state_record_key, StoredRecordKey};
 pub(crate) use storage::{PruneAllowance, RestorableRecord};
@@ -2534,6 +2535,10 @@ impl OfflineProtocol {
         // (`docs/spec/custody.md`, "Redelivery").
         self.redeliver_custody_to(peer_id);
 
+        // A subscription paused on this peer renews now rather than at its
+        // next renewal time.
+        self.on_subscription_peer_seen(peer_id);
+
         // A Welcome that stalled or expired while this peer was unreachable now
         // has a fresh delivery opportunity over the carrier that surfaced this
         // peer — re-arm it. No-op when there is no pending Welcome for the peer.
@@ -3809,6 +3814,7 @@ impl OfflineProtocol {
         self.pump_media_transfers();
         #[cfg(feature = "data")]
         self.send_due_data_settle_offers(Instant::now());
+        self.tick_service_subscriptions();
         self.refresh_nostr_key_package_slots();
         self.refresh_nostr_discovery_claim();
         // A relay is free never to send end-of-stored-events, and that is the

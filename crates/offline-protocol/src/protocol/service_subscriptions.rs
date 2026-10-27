@@ -75,6 +75,34 @@ fn timing(config: &ServiceSubscriptionConfig) -> (ProviderTiming, ConsumerTiming
     )
 }
 
+/// How a subscription frame left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameSent {
+    /// Ephemeral, over a live direct link.
+    Live,
+    /// Queued on the reliable ladder.
+    Queued,
+}
+
+/// What [`OfflineProtocol::publish_service_update`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PublishReport {
+    /// Active subscriptions on the topic.
+    pub subscribers: usize,
+    /// Sent once over a live direct link (`latest` only).
+    pub sent_live: usize,
+    /// Queued on the reliable ladder: every `log` update, and a `latest`
+    /// update to a subscriber with no live link, superseding the one it
+    /// replaces.
+    pub queued: usize,
+    /// Held back by the update interval; the newest value goes on the next
+    /// tick after it.
+    pub coalesced: usize,
+    /// Not sent because it could not be sealed (no confirmed session). The
+    /// subscriber's next renewal catches it up.
+    pub failed: usize,
+}
+
 /// Updates travel below the control frames that open, renew and end a
 /// subscription, so a burst of state never holds back the answer to a
 /// subscribe.
@@ -115,22 +143,38 @@ impl OfflineProtocol {
     /// that cannot be sealed is not sent; the state machines recover it
     /// (the consumer's renewal, the provider's next catch-up).
     pub(crate) fn apply_subscription_output(&mut self, output: SubscriptionOutput) {
-        for frame in output.frames {
-            if let Err(err) = self.send_subscription_frame(frame) {
-                debug!(error = %err, "Subscription frame not sent");
-            }
-        }
-        for event in output.events {
+        self.send_subscription_frames(output.frames);
+        self.emit_subscription_events(output.events);
+    }
+
+    /// Sends `frames` in order and returns how each left, or why it did not.
+    fn send_subscription_frames(
+        &mut self,
+        frames: Vec<SubscriptionFrame>,
+    ) -> Vec<Result<FrameSent>> {
+        frames
+            .into_iter()
+            .map(|frame| {
+                let sent = self.send_subscription_frame(frame);
+                if let Err(err) = &sent {
+                    debug!(error = %err, "Subscription frame not sent");
+                }
+                sent
+            })
+            .collect()
+    }
+
+    fn emit_subscription_events(&self, events: Vec<offline_protocol_services::ServiceEvent>) {
+        for event in events {
             self.emit_event(Event::from(event));
         }
     }
 
     /// Seals and sends one subscription frame by the delivery it asks for.
-    /// Returns the message id when it was queued or sent.
     pub(crate) fn send_subscription_frame(
         &mut self,
         frame: SubscriptionFrame,
-    ) -> Result<MessageId> {
+    ) -> Result<FrameSent> {
         if !self.config.service_subscriptions.enabled {
             return Err(Error::InvalidArgument(
                 "service subscriptions are switched off".to_string(),
@@ -146,29 +190,27 @@ impl OfflineProtocol {
             content,
             delivery,
         } = frame;
-        match delivery {
-            SubscriptionDelivery::Reliable => {
-                self.send_subscription_reliable(&recipient, content, None)
-            }
-            SubscriptionDelivery::Superseding(key) => {
-                self.send_subscription_reliable(&recipient, content, Some(key))
-            }
+        let key = match delivery {
+            SubscriptionDelivery::Reliable => None,
+            SubscriptionDelivery::Superseding(key) => Some(key),
             SubscriptionDelivery::LiveOrSuperseding(key) => {
                 if self.confirmed_sessions.contains(&recipient) {
                     match self.send_subscription_live(&recipient, &content) {
-                        Ok(message_id) => {
+                        Ok(_) => {
                             // Newer than anything queued under the key.
                             self.withdraw_superseded(&recipient, &key);
-                            return Ok(message_id);
+                            return Ok(FrameSent::Live);
                         }
                         Err(err) => {
                             debug!(error = %err, "No live link for a subscription update; queueing it");
                         }
                     }
                 }
-                self.send_subscription_reliable(&recipient, content, Some(key))
+                Some(key)
             }
-        }
+        };
+        self.send_subscription_reliable(&recipient, content, key)
+            .map(|_| FrameSent::Queued)
     }
 
     /// Sealed, on the reliable ladder. With `key`, whatever is still queued
@@ -331,5 +373,288 @@ impl OfflineProtocol {
                 }
             }
         }
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+impl OfflineProtocol {
+    fn ensure_subscriptions_enabled(&self) -> Result<()> {
+        if self.config.service_subscriptions.enabled {
+            Ok(())
+        } else {
+            Err(Error::InvalidArgument(
+                "service subscriptions are switched off (service_subscriptions.enabled)"
+                    .to_string(),
+            ))
+        }
+    }
+
+    /// Subscribes to `topic` of `service_id` on `provider`, and returns the
+    /// subscription's id (ADR 0035).
+    ///
+    /// The subscription is `pending` until the provider answers, which
+    /// arrives as `service_subscription_changed`; updates arrive as
+    /// `service_update_received`. With no confirmed session the call starts
+    /// one and the subscribe frame leaves when it confirms: every
+    /// subscription frame is sealed, and none is ever sent in plaintext.
+    ///
+    /// Fails with `ServiceError::Unsupported` when the provider's signed key
+    /// package says it does not route subscriptions.
+    pub fn subscribe_service(
+        &mut self,
+        provider: &str,
+        service_id: &str,
+        topic: &str,
+        mode: offline_protocol_services::SubscriptionMode,
+        params: &str,
+    ) -> Result<String> {
+        self.ensure_subscriptions_enabled()?;
+        Self::validate_outbound_recipient(provider)?;
+        self.ensure_running()?;
+        if provider == self.local_id {
+            return Err(Error::InvalidArgument(
+                "a device cannot subscribe to itself".to_string(),
+            ));
+        }
+        if self.mls_manager.is_none() {
+            return Err(Error::MlsNotInitialized);
+        }
+        if self.peer_routes_subscriptions(provider) == Some(false) {
+            return Err(Error::Service(
+                offline_protocol_services::ServiceError::Unsupported(
+                    "the provider's key package does not advertise subscriptions".to_string(),
+                ),
+            ));
+        }
+        let (sub_id, frame) = self
+            .service_subscriptions
+            .consumer
+            .subscribe(provider, service_id, topic, mode, params, Instant::now())
+            .map_err(Error::Service)?;
+        match self.send_subscription_frame(frame) {
+            Ok(_) => self.service_subscriptions.consumer.mark_sent(&sub_id),
+            // Waits for the session; `kick_service_subscriptions` sends it.
+            Err(Error::SessionNotReady(_)) => {}
+            Err(err) => {
+                let _ = self.service_subscriptions.consumer.unsubscribe(&sub_id);
+                return Err(err);
+            }
+        }
+        Ok(sub_id)
+    }
+
+    /// Ends a subscription this device holds, telling the provider. `false`
+    /// when there is no such subscription.
+    pub fn unsubscribe_service(&mut self, sub_id: &str) -> Result<bool> {
+        match self.service_subscriptions.consumer.unsubscribe(sub_id) {
+            Some(output) => {
+                self.apply_subscription_output(output);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Asks the provider for a subscription's state again: a full snapshot
+    /// of a `latest` topic, or a `log` topic's checkpoint and what follows it
+    /// (what follows this device's position when it has no checkpoint).
+    pub fn resync_service_subscription(&mut self, sub_id: &str) -> Result<()> {
+        self.ensure_subscriptions_enabled()?;
+        let frame = self
+            .service_subscriptions
+            .consumer
+            .resync(sub_id)
+            .map_err(Error::Service)?;
+        self.send_subscription_frame(frame).map(|_| ())
+    }
+
+    /// The subscriptions this device holds on other devices.
+    pub fn service_subscriptions(&self) -> Vec<offline_protocol_services::SubscriptionInfo> {
+        self.service_subscriptions.consumer.subscriptions()
+    }
+
+    /// Sets who may subscribe to `service_id`: `Restricted` (the default)
+    /// asks the application about each subscriber, `AcceptAll` admits every
+    /// peer with a session, and `Rules` admits listed peers and members of
+    /// listed groups and asks or refuses the rest.
+    pub fn set_service_subscription_policy(
+        &mut self,
+        service_id: &str,
+        policy: SubscriptionPolicy,
+    ) -> Result<()> {
+        offline_protocol_core::ServiceId::new(service_id)?;
+        self.service_subscriptions
+            .provider
+            .set_policy(service_id, policy);
+        Ok(())
+    }
+
+    /// Accepts a subscription the application was asked about with
+    /// `service_subscribe_received`. The subscriber is answered and caught up.
+    pub fn accept_service_subscription(&mut self, sub_id: &str) -> Result<()> {
+        let output = self
+            .service_subscriptions
+            .provider
+            .accept(sub_id, Instant::now())
+            .map_err(Error::Service)?;
+        self.apply_subscription_output(output);
+        Ok(())
+    }
+
+    /// Rejects a subscription the application was asked about.
+    pub fn reject_service_subscription(&mut self, sub_id: &str, reason: &str) -> Result<()> {
+        let output = self
+            .service_subscriptions
+            .provider
+            .reject(sub_id, reason)
+            .map_err(Error::Service)?;
+        self.apply_subscription_output(output);
+        Ok(())
+    }
+
+    /// Ends a subscription another device holds on this one, telling it.
+    /// Stops the updates; the subscriber keeps its 1:1 session.
+    pub fn end_service_subscription(&mut self, sub_id: &str, reason: &str) -> Result<()> {
+        let output = self
+            .service_subscriptions
+            .provider
+            .end(sub_id, reason)
+            .map_err(Error::Service)?;
+        self.apply_subscription_output(output);
+        Ok(())
+    }
+
+    /// The subscriptions other devices hold on `service_id`, or on every
+    /// service for `None`.
+    pub fn service_subscribers(
+        &self,
+        service_id: Option<&str>,
+    ) -> Vec<offline_protocol_services::SubscriberInfo> {
+        self.service_subscriptions.provider.subscribers(service_id)
+    }
+
+    /// Publishes to `topic` of `service_id`, which must be registered here.
+    /// With a `key` the topic is `latest` (state: one current value per
+    /// key); without one it is `log` (events: every update, in order). The
+    /// first publish or subscription fixes the mode.
+    ///
+    /// Each active subscriber is sent the update once over a live direct
+    /// link when it has one, and otherwise through the reliable ladder,
+    /// across hops; a `latest` value queued for an absent subscriber is
+    /// replaced by the next one for its key rather than queued behind it.
+    pub fn publish_service_update(
+        &mut self,
+        service_id: &str,
+        topic: &str,
+        key: Option<&str>,
+        body: &str,
+    ) -> Result<PublishReport> {
+        self.ensure_subscriptions_enabled()?;
+        if !self.mesh_services.has_service(service_id) {
+            return Err(Error::InvalidArgument(format!(
+                "register `{service_id}` before publishing to it"
+            )));
+        }
+        let (output, outcome) = self
+            .service_subscriptions
+            .provider
+            .publish(service_id, topic, key, body, Instant::now())
+            .map_err(Error::Service)?;
+        let mut report = PublishReport {
+            subscribers: outcome.subscribers,
+            coalesced: outcome.coalesced,
+            ..PublishReport::default()
+        };
+        for sent in self.send_subscription_frames(output.frames) {
+            match sent {
+                Ok(FrameSent::Live) => report.sent_live += 1,
+                Ok(FrameSent::Queued) => report.queued += 1,
+                Err(_) => report.failed += 1,
+            }
+        }
+        self.emit_subscription_events(output.events);
+        Ok(report)
+    }
+
+    /// Sets a `log` topic's checkpoint: a body summarising everything
+    /// published to it so far. A subscriber whose position has fallen out of
+    /// the buffer, or that asks to resync, is sent this and what follows it.
+    pub fn set_service_topic_checkpoint(
+        &mut self,
+        service_id: &str,
+        topic: &str,
+        body: &str,
+    ) -> Result<()> {
+        self.ensure_subscriptions_enabled()?;
+        if !self.mesh_services.has_service(service_id) {
+            return Err(Error::InvalidArgument(format!(
+                "register `{service_id}` before setting its checkpoint"
+            )));
+        }
+        self.service_subscriptions
+            .provider
+            .set_checkpoint(service_id, topic, body)
+            .map_err(Error::Service)
+    }
+
+    /// Starts a topic over: every key, buffered update and the checkpoint are
+    /// dropped, and each subscriber is told so (`stream_reset`) before it is
+    /// sent anything new.
+    pub fn clear_service_topic(&mut self, service_id: &str, topic: &str) -> Result<()> {
+        let output = self
+            .service_subscriptions
+            .provider
+            .clear_topic(service_id, topic)
+            .map_err(Error::Service)?;
+        self.apply_subscription_output(output);
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // Hooks
+    // ------------------------------------------------------------------------
+
+    /// The session with `peer` confirmed: subscriptions that were waiting
+    /// for it send their subscribe frame now.
+    pub(crate) fn kick_service_subscriptions(&mut self, peer: &str) {
+        let waiting = self
+            .service_subscriptions
+            .consumer
+            .frames_awaiting_session(peer);
+        for (sub_id, frame) in waiting {
+            if self.send_subscription_frame(frame).is_ok() {
+                self.service_subscriptions.consumer.mark_sent(&sub_id);
+            }
+        }
+    }
+
+    /// `peer` was seen again: a paused subscription on it renews at once.
+    pub(crate) fn on_subscription_peer_seen(&mut self, peer: &str) {
+        let output = self.service_subscriptions.consumer.on_peer_seen(peer);
+        self.apply_subscription_output(output);
+    }
+
+    /// One tick: renewals, pauses, leases, approval timeouts and coalesced
+    /// `latest` values.
+    pub(crate) fn tick_service_subscriptions(&mut self) {
+        if !self.config.service_subscriptions.enabled {
+            return;
+        }
+        let now = Instant::now();
+        let mut output = self.service_subscriptions.consumer.tick(now);
+        output.extend(self.service_subscriptions.provider.tick(now));
+        self.apply_subscription_output(output);
+    }
+
+    /// `service_id` was unregistered: every subscription on it ends.
+    pub(crate) fn end_subscriptions_on(&mut self, service_id: &str) {
+        let output = self
+            .service_subscriptions
+            .provider
+            .service_unregistered(service_id);
+        self.apply_subscription_output(output);
     }
 }

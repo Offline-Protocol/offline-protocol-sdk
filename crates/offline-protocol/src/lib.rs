@@ -67,7 +67,9 @@ pub use offline_protocol_services::{
 };
 pub use protocol::custody::{CustodyRefusal, CustodyStats};
 pub use protocol::mesh_relay::{MeshRelayConfig, MeshRelayStats};
-pub use protocol::{GatewayCarrier, MediaSendOptions, OfflineProtocol, SendMessageOptions};
+pub use protocol::{
+    GatewayCarrier, MediaSendOptions, OfflineProtocol, PublishReport, SendMessageOptions,
+};
 pub use protocol_state_storage::{
     ProtocolStateError, ProtocolStateResult, ProtocolStateStorage,
     MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES,
