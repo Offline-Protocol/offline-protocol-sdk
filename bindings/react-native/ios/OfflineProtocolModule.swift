@@ -2113,8 +2113,8 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     // Service subscriptions (ADR 0035).
 
-    @objc func subscribeService(_ provider: String, serviceId: String, topic: String, mode: String, params: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.subscribeService(self, provider, serviceId: serviceId, topic: topic, mode: mode, params: params, resolver: resolver, rejecter: rejecter)
+    @objc func subscribeService(_ provider: String, serviceId: String, topic: String, mode: String, params: String, keysJson: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.subscribeService(self, provider, serviceId: serviceId, topic: topic, mode: mode, params: params, keysJson: keysJson, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func unsubscribeService(_ subId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {

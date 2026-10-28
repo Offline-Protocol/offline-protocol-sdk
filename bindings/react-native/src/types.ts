@@ -2389,6 +2389,10 @@ export interface ServiceSubscriptionInfo {
   topic: string;
   mode: SubscriptionMode;
   state: 'pending' | 'active' | 'paused' | 'ended';
+  /** The `latest` keys asked for; empty for every key. */
+  keys: string[];
+  /** The topics heard of: the topic itself, or each one a pattern matched. */
+  topics: string[];
 }
 
 /** A subscription another device holds on this one. */
@@ -2400,6 +2404,8 @@ export interface ServiceSubscriberInfo {
   mode: SubscriptionMode;
   state: 'pending' | 'active';
   params: string;
+  /** The `latest` keys the subscriber asked for; empty for every key. */
+  keys: string[];
 }
 
 /**

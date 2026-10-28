@@ -656,9 +656,9 @@ fun signDataBase64(module: OfflineProtocolModule, dataBase64: String, promise: P
     }
 }
 
-fun subscribeService(module: OfflineProtocolModule, provider: String, serviceId: String, topic: String, mode: String, params: String, promise: Promise) {
+fun subscribeService(module: OfflineProtocolModule, provider: String, serviceId: String, topic: String, mode: String, params: String, keysJson: String, promise: Promise) {
     run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to subscribe to service", mapProtocolErrors = true) { host, context ->
-        ProtocolEngineHostBridge.subscribeService(host, context, mapOf("provider" to provider, "serviceId" to serviceId, "topic" to topic, "mode" to mode, "params" to params))
+        ProtocolEngineHostBridge.subscribeService(host, context, mapOf("provider" to provider, "serviceId" to serviceId, "topic" to topic, "mode" to mode, "params" to params, "keysJson" to keysJson))
     }
 }
 

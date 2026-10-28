@@ -662,6 +662,7 @@ RCT_EXTERN_METHOD(subscribeService:(NSString *)provider
                   topic:(NSString *)topic
                   mode:(NSString *)mode
                   params:(NSString *)params
+                  keysJson:(NSString *)keysJson
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

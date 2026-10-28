@@ -1969,8 +1969,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     // Service subscriptions (ADR 0035).
 
     @ReactMethod
-    fun subscribeService(provider: String, serviceId: String, topic: String, mode: String, params: String, promise: Promise) {
-        ProtocolEngineHostBridgeReactNative.subscribeService(this, provider, serviceId, topic, mode, params, promise)
+    fun subscribeService(provider: String, serviceId: String, topic: String, mode: String, params: String, keysJson: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.subscribeService(this, provider, serviceId, topic, mode, params, keysJson, promise)
     }
 
     @ReactMethod

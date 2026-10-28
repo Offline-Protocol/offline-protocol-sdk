@@ -651,9 +651,9 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
-    static func subscribeService(_ module: OfflineProtocolModule, _ provider: String, serviceId: String, topic: String, mode: String, params: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+    static func subscribeService(_ module: OfflineProtocolModule, _ provider: String, serviceId: String, topic: String, mode: String, params: String, keysJson: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to subscribe to service", mapProtocolErrors: true) { host, env in
-            try ProtocolEngineHostBridge.subscribeService(host: host, env: env, arguments: ["provider": provider, "serviceId": serviceId, "topic": topic, "mode": mode, "params": params])
+            try ProtocolEngineHostBridge.subscribeService(host: host, env: env, arguments: ["provider": provider, "serviceId": serviceId, "topic": topic, "mode": mode, "params": params, "keysJson": keysJson])
         }
     }
 

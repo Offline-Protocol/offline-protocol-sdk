@@ -1257,8 +1257,22 @@ enum ProtocolEngineHostBridge {
             serviceId: try A.requireString(m, "serviceId"),
             topic: try A.requireString(m, "topic"),
             mode: try subscriptionMode(try A.requireString(m, "mode")),
-            params: (m["params"] as? String) ?? ""
+            params: (m["params"] as? String) ?? "",
+            keys: try subscriptionKeys(m)
         )
+    }
+
+    /// `keys` as a list (Flutter), or `keysJson` as a JSON array (React
+    /// Native, which passes every collection argument as a string here).
+    private static func subscriptionKeys(_ m: [String: Any]) throws -> [String] {
+        guard let raw = m["keysJson"] as? String else {
+            return (m["keys"] as? [String]) ?? []
+        }
+        guard let data = raw.data(using: .utf8),
+              let keys = try JSONSerialization.jsonObject(with: data) as? [String] else {
+            throw HostError.invalidArgument("'keysJson' must be a JSON array of strings")
+        }
+        return keys
     }
 
     static func unsubscribeService(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
@@ -1281,6 +1295,8 @@ enum ProtocolEngineHostBridge {
                 "topic": info.topic,
                 "mode": subscriptionModeName(info.mode),
                 "state": info.state,
+                "keys": info.keys,
+                "topics": info.topics,
             ]
         }
     }
@@ -1394,6 +1410,7 @@ enum ProtocolEngineHostBridge {
                 "mode": subscriptionModeName(info.mode),
                 "state": info.state,
                 "params": info.params,
+                "keys": info.keys,
             ]
         }
     }

@@ -5119,8 +5119,13 @@ export class MeshServices {
    * Updates arrive as `service_update_received`, state changes as
    * `service_subscription_changed`.
    *
+   * @param topic - A topic, or a pattern (`'rooms/*'`, or `'*'` for every
+   *   topic): each matching topic in the mode, up to 64, each update naming
+   *   its own
    * @param mode - `'latest'` (state: one current value per key) or `'log'`
    *   (events: every update, in order)
+   * @param keys - `'latest'` only: the keys to be sent, each exact or a
+   *   prefix ending in `*`; empty for every key. The provider applies it.
    * @returns The subscription id its events carry
    */
   async subscribeService(
@@ -5128,14 +5133,17 @@ export class MeshServices {
     serviceId: string,
     topic: string,
     mode: SubscriptionMode = 'latest',
-    params: string = ''
+    params: string = '',
+    keys: string[] = []
   ): Promise<string> {
     return await OfflineProtocolNativeModule.subscribeService(
       provider,
       serviceId,
       topic,
       mode,
-      params
+      params,
+      // Every native array argument reads as integers on Android.
+      JSON.stringify(keys)
     );
   }
 

@@ -1118,6 +1118,7 @@ object ProtocolEngineHostBridge {
                 "mode" to info.mode.name.lowercase(),
                 "state" to info.state,
                 "params" to info.params,
+                "keys" to info.keys,
             )
         }
     }
@@ -1131,6 +1132,8 @@ object ProtocolEngineHostBridge {
                 "topic" to info.topic,
                 "mode" to info.mode.name.lowercase(),
                 "state" to info.state,
+                "keys" to info.keys,
+                "topics" to info.topics,
             )
         }
     }
@@ -1231,7 +1234,16 @@ object ProtocolEngineHostBridge {
             requireString(map, "topic"),
             mode,
             (map["params"] as? String) ?: "",
+            subscriptionKeys(map),
         )
+    }
+
+    // `keys` as a list (Flutter), or `keysJson` as a JSON array (React Native,
+    // whose adapter reads every array as integers).
+    private fun subscriptionKeys(map: Map<String, Any?>): List<String> {
+        val raw = map["keysJson"] as? String ?: return stringList(map, "keys")
+        val array = JSONArray(raw)
+        return List(array.length()) { i -> array.getString(i) }
     }
 
     fun unblockUser(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
