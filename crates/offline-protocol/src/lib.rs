@@ -33,8 +33,8 @@ pub mod visualization;
 
 pub use config::{
     CustodyConfig, DataConfig, EncryptionConfig, GroupConfig, OverflowPolicy, PendingQueueConfig,
-    ProtocolConfig, SecurityConfig, CUSTODY_MIN_BYTES_PER_DEPOSITOR, DEFAULT_CUSTODY_HOLD_MS,
-    DEFAULT_PENDING_TTL_MS,
+    ProtocolConfig, SecurityConfig, ServiceSubscriptionConfig, CUSTODY_MIN_BYTES_PER_DEPOSITOR,
+    DEFAULT_CUSTODY_HOLD_MS, DEFAULT_PENDING_TTL_MS,
 };
 pub use error::{Error, EstablishmentState, Result, SessionStateError};
 pub use events::{
@@ -59,9 +59,17 @@ pub use group_mesh::{
 #[cfg(feature = "data")]
 pub use offline_protocol_data::{DataValue, DOC_SIZE_WARN_BYTES, MAX_DOC_BYTES, MAX_VALUE_BYTES};
 pub use offline_protocol_services::MeshServices;
+/// Subscription types (ADR 0035), re-exported so callers of the engine's
+/// subscription calls never name `offline-protocol-services` directly.
+pub use offline_protocol_services::{
+    RulesFallback, SubscribeOptions, SubscriberInfo, SubscriptionInfo, SubscriptionMode,
+    SubscriptionPolicy, SubscriptionState,
+};
 pub use protocol::custody::{CustodyRefusal, CustodyStats};
 pub use protocol::mesh_relay::{MeshRelayConfig, MeshRelayStats};
-pub use protocol::{GatewayCarrier, MediaSendOptions, OfflineProtocol, SendMessageOptions};
+pub use protocol::{
+    GatewayCarrier, MediaSendOptions, OfflineProtocol, PublishReport, SendMessageOptions,
+};
 pub use protocol_state_storage::{
     ProtocolStateError, ProtocolStateResult, ProtocolStateStorage,
     MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES,

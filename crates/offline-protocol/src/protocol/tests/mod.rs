@@ -13,6 +13,7 @@ mod mesh_session;
 mod nostr_cold_contact;
 mod per_send_app_id;
 mod service_seal;
+mod service_subscriptions;
 
 use super::*;
 use crate::constants::{

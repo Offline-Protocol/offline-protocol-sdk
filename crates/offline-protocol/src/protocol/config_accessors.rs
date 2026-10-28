@@ -316,6 +316,7 @@ impl OfflineProtocol {
         self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
+        self.prune_superseded();
         self.cleanup_group_message_dedup();
         self.check_epoch_forks();
         self.check_leave_election_timeouts();
@@ -422,9 +423,14 @@ impl OfflineProtocol {
 
     /// Unregisters a local service. Returns true if the service was found and removed.
     pub fn unregister_service(&mut self, service_id: &str) -> Result<bool> {
-        self.mesh_services
+        let removed = self
+            .mesh_services
             .unregister_service(service_id)
-            .map_err(Error::Service)
+            .map_err(Error::Service)?;
+        if removed {
+            self.end_subscriptions_on(service_id);
+        }
+        Ok(removed)
     }
 
     /// Broadcasts a service discovery query to all known peers.
