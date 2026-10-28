@@ -14,6 +14,13 @@ internal static partial class OfflineProtocolNative
     [LibraryImport(LibraryName, EntryPoint = "offline_protocol_version")]
     internal static partial IntPtr offline_protocol_version_raw();
 
+    [LibraryImport(LibraryName, EntryPoint = "offline_protocol_call_static", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial OfflineProtocolStatus offline_protocol_call_static(
+        string method,
+        string? paramsJson,
+        out IntPtr outResult,
+        ref OfflineProtocolError err);
+
     [LibraryImport(LibraryName, EntryPoint = "offline_protocol_create", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial OfflineProtocolStatus offline_protocol_create(
         string configJson,
@@ -28,6 +35,30 @@ internal static partial class OfflineProtocolNative
         IntPtr handle,
         string method,
         string? paramsJson,
+        out IntPtr outResult,
+        ref OfflineProtocolError err);
+
+    [LibraryImport(LibraryName, EntryPoint = "offline_protocol_set_event_callback")]
+    internal static partial OfflineProtocolStatus offline_protocol_set_event_callback(
+        IntPtr handle,
+        IntPtr onEvent,
+        IntPtr drop,
+        IntPtr ctx,
+        ref OfflineProtocolError err);
+
+    [LibraryImport(LibraryName, EntryPoint = "offline_protocol_poll_event")]
+    internal static partial IntPtr offline_protocol_poll_event(IntPtr handle);
+
+    [LibraryImport(LibraryName, EntryPoint = "offline_protocol_initialize_mls")]
+    internal static partial OfflineProtocolStatus offline_protocol_initialize_mls(
+        IntPtr handle,
+        in OfflineProtocolStorage secureStorage,
+        in OfflineProtocolStorage protocolStateStorage,
+        ref OfflineProtocolError err);
+
+    [LibraryImport(LibraryName, EntryPoint = "offline_protocol_run_storage_conformance")]
+    internal static partial OfflineProtocolStatus offline_protocol_run_storage_conformance(
+        in OfflineProtocolStorage storage,
         out IntPtr outResult,
         ref OfflineProtocolError err);
 

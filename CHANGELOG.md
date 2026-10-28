@@ -38,6 +38,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   through the C API, runs engine calls on a dedicated thread, and ships a
   consumer check for create → file-store MLS → start/stop
   ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
+- **C# storage providers and telemetry (PR2).** `NativeStorageProvider` and
+  `MemoryProtocolStorage` wire `offline_protocol_initialize_mls` and storage
+  conformance; event callback/poll; `TelemetryConfig` JSON for
+  `enable_telemetry` with platform `os_major` and C12 lifecycle helpers
+  ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
 
 ### Fixed
 

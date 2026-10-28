@@ -99,3 +99,38 @@ fn the_csharp_binding_has_a_ci_job_the_result_waits_on() {
         "the C# job must run the consumer check against the built library"
     );
 }
+
+#[test]
+fn csharp_telemetry_config_omits_os_and_reads_the_section() {
+    let telemetry =
+        read("bindings/csharp/src/OfflineProtocol.Sdk/Telemetry/TelemetryConfigJson.cs");
+    assert!(
+        !telemetry.contains("\"os\"") && telemetry.contains("os_major"),
+        "TelemetryConfigJson must fill os_major and never serialize os from the app"
+    );
+    for field in [
+        "api_key",
+        "app_id",
+        "app_version",
+        "debug",
+        "flush_interval_ms",
+        "max_batch_bytes",
+        "max_buffered_records",
+        "include_device_id",
+        "scrub_ids",
+        "mls_verbosity",
+        "metrics_cadence_ms",
+        "routing_diagnostic",
+        "mls_sampling_bypass",
+    ] {
+        assert!(
+            telemetry.contains(field),
+            "TelemetryConfigJson must mention `{field}`"
+        );
+    }
+    let platform = read("bindings/csharp/src/OfflineProtocol.Sdk/Telemetry/TelemetryPlatform.cs");
+    assert!(
+        platform.contains("OsMajor"),
+        "TelemetryPlatform must supply os_major for C12"
+    );
+}

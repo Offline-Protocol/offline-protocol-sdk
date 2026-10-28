@@ -1,6 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using OfflineProtocol.Sdk.Native;
+using OfflineProtocol.Sdk.Storage;
+using OfflineProtocol.Sdk.Telemetry;
 
 namespace OfflineProtocol.Sdk;
 
@@ -24,6 +26,8 @@ public sealed class ProtocolEngine : IAsyncDisposable
     /// Calls accepted and not yet finished: waiting to enter the channel, queued, or running.
     /// </summary>
     private int _outboundWork;
+    private readonly List<NativeStorageProvider> _attachedStorageProviders = [];
+    private EventCallbackBridge? _eventBridge;
 
     private ProtocolEngine(int queueCapacity)
     {
@@ -128,6 +132,151 @@ public sealed class ProtocolEngine : IAsyncDisposable
     public Task<string> LocalAddressAsync(CancellationToken cancellationToken = default) =>
         CallWithResultAsync("local_address", null, cancellationToken);
 
+    /// <summary>Instance-less local API call (no engine handle).</summary>
+    public static Task<string> CallStaticAsync(
+        string method,
+        string? paramsJson = null,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(
+            () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                NativeLibraryLoader.EnsureRegistered();
+                var err = default(OfflineProtocolError);
+                var status = OfflineProtocolNative.offline_protocol_call_static(method, paramsJson, out var resultPtr, ref err);
+                if (status != OfflineProtocolStatus.Ok)
+                {
+                    throw FromError(status, ref err);
+                }
+
+                return OfflineProtocolNative.TakeUtf8String(resultPtr);
+            },
+            cancellationToken);
+
+    /// <summary>Runs the protocol-state storage conformance suite against a provider.</summary>
+    public static Task<string> RunStorageConformanceAsync(
+        NativeStorageProvider storage,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(
+            () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                NativeLibraryLoader.EnsureRegistered();
+                var err = default(OfflineProtocolError);
+                var native = storage.ToNative();
+                var status = OfflineProtocolNative.offline_protocol_run_storage_conformance(
+                    in native,
+                    out var resultPtr,
+                    ref err);
+                if (status != OfflineProtocolStatus.Ok)
+                {
+                    throw FromError(status, ref err);
+                }
+
+                return OfflineProtocolNative.TakeUtf8String(resultPtr);
+            },
+            cancellationToken);
+
+    public Task InitializeMlsAsync(
+        NativeStorageProvider secureStorage,
+        NativeStorageProvider protocolStateStorage,
+        CancellationToken cancellationToken = default) =>
+        EnqueueAsync<object?>(
+            () =>
+            {
+                var err = default(OfflineProtocolError);
+                var secureNative = secureStorage.ToNative();
+                var stateNative = protocolStateStorage.ToNative();
+                var status = OfflineProtocolNative.offline_protocol_initialize_mls(
+                    _handle,
+                    in secureNative,
+                    in stateNative,
+                    ref err);
+                if (status != OfflineProtocolStatus.Ok)
+                {
+                    throw FromError(status, ref err);
+                }
+
+                _attachedStorageProviders.Add(secureStorage);
+                _attachedStorageProviders.Add(protocolStateStorage);
+                return null;
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Delivers events on the thread pool. The handler must not call back into this engine synchronously.
+    /// </summary>
+    public Task SetEventCallbackAsync(Action<string>? handler, CancellationToken cancellationToken = default) =>
+        EnqueueAsync<object?>(
+            () =>
+            {
+                var err = default(OfflineProtocolError);
+                if (handler is null)
+                {
+                    _eventBridge = null;
+                    var status = OfflineProtocolNative.offline_protocol_set_event_callback(
+                        _handle,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        ref err);
+                    if (status != OfflineProtocolStatus.Ok)
+                    {
+                        throw FromError(status, ref err);
+                    }
+
+                    return null;
+                }
+
+                var bridge = new EventCallbackBridge(handler);
+                var install = OfflineProtocolNative.offline_protocol_set_event_callback(
+                    _handle,
+                    bridge.OnEventPointer,
+                    bridge.DropPointer,
+                    bridge.Context,
+                    ref err);
+                if (install != OfflineProtocolStatus.Ok)
+                {
+                    bridge.ReleaseLocal();
+                    throw FromError(install, ref err);
+                }
+
+                _eventBridge = bridge;
+                return null;
+            },
+            cancellationToken);
+
+    public Task<string?> PollEventAsync(CancellationToken cancellationToken = default) =>
+        EnqueueAsync<string?>(
+            () =>
+            {
+                var ptr = OfflineProtocolNative.offline_protocol_poll_event(_handle);
+                return ptr == IntPtr.Zero ? null : OfflineProtocolNative.TakeUtf8String(ptr);
+            },
+            cancellationToken);
+
+    public Task EnableTelemetryAsync(
+        TelemetryConfig config,
+        AppState initialAppState = AppState.Active,
+        CancellationToken cancellationToken = default) =>
+        CallAsync(
+            "enable_telemetry",
+            TelemetryConfigJson.EnableTelemetry(config, initialAppState),
+            cancellationToken);
+
+    public Task NotifyAppStateAsync(AppState state, CancellationToken cancellationToken = default) =>
+        CallAsync("notify_app_state", $"{{\"state\":\"{state}\"}}", cancellationToken);
+
+    public Task DisableTelemetryAsync(CancellationToken cancellationToken = default) =>
+        CallAsync("disable_telemetry", null, cancellationToken);
+
+    public Task EndTelemetrySessionAsync(CancellationToken cancellationToken = default) =>
+        CallAsync("end_telemetry_session", null, cancellationToken);
+
+    /// <summary>Blocks the engine thread until telemetry flush completes. Do not await from a UI thread.</summary>
+    public Task FlushTelemetryBlockingAsync(CancellationToken cancellationToken = default) =>
+        CallAsync("flush_telemetry_blocking", null, cancellationToken);
+
     /// <summary>
     /// Refuses new calls, lets every accepted call finish on the engine thread, then frees the
     /// native handle there. Never blocks the calling thread: a UI thread may await it. Every
@@ -164,10 +313,19 @@ public sealed class ProtocolEngine : IAsyncDisposable
                 {
                     if (_handle != IntPtr.Zero)
                     {
+                        var err = default(OfflineProtocolError);
+                        OfflineProtocolNative.offline_protocol_set_event_callback(
+                            _handle,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            ref err);
+                        _eventBridge = null;
                         OfflineProtocolNative.offline_protocol_free(_handle);
                         _handle = IntPtr.Zero;
                     }
 
+                    _attachedStorageProviders.Clear();
                     return null;
                 },
                 CancellationToken.None,
