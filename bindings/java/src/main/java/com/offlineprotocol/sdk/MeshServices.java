@@ -581,7 +581,7 @@ public class MeshServices implements AutoCloseable, MeshServicesInterface {
 
   
     @Override
-    public java.lang.String subscribeService(java.lang.String provider, java.lang.String serviceId, java.lang.String topic, SubscriptionMode mode, java.lang.String params) throws ProtocolException {
+    public java.lang.String subscribeService(java.lang.String provider, java.lang.String serviceId, java.lang.String topic, SubscriptionMode mode, java.lang.String params, java.util.List<java.lang.String> keys) throws ProtocolException {
             try {
                 return FfiConverterString.INSTANCE.lift(
     callWithHandle(_uniffiHandle -> {
@@ -590,7 +590,7 @@ public class MeshServices implements AutoCloseable, MeshServicesInterface {
             return
     UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
         return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(_allocator, _uniffiHandle,
-            FfiConverterString.INSTANCE.lower(provider), FfiConverterString.INSTANCE.lower(serviceId), FfiConverterString.INSTANCE.lower(topic), FfiConverterTypeSubscriptionMode.INSTANCE.lower(mode), FfiConverterString.INSTANCE.lower(params), _status);
+            FfiConverterString.INSTANCE.lower(provider), FfiConverterString.INSTANCE.lower(serviceId), FfiConverterString.INSTANCE.lower(topic), FfiConverterTypeSubscriptionMode.INSTANCE.lower(mode), FfiConverterString.INSTANCE.lower(params), FfiConverterSequenceString.INSTANCE.lower(keys), _status);
     });
     } catch (java.lang.RuntimeException _uniffi_ex) {
             throw _uniffi_ex;

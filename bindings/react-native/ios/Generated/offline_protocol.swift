@@ -1218,7 +1218,7 @@ public protocol MeshServicesProtocol: AnyObject, Sendable {
     
     func setServiceTopicCheckpoint(serviceId: String, topic: String, body: String) throws 
     
-    func subscribeService(provider: String, serviceId: String, topic: String, mode: SubscriptionMode, params: String) throws  -> String
+    func subscribeService(provider: String, serviceId: String, topic: String, mode: SubscriptionMode, params: String, keys: [String]) throws  -> String
     
     func unregisterService(serviceId: String) throws  -> Bool
     
@@ -1436,7 +1436,7 @@ open func setServiceTopicCheckpoint(serviceId: String, topic: String, body: Stri
 }
 }
     
-open func subscribeService(provider: String, serviceId: String, topic: String, mode: SubscriptionMode, params: String)throws  -> String  {
+open func subscribeService(provider: String, serviceId: String, topic: String, mode: SubscriptionMode, params: String, keys: [String])throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(
@@ -1445,7 +1445,8 @@ open func subscribeService(provider: String, serviceId: String, topic: String, m
         FfiConverterString.lower(serviceId),
         FfiConverterString.lower(topic),
         FfiConverterTypeSubscriptionMode_lower(mode),
-        FfiConverterString.lower(params),uniffiCallStatus
+        FfiConverterString.lower(params),
+        FfiConverterSequenceString.lower(keys),uniffiCallStatus
     )
 })
 }
@@ -6800,10 +6801,11 @@ public struct ServiceSubscriberInfo: Equatable, Hashable {
     public var mode: SubscriptionMode
     public var state: String
     public var params: String
+    public var keys: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(subId: String, subscriber: String, serviceId: String, topic: String, mode: SubscriptionMode, state: String, params: String) {
+    public init(subId: String, subscriber: String, serviceId: String, topic: String, mode: SubscriptionMode, state: String, params: String, keys: [String]) {
         self.subId = subId
         self.subscriber = subscriber
         self.serviceId = serviceId
@@ -6811,6 +6813,7 @@ public struct ServiceSubscriberInfo: Equatable, Hashable {
         self.mode = mode
         self.state = state
         self.params = params
+        self.keys = keys
     }
 
     
@@ -6835,7 +6838,8 @@ public struct FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer {
                 topic: FfiConverterString.read(from: &buf), 
                 mode: FfiConverterTypeSubscriptionMode.read(from: &buf), 
                 state: FfiConverterString.read(from: &buf), 
-                params: FfiConverterString.read(from: &buf)
+                params: FfiConverterString.read(from: &buf), 
+                keys: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -6847,6 +6851,7 @@ public struct FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer {
         FfiConverterTypeSubscriptionMode.write(value.mode, into: &buf)
         FfiConverterString.write(value.state, into: &buf)
         FfiConverterString.write(value.params, into: &buf)
+        FfiConverterSequenceString.write(value.keys, into: &buf)
     }
 }
 
@@ -6873,16 +6878,20 @@ public struct ServiceSubscriptionInfo: Equatable, Hashable {
     public var topic: String
     public var mode: SubscriptionMode
     public var state: String
+    public var keys: [String]
+    public var topics: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(subId: String, provider: String, serviceId: String, topic: String, mode: SubscriptionMode, state: String) {
+    public init(subId: String, provider: String, serviceId: String, topic: String, mode: SubscriptionMode, state: String, keys: [String], topics: [String]) {
         self.subId = subId
         self.provider = provider
         self.serviceId = serviceId
         self.topic = topic
         self.mode = mode
         self.state = state
+        self.keys = keys
+        self.topics = topics
     }
 
     
@@ -6906,7 +6915,9 @@ public struct FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer {
                 serviceId: FfiConverterString.read(from: &buf), 
                 topic: FfiConverterString.read(from: &buf), 
                 mode: FfiConverterTypeSubscriptionMode.read(from: &buf), 
-                state: FfiConverterString.read(from: &buf)
+                state: FfiConverterString.read(from: &buf), 
+                keys: FfiConverterSequenceString.read(from: &buf), 
+                topics: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -6917,6 +6928,8 @@ public struct FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer {
         FfiConverterString.write(value.topic, into: &buf)
         FfiConverterTypeSubscriptionMode.write(value.mode, into: &buf)
         FfiConverterString.write(value.state, into: &buf)
+        FfiConverterSequenceString.write(value.keys, into: &buf)
+        FfiConverterSequenceString.write(value.topics, into: &buf)
     }
 }
 
@@ -11217,7 +11230,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() != 51763) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != 6997) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != 1722) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 4997) {

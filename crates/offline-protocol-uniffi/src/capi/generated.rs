@@ -1971,6 +1971,8 @@ impl Codec for crate::ServiceSubscriptionInfo {
             topic: f.take("topic")?,
             mode: f.take("mode")?,
             state: f.take("state")?,
+            keys: f.take("keys")?,
+            topics: f.take("topics")?,
         };
         f.finish()?;
         Ok(out)
@@ -1983,6 +1985,8 @@ impl Codec for crate::ServiceSubscriptionInfo {
             ("topic", self.topic.encode()),
             ("mode", self.mode.encode()),
             ("state", self.state.encode()),
+            ("keys", self.keys.encode()),
+            ("topics", self.topics.encode()),
         ])
     }
 }
@@ -2007,6 +2011,7 @@ impl Codec for crate::ServiceSubscriberInfo {
             mode: f.take("mode")?,
             state: f.take("state")?,
             params: f.take("params")?,
+            keys: f.take("keys")?,
         };
         f.finish()?;
         Ok(out)
@@ -2020,6 +2025,7 @@ impl Codec for crate::ServiceSubscriberInfo {
             ("mode", self.mode.encode()),
             ("state", self.state.encode()),
             ("params", self.params.encode()),
+            ("keys", self.keys.encode()),
         ])
     }
 }
@@ -3432,8 +3438,9 @@ pub fn call_services(target: &crate::MeshServices, method: &str, mut args: Field
             let arg_topic = args.take("topic")?;
             let arg_mode = args.take("mode")?;
             let arg_params = args.take("params")?;
+            let arg_keys = args.take("keys")?;
             args.finish()?;
-            let result = target.subscribe_service(arg_provider, arg_service_id, arg_topic, arg_mode, arg_params)?;
+            let result = target.subscribe_service(arg_provider, arg_service_id, arg_topic, arg_mode, arg_params, arg_keys)?;
             Ok(result.encode())
         }
         "unsubscribe_service" => {

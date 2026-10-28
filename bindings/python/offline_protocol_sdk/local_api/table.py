@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "bf0d95fc909b198e4c6e8e1798214efda66b107d00892bd7e953cf76bd2893e0"
+UDL_SHA256 = "fc7d7c14aea45b774c102346b50a5e6f56f404e7d9ddded807f225754ce32f37"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',
@@ -213,7 +213,8 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                                      ('service_id', 'string'),
                                                      ('topic', 'string'),
                                                      ('mode', 'SubscriptionMode'),
-                                                     ('params', 'string')),
+                                                     ('params', 'string'),
+                                                     ('keys', 'sequence<string>')),
                                                     'string'),
                               'unregister_service': ((('service_id', 'string'),), 'boolean'),
                               'unsubscribe_service': ((('sub_id', 'string'),), 'boolean')},
@@ -861,13 +862,16 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                        ('topic', 'string', False),
                                        ('mode', 'SubscriptionMode', False),
                                        ('state', 'string', False),
-                                       ('params', 'string', False)),
+                                       ('params', 'string', False),
+                                       ('keys', 'sequence<string>', False)),
              'ServiceSubscriptionInfo': (('sub_id', 'string', False),
                                          ('provider', 'string', False),
                                          ('service_id', 'string', False),
                                          ('topic', 'string', False),
                                          ('mode', 'SubscriptionMode', False),
-                                         ('state', 'string', False)),
+                                         ('state', 'string', False),
+                                         ('keys', 'sequence<string>', False),
+                                         ('topics', 'sequence<string>', False)),
              'SubscriptionPolicyConfig': (('kind', 'SubscriptionPolicyKind', False),
                                           ('allow_peers', 'sequence<string>', False),
                                           ('allow_groups', 'sequence<string>', False),

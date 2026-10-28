@@ -653,7 +653,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() != 51763:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != 6997:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != 1722:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 4997:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -2129,6 +2129,7 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_top
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service.argtypes = (
     ctypes.c_uint64,
+    _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
@@ -7232,7 +7233,7 @@ class _UniffiFfiConverterTypeSubscriptionMode(_UniffiConverterRustBuffer):
 
 @dataclass
 class ServiceSubscriberInfo:
-    def __init__(self, *, sub_id:str, subscriber:str, service_id:str, topic:str, mode:SubscriptionMode, state:str, params:str):
+    def __init__(self, *, sub_id:str, subscriber:str, service_id:str, topic:str, mode:SubscriptionMode, state:str, params:str, keys:typing.List[str]):
         self.sub_id = sub_id
         self.subscriber = subscriber
         self.service_id = service_id
@@ -7240,12 +7241,13 @@ class ServiceSubscriberInfo:
         self.mode = mode
         self.state = state
         self.params = params
+        self.keys = keys
         
         
 
     
     def __str__(self):
-        return "ServiceSubscriberInfo(sub_id={}, subscriber={}, service_id={}, topic={}, mode={}, state={}, params={})".format(self.sub_id, self.subscriber, self.service_id, self.topic, self.mode, self.state, self.params)
+        return "ServiceSubscriberInfo(sub_id={}, subscriber={}, service_id={}, topic={}, mode={}, state={}, params={}, keys={})".format(self.sub_id, self.subscriber, self.service_id, self.topic, self.mode, self.state, self.params, self.keys)
     def __eq__(self, other):
         if self.sub_id != other.sub_id:
             return False
@@ -7261,6 +7263,8 @@ class ServiceSubscriberInfo:
             return False
         if self.params != other.params:
             return False
+        if self.keys != other.keys:
+            return False
         return True
 
 class _UniffiFfiConverterTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
@@ -7274,6 +7278,7 @@ class _UniffiFfiConverterTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
             mode=_UniffiFfiConverterTypeSubscriptionMode.read(buf),
             state=_UniffiFfiConverterString.read(buf),
             params=_UniffiFfiConverterString.read(buf),
+            keys=_UniffiFfiConverterSequenceString.read(buf),
         )
 
     @staticmethod
@@ -7285,6 +7290,7 @@ class _UniffiFfiConverterTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
         _UniffiFfiConverterTypeSubscriptionMode.check_lower(value.mode)
         _UniffiFfiConverterString.check_lower(value.state)
         _UniffiFfiConverterString.check_lower(value.params)
+        _UniffiFfiConverterSequenceString.check_lower(value.keys)
 
     @staticmethod
     def write(value, buf):
@@ -7295,22 +7301,25 @@ class _UniffiFfiConverterTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
         _UniffiFfiConverterTypeSubscriptionMode.write(value.mode, buf)
         _UniffiFfiConverterString.write(value.state, buf)
         _UniffiFfiConverterString.write(value.params, buf)
+        _UniffiFfiConverterSequenceString.write(value.keys, buf)
 
 @dataclass
 class ServiceSubscriptionInfo:
-    def __init__(self, *, sub_id:str, provider:str, service_id:str, topic:str, mode:SubscriptionMode, state:str):
+    def __init__(self, *, sub_id:str, provider:str, service_id:str, topic:str, mode:SubscriptionMode, state:str, keys:typing.List[str], topics:typing.List[str]):
         self.sub_id = sub_id
         self.provider = provider
         self.service_id = service_id
         self.topic = topic
         self.mode = mode
         self.state = state
+        self.keys = keys
+        self.topics = topics
         
         
 
     
     def __str__(self):
-        return "ServiceSubscriptionInfo(sub_id={}, provider={}, service_id={}, topic={}, mode={}, state={})".format(self.sub_id, self.provider, self.service_id, self.topic, self.mode, self.state)
+        return "ServiceSubscriptionInfo(sub_id={}, provider={}, service_id={}, topic={}, mode={}, state={}, keys={}, topics={})".format(self.sub_id, self.provider, self.service_id, self.topic, self.mode, self.state, self.keys, self.topics)
     def __eq__(self, other):
         if self.sub_id != other.sub_id:
             return False
@@ -7324,6 +7333,10 @@ class ServiceSubscriptionInfo:
             return False
         if self.state != other.state:
             return False
+        if self.keys != other.keys:
+            return False
+        if self.topics != other.topics:
+            return False
         return True
 
 class _UniffiFfiConverterTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer):
@@ -7336,6 +7349,8 @@ class _UniffiFfiConverterTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer)
             topic=_UniffiFfiConverterString.read(buf),
             mode=_UniffiFfiConverterTypeSubscriptionMode.read(buf),
             state=_UniffiFfiConverterString.read(buf),
+            keys=_UniffiFfiConverterSequenceString.read(buf),
+            topics=_UniffiFfiConverterSequenceString.read(buf),
         )
 
     @staticmethod
@@ -7346,6 +7361,8 @@ class _UniffiFfiConverterTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer)
         _UniffiFfiConverterString.check_lower(value.topic)
         _UniffiFfiConverterTypeSubscriptionMode.check_lower(value.mode)
         _UniffiFfiConverterString.check_lower(value.state)
+        _UniffiFfiConverterSequenceString.check_lower(value.keys)
+        _UniffiFfiConverterSequenceString.check_lower(value.topics)
 
     @staticmethod
     def write(value, buf):
@@ -7355,6 +7372,8 @@ class _UniffiFfiConverterTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer)
         _UniffiFfiConverterString.write(value.topic, buf)
         _UniffiFfiConverterTypeSubscriptionMode.write(value.mode, buf)
         _UniffiFfiConverterString.write(value.state, buf)
+        _UniffiFfiConverterSequenceString.write(value.keys, buf)
+        _UniffiFfiConverterSequenceString.write(value.topics, buf)
 
 
 
@@ -9664,7 +9683,7 @@ class MeshServicesProtocol(typing.Protocol):
         raise NotImplementedError
     def set_service_topic_checkpoint(self, service_id: str,topic: str,body: str) -> None:
         raise NotImplementedError
-    def subscribe_service(self, provider: str,service_id: str,topic: str,mode: SubscriptionMode,params: str) -> str:
+    def subscribe_service(self, provider: str,service_id: str,topic: str,mode: SubscriptionMode,params: str,keys: typing.List[str]) -> str:
         raise NotImplementedError
     def unregister_service(self, service_id: str) -> bool:
         raise NotImplementedError
@@ -9967,7 +9986,7 @@ class MeshServices(MeshServicesProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def subscribe_service(self, provider: str,service_id: str,topic: str,mode: SubscriptionMode,params: str) -> str:
+    def subscribe_service(self, provider: str,service_id: str,topic: str,mode: SubscriptionMode,params: str,keys: typing.List[str]) -> str:
         
         _UniffiFfiConverterString.check_lower(provider)
 
@@ -9978,6 +9997,8 @@ class MeshServices(MeshServicesProtocol):
         _UniffiFfiConverterTypeSubscriptionMode.check_lower(mode)
 
         _UniffiFfiConverterString.check_lower(params)
+
+        _UniffiFfiConverterSequenceString.check_lower(keys)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
             _UniffiFfiConverterString.lower(provider),
@@ -9985,6 +10006,7 @@ class MeshServices(MeshServicesProtocol):
             _UniffiFfiConverterString.lower(topic),
             _UniffiFfiConverterTypeSubscriptionMode.lower(mode),
             _UniffiFfiConverterString.lower(params),
+            _UniffiFfiConverterSequenceString.lower(keys),
         )
         _uniffi_lift_return = _UniffiFfiConverterString.lift
         _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError

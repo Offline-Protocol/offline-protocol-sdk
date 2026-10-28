@@ -7,6 +7,8 @@ public class ServiceSubscriptionInfo {
     private java.lang.String topic;
     private SubscriptionMode mode;
     private java.lang.String state;
+    private java.util.List<java.lang.String> keys;
+    private java.util.List<java.lang.String> topics;
 
     public ServiceSubscriptionInfo(
         java.lang.String subId, 
@@ -14,7 +16,9 @@ public class ServiceSubscriptionInfo {
         java.lang.String serviceId, 
         java.lang.String topic, 
         SubscriptionMode mode, 
-        java.lang.String state
+        java.lang.String state, 
+        java.util.List<java.lang.String> keys, 
+        java.util.List<java.lang.String> topics
     ) {
         
         this.subId = subId;
@@ -28,6 +32,10 @@ public class ServiceSubscriptionInfo {
         this.mode = mode;
         
         this.state = state;
+        
+        this.keys = keys;
+        
+        this.topics = topics;
     }
     
     public java.lang.String subId() {
@@ -53,6 +61,14 @@ public class ServiceSubscriptionInfo {
     public java.lang.String state() {
         return this.state;
     }
+    
+    public java.util.List<java.lang.String> keys() {
+        return this.keys;
+    }
+    
+    public java.util.List<java.lang.String> topics() {
+        return this.topics;
+    }
     public void setSubId(java.lang.String subId) {
         this.subId = subId;
     }
@@ -70,6 +86,12 @@ public class ServiceSubscriptionInfo {
     }
     public void setState(java.lang.String state) {
         this.state = state;
+    }
+    public void setKeys(java.util.List<java.lang.String> keys) {
+        this.keys = keys;
+    }
+    public void setTopics(java.util.List<java.lang.String> topics) {
+        this.topics = topics;
     }
 
     
@@ -90,7 +112,11 @@ public class ServiceSubscriptionInfo {
               
               java.util.Objects.equals(mode, _uniffiThat.mode) && 
               
-              java.util.Objects.equals(state, _uniffiThat.state)
+              java.util.Objects.equals(state, _uniffiThat.state) && 
+              
+              java.util.Objects.equals(keys, _uniffiThat.keys) && 
+              
+              java.util.Objects.equals(topics, _uniffiThat.topics)
               
             );
         };
@@ -105,6 +131,8 @@ public class ServiceSubscriptionInfo {
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(topic);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(mode);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(state);
+        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(keys);
+        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(topics);
         return _uniffiHash;
     }
 

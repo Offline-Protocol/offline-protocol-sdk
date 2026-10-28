@@ -212,6 +212,10 @@ def test_subscribe_maps_the_mode_and_returns_the_id() -> None:
     services.subscribe("bob", "fleet.v1", "doors", mode="log", params="{}")
     assert mesh.subscribe_service.call_args_list[0].args[3] == SubscriptionMode.LATEST
     assert mesh.subscribe_service.call_args_list[1].args[3] == SubscriptionMode.LOG
+    assert mesh.subscribe_service.call_args_list[0].args[5] == []
+    services.subscribe("bob", "fleet.v1", "rooms/*", keys=["temp", "pos.*"])
+    assert mesh.subscribe_service.call_args_list[2].args[2] == "rooms/*"
+    assert mesh.subscribe_service.call_args_list[2].args[5] == ["temp", "pos.*"]
     with pytest.raises(ValueError):
         services.subscribe("bob", "fleet.v1", "x", mode="stream")
 

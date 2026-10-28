@@ -1494,7 +1494,7 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`topic`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(`ptr`: Long,`provider`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`topic`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(`ptr`: Long,`provider`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`topic`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,`keys`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -2156,7 +2156,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() and 0xFFFF) != 51763) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() and 0xFFFF) != 6997) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() and 0xFFFF) != 1722) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() and 0xFFFF) != 4997) {
@@ -4154,7 +4154,7 @@ public interface MeshServicesInterface {
     
     fun `setServiceTopicCheckpoint`(`serviceId`: kotlin.String, `topic`: kotlin.String, `body`: kotlin.String)
     
-    fun `subscribeService`(`provider`: kotlin.String, `serviceId`: kotlin.String, `topic`: kotlin.String, `mode`: SubscriptionMode, `params`: kotlin.String): kotlin.String
+    fun `subscribeService`(`provider`: kotlin.String, `serviceId`: kotlin.String, `topic`: kotlin.String, `mode`: SubscriptionMode, `params`: kotlin.String, `keys`: List<kotlin.String>): kotlin.String
     
     fun `unregisterService`(`serviceId`: kotlin.String): kotlin.Boolean
     
@@ -4493,7 +4493,7 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `subscribeService`(`provider`: kotlin.String, `serviceId`: kotlin.String, `topic`: kotlin.String, `mode`: SubscriptionMode, `params`: kotlin.String): kotlin.String {
+    @Throws(ProtocolException::class)override fun `subscribeService`(`provider`: kotlin.String, `serviceId`: kotlin.String, `topic`: kotlin.String, `mode`: SubscriptionMode, `params`: kotlin.String, `keys`: List<kotlin.String>): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
@@ -4504,7 +4504,8 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
         FfiConverterString.lower(`serviceId`),
         FfiConverterString.lower(`topic`),
         FfiConverterTypeSubscriptionMode.lower(`mode`),
-        FfiConverterString.lower(`params`),_status)
+        FfiConverterString.lower(`params`),
+        FfiConverterSequenceString.lower(`keys`),_status)
 }
     }
     )
@@ -10389,6 +10390,8 @@ data class ServiceSubscriberInfo (
     var `state`: kotlin.String
     , 
     var `params`: kotlin.String
+    , 
+    var `keys`: List<kotlin.String>
     
 ){
     
@@ -10412,6 +10415,7 @@ public object FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer<Serv
             FfiConverterTypeSubscriptionMode.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
         )
     }
 
@@ -10422,7 +10426,8 @@ public object FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer<Serv
             FfiConverterString.allocationSize(value.`topic`) +
             FfiConverterTypeSubscriptionMode.allocationSize(value.`mode`) +
             FfiConverterString.allocationSize(value.`state`) +
-            FfiConverterString.allocationSize(value.`params`)
+            FfiConverterString.allocationSize(value.`params`) +
+            FfiConverterSequenceString.allocationSize(value.`keys`)
     )
 
     override fun write(value: ServiceSubscriberInfo, buf: ByteBuffer) {
@@ -10433,6 +10438,7 @@ public object FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer<Serv
             FfiConverterTypeSubscriptionMode.write(value.`mode`, buf)
             FfiConverterString.write(value.`state`, buf)
             FfiConverterString.write(value.`params`, buf)
+            FfiConverterSequenceString.write(value.`keys`, buf)
     }
 }
 
@@ -10450,6 +10456,10 @@ data class ServiceSubscriptionInfo (
     var `mode`: SubscriptionMode
     , 
     var `state`: kotlin.String
+    , 
+    var `keys`: List<kotlin.String>
+    , 
+    var `topics`: List<kotlin.String>
     
 ){
     
@@ -10472,6 +10482,8 @@ public object FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer<Se
             FfiConverterString.read(buf),
             FfiConverterTypeSubscriptionMode.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
         )
     }
 
@@ -10481,7 +10493,9 @@ public object FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer<Se
             FfiConverterString.allocationSize(value.`serviceId`) +
             FfiConverterString.allocationSize(value.`topic`) +
             FfiConverterTypeSubscriptionMode.allocationSize(value.`mode`) +
-            FfiConverterString.allocationSize(value.`state`)
+            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterSequenceString.allocationSize(value.`keys`) +
+            FfiConverterSequenceString.allocationSize(value.`topics`)
     )
 
     override fun write(value: ServiceSubscriptionInfo, buf: ByteBuffer) {
@@ -10491,6 +10505,8 @@ public object FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer<Se
             FfiConverterString.write(value.`topic`, buf)
             FfiConverterTypeSubscriptionMode.write(value.`mode`, buf)
             FfiConverterString.write(value.`state`, buf)
+            FfiConverterSequenceString.write(value.`keys`, buf)
+            FfiConverterSequenceString.write(value.`topics`, buf)
     }
 }
 

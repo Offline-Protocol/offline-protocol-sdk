@@ -1263,6 +1263,7 @@ private_constant :UniffiHandleMap
     RustBuffer.check_lower_TypeSubscriptionMode(v.mode)
     
     
+    RustBuffer.check_lower_Sequencestring(v.keys)
   end
 
   def self.alloc_from_TypeServiceSubscriberInfo(v)
@@ -1287,6 +1288,8 @@ private_constant :UniffiHandleMap
     
     RustBuffer.check_lower_TypeSubscriptionMode(v.mode)
     
+    RustBuffer.check_lower_Sequencestring(v.keys)
+    RustBuffer.check_lower_Sequencestring(v.topics)
   end
 
   def self.alloc_from_TypeServiceSubscriptionInfo(v)
@@ -3305,7 +3308,8 @@ class RustBufferStream
       topic: read_string,
       mode: read_TypeSubscriptionMode,
       state: read_string,
-      params: read_string
+      params: read_string,
+      keys: read_Sequencestring
     )
   end
 
@@ -3318,7 +3322,9 @@ class RustBufferStream
       service_id: read_string,
       topic: read_string,
       mode: read_TypeSubscriptionMode,
-      state: read_string
+      state: read_string,
+      keys: read_Sequencestring,
+      topics: read_Sequencestring
     )
   end
 
@@ -5197,6 +5203,7 @@ class RustBufferBuilder
     self.write_TypeSubscriptionMode(v.mode)
     self.write_string(v.state)
     self.write_string(v.params)
+    self.write_Sequencestring(v.keys)
   end
 
   # The Record type ServiceSubscriptionInfo.
@@ -5208,6 +5215,8 @@ class RustBufferBuilder
     self.write_string(v.topic)
     self.write_TypeSubscriptionMode(v.mode)
     self.write_string(v.state)
+    self.write_Sequencestring(v.keys)
+    self.write_Sequencestring(v.topics)
   end
 
   # The Record type SubscriptionPolicyConfig.
@@ -6778,7 +6787,7 @@ module UniFFILib
     :void
   
   attach_function :uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service,
-    [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
+    [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
     RustBuffer.by_value
   
   attach_function :uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service,
@@ -10728,9 +10737,9 @@ end
   
   # Record type ServiceSubscriberInfo
 class ServiceSubscriberInfo
-  attr_reader :sub_id, :subscriber, :service_id, :topic, :mode, :state, :params
+  attr_reader :sub_id, :subscriber, :service_id, :topic, :mode, :state, :params, :keys
 
-  def initialize(sub_id:, subscriber:, service_id:, topic:, mode:, state:, params:)
+  def initialize(sub_id:, subscriber:, service_id:, topic:, mode:, state:, params:, keys:)
     @sub_id = sub_id
     @subscriber = subscriber
     @service_id = service_id
@@ -10738,6 +10747,7 @@ class ServiceSubscriberInfo
     @mode = mode
     @state = state
     @params = params
+    @keys = keys
   end
 
   def ==(other)
@@ -10762,6 +10772,9 @@ class ServiceSubscriberInfo
     if @params != other.params
       return false
     end
+    if @keys != other.keys
+      return false
+    end
 
     true
   end
@@ -10770,15 +10783,17 @@ end
   
   # Record type ServiceSubscriptionInfo
 class ServiceSubscriptionInfo
-  attr_reader :sub_id, :provider, :service_id, :topic, :mode, :state
+  attr_reader :sub_id, :provider, :service_id, :topic, :mode, :state, :keys, :topics
 
-  def initialize(sub_id:, provider:, service_id:, topic:, mode:, state:)
+  def initialize(sub_id:, provider:, service_id:, topic:, mode:, state:, keys:, topics:)
     @sub_id = sub_id
     @provider = provider
     @service_id = service_id
     @topic = topic
     @mode = mode
     @state = state
+    @keys = keys
+    @topics = topics
   end
 
   def ==(other)
@@ -10798,6 +10813,12 @@ class ServiceSubscriptionInfo
       return false
     end
     if @state != other.state
+      return false
+    end
+    if @keys != other.keys
+      return false
+    end
+    if @topics != other.topics
       return false
     end
 
@@ -11668,7 +11689,7 @@ end
       ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint,uniffi_clone_handle(),RustBuffer.alloc_from_string(service_id),RustBuffer.alloc_from_string(topic),RustBuffer.alloc_from_string(body))
   end
   
-  def subscribe_service(provider, service_id, topic, mode, params)
+  def subscribe_service(provider, service_id, topic, mode, params, keys)
         provider = ::OfflineProtocol::uniffi_utf8(provider)
         
         service_id = ::OfflineProtocol::uniffi_utf8(service_id)
@@ -11679,7 +11700,9 @@ end
         RustBuffer.check_lower_TypeSubscriptionMode(mode)
         params = ::OfflineProtocol::uniffi_utf8(params)
         
-    result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service,uniffi_clone_handle(),RustBuffer.alloc_from_string(provider),RustBuffer.alloc_from_string(service_id),RustBuffer.alloc_from_string(topic),RustBuffer.alloc_from_TypeSubscriptionMode(mode),RustBuffer.alloc_from_string(params))
+        keys = keys.map { |v| ::OfflineProtocol::uniffi_utf8(v) }
+        RustBuffer.check_lower_Sequencestring(keys)
+    result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service,uniffi_clone_handle(),RustBuffer.alloc_from_string(provider),RustBuffer.alloc_from_string(service_id),RustBuffer.alloc_from_string(topic),RustBuffer.alloc_from_TypeSubscriptionMode(mode),RustBuffer.alloc_from_string(params),RustBuffer.alloc_from_Sequencestring(keys))
     return result.consume_into_string
   end
   def unregister_service(service_id)

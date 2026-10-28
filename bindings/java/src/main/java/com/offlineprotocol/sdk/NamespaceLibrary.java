@@ -172,7 +172,7 @@ final class NamespaceLibrary {
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() != ((short) 51763)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
-        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != ((short) 6997)) {
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != ((short) 1722)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != ((short) 4997)) {

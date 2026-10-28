@@ -655,7 +655,7 @@ void uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_che
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_MESHSERVICES_SUBSCRIBE_SERVICE
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_MESHSERVICES_SUBSCRIBE_SERVICE
-RustBuffer uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(uint64_t ptr, RustBuffer provider, RustBuffer service_id, RustBuffer topic, RustBuffer mode, RustBuffer params, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(uint64_t ptr, RustBuffer provider, RustBuffer service_id, RustBuffer topic, RustBuffer mode, RustBuffer params, RustBuffer keys, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_MESHSERVICES_UNREGISTER_SERVICE

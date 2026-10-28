@@ -8,6 +8,7 @@ public class ServiceSubscriberInfo {
     private SubscriptionMode mode;
     private java.lang.String state;
     private java.lang.String params;
+    private java.util.List<java.lang.String> keys;
 
     public ServiceSubscriberInfo(
         java.lang.String subId, 
@@ -16,7 +17,8 @@ public class ServiceSubscriberInfo {
         java.lang.String topic, 
         SubscriptionMode mode, 
         java.lang.String state, 
-        java.lang.String params
+        java.lang.String params, 
+        java.util.List<java.lang.String> keys
     ) {
         
         this.subId = subId;
@@ -32,6 +34,8 @@ public class ServiceSubscriberInfo {
         this.state = state;
         
         this.params = params;
+        
+        this.keys = keys;
     }
     
     public java.lang.String subId() {
@@ -61,6 +65,10 @@ public class ServiceSubscriberInfo {
     public java.lang.String params() {
         return this.params;
     }
+    
+    public java.util.List<java.lang.String> keys() {
+        return this.keys;
+    }
     public void setSubId(java.lang.String subId) {
         this.subId = subId;
     }
@@ -81,6 +89,9 @@ public class ServiceSubscriberInfo {
     }
     public void setParams(java.lang.String params) {
         this.params = params;
+    }
+    public void setKeys(java.util.List<java.lang.String> keys) {
+        this.keys = keys;
     }
 
     
@@ -103,7 +114,9 @@ public class ServiceSubscriberInfo {
               
               java.util.Objects.equals(state, _uniffiThat.state) && 
               
-              java.util.Objects.equals(params, _uniffiThat.params)
+              java.util.Objects.equals(params, _uniffiThat.params) && 
+              
+              java.util.Objects.equals(keys, _uniffiThat.keys)
               
             );
         };
@@ -119,6 +132,7 @@ public class ServiceSubscriberInfo {
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(mode);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(state);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(params);
+        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(keys);
         return _uniffiHash;
     }
 

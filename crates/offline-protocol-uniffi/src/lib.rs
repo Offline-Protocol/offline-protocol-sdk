@@ -8146,10 +8146,20 @@ impl MeshServices {
         topic: String,
         mode: SubscriptionMode,
         params: String,
+        keys: Vec<String>,
     ) -> Result<String, ProtocolError> {
         let mut protocol = self.protocol.lock_inner()?;
         protocol
-            .subscribe_service(&provider, &service_id, &topic, mode.into(), &params)
+            .subscribe_service_with(
+                &provider,
+                &service_id,
+                &topic,
+                offline_protocol::SubscribeOptions {
+                    mode: mode.into(),
+                    params,
+                    keys,
+                },
+            )
             .map_err(map_send_error)
     }
 
@@ -8182,6 +8192,8 @@ impl MeshServices {
                 topic: info.topic,
                 mode: info.mode.into(),
                 state: info.state.as_str().to_string(),
+                keys: info.keys,
+                topics: info.topics,
             })
             .collect())
     }
@@ -8295,6 +8307,7 @@ impl MeshServices {
                 mode: info.mode.into(),
                 state: info.state.as_str().to_string(),
                 params: info.params,
+                keys: info.keys,
             })
             .collect())
     }
@@ -8385,6 +8398,8 @@ pub struct ServiceSubscriptionInfo {
     pub topic: String,
     pub mode: SubscriptionMode,
     pub state: String,
+    pub keys: Vec<String>,
+    pub topics: Vec<String>,
 }
 
 /// A subscription another device holds on this one.
@@ -8397,6 +8412,7 @@ pub struct ServiceSubscriberInfo {
     pub mode: SubscriptionMode,
     pub state: String,
     pub params: String,
+    pub keys: Vec<String>,
 }
 
 #[cfg(test)]

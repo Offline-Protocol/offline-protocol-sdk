@@ -15,7 +15,7 @@ public interface MeshServicesInterface {
     public java.util.List<ServiceSubscriptionInfo> serviceSubscriptions() throws ProtocolException;
     public void setServiceSubscriptionPolicy(java.lang.String serviceId, SubscriptionPolicyConfig policy) throws ProtocolException;
     public void setServiceTopicCheckpoint(java.lang.String serviceId, java.lang.String topic, java.lang.String body) throws ProtocolException;
-    public java.lang.String subscribeService(java.lang.String provider, java.lang.String serviceId, java.lang.String topic, SubscriptionMode mode, java.lang.String params) throws ProtocolException;
+    public java.lang.String subscribeService(java.lang.String provider, java.lang.String serviceId, java.lang.String topic, SubscriptionMode mode, java.lang.String params, java.util.List<java.lang.String> keys) throws ProtocolException;
     public boolean unregisterService(java.lang.String serviceId) throws ProtocolException;
     public boolean unsubscribeService(java.lang.String subId) throws ProtocolException;
     

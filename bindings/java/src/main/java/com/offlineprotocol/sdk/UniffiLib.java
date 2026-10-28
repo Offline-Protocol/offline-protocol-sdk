@@ -471,11 +471,11 @@ final class UniffiLib {
     }
 
     // uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service
-    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
-    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment provider, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment topic, java.lang.foreign.MemorySegment mode, java.lang.foreign.MemorySegment params, java.lang.foreign.MemorySegment _uniffiOutErr) {
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment provider, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment topic, java.lang.foreign.MemorySegment mode, java.lang.foreign.MemorySegment params, java.lang.foreign.MemorySegment keys, java.lang.foreign.MemorySegment _uniffiOutErr) {
         try {
-            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service.invokeExact(_allocator, ptr, provider, serviceId, topic, mode, params, _uniffiOutErr);
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service.invokeExact(_allocator, ptr, provider, serviceId, topic, mode, params, keys, _uniffiOutErr);
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 

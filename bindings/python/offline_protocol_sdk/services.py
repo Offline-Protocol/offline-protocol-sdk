@@ -197,12 +197,20 @@ class Services:
         topic: str,
         mode: str | SubscriptionMode = "latest",
         params: str = "",
+        keys: list[str] | None = None,
     ) -> str:
         """Subscribe to ``topic`` of ``service_id`` on ``provider``; returns
         the subscription id its events carry. ``mode`` is ``"latest"``
-        (state, one value per key) or ``"log"`` (every event, in order)."""
+        (state, one value per key) or ``"log"`` (every event, in order).
+
+        ``topic`` may be a pattern, ``"prefix*"`` or ``"*"``: every matching
+        topic in the mode, each update naming its own. ``keys`` limits a
+        ``latest`` subscription to those keys, each exact or a prefix ending
+        in ``*``; the provider applies it."""
         return str(
-            self._mesh.subscribe_service(provider, service_id, topic, _mode(mode), params)
+            self._mesh.subscribe_service(
+                provider, service_id, topic, _mode(mode), params, list(keys or [])
+            )
         )
 
     def unsubscribe(self, sub_id: str) -> bool:
