@@ -46,6 +46,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0033](0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md) | A session is confirmed only by proof of the same group | Accepted |
 | [0034](0034-browsers-find-each-other-through-their-network-address.md) | Browsers on one network find each other through its address | Accepted |
 | [0035](0035-a-service-can-be-subscribed-to.md) | A service can be subscribed to: sealed, leased, `latest` or `log`, recoverable | Proposed |
+| [0036](0036-a-topic-can-be-backed-by-a-group.md) | A topic can be backed by a group: one encryption per publish, revocation by commit | Proposed |
 
 ## Format
 
