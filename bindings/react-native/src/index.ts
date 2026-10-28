@@ -64,6 +64,11 @@ import type {
   RelayConfig,
   RelayPriority,
   InviteInfo,
+  ServicePublishReport,
+  ServiceSubscriberInfo,
+  ServiceSubscriptionInfo,
+  SubscriptionMode,
+  SubscriptionPolicy,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import {
@@ -5100,6 +5105,140 @@ export class MeshServices {
       serviceId,
       status,
       body
+    );
+  }
+
+  // ==========================================================================
+  // SERVICE SUBSCRIPTIONS (ADR 0035)
+  // ==========================================================================
+
+  /**
+   * Subscribes to `topic` of `serviceId` on `provider`. Every subscription
+   * frame is sealed in the 1:1 MLS session, with no plaintext fallback; with
+   * no session yet one is started and the subscription waits for it.
+   * Updates arrive as `service_update_received`, state changes as
+   * `service_subscription_changed`.
+   *
+   * @param mode - `'latest'` (state: one current value per key) or `'log'`
+   *   (events: every update, in order)
+   * @returns The subscription id its events carry
+   */
+  async subscribeService(
+    provider: string,
+    serviceId: string,
+    topic: string,
+    mode: SubscriptionMode = 'latest',
+    params: string = ''
+  ): Promise<string> {
+    return await OfflineProtocolNativeModule.subscribeService(
+      provider,
+      serviceId,
+      topic,
+      mode,
+      params
+    );
+  }
+
+  /** Ends a subscription this device holds. `false` when there is none. */
+  async unsubscribeService(subId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.unsubscribeService(subId);
+  }
+
+  /** Asks the provider for the whole state again, now. */
+  async resyncServiceSubscription(subId: string): Promise<void> {
+    await OfflineProtocolNativeModule.resyncServiceSubscription(subId);
+  }
+
+  /** The subscriptions this device holds on other devices. */
+  async serviceSubscriptions(): Promise<ServiceSubscriptionInfo[]> {
+    return await OfflineProtocolNativeModule.serviceSubscriptions();
+  }
+
+  /**
+   * Sets who may subscribe to `serviceId`: `restricted` (the default) asks
+   * this app with `service_subscribe_received`; `accept_all` admits every
+   * peer with a session; `rules` admits `allowPeers` and members of
+   * `allowGroups` and asks or rejects everyone else by `fallback`.
+   */
+  async setServiceSubscriptionPolicy(
+    serviceId: string,
+    policy: SubscriptionPolicy
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.setServiceSubscriptionPolicy(
+      serviceId,
+      JSON.stringify(policy)
+    );
+  }
+
+  /** Accepts a subscriber this app was asked about. */
+  async acceptServiceSubscription(subId: string): Promise<void> {
+    await OfflineProtocolNativeModule.acceptServiceSubscription(subId);
+  }
+
+  /** Rejects a subscriber this app was asked about. */
+  async rejectServiceSubscription(
+    subId: string,
+    reason: string = ''
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.rejectServiceSubscription(subId, reason);
+  }
+
+  /** Ends a subscription another device holds on this one. */
+  async endServiceSubscription(
+    subId: string,
+    reason: string = ''
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.endServiceSubscription(subId, reason);
+  }
+
+  /**
+   * Publishes to a topic of a service registered on this device. With a
+   * `key` the topic is `latest`; without one it is `log`. Each subscriber is
+   * sent the update once over a live direct link, or through the reliable
+   * ladder across hops, where a `latest` value replaces the one queued
+   * before it for its key.
+   */
+  async publishServiceUpdate(
+    serviceId: string,
+    topic: string,
+    body: string,
+    key?: string
+  ): Promise<ServicePublishReport> {
+    return await OfflineProtocolNativeModule.publishServiceUpdate(
+      serviceId,
+      topic,
+      key ?? null,
+      body
+    );
+  }
+
+  /**
+   * Sets a `log` topic's checkpoint: a summary a subscriber that fell out of
+   * the buffer is sent instead of being told its history was lost.
+   */
+  async setServiceTopicCheckpoint(
+    serviceId: string,
+    topic: string,
+    body: string
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.setServiceTopicCheckpoint(
+      serviceId,
+      topic,
+      body
+    );
+  }
+
+  /** Starts a topic over; every subscriber is told before new state. */
+  async clearServiceTopic(serviceId: string, topic: string): Promise<void> {
+    await OfflineProtocolNativeModule.clearServiceTopic(serviceId, topic);
+  }
+
+  /** The subscriptions other devices hold on `serviceId`, or on all. */
+  async serviceSubscribers(
+    serviceId?: string
+  ): Promise<ServiceSubscriberInfo[]> {
+    return await OfflineProtocolNativeModule.serviceSubscribers(
+      serviceId ?? null
     );
   }
 }

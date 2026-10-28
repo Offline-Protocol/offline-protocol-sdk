@@ -2357,6 +2357,51 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
 // SERVICE SUBSCRIPTION EVENTS (ADR 0035)
 // ============================================================================
 
+/** How a topic treats its updates: state per key, or every event in order. */
+export type SubscriptionMode = 'latest' | 'log';
+
+/** Who may subscribe to a service. */
+export type SubscriptionPolicy =
+  | { kind: 'restricted' }
+  | { kind: 'accept_all' }
+  | {
+      kind: 'rules';
+      allowPeers?: string[];
+      allowGroups?: string[];
+      /** What happens to a subscriber no rule matches. Defaults to `'ask'`. */
+      fallback?: 'ask' | 'reject';
+    };
+
+/** What one `publishServiceUpdate` did, per subscriber. */
+export interface ServicePublishReport {
+  subscribers: number;
+  sentLive: number;
+  queued: number;
+  coalesced: number;
+  failed: number;
+}
+
+/** A subscription this device holds on another. */
+export interface ServiceSubscriptionInfo {
+  subId: string;
+  provider: string;
+  serviceId: string;
+  topic: string;
+  mode: SubscriptionMode;
+  state: 'pending' | 'active' | 'paused' | 'ended';
+}
+
+/** A subscription another device holds on this one. */
+export interface ServiceSubscriberInfo {
+  subId: string;
+  subscriber: string;
+  serviceId: string;
+  topic: string;
+  mode: SubscriptionMode;
+  state: 'pending' | 'active';
+  params: string;
+}
+
 /**
  * Provider side: a subscription waits for the app to accept or reject it.
  * Emitted under the `restricted` policy, and under `rules` when the

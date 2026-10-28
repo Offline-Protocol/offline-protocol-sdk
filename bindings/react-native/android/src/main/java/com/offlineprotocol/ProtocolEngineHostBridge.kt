@@ -242,6 +242,12 @@ object ProtocolEngineHostBridge {
         )
     }
 
+    fun acceptServiceSubscription(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().acceptServiceSubscription(requireString(map, "subId"))
+        return null
+    }
+
     fun bleGetDiagnostics(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val proto = host.protocol
         return mapOf(
@@ -288,6 +294,15 @@ object ProtocolEngineHostBridge {
         latch.await()
         return result
 
+    }
+
+    fun clearServiceTopic(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().clearServiceTopic(
+            requireString(map, "serviceId"),
+            requireString(map, "topic"),
+        )
+        return null
     }
 
     fun createInvite(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
@@ -344,6 +359,15 @@ object ProtocolEngineHostBridge {
     fun discoverServices(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
         return host.requireMeshServicesBridge().discoverServices(optionalString(map, "serviceId"))
+    }
+
+    fun endServiceSubscription(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().endServiceSubscription(
+            requireString(map, "subId"),
+            (map["reason"] as? String) ?: "",
+        )
+        return null
     }
 
     fun eraseCustody(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
@@ -861,6 +885,23 @@ object ProtocolEngineHostBridge {
 
     }
 
+    fun publishServiceUpdate(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        val report = host.requireMeshServicesBridge().publishServiceUpdate(
+            requireString(map, "serviceId"),
+            requireString(map, "topic"),
+            optionalString(map, "key"),
+            (map["body"] as? String) ?: throw IllegalArgumentException("Missing 'body'"),
+        )
+        return mapOf(
+            "subscribers" to report.subscribers.toDouble(),
+            "sentLive" to report.sentLive.toDouble(),
+            "queued" to report.queued.toDouble(),
+            "coalesced" to report.coalesced.toDouble(),
+            "failed" to report.failed.toDouble(),
+        )
+    }
+
     fun registerService(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
         val svc = host.requireMeshServicesBridge()
@@ -876,6 +917,15 @@ object ProtocolEngineHostBridge {
     fun rejectConnectionRequest(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
         return host.requireProtocolBridge().rejectConnectionRequest(requireString(map, "recipient"))
+    }
+
+    fun rejectServiceSubscription(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().rejectServiceSubscription(
+            requireString(map, "subId"),
+            (map["reason"] as? String) ?: "",
+        )
+        return null
     }
 
     fun rekeySession(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
@@ -920,6 +970,12 @@ object ProtocolEngineHostBridge {
             requireString(map, "status"),
             requireString(map, "body"),
         )
+    }
+
+    fun resyncServiceSubscription(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().resyncServiceSubscription(requireString(map, "subId"))
+        return null
     }
 
     fun sendConnectionRequest(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
@@ -1051,6 +1107,34 @@ object ProtocolEngineHostBridge {
         )
     }
 
+    fun serviceSubscribers(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        return host.requireMeshServicesBridge().serviceSubscribers(optionalString(map, "serviceId")).map { info ->
+            mapOf(
+                "subId" to info.subId,
+                "subscriber" to info.subscriber,
+                "serviceId" to info.serviceId,
+                "topic" to info.topic,
+                "mode" to info.mode.name.lowercase(),
+                "state" to info.state,
+                "params" to info.params,
+            )
+        }
+    }
+
+    fun serviceSubscriptions(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        return host.requireMeshServicesBridge().serviceSubscriptions().map { info ->
+            mapOf(
+                "subId" to info.subId,
+                "provider" to info.provider,
+                "serviceId" to info.serviceId,
+                "topic" to info.topic,
+                "mode" to info.mode.name.lowercase(),
+                "state" to info.state,
+            )
+        }
+    }
+
     fun setBatteryLevel(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val map = mapFromAny(arguments)
@@ -1079,6 +1163,41 @@ object ProtocolEngineHostBridge {
 
     }
 
+    fun setServiceSubscriptionPolicy(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        val json = JSONObject(requireString(map, "policyJson"))
+        val kind = when (json.optString("kind", "restricted").lowercase()) {
+            "restricted" -> SubscriptionPolicyKind.RESTRICTED
+            "accept_all" -> SubscriptionPolicyKind.ACCEPT_ALL
+            "rules" -> SubscriptionPolicyKind.RULES
+            else -> throw IllegalArgumentException("'kind' must be restricted, accept_all or rules")
+        }
+        val fallback = when (json.optString("fallback", "ask").lowercase()) {
+            "ask" -> SubscriptionRulesFallback.ASK
+            "reject" -> SubscriptionRulesFallback.REJECT
+            else -> throw IllegalArgumentException("'fallback' must be ask or reject")
+        }
+        fun strings(key: String): List<String> {
+            val array = json.optJSONArray(key) ?: return emptyList()
+            return (0 until array.length()).map { array.getString(it) }
+        }
+        host.requireMeshServicesBridge().setServiceSubscriptionPolicy(
+            requireString(map, "serviceId"),
+            SubscriptionPolicyConfig(kind, strings("allowPeers"), strings("allowGroups"), fallback),
+        )
+        return null
+    }
+
+    fun setServiceTopicCheckpoint(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().setServiceTopicCheckpoint(
+            requireString(map, "serviceId"),
+            requireString(map, "topic"),
+            (map["body"] as? String) ?: throw IllegalArgumentException("Missing 'body'"),
+        )
+        return null
+    }
+
     fun shouldEscalateToWifi(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? =
         host.requireProtocolBridge().shouldEscalateToWifi()
 
@@ -1099,6 +1218,22 @@ object ProtocolEngineHostBridge {
 
     }
 
+    fun subscribeService(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        val mode = when (requireString(map, "mode").lowercase()) {
+            "latest" -> SubscriptionMode.LATEST
+            "log" -> SubscriptionMode.LOG
+            else -> throw IllegalArgumentException("'mode' must be latest or log")
+        }
+        return host.requireMeshServicesBridge().subscribeService(
+            requireString(map, "provider"),
+            requireString(map, "serviceId"),
+            requireString(map, "topic"),
+            mode,
+            (map["params"] as? String) ?: "",
+        )
+    }
+
     fun unblockUser(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
         host.requireProtocolBridge().unblockUser(requireString(map, "userId"))
@@ -1108,6 +1243,11 @@ object ProtocolEngineHostBridge {
     fun unregisterService(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
         return host.requireMeshServicesBridge().unregisterService(requireString(map, "serviceId"))
+    }
+
+    fun unsubscribeService(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        return host.requireMeshServicesBridge().unsubscribeService(requireString(map, "subId"))
     }
 
     fun updateAckConfig(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {

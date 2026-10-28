@@ -1966,6 +1966,68 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         ProtocolEngineHostBridgeReactNative.respondToServiceRequest(this, requestId, requester, serviceId, status, body, promise)
     }
 
+    // Service subscriptions (ADR 0035).
+
+    @ReactMethod
+    fun subscribeService(provider: String, serviceId: String, topic: String, mode: String, params: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.subscribeService(this, provider, serviceId, topic, mode, params, promise)
+    }
+
+    @ReactMethod
+    fun unsubscribeService(subId: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.unsubscribeService(this, subId, promise)
+    }
+
+    @ReactMethod
+    fun resyncServiceSubscription(subId: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.resyncServiceSubscription(this, subId, promise)
+    }
+
+    @ReactMethod
+    fun serviceSubscriptions(promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.serviceSubscriptions(this, promise)
+    }
+
+    @ReactMethod
+    fun setServiceSubscriptionPolicy(serviceId: String, policyJson: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.setServiceSubscriptionPolicy(this, serviceId, policyJson, promise)
+    }
+
+    @ReactMethod
+    fun acceptServiceSubscription(subId: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.acceptServiceSubscription(this, subId, promise)
+    }
+
+    @ReactMethod
+    fun rejectServiceSubscription(subId: String, reason: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.rejectServiceSubscription(this, subId, reason, promise)
+    }
+
+    @ReactMethod
+    fun endServiceSubscription(subId: String, reason: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.endServiceSubscription(this, subId, reason, promise)
+    }
+
+    @ReactMethod
+    fun publishServiceUpdate(serviceId: String, topic: String, key: String?, body: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.publishServiceUpdate(this, serviceId, topic, key, body, promise)
+    }
+
+    @ReactMethod
+    fun setServiceTopicCheckpoint(serviceId: String, topic: String, body: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.setServiceTopicCheckpoint(this, serviceId, topic, body, promise)
+    }
+
+    @ReactMethod
+    fun clearServiceTopic(serviceId: String, topic: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.clearServiceTopic(this, serviceId, topic, promise)
+    }
+
+    @ReactMethod
+    fun serviceSubscribers(serviceId: String?, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.serviceSubscribers(this, serviceId, promise)
+    }
+
     @ReactMethod
     fun receiveMessage(promise: Promise) {
         val messageJson = protocol?.receiveMessage()

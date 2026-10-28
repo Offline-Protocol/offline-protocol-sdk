@@ -656,6 +656,67 @@ RCT_EXTERN_METHOD(respondToServiceRequest:(NSString *)requestId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Service subscriptions (ADR 0035)
+RCT_EXTERN_METHOD(subscribeService:(NSString *)provider
+                  serviceId:(NSString *)serviceId
+                  topic:(NSString *)topic
+                  mode:(NSString *)mode
+                  params:(NSString *)params
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(unsubscribeService:(NSString *)subId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(resyncServiceSubscription:(NSString *)subId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(serviceSubscriptions:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(setServiceSubscriptionPolicy:(NSString *)serviceId
+                  policyJson:(NSString *)policyJson
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(acceptServiceSubscription:(NSString *)subId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(rejectServiceSubscription:(NSString *)subId
+                  reason:(NSString *)reason
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(endServiceSubscription:(NSString *)subId
+                  reason:(NSString *)reason
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(publishServiceUpdate:(NSString *)serviceId
+                  topic:(NSString *)topic
+                  key:(NSString * _Nullable)key
+                  body:(NSString *)body
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(setServiceTopicCheckpoint:(NSString *)serviceId
+                  topic:(NSString *)topic
+                  body:(NSString *)body
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(clearServiceTopic:(NSString *)serviceId
+                  topic:(NSString *)topic
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(serviceSubscribers:(NSString * _Nullable)serviceId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Mesh Group Management (Protocol-Level MLS Groups)
 RCT_EXTERN_METHOD(meshCreateGroup:(NSString *)groupName
                   resolver:(RCTPromiseResolveBlock)resolve

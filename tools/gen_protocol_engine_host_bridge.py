@@ -12,17 +12,20 @@ OUT = REPO / "bindings/react-native/android/src/main/java/com/offlineprotocol/Pr
 # Methods EngineMethodHandlers delegates here (must match gen_engine_method_handlers.py).
 METHODS = [
     "acceptConnectionRequest",
+    "acceptServiceSubscription",
     "bleGetDiagnostics",
     "bleGetPeerCount",
     "blockUser",
     "cancelConnectionRequest",
     "cancelFileTransfer",
     "checkInternetPresence",
+    "clearServiceTopic",
     "createInvite",
     "deriveAddress",
     "deriveUserIdFromPublicKey",
     "disableTransport",
     "discoverServices",
+    "endServiceSubscription",
     "eraseCustody",
     "establishSecureSession",
     "finalizeFile",
@@ -81,13 +84,16 @@ METHODS = [
     "mlsProcessWelcome",
     "parseInvite",
     "processFileChunk",
+    "publishServiceUpdate",
     "registerService",
     "rejectConnectionRequest",
+    "rejectServiceSubscription",
     "rekeySession",
     "releaseTransportLock",
     "requestEnableBluetooth",
     "resolveUsername",
     "respondToServiceRequest",
+    "resyncServiceSubscription",
     "sendConnectionRequest",
     "sendFileFromPath",
     "sendMedia",
@@ -97,14 +103,20 @@ METHODS = [
     "sendReadReceipt",
     "sendServiceRequest",
     "sendTypingIndicator",
+    "serviceSubscribers",
+    "serviceSubscriptions",
     "setBatteryLevel",
     "setBatteryState",
     "setRelayPriority",
+    "setServiceSubscriptionPolicy",
+    "setServiceTopicCheckpoint",
     "shouldEscalateToWifi",
     "signData",
     "signDataBase64",
+    "subscribeService",
     "unblockUser",
     "unregisterService",
+    "unsubscribeService",
     "updateAckConfig",
     "updateDedupConfig",
     "updateDorsConfig",
@@ -700,6 +712,173 @@ IMPL["internetSendRawCommand"] = """
         val manager = host.internetManager
             ?: throw IllegalStateException("Internet transport not initialized")
         return manager.sendRawCommand(requireString(map, "json"))
+    }
+"""
+
+# Service subscriptions (ADR 0035). Mode, policy kind and fallback cross as
+# lowercase strings; the policy as one JSON object (`policyJson`), because the
+# React Native adapter turns an array argument into a list of integers.
+IMPL["subscribeService"] = """
+    fun subscribeService(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        val mode = when (requireString(map, "mode").lowercase()) {
+            "latest" -> SubscriptionMode.LATEST
+            "log" -> SubscriptionMode.LOG
+            else -> throw IllegalArgumentException("'mode' must be latest or log")
+        }
+        return host.requireMeshServicesBridge().subscribeService(
+            requireString(map, "provider"),
+            requireString(map, "serviceId"),
+            requireString(map, "topic"),
+            mode,
+            (map["params"] as? String) ?: "",
+        )
+    }
+"""
+
+IMPL["unsubscribeService"] = """
+    fun unsubscribeService(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        return host.requireMeshServicesBridge().unsubscribeService(requireString(map, "subId"))
+    }
+"""
+
+IMPL["resyncServiceSubscription"] = """
+    fun resyncServiceSubscription(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().resyncServiceSubscription(requireString(map, "subId"))
+        return null
+    }
+"""
+
+IMPL["serviceSubscriptions"] = """
+    fun serviceSubscriptions(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        return host.requireMeshServicesBridge().serviceSubscriptions().map { info ->
+            mapOf(
+                "subId" to info.subId,
+                "provider" to info.provider,
+                "serviceId" to info.serviceId,
+                "topic" to info.topic,
+                "mode" to info.mode.name.lowercase(),
+                "state" to info.state,
+            )
+        }
+    }
+"""
+
+IMPL["setServiceSubscriptionPolicy"] = """
+    fun setServiceSubscriptionPolicy(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        val json = JSONObject(requireString(map, "policyJson"))
+        val kind = when (json.optString("kind", "restricted").lowercase()) {
+            "restricted" -> SubscriptionPolicyKind.RESTRICTED
+            "accept_all" -> SubscriptionPolicyKind.ACCEPT_ALL
+            "rules" -> SubscriptionPolicyKind.RULES
+            else -> throw IllegalArgumentException("'kind' must be restricted, accept_all or rules")
+        }
+        val fallback = when (json.optString("fallback", "ask").lowercase()) {
+            "ask" -> SubscriptionRulesFallback.ASK
+            "reject" -> SubscriptionRulesFallback.REJECT
+            else -> throw IllegalArgumentException("'fallback' must be ask or reject")
+        }
+        fun strings(key: String): List<String> {
+            val array = json.optJSONArray(key) ?: return emptyList()
+            return (0 until array.length()).map { array.getString(it) }
+        }
+        host.requireMeshServicesBridge().setServiceSubscriptionPolicy(
+            requireString(map, "serviceId"),
+            SubscriptionPolicyConfig(kind, strings("allowPeers"), strings("allowGroups"), fallback),
+        )
+        return null
+    }
+"""
+
+IMPL["acceptServiceSubscription"] = """
+    fun acceptServiceSubscription(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().acceptServiceSubscription(requireString(map, "subId"))
+        return null
+    }
+"""
+
+IMPL["rejectServiceSubscription"] = """
+    fun rejectServiceSubscription(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().rejectServiceSubscription(
+            requireString(map, "subId"),
+            (map["reason"] as? String) ?: "",
+        )
+        return null
+    }
+"""
+
+IMPL["endServiceSubscription"] = """
+    fun endServiceSubscription(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().endServiceSubscription(
+            requireString(map, "subId"),
+            (map["reason"] as? String) ?: "",
+        )
+        return null
+    }
+"""
+
+IMPL["publishServiceUpdate"] = """
+    fun publishServiceUpdate(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        val report = host.requireMeshServicesBridge().publishServiceUpdate(
+            requireString(map, "serviceId"),
+            requireString(map, "topic"),
+            optionalString(map, "key"),
+            (map["body"] as? String) ?: throw IllegalArgumentException("Missing 'body'"),
+        )
+        return mapOf(
+            "subscribers" to report.subscribers.toDouble(),
+            "sentLive" to report.sentLive.toDouble(),
+            "queued" to report.queued.toDouble(),
+            "coalesced" to report.coalesced.toDouble(),
+            "failed" to report.failed.toDouble(),
+        )
+    }
+"""
+
+IMPL["setServiceTopicCheckpoint"] = """
+    fun setServiceTopicCheckpoint(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().setServiceTopicCheckpoint(
+            requireString(map, "serviceId"),
+            requireString(map, "topic"),
+            (map["body"] as? String) ?: throw IllegalArgumentException("Missing 'body'"),
+        )
+        return null
+    }
+"""
+
+IMPL["clearServiceTopic"] = """
+    fun clearServiceTopic(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        host.requireMeshServicesBridge().clearServiceTopic(
+            requireString(map, "serviceId"),
+            requireString(map, "topic"),
+        )
+        return null
+    }
+"""
+
+IMPL["serviceSubscribers"] = """
+    fun serviceSubscribers(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        return host.requireMeshServicesBridge().serviceSubscribers(optionalString(map, "serviceId")).map { info ->
+            mapOf(
+                "subId" to info.subId,
+                "subscriber" to info.subscriber,
+                "serviceId" to info.serviceId,
+                "topic" to info.topic,
+                "mode" to info.mode.name.lowercase(),
+                "state" to info.state,
+                "params" to info.params,
+            )
+        }
     }
 """
 

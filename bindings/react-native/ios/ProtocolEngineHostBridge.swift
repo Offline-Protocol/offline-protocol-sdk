@@ -1230,6 +1230,174 @@ enum ProtocolEngineHostBridge {
         )
     }
 
+    // MARK: - Service subscriptions (ADR 0035)
+    //
+    // Mode, policy kind and fallback cross as lowercase strings; the policy as
+    // one JSON object (`policyJson`), matching the Android bridge.
+
+    private static func subscriptionMode(_ value: String) throws -> SubscriptionMode {
+        switch value.lowercased() {
+        case "latest": return .latest
+        case "log": return .log
+        default: throw HostError.invalidArgument("'mode' must be latest or log")
+        }
+    }
+
+    private static func subscriptionModeName(_ mode: SubscriptionMode) -> String {
+        switch mode {
+        case .latest: return "latest"
+        case .log: return "log"
+        }
+    }
+
+    static func subscribeService(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "subscribeService")
+        return try host.requireMeshServices().subscribeService(
+            provider: try A.requireString(m, "provider"),
+            serviceId: try A.requireString(m, "serviceId"),
+            topic: try A.requireString(m, "topic"),
+            mode: try subscriptionMode(try A.requireString(m, "mode")),
+            params: (m["params"] as? String) ?? ""
+        )
+    }
+
+    static func unsubscribeService(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "unsubscribeService")
+        return try host.requireMeshServices().unsubscribeService(subId: try A.requireString(m, "subId"))
+    }
+
+    static func resyncServiceSubscription(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "resyncServiceSubscription")
+        try host.requireMeshServices().resyncServiceSubscription(subId: try A.requireString(m, "subId"))
+        return nil
+    }
+
+    static func serviceSubscriptions(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        return try host.requireMeshServices().serviceSubscriptions().map { info -> [String: Any] in
+            [
+                "subId": info.subId,
+                "provider": info.provider,
+                "serviceId": info.serviceId,
+                "topic": info.topic,
+                "mode": subscriptionModeName(info.mode),
+                "state": info.state,
+            ]
+        }
+    }
+
+    static func setServiceSubscriptionPolicy(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "setServiceSubscriptionPolicy")
+        let raw = try A.requireString(m, "policyJson")
+        guard let data = raw.data(using: .utf8),
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw HostError.invalidArgument("'policyJson' must be a JSON object")
+        }
+        let kind: SubscriptionPolicyKind
+        switch ((json["kind"] as? String) ?? "restricted").lowercased() {
+        case "restricted": kind = .restricted
+        case "accept_all": kind = .acceptAll
+        case "rules": kind = .rules
+        default: throw HostError.invalidArgument("'kind' must be restricted, accept_all or rules")
+        }
+        let fallback: SubscriptionRulesFallback
+        switch ((json["fallback"] as? String) ?? "ask").lowercased() {
+        case "ask": fallback = .ask
+        case "reject": fallback = .reject
+        default: throw HostError.invalidArgument("'fallback' must be ask or reject")
+        }
+        try host.requireMeshServices().setServiceSubscriptionPolicy(
+            serviceId: try A.requireString(m, "serviceId"),
+            policy: SubscriptionPolicyConfig(
+                kind: kind,
+                allowPeers: (json["allowPeers"] as? [String]) ?? [],
+                allowGroups: (json["allowGroups"] as? [String]) ?? [],
+                rulesFallback: fallback
+            )
+        )
+        return nil
+    }
+
+    static func acceptServiceSubscription(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "acceptServiceSubscription")
+        try host.requireMeshServices().acceptServiceSubscription(subId: try A.requireString(m, "subId"))
+        return nil
+    }
+
+    static func rejectServiceSubscription(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "rejectServiceSubscription")
+        try host.requireMeshServices().rejectServiceSubscription(
+            subId: try A.requireString(m, "subId"),
+            reason: (m["reason"] as? String) ?? ""
+        )
+        return nil
+    }
+
+    static func endServiceSubscription(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "endServiceSubscription")
+        try host.requireMeshServices().endServiceSubscription(
+            subId: try A.requireString(m, "subId"),
+            reason: (m["reason"] as? String) ?? ""
+        )
+        return nil
+    }
+
+    static func publishServiceUpdate(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "publishServiceUpdate")
+        guard let body = m["body"] as? String else {
+            throw HostError.invalidArgument("Missing 'body'")
+        }
+        let report = try host.requireMeshServices().publishServiceUpdate(
+            serviceId: try A.requireString(m, "serviceId"),
+            topic: try A.requireString(m, "topic"),
+            key: A.optionalString(m, "key"),
+            body: body
+        )
+        return [
+            "subscribers": Double(report.subscribers),
+            "sentLive": Double(report.sentLive),
+            "queued": Double(report.queued),
+            "coalesced": Double(report.coalesced),
+            "failed": Double(report.failed),
+        ]
+    }
+
+    static func setServiceTopicCheckpoint(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "setServiceTopicCheckpoint")
+        guard let body = m["body"] as? String else {
+            throw HostError.invalidArgument("Missing 'body'")
+        }
+        try host.requireMeshServices().setServiceTopicCheckpoint(
+            serviceId: try A.requireString(m, "serviceId"),
+            topic: try A.requireString(m, "topic"),
+            body: body
+        )
+        return nil
+    }
+
+    static func clearServiceTopic(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "clearServiceTopic")
+        try host.requireMeshServices().clearServiceTopic(
+            serviceId: try A.requireString(m, "serviceId"),
+            topic: try A.requireString(m, "topic")
+        )
+        return nil
+    }
+
+    static func serviceSubscribers(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "serviceSubscribers")
+        return try host.requireMeshServices().serviceSubscribers(serviceId: A.optionalString(m, "serviceId")).map { info -> [String: Any] in
+            [
+                "subId": info.subId,
+                "subscriber": info.subscriber,
+                "serviceId": info.serviceId,
+                "topic": info.topic,
+                "mode": subscriptionModeName(info.mode),
+                "state": info.state,
+                "params": info.params,
+            ]
+        }
+    }
+
     // MARK: - Data store
 
     static func dataCreateDoc(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
