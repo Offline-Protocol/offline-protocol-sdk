@@ -60,6 +60,32 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   whose rejections `DroppedTransportNotifyCount` reports. A throwing handler
   is counted in `TransportHandlerFailureCount` and never ends the process
   ([docs/bridges/csharp.md](docs/bridges/csharp.md#cs7-transport-callbacks)).
+- **A service can be subscribed to.** `subscribe_service` gives a consumer a
+  lease on one topic of a provider's service, and the provider's
+  `publish_service_update` reaches every subscriber as it happens: once over a
+  live link, or through the reliable ladder across hops, where a `latest`
+  value replaces the one still queued for its key rather than waiting behind
+  it. A topic is `latest` (current state per key) or `log` (every event, with
+  a checkpoint), and a consumer that missed updates gets the state back at its
+  next renewal, after a provider restart, or on `resync_service_subscription`.
+  Every subscription frame is sealed in the 1:1 MLS session with no plaintext
+  fallback, and none is written to the outbox's store: nothing of a
+  subscription survives a restart, and a frame from before one is dropped. Who may subscribe is the service's policy: ask the application
+  (the default), accept every peer with a session, or rules by peer and group.
+  The calls are on `MeshServices` in every binding (Swift, Kotlin, Python,
+  Ruby, Java, C), in React Native and Flutter on both platforms, in the
+  Python services wrapper and local API, and in the browser worker, where
+  `examples/web-coordination` shows devices watching each other's state. The
+  decision is ADR 0035, the behaviour `docs/state-machines/service-subscriptions.md`.
+- **A subscription can be narrowed.** A topic pattern (`rooms/*`, or `*`)
+  follows every matching topic in its mode, up to 64, including topics first
+  published after it, each caught up and recovered on its own; every update
+  names its topic. A key filter limits a `latest` subscription to the keys it
+  lists, exact or by prefix. The provider applies both, so a filtered key or
+  an unmatched topic never leaves its device. `subscribe_service_with` takes
+  the filter in Rust, and `subscribe_service` takes `keys` in every binding.
+  Group-backed topics, the rest of ADR 0035's third phase, are proposed in
+  ADR 0036.
 
 ### Fixed
 

@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device coordination</title>
+<style>
+  :root { --bg: #fafaf7; --fg: #1c1c1a; --muted: #6b6b66; --line: #ddddd6; --accent: #2457c5; --warn: #b4441c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --accent: #7aa2ff; --warn: #ff8a5c; }
+  }
+  body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin-inline: auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 8px; }
+  p { color: var(--muted); margin: 0 0 16px; }
+  code { font-size: 13px; word-break: break-all; }
+  section { border-top: 1px solid var(--line); padding: 16px 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  label { display: flex; gap: 6px; align-items: center; }
+  select, input, button { font: inherit; padding: 6px 10px; border: 1px solid var(--line);
+                          border-radius: 6px; background: transparent; color: inherit; }
+  input[type=text] { flex: 1 1 160px; }
+  button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+  button.quiet { background: transparent; color: var(--accent); }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  li:last-child { border-bottom: 0; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .alert { color: var(--warn); }
+  .peer-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0 0; }
+  dt { color: var(--muted); font-size: 13px; }
+  dd { margin: 0; }
+</style>
+
+<h1>Device coordination</h1>
+<p>Open this page in two or more tabs. Each tab is a device: it publishes its own state, and subscribes to every other device it finds. Updates arrive as they happen, sealed end to end in the 1:1 session between the two devices; a device that missed some gets the state back at its next renewal, or when you press <em>Resync</em>.</p>
+
+<section>
+  <div class="meta">This device</div>
+  <code id="me">starting…</code>
+  <div class="row" style="margin-top: 12px">
+    <label>Name <input id="name" type="text" autocomplete="off"></label>
+    <label>Status
+      <select id="status">
+        <option>idle</option><option>busy</option><option>away</option>
+      </select>
+    </label>
+    <label>Load <input id="load" type="range" min="0" max="100" value="0"></label>
+  </div>
+  <div class="row">
+    <input id="alert-text" type="text" placeholder="Alert text" autocomplete="off">
+    <select id="alert-level" aria-label="Alert level">
+      <option>info</option><option>urgent</option>
+    </select>
+    <button id="raise">Raise alert</button>
+    <label>Who may watch
+      <select id="policy">
+        <option value="accept_all">anyone with a session</option>
+        <option value="restricted">ask me</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <label><input id="watch-load" type="checkbox" checked> Watch other devices' load</label>
+  </div>
+  <div class="meta" id="report">nothing published yet</div>
+</section>
+
+<section id="asks-section" hidden>
+  <h2>Waiting for your answer</h2>
+  <ul id="asks"></ul>
+</section>
+
+<section>
+  <h2>Other devices</h2>
+  <ul id="peers"><li class="meta">none yet</li></ul>
+</section>
+
+<section>
+  <h2>Alerts</h2>
+  <ul id="alerts"><li class="meta">none yet</li></ul>
+</section>
+
+<script type="module">
+import { OfflineNode } from "../../bindings/web/src/index.js";
+
+const SERVICE = "coord.v1";
+const $ = (id) => document.getElementById(id);
+const short = (address) => `${address.slice(0, 10)}…${address.slice(-6)}`;
+
+// address -> { state: { key: value }, subs: { status, alerts }, subState }.
+// `alerts` is one subscription to the pattern `alerts/*`: every alert level
+// is its own topic, and a level created later is followed without asking.
+const peers = new Map();
+// sub_id -> { address, topic }
+const subscriptions = new Map();
+const alerts = [];
+let alertCount = 0;
+
+// In memory: every tab is its own device (see examples/web-two-tabs).
+const node = await OfflineNode.start({ appId: "web-coordination-demo", storage: "memory" });
+$("me").textContent = node.address;
+$("name").value = `device ${node.address.slice(-4)}`;
+
+await node.registerService(SERVICE, { version: "1", capabilities: { topics: "status,alerts" } });
+await node.setServiceSubscriptionPolicy(SERVICE, { kind: "accept_all" });
+
+// ---------------------------------------------------------------------------
+// Publishing: `status` is a latest topic (one value per key), `alerts` a log
+// topic (every event) whose checkpoint summarises the ones before the buffer.
+// ---------------------------------------------------------------------------
+
+function showReport(what, report) {
+  $("report").textContent =
+    `${what}: ${report.subscribers} subscriber(s), ${report.sentLive} live, ` +
+    `${report.queued} queued, ${report.coalesced} coalesced`;
+}
+
+async function publishState(key, value) {
+  showReport(key, await node.publishServiceUpdate(SERVICE, "status", value, { key }));
+}
+
+$("name").addEventListener("change", () => publishState("name", $("name").value));
+$("status").addEventListener("change", () => publishState("status", $("status").value));
+$("load").addEventListener("input", () => publishState("load", $("load").value));
+for (const [key, value] of [["name", $("name").value], ["status", $("status").value], ["load", $("load").value]]) {
+  await publishState(key, value);
+}
+
+$("raise").addEventListener("click", async () => {
+  const text = $("alert-text").value.trim() || "attention";
+  const topic = `alerts/${$("alert-level").value}`;
+  alertCount += 1;
+  showReport("alert", await node.publishServiceUpdate(SERVICE, topic, text));
+  await node.setServiceTopicCheckpoint(SERVICE, topic, `${alertCount} alert(s) so far, last: ${text}`);
+  $("alert-text").value = "";
+});
+
+$("policy").addEventListener("change", () =>
+  node.setServiceSubscriptionPolicy(SERVICE, { kind: $("policy").value }));
+
+// ---------------------------------------------------------------------------
+// Subscribing to every device this one finds.
+// ---------------------------------------------------------------------------
+
+// Without load, the status subscription filters it out on the provider: the
+// slider's updates never leave the other device.
+const statusKeys = () => ($("watch-load").checked ? [] : ["name", "status"]);
+
+async function subscribeTo(address, topic, options) {
+  const peer = peers.get(address);
+  try {
+    const subId = await node.subscribeService(address, SERVICE, topic, options);
+    peer.subs[topic] = subId;
+    subscriptions.set(subId, { address, topic });
+  } catch (error) {
+    peer.subState = `could not subscribe: ${error.message ?? error}`;
+  }
+}
+
+async function watch(address) {
+  if (peers.has(address)) return;
+  const peer = { state: {}, subState: "pending", subs: {} };
+  peers.set(address, peer);
+  render();
+  await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
+  await subscribeTo(address, "alerts/*", { mode: "log" });
+  render();
+}
+
+$("watch-load").addEventListener("change", async () => {
+  for (const [address, peer] of peers) {
+    const old = peer.subs.status;
+    if (old) {
+      subscriptions.delete(old);
+      delete peer.subs.status;
+      await node.unsubscribeService(old);
+    }
+    delete peer.state.load;
+    await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
+  }
+  render();
+});
+
+node.addEventListener("neighbor_discovered", ({ detail }) => watch(detail.peer_id));
+
+node.addEventListener("service_update_received", ({ detail }) => {
+  const sub = subscriptions.get(detail.sub_id);
+  if (!sub) return;
+  const peer = peers.get(sub.address);
+  if (sub.topic === "status") {
+    peer.state[detail.key] = detail.body;
+  } else {
+    alerts.unshift({
+      from: peer.state.name ?? short(sub.address),
+      level: detail.topic.slice("alerts/".length),
+      text: detail.snapshot ? `(summary) ${detail.body}` : detail.body,
+    });
+  }
+  render();
+});
+
+node.addEventListener("service_subscription_changed", ({ detail }) => {
+  if (detail.role === "consumer") {
+    const sub = subscriptions.get(detail.sub_id);
+    if (!sub) return;
+    const peer = peers.get(sub.address);
+    peer.subState = `${detail.state} (${detail.reason})`;
+    // A provider that started over: what was held belongs to its old life.
+    if (detail.reason === "stream_reset" && sub.topic === "status") peer.state = {};
+    if (detail.state === "ended") {
+      subscriptions.delete(detail.sub_id);
+      delete peer.subs[sub.topic];
+    }
+  } else {
+    asks.delete(detail.sub_id);
+  }
+  render();
+});
+
+// Under "ask me", a new subscriber waits here for an answer.
+const asks = new Map();
+node.addEventListener("service_subscribe_received", ({ detail }) => {
+  asks.set(detail.sub_id, detail);
+  render();
+});
+
+node.addEventListener("neighbor_lost", ({ detail }) => {
+  const peer = peers.get(detail.peer_id);
+  if (peer) peer.subState = "out of range; queued updates wait for it";
+  render();
+});
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function button(text, onClick, quiet = false) {
+  const b = document.createElement("button");
+  b.textContent = text;
+  if (quiet) b.className = "quiet";
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function render() {
+  const list = $("peers");
+  list.replaceChildren();
+  if (peers.size === 0) list.innerHTML = '<li class="meta">none yet</li>';
+  for (const [address, peer] of peers) {
+    const item = document.createElement("li");
+    const head = document.createElement("div");
+    head.className = "peer-head";
+    const title = document.createElement("strong");
+    title.textContent = peer.state.name ?? short(address);
+    const actions = document.createElement("span");
+    if (peer.subs.status) {
+      actions.append(button("Resync", () => node.resyncServiceSubscription(peer.subs.status), true));
+    }
+    head.append(title, actions);
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${short(address)} · ${peer.subState}`;
+    const values = document.createElement("dl");
+    for (const key of ["status", "load"]) {
+      const dt = document.createElement("dt");
+      dt.textContent = key;
+      const dd = document.createElement("dd");
+      dd.textContent = peer.state[key] ?? (key === "load" && !$("watch-load").checked ? "not watched" : "…");
+      values.append(dt, dd);
+    }
+    item.append(head, meta, values);
+    list.append(item);
+  }
+
+  const alertList = $("alerts");
+  alertList.replaceChildren();
+  if (alerts.length === 0) alertList.innerHTML = '<li class="meta">none yet</li>';
+  for (const { from, level, text } of alerts.slice(0, 20)) {
+    const item = document.createElement("li");
+    item.className = "alert";
+    item.textContent = `${from} [${level}]: ${text}`;
+    alertList.append(item);
+  }
+
+  $("asks-section").hidden = asks.size === 0;
+  const askList = $("asks");
+  askList.replaceChildren();
+  for (const [subId, ask] of asks) {
+    const item = document.createElement("li");
+    item.textContent = `${short(ask.sender)} wants to watch ${ask.topic} `;
+    item.append(
+      button("Accept", async () => { await node.acceptServiceSubscription(subId); asks.delete(subId); render(); }),
+      document.createTextNode(" "),
+      button("Reject", async () => { await node.rejectServiceSubscription(subId, "not now"); asks.delete(subId); render(); }, true),
+    );
+    askList.append(item);
+  }
+}
+
+render();
+addEventListener("pagehide", () => node.stop());
+</script>
+</html>

@@ -190,6 +190,80 @@ fn a_removed_member_is_told_and_the_group_moves_to_a_new_epoch() {
     assert_eq!(b.node.group_info(&group).expect("info"), None);
 }
 
+/// A subscription between two browser nodes (ADR 0035): opened before any
+/// session, admitted by policy, then a `latest` value published on one
+/// arrives on the other, and a resync hands it back.
+#[test]
+fn a_subscription_delivers_a_published_value_and_a_resync() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "neighbor_discovered", "peer_id", &b_addr)
+    }));
+    b.node
+        .register_service("fleet.v1", "1.0", r#"{"kind":"tracker"}"#)
+        .expect("register");
+    b.node
+        .set_service_subscription_policy("fleet.v1", r#"{"kind":"accept_all"}"#)
+        .expect("policy");
+    b.node
+        .publish_service_update("fleet.v1", "battery", Some("pct".into()), "81")
+        .expect("publish");
+    let sub_id = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_update_received" && e["sub_id"] == sub_id && e["body"] == "81"
+        })
+    }));
+    let subs: serde_json::Value =
+        serde_json::from_str(&a.node.service_subscriptions().expect("list")).expect("json");
+    assert_eq!(subs[0]["state"], "active");
+    let subscribers: serde_json::Value =
+        serde_json::from_str(&b.node.service_subscribers(None).expect("list")).expect("json");
+    assert_eq!(subscribers[0]["subId"], sub_id.as_str());
+
+    a.events.clear();
+    a.node.resync_service_subscription(&sub_id).expect("resync");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events
+            .iter()
+            .any(|e| e["type"] == "service_update_received" && e["snapshot"] == true)
+    }));
+    assert!(a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "x", "stream", "", &[])
+        .is_err());
+
+    // A pattern with a key filter: one subscription across topics, and only
+    // the keys asked for.
+    b.node
+        .publish_service_update("fleet.v1", "cars/1", Some("pct".into()), "c1-pct")
+        .expect("publish");
+    b.node
+        .publish_service_update("fleet.v1", "cars/1", Some("gps".into()), "c1-gps")
+        .expect("publish");
+    a.events.clear();
+    let pattern = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "cars/*", "latest", "", &["pct".into()])
+        .expect("subscribe to a pattern");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_update_received"
+                && e["sub_id"] == pattern
+                && e["topic"] == "cars/1"
+                && e["body"] == "c1-pct"
+        })
+    }));
+    assert!(!a
+        .events
+        .iter()
+        .any(|e| e["type"] == "service_update_received" && e["body"] == "c1-gps"));
+}
+
 #[test]
 fn a_second_link_proving_an_announced_address_is_refused() {
     let (mut a, mut b) = (peer("alice"), peer("bob"));

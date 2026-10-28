@@ -716,6 +716,21 @@ identity included) does the same.
 `bindings/web/src`: a file left out still loads online, where everyone
 works.
 
+## Services and subscriptions
+
+The worker exposes the service registry and service subscriptions
+([ADR 0035](../adr/0035-a-service-can-be-subscribed-to.md)):
+`registerService`, `subscribeService`, `publishServiceUpdate`,
+`resyncServiceSubscription`, `setServiceSubscriptionPolicy` and the calls
+around them; `subscribeService` takes a topic pattern and a key filter as
+`{ mode, params, keys }`. Nothing about them is browser-specific: every subscription
+frame is sealed by the engine in the 1:1 session, a `latest` update to a
+neighbour with a live link is an ephemeral send (W10), and one to a device
+reached otherwise waits in the sealed log as the one value per key that
+supersedes the last. Records cross the worker boundary as JSON, the way
+group info does. Service discovery and request/response are not exposed in
+the browser yet.
+
 ## Which shared rules apply
 
 | Rule | How it reaches the web binding |
@@ -906,8 +921,10 @@ covers what one machine cannot: a phone's browser, a local network, and a
 tab the phone suspends.
 
 [`examples/web-two-tabs`](../../examples/web-two-tabs) is the first page to
-open in two tabs, and [`examples/web-lobby`](../../examples/web-lobby) a
-two-player game between devices over WebRTC with durable nodes.
+open in two tabs, [`examples/web-lobby`](../../examples/web-lobby) a
+two-player game between devices over WebRTC with durable nodes, and
+[`examples/web-coordination`](../../examples/web-coordination) devices that
+subscribe to each other's live state.
 
 ## What is not built yet
 

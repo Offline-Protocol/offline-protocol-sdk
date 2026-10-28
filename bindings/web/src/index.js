@@ -153,6 +153,78 @@ export class OfflineNode extends EventTarget {
     return this.#call("sendGroupMessage", { groupId, content, ephemeral });
   }
 
+  // Services and subscriptions (ADR 0035). Every subscription frame is
+  // sealed in the 1:1 session, with no plaintext fallback. Updates arrive as
+  // `service_update_received`, state changes as
+  // `service_subscription_changed`, and a subscriber waiting for this page's
+  // decision as `service_subscribe_received`.
+
+  registerService(serviceId, { version = "", capabilities = {} } = {}) {
+    return this.#call("registerService", { serviceId, version, capabilities });
+  }
+
+  unregisterService(serviceId) {
+    return this.#call("unregisterService", { serviceId });
+  }
+
+  /// `mode` is "latest" (state, one current value per key) or "log" (every
+  /// event, in order). `topic` may be a pattern, "prefix*" or "*": every
+  /// matching topic in the mode, each update naming its own. `keys` limits a
+  /// "latest" subscription to those keys (exact, or a prefix ending in "*").
+  /// Resolves to the subscription id its events carry.
+  subscribeService(provider, serviceId, topic, { mode = "latest", params = "", keys = [] } = {}) {
+    return this.#call("subscribeService", { provider, serviceId, topic, mode, params, keys });
+  }
+
+  unsubscribeService(subId) {
+    return this.#call("unsubscribeService", { subId });
+  }
+
+  /// Asks the provider for the whole state again, now.
+  resyncServiceSubscription(subId) {
+    return this.#call("resyncServiceSubscription", { subId });
+  }
+
+  serviceSubscriptions() {
+    return this.#call("serviceSubscriptions");
+  }
+
+  /// `{ kind: "restricted" }` (the default: this page is asked),
+  /// `{ kind: "accept_all" }`, or `{ kind: "rules", allowPeers, allowGroups,
+  /// fallback: "ask" | "reject" }`.
+  setServiceSubscriptionPolicy(serviceId, policy) {
+    return this.#call("setServiceSubscriptionPolicy", { serviceId, policy });
+  }
+
+  acceptServiceSubscription(subId) {
+    return this.#call("acceptServiceSubscription", { subId });
+  }
+
+  rejectServiceSubscription(subId, reason = "") {
+    return this.#call("rejectServiceSubscription", { subId, reason });
+  }
+
+  endServiceSubscription(subId, reason = "") {
+    return this.#call("endServiceSubscription", { subId, reason });
+  }
+
+  /// With a `key` the topic is `latest`; without one it is `log`.
+  publishServiceUpdate(serviceId, topic, body, { key = null } = {}) {
+    return this.#call("publishServiceUpdate", { serviceId, topic, key, body });
+  }
+
+  setServiceTopicCheckpoint(serviceId, topic, body) {
+    return this.#call("setServiceTopicCheckpoint", { serviceId, topic, body });
+  }
+
+  clearServiceTopic(serviceId, topic) {
+    return this.#call("clearServiceTopic", { serviceId, topic });
+  }
+
+  serviceSubscribers(serviceId = null) {
+    return this.#call("serviceSubscribers", { serviceId });
+  }
+
   /// Starts a session with `address`: "created" (the Welcome went out now),
   /// "existing", or "pending" while its key package has not arrived. On a
   /// node with relays, the engine has asked them for the packages the device
