@@ -40,6 +40,16 @@ reactOnly.forEach { name ->
     }
 }
 
+// The module's tests that build React Native values, which this build has no
+// React classes to compile. Checked the same way: a renamed test would be
+// compiled here and fail.
+val reactOnlyTests = listOf("BridgeArgumentMapsTest.kt")
+reactOnlyTests.forEach { name ->
+    require(bridge.file("src/test/java/com/offlineprotocol/$name").asFile.isFile) {
+        "reactOnlyTests names $name, which is not in ${bridge.dir("src/test/java/com/offlineprotocol").asFile}"
+    }
+}
+
 // What the React Native manifest declares for the files above.
 val reactOnlyServices = listOf("com.offlineprotocol.MeshHeadlessWakeService")
 // Held for React Native's headless task, which takes a wake lock. Nothing in
@@ -142,7 +152,7 @@ android {
 // the jar that is published, because which task packs it is the plugin's to
 // change.
 tasks.withType<KotlinCompile>().configureEach {
-    exclude(reactOnly.map { "**/$it" })
+    exclude((reactOnly + reactOnlyTests).map { "**/$it" })
 }
 tasks.withType<org.gradle.jvm.tasks.Jar>().configureEach {
     exclude(reactOnly.map { "**/$it" })

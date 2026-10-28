@@ -248,7 +248,8 @@ enum ProtocolEngineHostBridge {
 
     static func sendReadReceipt(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendReadReceipt")
-        let ids = try A.stringList(m, "messageIds")
+        // Empty ids are dropped before the check, as the Android bridge does.
+        let ids = try A.stringList(m, "messageIds").filter { !$0.isEmpty }
         guard !ids.isEmpty else {
             throw HostError.invalidArgument("No valid message IDs provided")
         }

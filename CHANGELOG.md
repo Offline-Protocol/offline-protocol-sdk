@@ -11,6 +11,20 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **`sendReadReceipt` works again from React Native on Android.** Since the
+  shared engine bridge (0.31.0), every array argument crossed the Android
+  adapter as integers, so the message ids, which are strings, threw on every
+  call. Arrays now keep each element's type, through the same conversion an
+  array inside a map already used, and byte arrays still reach the engine
+  unchanged. Empty ids are dropped as they were before, now on iOS too, so
+  both platforms and Flutter apply one rule. A guard holds every array
+  parameter of the adapter to that conversion, and JVM tests pin what it
+  returns.
+
 ## [0.31.0] — 2026-10-27
 
 > **The engine runs in a browser (experimental).** `offline-protocol-web` and

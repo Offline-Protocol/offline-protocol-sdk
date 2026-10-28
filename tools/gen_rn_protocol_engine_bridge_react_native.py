@@ -78,7 +78,7 @@ def build_args_expr(params: str) -> str:
         if "ReadableMap" in typ:
             pieces.append(f'"{name}" to BridgeResults.readableMapToArgumentMap({name})')
         elif "ReadableArray" in typ:
-            pieces.append(f'"{name}" to BridgeResults.readableArrayToIntList({name})')
+            pieces.append(f'"{name}" to BridgeResults.readableArrayToList({name})')
         else:
             pieces.append(f'"{name}" to {name}')
     if len(pieces) == 1 and pieces[0].startswith('"configJson"'):
