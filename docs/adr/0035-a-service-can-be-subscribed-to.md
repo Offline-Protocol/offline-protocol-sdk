@@ -369,7 +369,9 @@ reported rather than silent.
    `log` over the reliable ladder with checkpoints. Tests with engines over
    links.
 2. **Bindings and an example.** The UDL surface, every binding regenerated
-   together, the browser worker, and a device coordination example.
+   together, the browser worker, and a device coordination example
+   (`examples/web-coordination`). `ServiceSubscriptionConfig` is not on the
+   bindings' config record yet, so a binding runs the defaults.
 3. **Later, each only if a product needs it:** group-backed topics (one MLS
    group per topic; cryptographic revocation and one encryption for many
    subscribers, at the cost of a commit per join and ADR 0032's ratchet-gap

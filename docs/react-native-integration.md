@@ -348,6 +348,25 @@ await protocol.meshSendGroupMessage(groupId, content, null, replyToMessageId);
 
 Render replies in the UI by resolving `replyToMsg` to the original message.
 
+### 7.5 Live state from another device (service subscriptions)
+
+A device can subscribe to another's live state and receive sealed updates as
+they happen ([service discovery guide](service-discovery.md#subscriptions)):
+
+```ts
+// Provider
+await protocol.setServiceSubscriptionPolicy('fleet.v1', { kind: 'accept_all' });
+await protocol.publishServiceUpdate('fleet.v1', 'battery', '81', 'pct');
+
+// Consumer
+const subId = await protocol.subscribeService(providerAddress, 'fleet.v1', 'battery', 'latest');
+protocol.onEvent((event) => {
+  if (event.type === 'service_update_received' && event.sub_id === subId) {
+    render(event.key, event.body);
+  }
+});
+```
+
 ---
 
 ## 8. Surfacing Metrics

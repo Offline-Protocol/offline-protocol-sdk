@@ -26,7 +26,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Every subscription frame is sealed in the 1:1 MLS session with no plaintext
   fallback. Who may subscribe is the service's policy: ask the application
   (the default), accept every peer with a session, or rules by peer and group.
-  Rust only in this release; the TypeScript event types are in place. The
+  The calls are on `MeshServices` in every binding (Swift, Kotlin, Python,
+  Ruby, Java, C), in React Native and Flutter on both platforms, in the
+  Python services wrapper and local API, and in the browser worker, where
+  `examples/web-coordination` shows devices watching each other's state. The
   decision is ADR 0035, the behaviour `docs/state-machines/service-subscriptions.md`.
 
 ### Fixed
