@@ -157,9 +157,12 @@ export class OfflineNode extends EventTarget {
   }
 
   /// `mode` is "latest" (state, one current value per key) or "log" (every
-  /// event, in order). Resolves to the subscription id its events carry.
-  subscribeService(provider, serviceId, topic, { mode = "latest", params = "" } = {}) {
-    return this.#call("subscribeService", { provider, serviceId, topic, mode, params });
+  /// event, in order). `topic` may be a pattern, "prefix*" or "*": every
+  /// matching topic in the mode, each update naming its own. `keys` limits a
+  /// "latest" subscription to those keys (exact, or a prefix ending in "*").
+  /// Resolves to the subscription id its events carry.
+  subscribeService(provider, serviceId, topic, { mode = "latest", params = "", keys = [] } = {}) {
+    return this.#call("subscribeService", { provider, serviceId, topic, mode, params, keys });
   }
 
   unsubscribeService(subId) {

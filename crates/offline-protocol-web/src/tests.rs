@@ -211,7 +211,7 @@ fn a_subscription_delivers_a_published_value_and_a_resync() {
         .expect("publish");
     let sub_id = a
         .node
-        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "")
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
         .expect("subscribe");
     assert!(run_until(&mut a, &mut b, |a, _| {
         a.events.iter().any(|e| {
@@ -234,8 +234,34 @@ fn a_subscription_delivers_a_published_value_and_a_resync() {
     }));
     assert!(a
         .node
-        .subscribe_service(&b_addr, "fleet.v1", "x", "stream", "")
+        .subscribe_service(&b_addr, "fleet.v1", "x", "stream", "", &[])
         .is_err());
+
+    // A pattern with a key filter: one subscription across topics, and only
+    // the keys asked for.
+    b.node
+        .publish_service_update("fleet.v1", "cars/1", Some("pct".into()), "c1-pct")
+        .expect("publish");
+    b.node
+        .publish_service_update("fleet.v1", "cars/1", Some("gps".into()), "c1-gps")
+        .expect("publish");
+    a.events.clear();
+    let pattern = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "cars/*", "latest", "", &["pct".into()])
+        .expect("subscribe to a pattern");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_update_received"
+                && e["sub_id"] == pattern
+                && e["topic"] == "cars/1"
+                && e["body"] == "c1-pct"
+        })
+    }));
+    assert!(!a
+        .events
+        .iter()
+        .any(|e| e["type"] == "service_update_received" && e["body"] == "c1-gps"));
 }
 
 #[test]

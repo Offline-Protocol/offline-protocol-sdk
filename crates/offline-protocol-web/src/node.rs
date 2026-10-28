@@ -579,6 +579,7 @@ impl Node {
         topic: &str,
         mode: &str,
         params: &str,
+        keys: &[String],
     ) -> NodeResult<String> {
         let mode = match mode {
             "latest" => SubscriptionMode::Latest,
@@ -589,9 +590,16 @@ impl Node {
                 )))
             }
         };
-        Ok(self
-            .protocol
-            .subscribe_service(provider, service_id, topic, mode, params)?)
+        Ok(self.protocol.subscribe_service_with(
+            provider,
+            service_id,
+            topic,
+            offline_protocol::SubscribeOptions {
+                mode,
+                params: params.to_string(),
+                keys: keys.to_vec(),
+            },
+        )?)
     }
 
     /// Ends a subscription this device holds; `false` when there is none.
@@ -618,6 +626,8 @@ impl Node {
                     "topic": info.topic,
                     "mode": info.mode.as_str(),
                     "state": info.state.as_str(),
+                    "keys": info.keys,
+                    "topics": info.topics,
                 })
             })
             .collect();
@@ -750,6 +760,7 @@ impl Node {
                     "mode": info.mode.as_str(),
                     "state": info.state.as_str(),
                     "params": info.params,
+                    "keys": info.keys,
                 })
             })
             .collect();

@@ -156,12 +156,17 @@ export class OfflineNode extends EventTarget {
   /**
    * Subscribes to a provider's topic (ADR 0035); resolves to the subscription
    * id. Every subscription frame is sealed in the 1:1 session.
+   *
+   * `topic` may be a pattern, `"prefix*"` or `"*"`: every matching topic in
+   * the mode, up to 64, each update naming its own. `keys` limits a `latest`
+   * subscription to those keys, each exact or a prefix ending in `*`; the
+   * provider applies it.
    */
   subscribeService(
     provider: string,
     serviceId: string,
     topic: string,
-    options?: { mode?: SubscriptionMode; params?: string },
+    options?: { mode?: SubscriptionMode; params?: string; keys?: string[] },
   ): Promise<string>;
   unsubscribeService(subId: string): Promise<boolean>;
   /** Asks the provider for the whole state again, now. */
@@ -449,6 +454,10 @@ export interface ServiceSubscriptionInfo {
   topic: string;
   mode: SubscriptionMode;
   state: "pending" | "active" | "paused" | "ended";
+  /** The `latest` keys asked for; empty for every key. */
+  keys: string[];
+  /** The topics heard of: the topic itself, or each one a pattern matched. */
+  topics: string[];
 }
 
 /** A subscription another device holds on this one. */
@@ -460,4 +469,6 @@ export interface ServiceSubscriberInfo {
   mode: SubscriptionMode;
   state: "pending" | "active";
   params: string;
+  /** The `latest` keys the subscriber asked for; empty for every key. */
+  keys: string[];
 }

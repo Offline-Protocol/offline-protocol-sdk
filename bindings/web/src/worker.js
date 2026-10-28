@@ -360,8 +360,8 @@ const handlers = {
   unregisterService({ serviceId }) {
     return engine.unregisterService(serviceId);
   },
-  subscribeService({ provider, serviceId, topic, mode = "latest", params = "" }) {
-    return engine.subscribeService(provider, serviceId, topic, mode, params);
+  subscribeService({ provider, serviceId, topic, mode = "latest", params = "", keys = [] }) {
+    return engine.subscribeService(provider, serviceId, topic, mode, params, JSON.stringify(keys));
   },
   unsubscribeService({ subId }) {
     return engine.unsubscribeService(subId);

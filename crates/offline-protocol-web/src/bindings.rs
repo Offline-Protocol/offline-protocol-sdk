@@ -558,7 +558,9 @@ impl WebEngine {
         self.node.unregister_service(service_id).map_err(js)
     }
 
-    /// Subscribes to a provider's topic; returns the subscription id.
+    /// Subscribes to a provider's topic or topic pattern; returns the
+    /// subscription id. `keys_json` is a JSON array of `latest` keys (each
+    /// exact or a prefix ending in `*`); `[]` for every key.
     #[wasm_bindgen(js_name = subscribeService)]
     pub fn subscribe_service(
         &mut self,
@@ -567,9 +569,12 @@ impl WebEngine {
         topic: &str,
         mode: &str,
         params: &str,
+        keys_json: &str,
     ) -> Result<String, JsError> {
+        let keys: Vec<String> = serde_json::from_str(keys_json)
+            .map_err(|e| JsError::new(&format!("keys must be a JSON array of strings: {e}")))?;
         self.node
-            .subscribe_service(provider, service_id, topic, mode, params)
+            .subscribe_service(provider, service_id, topic, mode, params, &keys)
             .map_err(js)
     }
 
