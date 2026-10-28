@@ -371,7 +371,7 @@ fn pump_all(sides: &mut [&mut Side], broadcaster: Option<usize>) {
 fn run_all(
     sides: &mut [&mut Side],
     broadcaster: Option<usize>,
-    mut done: impl FnMut(&[&mut Side]) -> bool,
+    mut done: impl FnMut(&mut [&mut Side]) -> bool,
 ) -> bool {
     for _ in 0..800 {
         pump_all(sides, broadcaster);
@@ -427,15 +427,13 @@ fn two_browsers_reach_each_other_through_one_peripheral() {
     let group_id = group["group_id"].as_str().expect("group id").to_string();
     // The invite needs the key package c sends after the session forms,
     // which crosses the hub a tick or two behind it.
-    let mut invited = false;
-    for _ in 0..80 {
-        if a.node.invite_to_group(&group_id, &c_addr).is_ok() {
-            invited = true;
-            break;
-        }
-        run_all(&mut [&mut a, &mut hub, &mut c], None, |_| true);
-    }
-    assert!(invited, "c's key package never crossed the hub");
+    assert!(
+        run_all(&mut [&mut a, &mut hub, &mut c], None, |s| s[0]
+            .node
+            .invite_to_group(&group_id, &c_addr)
+            .is_ok()),
+        "c's key package never crossed the hub"
+    );
     assert!(
         run_all(&mut [&mut a, &mut hub, &mut c], None, |s| s[2]
             .events
