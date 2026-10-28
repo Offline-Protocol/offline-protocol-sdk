@@ -46,7 +46,7 @@ internal object ProtocolEngineHostBridgeReactNative {
 
 fun acceptConnectionRequest(module: OfflineProtocolModule, recipient: String, accepterName: String, keyPackage: ReadableArray?, promise: Promise) {
     run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to accept connection request", mapProtocolErrors = true) { host, context ->
-        ProtocolEngineHostBridge.acceptConnectionRequest(host, context, mapOf("recipient" to recipient, "accepterName" to accepterName, "keyPackage" to BridgeResults.readableArrayToIntList(keyPackage)))
+        ProtocolEngineHostBridge.acceptConnectionRequest(host, context, mapOf("recipient" to recipient, "accepterName" to accepterName, "keyPackage" to BridgeResults.readableArrayToList(keyPackage)))
     }
 }
 
@@ -94,13 +94,13 @@ fun createInvite(module: OfflineProtocolModule, petname: String?, signed: Boolea
 
 fun deriveAddress(module: OfflineProtocolModule, publicKey: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_CRYPTO", "Failed to derive address") { host, context ->
-        ProtocolEngineHostBridge.deriveAddress(host, context, mapOf("publicKey" to BridgeResults.readableArrayToIntList(publicKey)))
+        ProtocolEngineHostBridge.deriveAddress(host, context, mapOf("publicKey" to BridgeResults.readableArrayToList(publicKey)))
     }
 }
 
 fun deriveUserIdFromPublicKey(module: OfflineProtocolModule, publicKey: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_NOT_INITIALIZED", "Protocol not initialized") { host, context ->
-        ProtocolEngineHostBridge.deriveUserIdFromPublicKey(host, context, mapOf("publicKey" to BridgeResults.readableArrayToIntList(publicKey)))
+        ProtocolEngineHostBridge.deriveUserIdFromPublicKey(host, context, mapOf("publicKey" to BridgeResults.readableArrayToList(publicKey)))
     }
 }
 
@@ -322,7 +322,7 @@ fun internetIsSuperseded(module: OfflineProtocolModule, promise: Promise) {
 
 fun internetMessageReceived(module: OfflineProtocolModule, senderId: String, data: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_INTERNET", "Protocol not initialized") { host, context ->
-        ProtocolEngineHostBridge.internetMessageReceived(host, context, mapOf("senderId" to senderId, "data" to BridgeResults.readableArrayToIntList(data)))
+        ProtocolEngineHostBridge.internetMessageReceived(host, context, mapOf("senderId" to senderId, "data" to BridgeResults.readableArrayToList(data)))
     }
 }
 
@@ -394,7 +394,7 @@ fun mlsDeleteSession(module: OfflineProtocolModule, otherUserId: String, promise
 
 fun mlsEncryptForUser(module: OfflineProtocolModule, otherUserId: String, plaintext: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_MLS", "Protocol not initialized") { host, context ->
-        ProtocolEngineHostBridge.mlsEncryptForUser(host, context, mapOf("otherUserId" to otherUserId, "plaintext" to BridgeResults.readableArrayToIntList(plaintext)))
+        ProtocolEngineHostBridge.mlsEncryptForUser(host, context, mapOf("otherUserId" to otherUserId, "plaintext" to BridgeResults.readableArrayToList(plaintext)))
     }
 }
 
@@ -424,7 +424,7 @@ fun mlsHasSession(module: OfflineProtocolModule, otherUserId: String, promise: P
 
 fun mlsImportKeyPackage(module: OfflineProtocolModule, userId: String, keyPackageData: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_MLS", "Protocol not initialized") { host, context ->
-        ProtocolEngineHostBridge.mlsImportKeyPackage(host, context, mapOf("userId" to userId, "keyPackageData" to BridgeResults.readableArrayToIntList(keyPackageData)))
+        ProtocolEngineHostBridge.mlsImportKeyPackage(host, context, mapOf("userId" to userId, "keyPackageData" to BridgeResults.readableArrayToList(keyPackageData)))
     }
 }
 
@@ -460,7 +460,7 @@ fun parseInvite(module: OfflineProtocolModule, blob: String, promise: Promise) {
 
 fun processFileChunk(module: OfflineProtocolModule, fileId: String, chunkIndex: Int, totalChunks: Int, fileSize: Double, fileName: String, fileChecksum: String, data: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_FILE", "Failed to process file chunk", mapProtocolErrors = true) { host, context ->
-        ProtocolEngineHostBridge.processFileChunk(host, context, mapOf("fileId" to fileId, "chunkIndex" to chunkIndex, "totalChunks" to totalChunks, "fileSize" to fileSize, "fileName" to fileName, "fileChecksum" to fileChecksum, "data" to BridgeResults.readableArrayToIntList(data)))
+        ProtocolEngineHostBridge.processFileChunk(host, context, mapOf("fileId" to fileId, "chunkIndex" to chunkIndex, "totalChunks" to totalChunks, "fileSize" to fileSize, "fileName" to fileName, "fileChecksum" to fileChecksum, "data" to BridgeResults.readableArrayToList(data)))
     }
 }
 
@@ -508,7 +508,7 @@ fun respondToServiceRequest(module: OfflineProtocolModule, requestId: String, re
 
 fun sendConnectionRequest(module: OfflineProtocolModule, recipient: String, senderName: String, keyPackage: ReadableArray?, initialMessage: String?, promise: Promise) {
     run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to send connection request", mapProtocolErrors = true) { host, context ->
-        ProtocolEngineHostBridge.sendConnectionRequest(host, context, mapOf("recipient" to recipient, "senderName" to senderName, "keyPackage" to BridgeResults.readableArrayToIntList(keyPackage), "initialMessage" to initialMessage))
+        ProtocolEngineHostBridge.sendConnectionRequest(host, context, mapOf("recipient" to recipient, "senderName" to senderName, "keyPackage" to BridgeResults.readableArrayToList(keyPackage), "initialMessage" to initialMessage))
     }
 }
 
@@ -544,7 +544,7 @@ fun sendPresenceUpdate(module: OfflineProtocolModule, recipient: String, status:
 
 fun sendReadReceipt(module: OfflineProtocolModule, recipient: String, messageIds: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_READ_RECEIPT", "Failed to send read receipt", mapProtocolErrors = true) { host, context ->
-        ProtocolEngineHostBridge.sendReadReceipt(host, context, mapOf("recipient" to recipient, "messageIds" to BridgeResults.readableArrayToIntList(messageIds)))
+        ProtocolEngineHostBridge.sendReadReceipt(host, context, mapOf("recipient" to recipient, "messageIds" to BridgeResults.readableArrayToList(messageIds)))
     }
 }
 
@@ -586,7 +586,7 @@ fun shouldEscalateToWifi(module: OfflineProtocolModule, promise: Promise) {
 
 fun signData(module: OfflineProtocolModule, data: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_NOT_INITIALIZED", "Protocol not initialized") { host, context ->
-        ProtocolEngineHostBridge.signData(host, context, mapOf("data" to BridgeResults.readableArrayToIntList(data)))
+        ProtocolEngineHostBridge.signData(host, context, mapOf("data" to BridgeResults.readableArrayToList(data)))
     }
 }
 
@@ -640,7 +640,7 @@ fun updateRetryConfig(module: OfflineProtocolModule, configJson: String, promise
 
 fun verifySignature(module: OfflineProtocolModule, publicKey: ReadableArray, data: ReadableArray, signature: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_NOT_INITIALIZED", "Protocol not initialized") { host, context ->
-        ProtocolEngineHostBridge.verifySignature(host, context, mapOf("publicKey" to BridgeResults.readableArrayToIntList(publicKey), "data" to BridgeResults.readableArrayToIntList(data), "signature" to BridgeResults.readableArrayToIntList(signature)))
+        ProtocolEngineHostBridge.verifySignature(host, context, mapOf("publicKey" to BridgeResults.readableArrayToList(publicKey), "data" to BridgeResults.readableArrayToList(data), "signature" to BridgeResults.readableArrayToList(signature)))
     }
 }
 
@@ -658,7 +658,7 @@ fun wifiDirectGetNextMessage(module: OfflineProtocolModule, promise: Promise) {
 
 fun wifiDirectMessageReceived(module: OfflineProtocolModule, senderId: String, data: ReadableArray, promise: Promise) {
     run(module, promise, "ERROR_WIFI_DIRECT", "Protocol not initialized") { host, context ->
-        ProtocolEngineHostBridge.wifiDirectMessageReceived(host, context, mapOf("senderId" to senderId, "data" to BridgeResults.readableArrayToIntList(data)))
+        ProtocolEngineHostBridge.wifiDirectMessageReceived(host, context, mapOf("senderId" to senderId, "data" to BridgeResults.readableArrayToList(data)))
     }
 }
 

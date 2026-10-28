@@ -32,13 +32,13 @@ Each release from 0.29.0 is also published, built from this directory, for
 linux/amd64 and linux/arm64:
 
 ```bash
-docker pull ghcr.io/offline-protocol/offline-protocol-service:0.30.0
+docker pull ghcr.io/offline-protocol/offline-protocol-service:0.31.0
 ```
 
 | Tag | What it names |
 |---|---|
-| `X.Y.Z`, such as `0.30.0` | That release |
-| `X.Y`, such as `0.30` | The newest release in that series |
+| `X.Y.Z`, such as `0.31.0` | That release |
+| `X.Y`, such as `0.31` | The newest release in that series |
 | `latest` | The newest release, never a prerelease |
 | `X.Y.Z-rc.N` | A prerelease, under that tag only |
 
@@ -48,12 +48,12 @@ pip installs any other version. `X.Y` and `latest` move with every release;
 `X.Y.Z` is never pushed twice by the release workflow, but a registry tag
 can be moved, and a digest cannot. So pin the digest in a deployment, which
 `docker buildx imagetools inspect
-ghcr.io/offline-protocol/offline-protocol-service:0.30.0` prints:
+ghcr.io/offline-protocol/offline-protocol-service:0.31.0` prints:
 `image: ghcr.io/offline-protocol/offline-protocol-service@sha256:<digest>`.
 Read [docs/UPGRADING.md](../../../docs/UPGRADING.md) before moving a host to
 a new one. Each image carries a provenance attestation and an SBOM; check the
 attestation with `gh attestation verify
-oci://ghcr.io/offline-protocol/offline-protocol-service:0.30.0 --repo
+oci://ghcr.io/offline-protocol/offline-protocol-service:0.31.0 --repo
 Offline-Protocol/offline-protocol-sdk`.
 
 To run it with this directory's `compose.yml`, replace `build: .` with
@@ -165,7 +165,7 @@ every release before 0.29.0.
 The build context is this directory only. Never build from the repository
 root or mount the checkout: `target/` alone fills the build VM.
 
-`docker build --build-arg SDK_VERSION=0.30.0 bindings/python/docker` installs
+`docker build --build-arg SDK_VERSION=0.31.0 bindings/python/docker` installs
 that release from PyPI and nothing else, as the published image does; it is
 refused while a wheel is in `wheels/`, which it would otherwise replace.
 

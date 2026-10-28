@@ -702,7 +702,7 @@ works.
 | [C2](README.md#c2-the-error-enum-is-append-only) | Does not apply yet: errors cross as a JavaScript `Error` carrying the engine's message, not a position |
 | [C3](README.md#c3-events-cross-as-opaque-json) | Applies unchanged: `pollEvent` returns the engine's JSON, and the client dispatches it as a DOM event named by its `type` |
 | [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language) | The resolution-query completion deadline is the one mirrored constant here, pinned in `nostr-relays.js` beside the two mobile trackers (W12) |
-| [C7](README.md#c7-ordering-constraints) | `initialize` before `start`: the address replaces the placeholder the transport was built on |
+| [C7](README.md#c7-ordering-constraints-across-the-boundary) | `initialize` before `start`: the address replaces the placeholder the transport was built on |
 | [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | The browser test page is the binding's own test; the Rust tests in the crate run two engines over links on the host |
 | [C11](README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified) | The durable log store passes both conformance suites on the host, and so does the in-memory protocol-state store (W8) |
 | [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform) | Not built: the pipe's uploader is a thread and a blocking client. A browser build has no telemetry until it has a `fetch` seam |
@@ -900,10 +900,6 @@ two-player game between devices over WebRTC with durable nodes.
 - **Ephemeral sends on the native bindings.** The engine has them and the
   browser exposes them; the UDL record does not yet carry the field
   ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
-- **An end to a rung that can never be decrypted.** A group member's
-  reliable rung that arrives behind more than 32 newer ephemeral frames is
-  retried until it fails, and holds that member out of ephemeral frames
-  meanwhile ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
 - **Bluetooth from a real browser to a real device.** No engine runs Web
   Bluetooth without a person at the chooser, so CI drives the carrier
   through a stand-in. Chrome on Android, macOS and Linux against an

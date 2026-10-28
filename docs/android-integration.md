@@ -42,9 +42,10 @@ android/app/src/main/jniLibs/
 ```
 
 The `bindings/react-native/scripts/build-uniffi-android.sh` helper builds every ABI and
-renames automatically. It also regenerates the UniFFI bindings — all three languages, not
-just Kotlin: they are one artifact set off one UDL, so the Swift and Python bindings are
-rewritten too and all three must be committed together (see `scripts/generate-bindings.sh`).
+renames automatically. It also regenerates the UniFFI bindings, all five languages, not
+just Kotlin: they are one artifact set off one UDL, so the Swift, Python, Ruby and Java
+bindings are rewritten too and all five must be committed together (see
+`scripts/generate-bindings.sh`).
 
 ### 4. Use in Kotlin
 

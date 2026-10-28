@@ -1,14 +1,14 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.30.x` line.
+current `v0.31.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-Since `v0.17.0` nine releases can break a build. `v0.20.0` enables iOS
+Since `v0.17.0` ten releases can break a build. `v0.20.0` enables iOS
 autolinking, so a manual `pod 'MeshSdk'` line left in your `Podfile` now fails
 `pod install` — React Native on iOS only; it is a one-line deletion, and
 [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) has the
@@ -64,6 +64,13 @@ crate drops `BleTransport::record_send_success` and `record_send_failure`.
 React Native recovers events it lost, a burst to one nearby peer is sent
 sixteen at a time, and the telemetry dashboard's delivered count drops
 ([§28](#28-behaviour-that-changes-without-a-compile-error-v0300)).
+`v0.31.0` breaks Rust code that names every case or every field: `Event`
+gains `PeerRssi`, `SendMessageOptions` and `GroupSendOptions` gain
+`ephemeral`, and `offline-protocol-sealed`'s `KeyPackagePayload` gains
+`no_session`. An exhaustive TypeScript `switch` over the event union needs a
+`peer_rssi` case. A device with Nostr on now asks its relays for a stranger's
+key packages, and a Flutter app on Android runs a foreground service
+([§29](#29-behaviour-that-changes-without-a-compile-error-v0310)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -2703,6 +2710,102 @@ reason "Outbox capacity exceeded" and a retry count of 0, usually before
 `send` returns. Treat it as "queue full, try later" for that conversation.
 Messages already queued are no longer failed to make room for it, and a
 message awaiting its acknowledgement is never failed for capacity.
+
+## 29. Behaviour that changes without a compile error *(v0.31.0)*
+
+Nothing is removed from any binding. Four additions break Rust code that names
+every case or every field; the first paragraph lists them. Each paragraph after
+it says what to check.
+
+**Four Rust additions that break an exhaustive match or a full struct
+literal.** `Event` gains `PeerRssi { peer_id, transport, rssi }`, and `Event`
+is not `#[non_exhaustive]`, so a `match` with no `_` arm needs a case.
+`SendMessageOptions` and `GroupSendOptions` gain `ephemeral: bool`; a literal
+that ends in `..Default::default()` is unaffected. `KeyPackagePayload` in
+`offline-protocol-sealed` gains `no_session: bool` and has no `Default`, so a
+literal that builds one needs `no_session: false`. Code that only decodes a key
+package is unaffected. A hand-written conformer of the generated
+`OfflineProtocol` interface (a test double in Swift, Kotlin or Java) needs the
+three new methods: `ble_peer_rssi`, `set_peer_rssi_events` and
+`ble_node_hash`.
+
+**TypeScript: the event union widens.** `ProtocolEvent` gains
+`PeerRssiEvent` (`type: 'peer_rssi'`). An exhaustive `switch` that ends in a
+`never` check, or a `Record` keyed by every event type, fails `tsc` until it
+has the case.
+
+**Flutter: `MeshSdk` is exported.** `package:offline_protocol/offline_protocol.dart`
+now exports `MeshSdk`. An app that declares its own `MeshSdk` and imports the
+package without a prefix gets an ambiguous-import error; import it with a
+prefix or rename the class.
+
+**Nostr: a send to a stranger asks the relays.** With Nostr on, a send or
+`establish_secure_session` to a peer the device holds no key package for now
+asks the application's relays for the key packages that peer published, at
+most once per peer every five minutes while a message waits. Before, the send
+only queued and nothing looked the peer up, so two phones that shared only a
+relay never formed a session. A peer on a live Bluetooth or Wi-Fi link, a
+blocked peer, and every peer while `nostr_cold_contact_enabled` is false are
+never looked up. The switch defaults to on, and Nostr itself defaults to off,
+so only an application that turned Nostr on sends the new queries; set the
+switch to false to keep the old behaviour.
+
+**`message_decryption_failed` names the decrypt failure.** Its `reason` now
+carries the MLS library's failure as a fixed name beside the kind, for example
+`(InvalidCiphertext, aead)` where it read `(InvalidCiphertext)`. An app that
+matches the reason string exactly should match on a prefix instead.
+
+**Sessions heal themselves in two new ways.** Any decrypt failure on a 1:1
+session now sends a probe, at most once per peer every 30 seconds. When the
+probe shows the two sides hold different groups, the side with the greater
+address gives up its group and the other resends its Welcome. The side that
+gives up emits a `convergence_diag` with stage `session_split_detected`.
+`crypto_recovery_enabled: false` does not turn
+this off, because only an authenticated answer to the device's own challenge
+starts it
+([ADR 0033](adr/0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md)).
+Separately, a key package now says when its sender holds no session, and the
+side that still holds one resends its Welcome or rebuilds. Both need the two
+devices on 0.31.0: a 0.30.0 peer ignores the new fields and keeps the old
+rules, so a pair split across versions stays split until both update.
+
+**Groups: a frame that can never decrypt is acknowledged and dropped.** A group
+frame from a member further behind the receiver's ratchet than the out-of-order
+window used to be held without an acknowledgement, so the sender resent it for
+the outbox lifetime and it held one of the sixteen slots in that peer's send
+window. It is now acknowledged and dropped, so the sender reports it delivered
+although the receiver never read it. A frame from a device outside the group
+is still held unanswered.
+
+**Telemetry: ephemeral sends are not counted.** Only sends that ask for an
+acknowledgement count toward the dashboard's sent and delivered figures. An
+application that does not use ephemeral sends sees no change.
+
+**iOS: a central that cannot be dialled back is named, and a departed one is
+reported lost.** The iPhone peripheral now serves the Hello characteristic, so
+a central that writes its identity is bound to its address at once, and the
+iPhone waits two seconds for a hello before it dials a new central back. A
+peer whose last link was a central that left is now reported lost after 15
+seconds, as on Android; before, nothing reported it.
+
+**Bluetooth LE signal strength is off until the app listens.** `peer_rssi`
+events flow only while React Native has a listener for that event type (an
+`'all'` listener does not count), or while a native app calls
+`set_peer_rssi_events(true)`. While they flow, each link's quality follows the
+smoothed readings and the mesh relay ranks neighbours by it, so the order in
+which neighbours carry relayed traffic can change. `advertiseNodeHash`, which
+lets an iPhone name an Android peer, is Android only and off by default; read
+[R29](security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)
+before turning it on.
+
+**Flutter on Android: `start()` runs a foreground service.** The plugin now
+runs the mesh foreground service React Native runs, so the device shows its
+notification while the mesh runs, and the plugin's manifest merges
+`FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`,
+`CHANGE_WIFI_STATE` and a `connectedDevice` service into the app's. An app
+that targets Android 14 or later declares the foreground service type in the
+Play Console. Reticulum and Nostr configs, which the plugin used to refuse,
+now start those transports.
 
 ---
 

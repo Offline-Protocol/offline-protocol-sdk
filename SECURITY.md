@@ -7,15 +7,16 @@ backports to earlier lines. If you are on an older line, upgrading is the fix.
 
 | Version                          | Supported          |
 | -------------------------------- | ------------------ |
-| Current line (`0.30.x`)          | :white_check_mark: |
-| Any earlier line (`≤ 0.29.x`)    | :x:                |
+| Current line (`0.31.x`)          | :white_check_mark: |
+| Any earlier line (`≤ 0.30.x`)    | :x:                |
 
 Report against the latest published release
 ([releases](https://github.com/Offline-Protocol/offline-protocol-sdk/releases),
 `npm view @offline-protocol/mesh-sdk version`); a fix ships in the next release
 on the current line. One number covers every channel: the git tag, the
-`@offline-protocol/mesh-sdk` npm package, and the `offline-protocol*` crates on
-crates.io all share it. Releases up to and including `v0.20.1` predate crates.io
+`@offline-protocol/mesh-sdk` npm package, the `offline-protocol*` crates on
+crates.io, the Swift package, the Android and Java libraries on Maven Central,
+the PyPI wheels, the RubyGems gem and the service image all share it. Releases up to and including `v0.20.1` predate crates.io
 publishing and exist as tags and npm packages only.
 
 ## Reporting a Vulnerability

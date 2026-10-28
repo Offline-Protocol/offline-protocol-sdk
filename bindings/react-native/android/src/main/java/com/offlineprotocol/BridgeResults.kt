@@ -27,10 +27,9 @@ import org.json.JSONObject
  * `switchHysteresis`, and narrowing a JSON double to a long reports 0.3 as 0.
  */
 internal object BridgeResults {
-    fun readableArrayToIntList(array: ReadableArray?): List<Int>? {
-        if (array == null) return null
-        return List(array.size()) { i -> array.getInt(i) }
-    }
+    /** A method's array parameter, converted by [BridgeArgumentMaps.readableArrayToList]. */
+    fun readableArrayToList(array: ReadableArray?): List<Any?>? =
+        array?.let(BridgeArgumentMaps::readableArrayToList)
 
     fun readableMapToArgumentMap(map: ReadableMap?): Map<String, Any?> {
         if (map == null) return emptyMap()

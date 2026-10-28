@@ -643,9 +643,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.6"
+version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb08299a6046833a879ace115697f12fd2bd6c8d3e93c909ffc9e0738e7cae0"
+checksum = "9c035cb64cba03dad2fb921f3e218785e8cf9a41790da5eb3a1400f62fa2be11"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -690,9 +690,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.5"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
+checksum = "fe3e9d21d39e6f39ff46e03d5b621424f88ee23d8a1672c6bfc9ccc7f2da4f6a"
 dependencies = [
  "cmov",
  "subtle",
@@ -971,7 +971,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d65aa39b3a5c1c9c1b745c9a019234bb7a21b77abcb4f4d266d706e2d577d65"
 dependencies = [
  "base16ct 1.0.0",
- "crypto-bigint 0.7.6",
+ "crypto-bigint 0.7.10",
  "crypto-common 0.2.2",
  "digest 0.11.3",
  "ff 0.14.0",
@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-bench"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "criterion",
  "offline-protocol",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-core"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "base64 0.22.1",
  "bech32",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-data"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "loro",
  "serde",
@@ -2589,7 +2589,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-leaf"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.16",
@@ -2608,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-mls"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-reliability"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "chrono",
  "offline-protocol-core",
@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-router"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "chrono",
  "offline-protocol-core",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-sealed"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "base64 0.22.1",
  "offline-protocol-core",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-services"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "offline-protocol-core",
  "serde",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-telemetry-wire"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-transport"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20",
@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-uniffi"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "android_logger",
  "base64 0.22.1",
@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-web"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -3168,7 +3168,7 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c555a6e4eb7d4e158fcb028c835c3b8642206ddc279b5c6b202ef9a8bdb592f4"
 dependencies = [
- "crypto-bigint 0.7.6",
+ "crypto-bigint 0.7.10",
  "crypto-common 0.2.2",
  "ff 0.14.0",
  "rand_core 0.10.1",
@@ -3439,7 +3439,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b"
 dependencies = [
- "crypto-bigint 0.7.6",
+ "crypto-bigint 0.7.10",
  "hmac 0.13.0",
 ]
 
