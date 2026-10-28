@@ -34,6 +34,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the browser run reloads it offline in three engines
   ([W15](docs/bridges/web.md#w15-a-page-that-loads-offline-caches-one-build-whole)).
 
+- **C# / .NET binding scaffold.** `bindings/csharp` loads `offline_protocol_uniffi`
+  through the C API, runs engine calls on a dedicated thread, and ships a
+  consumer check for create → file-store MLS → start/stop
+  ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
+
 ### Fixed
 
 - **Two devices that meet only through a third can invite each other to a

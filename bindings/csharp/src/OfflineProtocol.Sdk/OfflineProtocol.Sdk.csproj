@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>OfflineProtocol.Sdk</RootNamespace>
+    <AssemblyName>OfflineProtocol.Sdk</AssemblyName>
+    <Description>Offline Protocol SDK for .NET (P/Invoke over the C API)</Description>
+  </PropertyGroup>
+</Project>

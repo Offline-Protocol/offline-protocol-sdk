@@ -8432,6 +8432,7 @@ fn read_send_file(file_path: &str) -> Result<Vec<u8>, ProtocolError> {
 #[cfg(test)]
 mod tests {
     mod file_stores;
+    mod csharp_bridge_guards;
     mod flutter_bridge_guards;
 
     use super::*;
