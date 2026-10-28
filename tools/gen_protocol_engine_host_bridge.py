@@ -484,7 +484,7 @@ IMPL["sendTypingIndicator"] = """
 IMPL["sendReadReceipt"] = """
     fun sendReadReceipt(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
-        val ids = stringList(map, "messageIds").ifEmpty {
+        val ids = stringList(map, "messageIds").filter { it.isNotEmpty() }.ifEmpty {
             throw IllegalArgumentException("No valid message IDs provided")
         }
         return host.requireProtocolBridge().sendReadReceipt(requireString(map, "recipient"), ids)

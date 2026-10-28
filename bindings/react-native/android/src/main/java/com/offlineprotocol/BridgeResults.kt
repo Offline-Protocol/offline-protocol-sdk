@@ -3,6 +3,7 @@ package com.offlineprotocol
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.ReadableType
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
 import org.json.JSONArray
@@ -27,9 +28,32 @@ import org.json.JSONObject
  * `switchHysteresis`, and narrowing a JSON double to a long reports 0.3 as 0.
  */
 internal object BridgeResults {
-    fun readableArrayToIntList(array: ReadableArray?): List<Int>? {
+    /**
+     * A JavaScript array as a list the shared bridge reads, each element kept as
+     * its own type: a string stays a string (`sendReadReceipt`'s message ids), a
+     * whole number becomes an [Int] (every byte array), any other number a
+     * [Double]. Reading every element with `getInt` throws on the first string,
+     * which is how `sendReadReceipt` failed on every call in 0.31.0.
+     */
+    fun readableArrayToList(array: ReadableArray?): List<Any?>? {
         if (array == null) return null
-        return List(array.size()) { i -> array.getInt(i) }
+        return List(array.size()) { i ->
+            when (array.getType(i)) {
+                ReadableType.Null -> null
+                ReadableType.Boolean -> array.getBoolean(i)
+                ReadableType.Number -> {
+                    val number = array.getDouble(i)
+                    if (number % 1.0 == 0.0 && number >= Int.MIN_VALUE && number <= Int.MAX_VALUE) {
+                        number.toInt()
+                    } else {
+                        number
+                    }
+                }
+                ReadableType.String -> array.getString(i)
+                ReadableType.Map -> readableMapToArgumentMap(array.getMap(i))
+                ReadableType.Array -> readableArrayToList(array.getArray(i))
+            }
+        }
     }
 
     fun readableMapToArgumentMap(map: ReadableMap?): Map<String, Any?> {
