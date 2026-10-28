@@ -19192,23 +19192,33 @@ mod tests {
     /// with no element type, so a conversion that reads elements as one type
     /// is wrong for some method: reading them with `getInt` made
     /// `sendReadReceipt`, whose ids are strings, throw on every call in
-    /// 0.31.0. Byte arrays still arrive as whole numbers, which `ubyteList`
-    /// takes.
+    /// 0.31.0. Byte arrays arrive as numbers, which `ubyteList` takes. The
+    /// conversion's results are pinned by `BridgeArgumentMapsTest`; this pins
+    /// that every parameter goes through it.
     #[test]
     fn react_native_array_arguments_keep_their_element_types() {
         // Comments stripped and the file joined into one line.
-        let results =
-            rn_source_code_only("android/src/main/java/com/offlineprotocol/BridgeResults.kt");
+        let maps =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/BridgeArgumentMaps.kt");
         assert!(
-            !results.contains("getInt("),
-            "BridgeResults.kt reads an array element with getInt, which throws on a string"
+            !maps.contains("getInt("),
+            "BridgeArgumentMaps.kt reads an array element with getInt, which throws on a string"
         );
         for arm in ["ReadableType.String ->", "ReadableType.Number ->"] {
             assert!(
-                results.contains(arm),
-                "BridgeResults.kt readableArrayToList must convert `{arm}` elements"
+                maps.contains(arm),
+                "BridgeArgumentMaps.kt readableArrayToList must convert `{arm}` elements"
             );
         }
+        // One conversion: a parameter array and an array inside a map reach
+        // the shared bridge with the same element types.
+        let results =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/BridgeResults.kt");
+        assert!(
+            results.contains("BridgeArgumentMaps::readableArrayToList")
+                && !results.contains("ReadableType."),
+            "BridgeResults.readableArrayToList must delegate to BridgeArgumentMaps, not convert on its own"
+        );
         let adapter = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt",
         );

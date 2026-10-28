@@ -49,7 +49,21 @@ internal object BridgeArgumentMaps {
         else -> value.toString()
     }
 
-    private fun readableArrayToList(array: ReadableArray): List<Any?> {
+    /**
+     * A JavaScript array as a list the shared bridge reads, each element kept as
+     * its own type: a string stays a string (`sendReadReceipt`'s message ids), a
+     * number becomes a [Double], a map or array is converted recursively.
+     *
+     * This is the one array conversion for React Native arguments, whether the
+     * array is a method parameter ([BridgeResults.readableArrayToList]) or sits
+     * inside a map. Numbers are not narrowed: the shared bridge's byte-list
+     * reader takes any [Number], and a second rule for top-level arrays would
+     * hand the bridge a different element type for the same byte array
+     * depending on where it was nested. Reading every element as one type is
+     * the defect this replaces: `getInt` threw on the first string, which is how
+     * `sendReadReceipt` failed on every call in 0.31.0.
+     */
+    fun readableArrayToList(array: ReadableArray): List<Any?> {
         val list = ArrayList<Any?>(array.size())
         for (i in 0 until array.size()) {
             list.add(

@@ -82,6 +82,10 @@ dependencies {
     } else {
         // For standalone build or testing
         compileOnly 'com.facebook.react:react-android:0.76.0'
+        // The argument-conversion tests build real ReadableArrays
+        // (JavaOnlyArray), so React Native's classes have to load at test
+        // runtime too. The Android library leaves those tests out.
+        testImplementation 'com.facebook.react:react-android:0.76.0'
     }
 
     testImplementation 'junit:junit:4.13.2'
