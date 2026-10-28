@@ -12,8 +12,9 @@ Open <http://127.0.0.1:8000/examples/web-coordination/> in two or more tabs. The
 
 What each tab does:
 
-- **Registers `coord.v1`** and publishes to two topics on it. `status` is a `latest` topic: the name, status and load sliders each publish one key, and only the newest value per key matters. `alerts` is a `log` topic: every alert is delivered, in order, and a checkpoint summarises the ones a late subscriber can no longer be replayed.
-- **Subscribes to both topics on every neighbour**, as soon as it is discovered. A subscription made before the session exists waits for it.
+- **Registers `coord.v1`** and publishes to it. `status` is a `latest` topic: the name, status and load controls each publish one key, and only the newest value per key matters. Alerts are `log` topics, one per level (`alerts/info`, `alerts/urgent`): every alert is delivered, in order, and a checkpoint summarises the ones a late subscriber can no longer be replayed.
+- **Subscribes on every neighbour**, as soon as it is discovered: to `status`, and to the pattern `alerts/*`, one subscription that follows every alert level, including a level first raised after it. A subscription made before the session exists waits for it.
+- **Watch other devices' load** switches the `status` subscription between every key and a key filter of `name` and `status`. The filter is applied by the other device, so with it on, the load slider's updates never leave that device.
 - **Shows what each publish reached**: subscribers sent the update live, queued for them, or held back by the 50 ms update interval (drag the load slider to see coalescing).
 - **Who may watch** switches the service's policy between admitting every peer with a session and asking you. Under *ask me*, a new subscriber (open another tab) waits under *Waiting for your answer*.
 - **Resync** asks a device for its whole state again.

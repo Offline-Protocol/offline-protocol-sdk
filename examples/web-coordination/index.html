@@ -50,6 +50,9 @@
   </div>
   <div class="row">
     <input id="alert-text" type="text" placeholder="Alert text" autocomplete="off">
+    <select id="alert-level" aria-label="Alert level">
+      <option>info</option><option>urgent</option>
+    </select>
     <button id="raise">Raise alert</button>
     <label>Who may watch
       <select id="policy">
@@ -57,6 +60,9 @@
         <option value="restricted">ask me</option>
       </select>
     </label>
+  </div>
+  <div class="row">
+    <label><input id="watch-load" type="checkbox" checked> Watch other devices' load</label>
   </div>
   <div class="meta" id="report">nothing published yet</div>
 </section>
@@ -83,7 +89,9 @@ const SERVICE = "coord.v1";
 const $ = (id) => document.getElementById(id);
 const short = (address) => `${address.slice(0, 10)}…${address.slice(-6)}`;
 
-// address -> { state: { key: value }, subs: { status, alerts }, subState }
+// address -> { state: { key: value }, subs: { status, alerts }, subState }.
+// `alerts` is one subscription to the pattern `alerts/*`: every alert level
+// is its own topic, and a level created later is followed without asking.
 const peers = new Map();
 // sub_id -> { address, topic }
 const subscriptions = new Map();
@@ -122,9 +130,10 @@ for (const [key, value] of [["name", $("name").value], ["status", $("status").va
 
 $("raise").addEventListener("click", async () => {
   const text = $("alert-text").value.trim() || "attention";
+  const topic = `alerts/${$("alert-level").value}`;
   alertCount += 1;
-  showReport("alert", await node.publishServiceUpdate(SERVICE, "alerts", text));
-  await node.setServiceTopicCheckpoint(SERVICE, "alerts", `${alertCount} alert(s) so far, last: ${text}`);
+  showReport("alert", await node.publishServiceUpdate(SERVICE, topic, text));
+  await node.setServiceTopicCheckpoint(SERVICE, topic, `${alertCount} alert(s) so far, last: ${text}`);
   $("alert-text").value = "";
 });
 
@@ -135,22 +144,44 @@ $("policy").addEventListener("change", () =>
 // Subscribing to every device this one finds.
 // ---------------------------------------------------------------------------
 
+// Without load, the status subscription filters it out on the provider: the
+// slider's updates never leave the other device.
+const statusKeys = () => ($("watch-load").checked ? [] : ["name", "status"]);
+
+async function subscribeTo(address, topic, options) {
+  const peer = peers.get(address);
+  try {
+    const subId = await node.subscribeService(address, SERVICE, topic, options);
+    peer.subs[topic] = subId;
+    subscriptions.set(subId, { address, topic });
+  } catch (error) {
+    peer.subState = `could not subscribe: ${error.message ?? error}`;
+  }
+}
+
 async function watch(address) {
   if (peers.has(address)) return;
   const peer = { state: {}, subState: "pending", subs: {} };
   peers.set(address, peer);
   render();
-  for (const [topic, mode] of [["status", "latest"], ["alerts", "log"]]) {
-    try {
-      const subId = await node.subscribeService(address, SERVICE, topic, { mode });
-      peer.subs[topic] = subId;
-      subscriptions.set(subId, { address, topic });
-    } catch (error) {
-      peer.subState = `could not subscribe: ${error.message ?? error}`;
-    }
-  }
+  await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
+  await subscribeTo(address, "alerts/*", { mode: "log" });
   render();
 }
+
+$("watch-load").addEventListener("change", async () => {
+  for (const [address, peer] of peers) {
+    const old = peer.subs.status;
+    if (old) {
+      subscriptions.delete(old);
+      delete peer.subs.status;
+      await node.unsubscribeService(old);
+    }
+    delete peer.state.load;
+    await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
+  }
+  render();
+});
 
 node.addEventListener("neighbor_discovered", ({ detail }) => watch(detail.peer_id));
 
@@ -163,6 +194,7 @@ node.addEventListener("service_update_received", ({ detail }) => {
   } else {
     alerts.unshift({
       from: peer.state.name ?? short(sub.address),
+      level: detail.topic.slice("alerts/".length),
       text: detail.snapshot ? `(summary) ${detail.body}` : detail.body,
     });
   }
@@ -235,7 +267,7 @@ function render() {
       const dt = document.createElement("dt");
       dt.textContent = key;
       const dd = document.createElement("dd");
-      dd.textContent = peer.state[key] ?? "…";
+      dd.textContent = peer.state[key] ?? (key === "load" && !$("watch-load").checked ? "not watched" : "…");
       values.append(dt, dd);
     }
     item.append(head, meta, values);
@@ -245,10 +277,10 @@ function render() {
   const alertList = $("alerts");
   alertList.replaceChildren();
   if (alerts.length === 0) alertList.innerHTML = '<li class="meta">none yet</li>';
-  for (const { from, text } of alerts.slice(0, 20)) {
+  for (const { from, level, text } of alerts.slice(0, 20)) {
     const item = document.createElement("li");
     item.className = "alert";
-    item.textContent = `${from}: ${text}`;
+    item.textContent = `${from} [${level}]: ${text}`;
     alertList.append(item);
   }
 
