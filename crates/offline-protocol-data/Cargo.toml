@@ -27,7 +27,7 @@ workspace = true
 #
 # Default features are `counter` alone, which this crate's API uses. `jsonpath`
 # stays off: it violates the v1 no-query-language non-goal and adds weight.
-loro = "=1.13.9"
+loro = "=1.16.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
