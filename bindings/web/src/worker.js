@@ -353,6 +353,49 @@ const handlers = {
   sendGroupMessage({ groupId, content, ephemeral = false }) {
     return JSON.parse(engine.sendGroupMessage(groupId, content, Boolean(ephemeral)));
   },
+  // Services and subscriptions (ADR 0035). Records cross as JSON.
+  registerService({ serviceId, version = "", capabilities = {} }) {
+    engine.registerService(serviceId, version, JSON.stringify(capabilities));
+  },
+  unregisterService({ serviceId }) {
+    return engine.unregisterService(serviceId);
+  },
+  subscribeService({ provider, serviceId, topic, mode = "latest", params = "" }) {
+    return engine.subscribeService(provider, serviceId, topic, mode, params);
+  },
+  unsubscribeService({ subId }) {
+    return engine.unsubscribeService(subId);
+  },
+  resyncServiceSubscription({ subId }) {
+    engine.resyncServiceSubscription(subId);
+  },
+  serviceSubscriptions() {
+    return JSON.parse(engine.serviceSubscriptions());
+  },
+  setServiceSubscriptionPolicy({ serviceId, policy }) {
+    engine.setServiceSubscriptionPolicy(serviceId, JSON.stringify(policy));
+  },
+  acceptServiceSubscription({ subId }) {
+    engine.acceptServiceSubscription(subId);
+  },
+  rejectServiceSubscription({ subId, reason = "" }) {
+    engine.rejectServiceSubscription(subId, reason);
+  },
+  endServiceSubscription({ subId, reason = "" }) {
+    engine.endServiceSubscription(subId, reason);
+  },
+  publishServiceUpdate({ serviceId, topic, key = null, body }) {
+    return JSON.parse(engine.publishServiceUpdate(serviceId, topic, key ?? undefined, body));
+  },
+  setServiceTopicCheckpoint({ serviceId, topic, body }) {
+    engine.setServiceTopicCheckpoint(serviceId, topic, body);
+  },
+  clearServiceTopic({ serviceId, topic }) {
+    engine.clearServiceTopic(serviceId, topic);
+  },
+  serviceSubscribers({ serviceId = null } = {}) {
+    return JSON.parse(engine.serviceSubscribers(serviceId ?? undefined));
+  },
   stop() {
     clearInterval(timer);
     carrier?.close();

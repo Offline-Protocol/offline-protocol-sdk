@@ -535,6 +535,139 @@ impl WebEngine {
         self.node.ble_link_down(peer);
     }
 
+    // ------------------------------------------------------------------
+    // Services and subscriptions (ADR 0035)
+    // ------------------------------------------------------------------
+
+    /// Registers a service; `capabilities_json` is a JSON object of strings.
+    #[wasm_bindgen(js_name = registerService)]
+    pub fn register_service(
+        &mut self,
+        service_id: &str,
+        version: &str,
+        capabilities_json: &str,
+    ) -> Result<(), JsError> {
+        self.node
+            .register_service(service_id, version, capabilities_json)
+            .map_err(js)
+    }
+
+    /// Unregisters a service; `false` when it was not registered.
+    #[wasm_bindgen(js_name = unregisterService)]
+    pub fn unregister_service(&mut self, service_id: &str) -> Result<bool, JsError> {
+        self.node.unregister_service(service_id).map_err(js)
+    }
+
+    /// Subscribes to a provider's topic; returns the subscription id.
+    #[wasm_bindgen(js_name = subscribeService)]
+    pub fn subscribe_service(
+        &mut self,
+        provider: &str,
+        service_id: &str,
+        topic: &str,
+        mode: &str,
+        params: &str,
+    ) -> Result<String, JsError> {
+        self.node
+            .subscribe_service(provider, service_id, topic, mode, params)
+            .map_err(js)
+    }
+
+    /// Ends a subscription this device holds.
+    #[wasm_bindgen(js_name = unsubscribeService)]
+    pub fn unsubscribe_service(&mut self, sub_id: &str) -> Result<bool, JsError> {
+        self.node.unsubscribe_service(sub_id).map_err(js)
+    }
+
+    /// Asks a subscription's provider for the whole state again.
+    #[wasm_bindgen(js_name = resyncServiceSubscription)]
+    pub fn resync_service_subscription(&mut self, sub_id: &str) -> Result<(), JsError> {
+        self.node.resync_service_subscription(sub_id).map_err(js)
+    }
+
+    /// The subscriptions this device holds, as JSON.
+    #[wasm_bindgen(js_name = serviceSubscriptions)]
+    pub fn service_subscriptions(&self) -> Result<String, JsError> {
+        self.node.service_subscriptions().map_err(js)
+    }
+
+    /// Sets a service's admission policy from JSON.
+    #[wasm_bindgen(js_name = setServiceSubscriptionPolicy)]
+    pub fn set_service_subscription_policy(
+        &mut self,
+        service_id: &str,
+        policy_json: &str,
+    ) -> Result<(), JsError> {
+        self.node
+            .set_service_subscription_policy(service_id, policy_json)
+            .map_err(js)
+    }
+
+    /// Accepts a subscriber the application was asked about.
+    #[wasm_bindgen(js_name = acceptServiceSubscription)]
+    pub fn accept_service_subscription(&mut self, sub_id: &str) -> Result<(), JsError> {
+        self.node.accept_service_subscription(sub_id).map_err(js)
+    }
+
+    /// Rejects a subscriber the application was asked about.
+    #[wasm_bindgen(js_name = rejectServiceSubscription)]
+    pub fn reject_service_subscription(
+        &mut self,
+        sub_id: &str,
+        reason: &str,
+    ) -> Result<(), JsError> {
+        self.node
+            .reject_service_subscription(sub_id, reason)
+            .map_err(js)
+    }
+
+    /// Ends a subscription another device holds on this one.
+    #[wasm_bindgen(js_name = endServiceSubscription)]
+    pub fn end_service_subscription(&mut self, sub_id: &str, reason: &str) -> Result<(), JsError> {
+        self.node
+            .end_service_subscription(sub_id, reason)
+            .map_err(js)
+    }
+
+    /// Publishes to a topic; returns the report as JSON.
+    #[wasm_bindgen(js_name = publishServiceUpdate)]
+    pub fn publish_service_update(
+        &mut self,
+        service_id: &str,
+        topic: &str,
+        key: Option<String>,
+        body: &str,
+    ) -> Result<String, JsError> {
+        self.node
+            .publish_service_update(service_id, topic, key, body)
+            .map_err(js)
+    }
+
+    /// Sets a `log` topic's checkpoint.
+    #[wasm_bindgen(js_name = setServiceTopicCheckpoint)]
+    pub fn set_service_topic_checkpoint(
+        &mut self,
+        service_id: &str,
+        topic: &str,
+        body: &str,
+    ) -> Result<(), JsError> {
+        self.node
+            .set_service_topic_checkpoint(service_id, topic, body)
+            .map_err(js)
+    }
+
+    /// Starts a topic over.
+    #[wasm_bindgen(js_name = clearServiceTopic)]
+    pub fn clear_service_topic(&mut self, service_id: &str, topic: &str) -> Result<(), JsError> {
+        self.node.clear_service_topic(service_id, topic).map_err(js)
+    }
+
+    /// The subscriptions other devices hold here, as JSON.
+    #[wasm_bindgen(js_name = serviceSubscribers)]
+    pub fn service_subscribers(&self, service_id: Option<String>) -> Result<String, JsError> {
+        self.node.service_subscribers(service_id).map_err(js)
+    }
+
     /// Sends to a group; returns the per-member message ids as JSON.
     /// `ephemeral` as for [`WebEngine::send_message`].
     #[wasm_bindgen(js_name = sendGroupMessage)]
