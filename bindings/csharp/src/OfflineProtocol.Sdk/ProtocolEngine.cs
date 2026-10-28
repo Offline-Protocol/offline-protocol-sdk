@@ -19,6 +19,7 @@ public sealed class ProtocolEngine : IAsyncDisposable
     private IntPtr _handle;
     private int _disposePassStarted;
     private int _rejectNewCalls;
+    private int _outboundWork;
 
     private ProtocolEngine(int queueCapacity)
     {
@@ -136,10 +137,11 @@ public sealed class ProtocolEngine : IAsyncDisposable
         }
 
         Volatile.Write(ref _rejectNewCalls, 1);
+        WaitForNoOutboundWork();
 
         try
         {
-            await EnqueueOnEngineThreadAsync(
+            await EnqueueShutdownWorkAsync(
                 () =>
                 {
                     if (_handle != IntPtr.Zero)
@@ -147,8 +149,7 @@ public sealed class ProtocolEngine : IAsyncDisposable
                         OfflineProtocolNative.offline_protocol_free(_handle);
                         _handle = IntPtr.Zero;
                     }
-                },
-                CancellationToken.None).ConfigureAwait(false);
+                }).ConfigureAwait(false);
         }
         catch (ChannelClosedException)
         {
@@ -163,6 +164,7 @@ public sealed class ProtocolEngine : IAsyncDisposable
     {
         Interlocked.CompareExchange(ref _disposePassStarted, 1, 0);
         Volatile.Write(ref _rejectNewCalls, 1);
+        WaitForNoOutboundWork();
         _writer.TryComplete();
         _engineThread.Join();
     }
@@ -182,7 +184,7 @@ public sealed class ProtocolEngine : IAsyncDisposable
     private async Task EnqueueOnEngineThreadAsync(Action work, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var item = new VoidEngineWorkItem(work, cancellationToken);
+        var item = new VoidEngineWorkItem(work, cancellationToken, CompleteOutboundWork);
         await WriteWorkAsync(item, cancellationToken).ConfigureAwait(false);
         await item.Completion.ConfigureAwait(false);
     }
@@ -190,24 +192,44 @@ public sealed class ProtocolEngine : IAsyncDisposable
     private async Task<T> EnqueueOnEngineThreadAsync<T>(Func<T> work, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var item = new ResultEngineWorkItem<T>(work, cancellationToken);
+        var item = new ResultEngineWorkItem<T>(work, cancellationToken, CompleteOutboundWork);
         await WriteWorkAsync(item, cancellationToken).ConfigureAwait(false);
         return await item.Completion.ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Runs after <see cref="WaitForNoOutboundWork"/>; does not touch the outbound counter.
+    /// </summary>
+    private async Task EnqueueShutdownWorkAsync(Action work)
+    {
+        var item = new VoidEngineWorkItem(work, CancellationToken.None, static () => { });
+        await _writer.WriteAsync(item, CancellationToken.None).ConfigureAwait(false);
+        await item.Completion.ConfigureAwait(false);
+    }
+
     private async Task WriteWorkAsync(IEngineWorkItem item, CancellationToken cancellationToken)
     {
+        if (!TryBeginOutboundWork())
+        {
+            item.DisposeRegistration();
+            throw new ObjectDisposedException(nameof(ProtocolEngine));
+        }
+
         try
         {
             await _writer.WriteAsync(item, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
+            CompleteOutboundWork();
             item.DisposeRegistration();
             throw;
         }
     }
 
+    /// <summary>
+    /// Dedicated engine thread: block here (not on the thread pool) while waiting for channel items (CS1).
+    /// </summary>
     private void RunEngineLoop()
     {
         try
@@ -222,6 +244,37 @@ public sealed class ProtocolEngine : IAsyncDisposable
         }
         catch (ChannelClosedException)
         {
+        }
+    }
+
+    private bool TryBeginOutboundWork()
+    {
+        if (Volatile.Read(ref _rejectNewCalls) != 0)
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _outboundWork);
+        if (Volatile.Read(ref _rejectNewCalls) != 0)
+        {
+            CompleteOutboundWork();
+            return false;
+        }
+
+        return true;
+    }
+
+    private void CompleteOutboundWork()
+    {
+        Interlocked.Decrement(ref _outboundWork);
+    }
+
+    private void WaitForNoOutboundWork()
+    {
+        var spinner = new SpinWait();
+        while (Volatile.Read(ref _outboundWork) != 0)
+        {
+            spinner.SpinOnce();
         }
     }
 
@@ -251,12 +304,14 @@ public sealed class ProtocolEngine : IAsyncDisposable
     private sealed class VoidEngineWorkItem : IEngineWorkItem
     {
         private readonly Action _work;
+        private readonly Action _onRunComplete;
         private readonly TaskCompletionSource _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly CancellationTokenRegistration _cancelRegistration;
 
-        public VoidEngineWorkItem(Action work, CancellationToken cancellationToken)
+        public VoidEngineWorkItem(Action work, CancellationToken cancellationToken, Action onRunComplete)
         {
             _work = work;
+            _onRunComplete = onRunComplete;
             _cancelRegistration = Register(cancellationToken, _tcs);
         }
 
@@ -275,6 +330,7 @@ public sealed class ProtocolEngine : IAsyncDisposable
             }
             finally
             {
+                _onRunComplete();
                 DisposeRegistration();
             }
         }
@@ -291,12 +347,14 @@ public sealed class ProtocolEngine : IAsyncDisposable
     private sealed class ResultEngineWorkItem<T> : IEngineWorkItem
     {
         private readonly Func<T> _work;
+        private readonly Action _onRunComplete;
         private readonly TaskCompletionSource<T> _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly CancellationTokenRegistration _cancelRegistration;
 
-        public ResultEngineWorkItem(Func<T> work, CancellationToken cancellationToken)
+        public ResultEngineWorkItem(Func<T> work, CancellationToken cancellationToken, Action onRunComplete)
         {
             _work = work;
+            _onRunComplete = onRunComplete;
             _cancelRegistration = Register(cancellationToken, _tcs);
         }
 
@@ -314,6 +372,7 @@ public sealed class ProtocolEngine : IAsyncDisposable
             }
             finally
             {
+                _onRunComplete();
                 DisposeRegistration();
             }
         }

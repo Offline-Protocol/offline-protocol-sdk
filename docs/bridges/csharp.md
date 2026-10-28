@@ -32,8 +32,22 @@ without regenerating C#, because dispatch stays in the Rust C API.
 **All calls into `offline_protocol_*` for a given engine run on one dedicated
 .NET thread** (`ProtocolEngine`). Public async methods queue work on a
 **bounded channel** (default capacity 512) and complete on the caller's
-synchronization context. When the queue is full, callers wait: this caps memory
-if the app submits work faster than the engine runs it.
+synchronization context. When the queue is full, callers block in
+`WriteAsync` until the engine drains the queue: this caps memory if the app
+submits work faster than the engine runs it. **UI hosts should always `await`
+each engine call** (and use `ConfigureAwait(true)` on the UI thread when
+continuations must run there). Flooding the engine without awaiting can stall
+the UI thread when the queue is full.
+
+**Cancellation** applies while a call is waiting to enter the queue. Once a
+work item is written to the channel, the engine thread still runs it to
+completion; canceling the token does not interrupt native work in flight.
+
+**Dispose** rejects new calls, waits until every queued call has finished on
+the engine thread, then runs `offline_protocol_free` on that thread. Hosts do
+not need to await every pending `Task` before dispose for safety, but awaiting
+in-flight work before shutdown is still recommended so failures surface
+cleanly.
 
 PR1 uses a **background** engine thread so a forgotten host does not block
 process exit. **WinUI, WPF, and MAUI hosts must call `DisposeAsync` (or

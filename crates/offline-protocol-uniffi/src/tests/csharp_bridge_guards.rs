@@ -29,8 +29,11 @@ fn csharp_engine_runs_native_calls_on_a_dedicated_thread() {
         engine.contains("offline-protocol-engine")
             && engine.contains("Channel.CreateBounded")
             && engine.contains("RunEngineLoop")
-            && engine.contains("ShutdownEngineLoopAfterFailedCreate"),
-        "ProtocolEngine must serialize native calls on a dedicated thread (CS1)"
+            && engine.contains("ShutdownEngineLoopAfterFailedCreate")
+            && engine.contains("WaitForNoOutboundWork")
+            && engine.contains("TryBeginOutboundWork"),
+        "ProtocolEngine must serialize native calls on a dedicated thread (CS1) and \
+         free the native handle only after outbound work drains"
     );
     let config = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
