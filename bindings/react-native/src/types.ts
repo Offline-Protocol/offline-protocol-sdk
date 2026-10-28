@@ -2354,6 +2354,69 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
 }
 
 // ============================================================================
+// SERVICE SUBSCRIPTION EVENTS (ADR 0035)
+// ============================================================================
+
+/**
+ * Provider side: a subscription waits for the app to accept or reject it.
+ * Emitted under the `restricted` policy, and under `rules` when the
+ * subscriber matches no rule and the fallback is to ask. Every subscription
+ * frame is sealed, so `sender` is authenticated by the 1:1 MLS session.
+ */
+export interface ServiceSubscribeReceivedEvent extends BaseEvent {
+  type: 'service_subscribe_received';
+  sub_id: string;
+  service_id: string;
+  topic: string;
+  mode: 'latest' | 'log';
+  params: string;
+  sender: string;
+  /** A renewal of a subscription this device no longer held. */
+  renewal: boolean;
+}
+
+/**
+ * A subscription changed state, on either side.
+ */
+export interface ServiceSubscriptionChangedEvent extends BaseEvent {
+  type: 'service_subscription_changed';
+  sub_id: string;
+  role: 'consumer' | 'provider';
+  service_id: string;
+  topic: string;
+  /** The provider (consumer side) or the subscriber (provider side). */
+  peer: string;
+  state: 'pending' | 'active' | 'paused' | 'ended';
+  /**
+   * Why: `accepted`, `resumed`, `stream_reset`, `history_lost`,
+   * `renewal_unanswered`, `provider_unreachable`, `no_reply`,
+   * `session_timeout`, `unsubscribed`, `revoked`, `replaced`, `expired`,
+   * `approval_timeout`, `service_unregistered`, `pattern_full` (provider
+   * side: a pattern passed over a topic for want of room, reported once), or
+   * a reason the provider gave when it rejected or ended the subscription.
+   */
+  reason: string;
+}
+
+/**
+ * Consumer side: an update on a subscribed topic. Never older than one
+ * already delivered for the same key.
+ */
+export interface ServiceUpdateReceivedEvent extends BaseEvent {
+  type: 'service_update_received';
+  sub_id: string;
+  service_id: string;
+  topic: string;
+  /** The key, on a `latest` topic. */
+  key: string | null;
+  seq: number;
+  body: string;
+  /** A catch-up value (current state or a checkpoint) rather than a fresh publish. */
+  snapshot: boolean;
+  provider_peer_id: string;
+}
+
+// ============================================================================
 // PRESENCE, TYPING, READ RECEIPTS EVENTS
 // ============================================================================
 
@@ -3025,6 +3088,9 @@ export type ProtocolEvent =
   | ServiceDiscoveredEvent
   | ServiceRequestReceivedEvent
   | ServiceResponseReceivedEvent
+  | ServiceSubscribeReceivedEvent
+  | ServiceSubscriptionChangedEvent
+  | ServiceUpdateReceivedEvent
   | PresenceUpdatedEvent
   | InternetServerMessageEvent
   | InternetStatusChangedEvent

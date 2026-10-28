@@ -183,7 +183,9 @@ pub struct KeyPackagePayload {
     /// decrypted 1:1 MLS plaintext is handed to its service layer rather than
     /// surfaced as a chat message. Absent on legacy nodes
     /// (`#[serde(default)]` gives empty), and toward them service bodies stay
-    /// signed plaintext, which is the floor for this frame family.
+    /// signed plaintext, which is the floor for this frame family. Entry 2
+    /// ([`SVC_SUB_V1`]) says the sender routes subscription frames from a
+    /// session slot, and has no such floor.
     ///
     /// End to end, like `rich_versions`: it describes the far end's parser,
     /// not any carrier.
@@ -283,6 +285,14 @@ pub const CTRL_SIGN_V2: u8 = 2;
 /// `__SVC_RESP__` it finds inside a decrypted 1:1 MLS plaintext into its
 /// service layer, with the MLS-authenticated sender as the requester.
 pub const SVC_SEALED_V1: u8 = 1;
+
+/// Service subscription version advertised in
+/// [`KeyPackagePayload::svc_versions`]: the sender routes the four
+/// subscription frames (`__SVC_SUB__`, `__SVC_SUB_R__`, `__SVC_UPD__`,
+/// `__SVC_UNSUB__`) it finds inside a decrypted 1:1 MLS plaintext into its
+/// service layer. Unlike [`SVC_SEALED_V1`] there is no plaintext floor behind
+/// it: subscription frames are sealed or not sent (ADR 0035).
+pub const SVC_SUB_V1: u8 = 2;
 
 /// Acknowledgement version advertised in [`KeyPackagePayload::ack_versions`]:
 /// the sender reads `ack_status = "undecryptable"` on a delivery ACK as "the

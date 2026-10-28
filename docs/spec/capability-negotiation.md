@@ -12,7 +12,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
 | `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer; entry 4 additionally means the peer reads the removals a version offer carries; entry 5 additionally means it answers inside the interest an offer declares; entry 6 additionally means it carries attachment bytes inside a group; entry 7 additionally means it parses the custody receipt, so a custodian may answer its deposits | No replication with that peer |
 | `ctrl_versions` | End to end | Which control-frame signing payload we build for this peer. Entry 2 means the peer verifies `offline-ctrl-v2`, which binds the frame's timestamp | Build `offline-ctrl-v1`, which states no freshness |
-| `svc_versions` | End to end | Whether a service request or response may travel sealed inside `__MLS_ENC__` toward this peer. Entry 1 means the peer routes a decrypted `__SVC_REQ__` or `__SVC_RESP__` into its service layer, with the MLS-authenticated sender as the requester | Signed plaintext service frames |
+| `svc_versions` | End to end | Whether a service request or response may travel sealed inside `__MLS_ENC__` toward this peer. Entry 1 means the peer routes a decrypted `__SVC_REQ__` or `__SVC_RESP__` into its service layer, with the MLS-authenticated sender as the requester. Entry 2 means it routes the four subscription frames from a session slot | Signed plaintext service frames. Without entry 2 from a signed package that has been seen, a subscription is refused at the call; with no package seen, it is tried and ends at its pending timeout |
 | `ack_versions` | End to end | Which delivery-ACK statuses we may send this peer. Entry 1 means the peer reads `ack_status: "undecryptable"` as "this frame can never decrypt" (it resends the message once, re-sealed when it can) rather than as a delivery. Entry 2 means the peer reads `ack_more`, so one delivery ACK may answer up to five of its frames | Never answer an undecryptable frame; leave it unacknowledged. Acknowledge each frame in its own ACK |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
@@ -252,6 +252,14 @@ beside the control-freshness ratchet.
 
 A sender that cannot seal on a session it has confirmed MUST NOT fall back to
 plaintext. The fallback is for a peer it cannot seal to yet.
+
+**Entry 2 is not part of the exception.** Subscription frames have no
+plaintext form for a downgrade to fall back to, so stripping or replaying
+entry 2 costs the subscription, never its confidentiality: the consumer is
+refused at `subscribe_service`, or its subscription ends unanswered. A peer
+that has sent a sealed subscription frame is recorded as routing them, so a
+replayed older package does not refuse it again; that record is held in
+memory, since a lost record costs only a refused call.
 
 ## Relay capabilities
 
