@@ -16,6 +16,10 @@ class MeshSdk {
 static Future<dynamic> acceptConnectionRequest([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('acceptConnectionRequest', args);
 
+/// Native `acceptServiceSubscription` (see React Native `OfflineProtocolNativeModule.acceptServiceSubscription`).
+static Future<dynamic> acceptServiceSubscription([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('acceptServiceSubscription', args);
+
 /// Native `bleGetDiagnostics` (see React Native `OfflineProtocolNativeModule.bleGetDiagnostics`).
 static Future<dynamic> bleGetDiagnostics([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('bleGetDiagnostics', args);
@@ -39,6 +43,10 @@ static Future<dynamic> cancelFileTransfer([Map<String, dynamic>? args]) =>
 /// Native `checkInternetPresence` (see React Native `OfflineProtocolNativeModule.checkInternetPresence`).
 static Future<dynamic> checkInternetPresence([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('checkInternetPresence', args);
+
+/// Native `clearServiceTopic` (see React Native `OfflineProtocolNativeModule.clearServiceTopic`).
+static Future<dynamic> clearServiceTopic([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('clearServiceTopic', args);
 
 /// Native `createInvite` (see React Native `OfflineProtocolNativeModule.createInvite`).
 static Future<dynamic> createInvite([Map<String, dynamic>? args]) =>
@@ -187,6 +195,10 @@ static Future<dynamic> emitTestEvent([Map<String, dynamic>? args]) =>
 /// Native `enableTelemetry` (see React Native `OfflineProtocolNativeModule.enableTelemetry`).
 static Future<dynamic> enableTelemetry([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('enableTelemetry', args);
+
+/// Native `endServiceSubscription` (see React Native `OfflineProtocolNativeModule.endServiceSubscription`).
+static Future<dynamic> endServiceSubscription([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('endServiceSubscription', args);
 
 /// Native `endTelemetrySession` (see React Native `OfflineProtocolNativeModule.endTelemetrySession`).
 static Future<dynamic> endTelemetrySession([Map<String, dynamic>? args]) =>
@@ -492,6 +504,10 @@ static Future<dynamic> pause([Map<String, dynamic>? args]) =>
 static Future<dynamic> processFileChunk([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('processFileChunk', args);
 
+/// Native `publishServiceUpdate` (see React Native `OfflineProtocolNativeModule.publishServiceUpdate`).
+static Future<dynamic> publishServiceUpdate([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('publishServiceUpdate', args);
+
 /// Native `receiveMessage` (see React Native `OfflineProtocolNativeModule.receiveMessage`).
 static Future<dynamic> receiveMessage([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('receiveMessage', args);
@@ -503,6 +519,10 @@ static Future<dynamic> registerService([Map<String, dynamic>? args]) =>
 /// Native `rejectConnectionRequest` (see React Native `OfflineProtocolNativeModule.rejectConnectionRequest`).
 static Future<dynamic> rejectConnectionRequest([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('rejectConnectionRequest', args);
+
+/// Native `rejectServiceSubscription` (see React Native `OfflineProtocolNativeModule.rejectServiceSubscription`).
+static Future<dynamic> rejectServiceSubscription([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('rejectServiceSubscription', args);
 
 /// Native `rekeySession` (see React Native `OfflineProtocolNativeModule.rekeySession`).
 static Future<dynamic> rekeySession([Map<String, dynamic>? args]) =>
@@ -527,6 +547,10 @@ static Future<dynamic> respondToServiceRequest([Map<String, dynamic>? args]) =>
 /// Native `resume` (see React Native `OfflineProtocolNativeModule.resume`).
 static Future<dynamic> resume([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('resume', args);
+
+/// Native `resyncServiceSubscription` (see React Native `OfflineProtocolNativeModule.resyncServiceSubscription`).
+static Future<dynamic> resyncServiceSubscription([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('resyncServiceSubscription', args);
 
 /// Native `sendConnectionRequest` (see React Native `OfflineProtocolNativeModule.sendConnectionRequest`).
 static Future<dynamic> sendConnectionRequest([Map<String, dynamic>? args]) =>
@@ -564,6 +588,14 @@ static Future<dynamic> sendServiceRequest([Map<String, dynamic>? args]) =>
 static Future<dynamic> sendTypingIndicator([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('sendTypingIndicator', args);
 
+/// Native `serviceSubscribers` (see React Native `OfflineProtocolNativeModule.serviceSubscribers`).
+static Future<dynamic> serviceSubscribers([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('serviceSubscribers', args);
+
+/// Native `serviceSubscriptions` (see React Native `OfflineProtocolNativeModule.serviceSubscriptions`).
+static Future<dynamic> serviceSubscriptions([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('serviceSubscriptions', args);
+
 /// Native `setBatteryLevel` (see React Native `OfflineProtocolNativeModule.setBatteryLevel`).
 static Future<dynamic> setBatteryLevel([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('setBatteryLevel', args);
@@ -575,6 +607,14 @@ static Future<dynamic> setBatteryState([Map<String, dynamic>? args]) =>
 /// Native `setRelayPriority` (see React Native `OfflineProtocolNativeModule.setRelayPriority`).
 static Future<dynamic> setRelayPriority([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('setRelayPriority', args);
+
+/// Native `setServiceSubscriptionPolicy` (see React Native `OfflineProtocolNativeModule.setServiceSubscriptionPolicy`).
+static Future<dynamic> setServiceSubscriptionPolicy([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('setServiceSubscriptionPolicy', args);
+
+/// Native `setServiceTopicCheckpoint` (see React Native `OfflineProtocolNativeModule.setServiceTopicCheckpoint`).
+static Future<dynamic> setServiceTopicCheckpoint([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('setServiceTopicCheckpoint', args);
 
 /// Native `setTelemetryEnabled` (see React Native `OfflineProtocolNativeModule.setTelemetryEnabled`).
 static Future<dynamic> setTelemetryEnabled([Map<String, dynamic>? args]) =>
@@ -592,6 +632,10 @@ static Future<dynamic> signData([Map<String, dynamic>? args]) =>
 static Future<dynamic> signDataBase64([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('signDataBase64', args);
 
+/// Native `subscribeService` (see React Native `OfflineProtocolNativeModule.subscribeService`).
+static Future<dynamic> subscribeService([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('subscribeService', args);
+
 /// Native `telemetryInstallId` (see React Native `OfflineProtocolNativeModule.telemetryInstallId`).
 static Future<dynamic> telemetryInstallId([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('telemetryInstallId', args);
@@ -607,6 +651,10 @@ static Future<dynamic> unblockUser([Map<String, dynamic>? args]) =>
 /// Native `unregisterService` (see React Native `OfflineProtocolNativeModule.unregisterService`).
 static Future<dynamic> unregisterService([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('unregisterService', args);
+
+/// Native `unsubscribeService` (see React Native `OfflineProtocolNativeModule.unsubscribeService`).
+static Future<dynamic> unsubscribeService([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('unsubscribeService', args);
 
 /// Native `updateAckConfig` (see React Native `OfflineProtocolNativeModule.updateAckConfig`).
 static Future<dynamic> updateAckConfig([Map<String, dynamic>? args]) =>

@@ -32,7 +32,17 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol
 
-from .offline_protocol import MeshServices, OfflineProtocol
+from .offline_protocol import (
+    MeshServices,
+    OfflineProtocol,
+    ServicePublishReport,
+    ServiceSubscriberInfo,
+    ServiceSubscriptionInfo,
+    SubscriptionMode,
+    SubscriptionPolicyConfig,
+    SubscriptionPolicyKind,
+    SubscriptionRulesFallback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +183,116 @@ class Services:
             )
         return str(self._mesh.respond_to_service_request(request_id, requester, service_id, status, body))
 
+    # -- subscriptions (ADR 0035) ---------------------------------------------
+    #
+    # Every subscription frame is sealed in the 1:1 MLS session, with no
+    # plaintext fallback. Updates arrive as ``service_update_received``,
+    # state changes as ``service_subscription_changed``, and a subscriber
+    # waiting for this application's decision as ``service_subscribe_received``.
+
+    def subscribe(
+        self,
+        provider: str,
+        service_id: str,
+        topic: str,
+        mode: str | SubscriptionMode = "latest",
+        params: str = "",
+        keys: list[str] | None = None,
+    ) -> str:
+        """Subscribe to ``topic`` of ``service_id`` on ``provider``; returns
+        the subscription id its events carry. ``mode`` is ``"latest"``
+        (state, one value per key) or ``"log"`` (every event, in order).
+
+        ``topic`` may be a pattern, ``"prefix*"`` or ``"*"``: every matching
+        topic in the mode, each update naming its own. ``keys`` limits a
+        ``latest`` subscription to those keys, each exact or a prefix ending
+        in ``*``; the provider applies it."""
+        return str(
+            self._mesh.subscribe_service(
+                provider, service_id, topic, _mode(mode), params, list(keys or [])
+            )
+        )
+
+    def unsubscribe(self, sub_id: str) -> bool:
+        """End a subscription this node holds; ``False`` when there is none."""
+        return bool(self._mesh.unsubscribe_service(sub_id))
+
+    def resync(self, sub_id: str) -> None:
+        """Ask the provider for the whole state again, now."""
+        self._mesh.resync_service_subscription(sub_id)
+
+    def subscriptions(self) -> list[ServiceSubscriptionInfo]:
+        """The subscriptions this node holds on other nodes."""
+        return list(self._mesh.service_subscriptions())
+
+    def set_policy(
+        self,
+        service_id: str,
+        policy: str = "restricted",
+        *,
+        allow_peers: list[str] | None = None,
+        allow_groups: list[str] | None = None,
+        fallback: str = "ask",
+    ) -> None:
+        """Set who may subscribe to ``service_id``: ``"restricted"`` (ask
+        this application, the default), ``"accept_all"``, or ``"rules"``
+        (admit ``allow_peers`` and members of ``allow_groups``; ``fallback``
+        ``"ask"`` or ``"reject"`` for everyone else)."""
+        kinds = {
+            "restricted": SubscriptionPolicyKind.RESTRICTED,
+            "accept_all": SubscriptionPolicyKind.ACCEPT_ALL,
+            "rules": SubscriptionPolicyKind.RULES,
+        }
+        fallbacks = {
+            "ask": SubscriptionRulesFallback.ASK,
+            "reject": SubscriptionRulesFallback.REJECT,
+        }
+        if policy not in kinds:
+            raise ValueError(f"policy {policy!r} is not one of {', '.join(kinds)}")
+        if fallback not in fallbacks:
+            raise ValueError(f"fallback {fallback!r} is not one of {', '.join(fallbacks)}")
+        self._mesh.set_service_subscription_policy(
+            service_id,
+            SubscriptionPolicyConfig(
+                kind=kinds[policy],
+                allow_peers=list(allow_peers or []),
+                allow_groups=list(allow_groups or []),
+                rules_fallback=fallbacks[fallback],
+            ),
+        )
+
+    def accept(self, sub_id: str) -> None:
+        """Accept a subscriber this application was asked about."""
+        self._mesh.accept_service_subscription(sub_id)
+
+    def reject(self, sub_id: str, reason: str = "") -> None:
+        """Reject a subscriber this application was asked about."""
+        self._mesh.reject_service_subscription(sub_id, reason)
+
+    def end(self, sub_id: str, reason: str = "") -> None:
+        """End a subscription another node holds on this one."""
+        self._mesh.end_service_subscription(sub_id, reason)
+
+    def publish(
+        self, service_id: str, topic: str, body: str, key: str | None = None
+    ) -> ServicePublishReport:
+        """Publish to a topic: with ``key`` it is a ``latest`` topic, without
+        one a ``log`` topic. ``service_id`` must be registered here."""
+        return self._mesh.publish_service_update(service_id, topic, key, body)
+
+    def checkpoint(self, service_id: str, topic: str, body: str) -> None:
+        """Set a ``log`` topic's checkpoint, which a subscriber that fell out
+        of the buffer is sent instead of being told its history was lost."""
+        self._mesh.set_service_topic_checkpoint(service_id, topic, body)
+
+    def clear_topic(self, service_id: str, topic: str) -> None:
+        """Start a topic over; every subscriber is told before new state."""
+        self._mesh.clear_service_topic(service_id, topic)
+
+    def subscribers(self, service_id: str | None = None) -> list[ServiceSubscriberInfo]:
+        """The subscriptions other nodes hold on ``service_id``, or on all."""
+        return list(self._mesh.service_subscribers(service_id))
+
     # -- listeners ------------------------------------------------------------
 
     def add_listener(self, listener: ServicesListener) -> None:
@@ -193,3 +313,12 @@ class Services:
                 callback(record)
             except Exception:
                 logger.exception("service listener %r failed in %s", listener, method)
+
+
+def _mode(mode: str | SubscriptionMode) -> SubscriptionMode:
+    if isinstance(mode, SubscriptionMode):
+        return mode
+    modes = {"latest": SubscriptionMode.LATEST, "log": SubscriptionMode.LOG}
+    if mode not in modes:
+        raise ValueError(f"mode {mode!r} is not one of {', '.join(modes)}")
+    return modes[mode]
