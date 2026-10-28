@@ -30,8 +30,15 @@ without regenerating C#, because dispatch stays in the Rust C API.
 ## CS1. Engine thread and callbacks (K2 parity)
 
 **All calls into `offline_protocol_*` for a given engine run on one dedicated
-.NET thread** (`ProtocolEngine`). Public async methods queue work there and
-complete on the caller's synchronization context.
+.NET thread** (`ProtocolEngine`). Public async methods queue work on a
+**bounded channel** (default capacity 512) and complete on the caller's
+synchronization context. When the queue is full, callers wait: this caps memory
+if the app submits work faster than the engine runs it.
+
+PR1 uses a **background** engine thread so a forgotten host does not block
+process exit. **WinUI, WPF, and MAUI hosts must call `DisposeAsync` (or
+`StopAsync` then dispose) before application shutdown** so telemetry flush and
+transport teardown can finish; a follow-up PR may offer a foreground-thread option.
 
 Native **event and transport callbacks** run on the engine thread inside the
 library ([C K2](c.md#k2-callbacks-run-on-the-engines-thread-inside-the-engine)).

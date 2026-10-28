@@ -1,5 +1,5 @@
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using System.Threading.Channels;
 using OfflineProtocol.Sdk.Native;
 
 namespace OfflineProtocol.Sdk;
@@ -9,40 +9,68 @@ namespace OfflineProtocol.Sdk;
 /// </summary>
 public sealed class ProtocolEngine : IAsyncDisposable
 {
-    private readonly BlockingCollection<Action> _queue = new();
+    /// <summary>Pending engine calls; backpressure when the app outruns the native thread.</summary>
+    public const int DefaultQueueCapacity = 512;
+
+    private readonly Channel<IEngineWorkItem> _channel;
+    private readonly ChannelWriter<IEngineWorkItem> _writer;
+    private readonly ChannelReader<IEngineWorkItem> _reader;
     private readonly Thread _engineThread;
     private IntPtr _handle;
-    private bool _disposed;
+    private int _disposePassStarted;
+    private int _rejectNewCalls;
 
-    private ProtocolEngine()
+    private ProtocolEngine(int queueCapacity)
     {
+        _channel = Channel.CreateBounded<IEngineWorkItem>(
+            new BoundedChannelOptions(queueCapacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = false,
+            });
+        _writer = _channel.Writer;
+        _reader = _channel.Reader;
         _engineThread = new Thread(RunEngineLoop)
         {
             Name = "offline-protocol-engine",
+            // Background so a forgotten host does not block process exit; UI hosts should
+            // call DisposeAsync before shutdown (see docs/bridges/csharp.md).
             IsBackground = true,
         };
         _engineThread.Start();
     }
 
     /// <summary>Creates an engine from a <c>ProtocolConfig</c> JSON object.</summary>
-    public static async Task<ProtocolEngine> CreateAsync(string configJson, CancellationToken cancellationToken = default)
+    public static async Task<ProtocolEngine> CreateAsync(
+        string configJson,
+        CancellationToken cancellationToken = default,
+        int queueCapacity = DefaultQueueCapacity)
     {
         NativeLibraryLoader.EnsureRegistered();
-        var engine = new ProtocolEngine();
-        await engine.EnqueueAsync(
-            () =>
-            {
-                var err = default(OfflineProtocolError);
-                var status = OfflineProtocolNative.offline_protocol_create(configJson, out var handle, ref err);
-                if (status != OfflineProtocolStatus.Ok)
+        var engine = new ProtocolEngine(queueCapacity);
+        try
+        {
+            await engine.EnqueueAsync(
+                () =>
                 {
-                    throw FromError(status, ref err);
-                }
+                    var err = default(OfflineProtocolError);
+                    var status = OfflineProtocolNative.offline_protocol_create(configJson, out var handle, ref err);
+                    if (status != OfflineProtocolStatus.Ok)
+                    {
+                        throw FromError(status, ref err);
+                    }
 
-                engine._handle = handle;
-            },
-            cancellationToken);
-        return engine;
+                    engine._handle = handle;
+                },
+                cancellationToken).ConfigureAwait(false);
+            return engine;
+        }
+        catch
+        {
+            engine.ShutdownEngineLoopAfterFailedCreate();
+            throw;
+        }
     }
 
     public Task CallAsync(string method, string? paramsJson = null, CancellationToken cancellationToken = default) =>
@@ -100,85 +128,108 @@ public sealed class ProtocolEngine : IAsyncDisposable
     public Task<string> LocalAddressAsync(CancellationToken cancellationToken = default) =>
         CallWithResultAsync("local_address", null, cancellationToken);
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (Interlocked.CompareExchange(ref _disposePassStarted, 1, 0) != 0)
         {
-            return ValueTask.CompletedTask;
+            return;
         }
 
-        _disposed = true;
-        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _queue.Add(() =>
-        {
-            try
-            {
-                if (_handle != IntPtr.Zero)
-                {
-                    OfflineProtocolNative.offline_protocol_free(_handle);
-                    _handle = IntPtr.Zero;
-                }
+        Volatile.Write(ref _rejectNewCalls, 1);
 
-                completion.SetResult();
-            }
-            catch (Exception ex)
-            {
-                completion.SetException(ex);
-            }
-            finally
-            {
-                _queue.CompleteAdding();
-            }
-        });
-        return new ValueTask(completion.Task.ContinueWith(_ => _engineThread.Join(), TaskScheduler.Default));
+        try
+        {
+            await EnqueueOnEngineThreadAsync(
+                () =>
+                {
+                    if (_handle != IntPtr.Zero)
+                    {
+                        OfflineProtocolNative.offline_protocol_free(_handle);
+                        _handle = IntPtr.Zero;
+                    }
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (ChannelClosedException)
+        {
+            // Engine loop already stopped (e.g. after a failed create cleanup).
+        }
+
+        _writer.TryComplete();
+        _engineThread.Join();
+    }
+
+    private void ShutdownEngineLoopAfterFailedCreate()
+    {
+        Interlocked.CompareExchange(ref _disposePassStarted, 1, 0);
+        Volatile.Write(ref _rejectNewCalls, 1);
+        _writer.TryComplete();
+        _engineThread.Join();
     }
 
     private Task EnqueueAsync(Action work, CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        cancellationToken.ThrowIfCancellationRequested();
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
-        _queue.Add(() =>
-        {
-            try
-            {
-                work();
-                tcs.TrySetResult();
-            }
-            catch (Exception ex)
-            {
-                tcs.TrySetException(ex);
-            }
-        });
-        return tcs.Task;
+        ThrowIfEngineClosedToCallers();
+        return EnqueueOnEngineThreadAsync(work, cancellationToken);
     }
 
     private Task<T> EnqueueAsync<T>(Func<T> work, CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfEngineClosedToCallers();
+        return EnqueueOnEngineThreadAsync(work, cancellationToken);
+    }
+
+    private async Task EnqueueOnEngineThreadAsync(Action work, CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
-        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
-        _queue.Add(() =>
+        var item = new VoidEngineWorkItem(work, cancellationToken);
+        await WriteWorkAsync(item, cancellationToken).ConfigureAwait(false);
+        await item.Completion.ConfigureAwait(false);
+    }
+
+    private async Task<T> EnqueueOnEngineThreadAsync<T>(Func<T> work, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var item = new ResultEngineWorkItem<T>(work, cancellationToken);
+        await WriteWorkAsync(item, cancellationToken).ConfigureAwait(false);
+        return await item.Completion.ConfigureAwait(false);
+    }
+
+    private async Task WriteWorkAsync(IEngineWorkItem item, CancellationToken cancellationToken)
+    {
+        try
         {
-            try
-            {
-                tcs.TrySetResult(work());
-            }
-            catch (Exception ex)
-            {
-                tcs.TrySetException(ex);
-            }
-        });
-        return tcs.Task;
+            await _writer.WriteAsync(item, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            item.DisposeRegistration();
+            throw;
+        }
     }
 
     private void RunEngineLoop()
     {
-        foreach (var work in _queue.GetConsumingEnumerable())
+        try
         {
-            work();
+            while (_reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult())
+            {
+                while (_reader.TryRead(out var item))
+                {
+                    item.Run();
+                }
+            }
+        }
+        catch (ChannelClosedException)
+        {
+        }
+    }
+
+    private void ThrowIfEngineClosedToCallers()
+    {
+        if (Volatile.Read(ref _rejectNewCalls) != 0)
+        {
+            throw new ObjectDisposedException(nameof(ProtocolEngine));
         }
     }
 
@@ -190,4 +241,109 @@ public sealed class ProtocolEngine : IAsyncDisposable
         err.Clear();
         return new ProtocolEngineException(status, code, variant, message);
     }
+
+    private interface IEngineWorkItem
+    {
+        void Run();
+        void DisposeRegistration();
+    }
+
+    private sealed class VoidEngineWorkItem : IEngineWorkItem
+    {
+        private readonly Action _work;
+        private readonly TaskCompletionSource _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly CancellationTokenRegistration _cancelRegistration;
+
+        public VoidEngineWorkItem(Action work, CancellationToken cancellationToken)
+        {
+            _work = work;
+            _cancelRegistration = Register(cancellationToken, _tcs);
+        }
+
+        public Task Completion => _tcs.Task;
+
+        public void Run()
+        {
+            try
+            {
+                _work();
+                _tcs.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                _tcs.TrySetException(ex);
+            }
+            finally
+            {
+                DisposeRegistration();
+            }
+        }
+
+        public void DisposeRegistration()
+        {
+            if (_cancelRegistration != default)
+            {
+                _cancelRegistration.Dispose();
+            }
+        }
+    }
+
+    private sealed class ResultEngineWorkItem<T> : IEngineWorkItem
+    {
+        private readonly Func<T> _work;
+        private readonly TaskCompletionSource<T> _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly CancellationTokenRegistration _cancelRegistration;
+
+        public ResultEngineWorkItem(Func<T> work, CancellationToken cancellationToken)
+        {
+            _work = work;
+            _cancelRegistration = Register(cancellationToken, _tcs);
+        }
+
+        public Task<T> Completion => _tcs.Task;
+
+        public void Run()
+        {
+            try
+            {
+                _tcs.TrySetResult(_work());
+            }
+            catch (Exception ex)
+            {
+                _tcs.TrySetException(ex);
+            }
+            finally
+            {
+                DisposeRegistration();
+            }
+        }
+
+        public void DisposeRegistration()
+        {
+            if (_cancelRegistration != default)
+            {
+                _cancelRegistration.Dispose();
+            }
+        }
+    }
+
+    private static CancellationTokenRegistration Register(CancellationToken cancellationToken, TaskCompletionSource tcs) =>
+        cancellationToken.CanBeCanceled
+            ? cancellationToken.Register(static state =>
+            {
+                var pair = ((TaskCompletionSource Tcs, CancellationToken Token))state!;
+                pair.Tcs.TrySetCanceled(pair.Token);
+            },
+            (tcs, cancellationToken))
+            : default;
+
+    private static CancellationTokenRegistration Register<T>(CancellationToken cancellationToken, TaskCompletionSource<T> tcs) =>
+        cancellationToken.CanBeCanceled
+            ? cancellationToken.Register(static state =>
+            {
+                var pair = ((TaskCompletionSource<T> Tcs, CancellationToken Token))state!;
+                pair.Tcs.TrySetCanceled(pair.Token);
+            },
+            (tcs, cancellationToken))
+            : default;
 }

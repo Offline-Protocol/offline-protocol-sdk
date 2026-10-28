@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace OfflineProtocol.Sdk;
 
 /// <summary>Minimal <c>ProtocolConfig</c> JSON for scaffold and consumer-check (PR1).</summary>
@@ -27,9 +29,11 @@ public static class ProtocolConfigJson
         """;
 
     public static string FileStores(string mlsRoot, string stateRoot, string storeKeyBase64) =>
-        $$"""
-        {"mls_root":"{{Escape(mlsRoot)}}","state_root":"{{Escape(stateRoot)}}","store_key":"{{storeKeyBase64}}"}
-        """;
-
-    private static string Escape(string path) => path.Replace("\\", "\\\\", StringComparison.Ordinal);
+        JsonSerializer.Serialize(
+            new Dictionary<string, string>
+            {
+                ["mls_root"] = mlsRoot,
+                ["state_root"] = stateRoot,
+                ["store_key"] = storeKeyBase64,
+            });
 }

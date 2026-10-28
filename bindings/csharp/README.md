@@ -23,6 +23,7 @@ library before running tests or the consumer check (same role as
 ```bash
 cd bindings/csharp
 dotnet build
+dotnet test --no-build   # after build; JSON/unit tests only (no native library)
 ```
 
 ## Consumer check

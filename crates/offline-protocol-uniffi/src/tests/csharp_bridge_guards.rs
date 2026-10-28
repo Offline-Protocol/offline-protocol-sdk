@@ -27,8 +27,18 @@ fn csharp_engine_runs_native_calls_on_a_dedicated_thread() {
     .unwrap_or_else(|e| panic!("cannot read ProtocolEngine.cs: {e}"));
     assert!(
         engine.contains("offline-protocol-engine")
-            && engine.contains("BlockingCollection")
-            && engine.contains("RunEngineLoop"),
+            && engine.contains("Channel.CreateBounded")
+            && engine.contains("RunEngineLoop")
+            && engine.contains("ShutdownEngineLoopAfterFailedCreate"),
         "ProtocolEngine must serialize native calls on a dedicated thread (CS1)"
+    );
+    let config = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/csharp/src/OfflineProtocol.Sdk/ProtocolConfigJson.cs"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read ProtocolConfigJson.cs: {e}"));
+    assert!(
+        config.contains("JsonSerializer.Serialize"),
+        "FileStores must build JSON with System.Text.Json, not manual escaping"
     );
 }
