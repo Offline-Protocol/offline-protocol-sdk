@@ -6,14 +6,16 @@
 //! it; a `latest` value for a subscriber out of range waits in the outbox as
 //! one superseding entry per key, so the subscriber comes back to the newest
 //! value only; a resync hands the state back; a peer whose key package omits
-//! entry 2 is refused at the call; and unregistering a service ends what was
-//! subscribed to it.
+//! entry 2 is refused at the call; unregistering a service ends what was
+//! subscribed to it; and a key filter and a topic pattern hold across the
+//! link, with nothing they carry readable on it.
 
 use std::sync::{Arc, Mutex};
 
 use offline_protocol_core::{Message, ServiceDescriptor, ServiceId};
 use offline_protocol_services::{
-    RulesFallback, SubscriptionMode, SubscriptionPolicy, SubscriptionState, SVC_MESSAGE_PREFIX,
+    RulesFallback, SubscribeOptions, SubscriptionMode, SubscriptionPolicy, SubscriptionState,
+    SVC_MESSAGE_PREFIX,
 };
 use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
@@ -513,4 +515,100 @@ fn unsubscribing_ends_it_on_the_provider() {
     assert!(pair.alice.protocol.unsubscribe_service(&sub_id).unwrap());
     pair.run(3);
     assert!(pair.bob.protocol.service_subscribers(Some(SVC)).is_empty());
+}
+
+/// `(topic, key, body)` of every update received, then forgotten.
+fn take_topic_updates(node: &Node) -> Vec<(String, Option<String>, String)> {
+    let mut updates = Vec::new();
+    node.events.lock().unwrap().retain(|event| match event {
+        Event::ServiceUpdateReceived {
+            topic, key, body, ..
+        } => {
+            updates.push((topic.clone(), key.clone(), body.clone()));
+            false
+        }
+        _ => true,
+    });
+    updates
+}
+
+#[test]
+fn a_key_filter_keeps_other_keys_on_the_provider() {
+    let mut pair = Pair::new();
+    pair.bob.register(SubscriptionPolicy::AcceptAll);
+    pair.bob
+        .protocol
+        .publish_service_update(SVC, "car", Some("battery"), "battery-80")
+        .unwrap();
+    pair.bob
+        .protocol
+        .publish_service_update(SVC, "car", Some("location"), "secret-location")
+        .unwrap();
+    let bob = pair.bob.address.clone();
+    pair.alice
+        .protocol
+        .subscribe_service_with(
+            &bob,
+            SVC,
+            "car",
+            SubscribeOptions {
+                keys: vec!["battery".into()],
+                ..SubscribeOptions::new(SubscriptionMode::Latest)
+            },
+        )
+        .unwrap();
+    pair.run(12);
+    assert_eq!(
+        take_topic_updates(&pair.alice),
+        vec![("car".into(), Some("battery".into()), "battery-80".into())]
+    );
+
+    let report = pair
+        .bob
+        .protocol
+        .publish_service_update(SVC, "car", Some("location"), "secret-location-2")
+        .unwrap();
+    assert_eq!(report.subscribers, 0);
+    pair.run(2);
+    assert!(take_topic_updates(&pair.alice).is_empty());
+    assert_nothing_readable(&pair.carried, &["battery-80", "fleet.v1"]);
+}
+
+#[test]
+fn a_topic_pattern_follows_topics_made_after_it() {
+    let mut pair = Pair::new();
+    pair.bob.register(SubscriptionPolicy::AcceptAll);
+    pair.bob
+        .protocol
+        .publish_service_update(SVC, "rooms/kitchen", Some("temp"), "kitchen-21")
+        .unwrap();
+    pair.subscribe("rooms/*", SubscriptionMode::Latest);
+    assert_eq!(
+        take_topic_updates(&pair.alice),
+        vec![(
+            "rooms/kitchen".into(),
+            Some("temp".into()),
+            "kitchen-21".into()
+        )]
+    );
+
+    // Past the update interval the snapshot started.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    pair.bob
+        .protocol
+        .publish_service_update(SVC, "rooms/hall", Some("temp"), "hall-19")
+        .unwrap();
+    pair.bob
+        .protocol
+        .publish_service_update(SVC, "garden", Some("temp"), "garden-12")
+        .unwrap();
+    pair.run(2);
+    assert_eq!(
+        take_topic_updates(&pair.alice),
+        vec![("rooms/hall".into(), Some("temp".into()), "hall-19".into())]
+    );
+    let info = pair.alice.protocol.service_subscriptions();
+    assert_eq!(info[0].topic, "rooms/*");
+    assert_eq!(info[0].topics, vec!["rooms/hall", "rooms/kitchen"]);
+    assert_nothing_readable(&pair.carried, &["kitchen-21", "hall-19", "rooms/"]);
 }

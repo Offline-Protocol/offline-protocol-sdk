@@ -62,8 +62,8 @@ pub use offline_protocol_services::MeshServices;
 /// Subscription types (ADR 0035), re-exported so callers of the engine's
 /// subscription calls never name `offline-protocol-services` directly.
 pub use offline_protocol_services::{
-    RulesFallback, SubscriberInfo, SubscriptionInfo, SubscriptionMode, SubscriptionPolicy,
-    SubscriptionState,
+    RulesFallback, SubscribeOptions, SubscriberInfo, SubscriptionInfo, SubscriptionMode,
+    SubscriptionPolicy, SubscriptionState,
 };
 pub use protocol::custody::{CustodyRefusal, CustodyStats};
 pub use protocol::mesh_relay::{MeshRelayConfig, MeshRelayStats};

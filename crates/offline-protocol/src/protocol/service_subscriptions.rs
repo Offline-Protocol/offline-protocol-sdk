@@ -411,6 +411,37 @@ impl OfflineProtocol {
         mode: offline_protocol_services::SubscriptionMode,
         params: &str,
     ) -> Result<String> {
+        self.subscribe_service_with(
+            provider,
+            service_id,
+            topic,
+            offline_protocol_services::SubscribeOptions {
+                params: params.to_string(),
+                ..offline_protocol_services::SubscribeOptions::new(mode)
+            },
+        )
+    }
+
+    /// [`Self::subscribe_service`] with a key filter, and the place a topic
+    /// pattern is explained.
+    ///
+    /// `topic` may be a pattern, `prefix*` (or `*` for every topic): one
+    /// subscription then follows every topic of the service in its mode whose
+    /// name starts with `prefix`, up to 64, including topics created after
+    /// it; each update names its topic, and each topic is caught up and
+    /// recovered on its own. `options.keys`, on a `latest` subscription,
+    /// limits the keys sent to those listed, each exact or a prefix ending in
+    /// `*`; the provider applies it, so a key outside it never leaves the
+    /// provider. A provider on a build that predates either ends the
+    /// subscription with the reason `unsupported` rather than send what was
+    /// not asked for.
+    pub fn subscribe_service_with(
+        &mut self,
+        provider: &str,
+        service_id: &str,
+        topic: &str,
+        options: offline_protocol_services::SubscribeOptions,
+    ) -> Result<String> {
         self.ensure_subscriptions_enabled()?;
         Self::validate_outbound_recipient(provider)?;
         self.ensure_running()?;
@@ -432,16 +463,7 @@ impl OfflineProtocol {
         let (sub_id, frame) = self
             .service_subscriptions
             .consumer
-            .subscribe(
-                provider,
-                service_id,
-                topic,
-                &offline_protocol_services::SubscribeOptions {
-                    params: params.to_string(),
-                    ..offline_protocol_services::SubscribeOptions::new(mode)
-                },
-                Instant::now(),
-            )
+            .subscribe(provider, service_id, topic, &options, Instant::now())
             .map_err(Error::Service)?;
         match self.send_subscription_frame(frame) {
             Ok(_) => self.service_subscriptions.consumer.mark_sent(&sub_id),
