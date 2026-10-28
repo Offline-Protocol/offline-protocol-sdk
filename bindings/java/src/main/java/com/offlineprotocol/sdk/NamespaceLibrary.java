@@ -130,19 +130,55 @@ final class NamespaceLibrary {
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != ((short) 58624)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription() != ((short) 24108)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic() != ((short) 19137)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != ((short) 43941)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription() != ((short) 13)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update() != ((short) 65376)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != ((short) 46597)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription() != ((short) 14676)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != ((short) 20926)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription() != ((short) 4072)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != ((short) 34689)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers() != ((short) 11372)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions() != ((short) 17809)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy() != ((short) 4258)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() != ((short) 51763)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != ((short) 1722)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != ((short) 4997)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service() != ((short) 53713)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != ((short) 50880)) {

@@ -1190,15 +1190,39 @@ public func FfiConverterTypeDataStore_lower(_ value: DataStore) -> UInt64 {
 
 public protocol MeshServicesProtocol: AnyObject, Sendable {
     
+    func acceptServiceSubscription(subId: String) throws 
+    
+    func clearServiceTopic(serviceId: String, topic: String) throws 
+    
     func discoverServices(serviceId: String?) throws  -> String
+    
+    func endServiceSubscription(subId: String, reason: String) throws 
+    
+    func publishServiceUpdate(serviceId: String, topic: String, key: String?, body: String) throws  -> ServicePublishReport
     
     func registerService(serviceId: String, version: String, capabilities: [String: String]) throws 
     
+    func rejectServiceSubscription(subId: String, reason: String) throws 
+    
     func respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String) throws  -> String
+    
+    func resyncServiceSubscription(subId: String) throws 
     
     func sendServiceRequest(provider: String, serviceId: String, method: String, body: String) throws  -> String
     
+    func serviceSubscribers(serviceId: String?) throws  -> [ServiceSubscriberInfo]
+    
+    func serviceSubscriptions() throws  -> [ServiceSubscriptionInfo]
+    
+    func setServiceSubscriptionPolicy(serviceId: String, policy: SubscriptionPolicyConfig) throws 
+    
+    func setServiceTopicCheckpoint(serviceId: String, topic: String, body: String) throws 
+    
+    func subscribeService(provider: String, serviceId: String, topic: String, mode: SubscriptionMode, params: String, keys: [String]) throws  -> String
+    
     func unregisterService(serviceId: String) throws  -> Bool
+    
+    func unsubscribeService(subId: String) throws  -> Bool
     
 }
 open class MeshServices: MeshServicesProtocol, @unchecked Sendable {
@@ -1263,12 +1287,54 @@ public convenience init(`protocol`: OfflineProtocol)throws  {
     
 
     
+open func acceptServiceSubscription(subId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(subId),uniffiCallStatus
+    )
+}
+}
+    
+open func clearServiceTopic(serviceId: String, topic: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(topic),uniffiCallStatus
+    )
+}
+}
+    
 open func discoverServices(serviceId: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services(
             self.uniffiCloneHandle(),
         FfiConverterOptionString.lower(serviceId),uniffiCallStatus
+    )
+})
+}
+    
+open func endServiceSubscription(subId: String, reason: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(subId),
+        FfiConverterString.lower(reason),uniffiCallStatus
+    )
+}
+}
+    
+open func publishServiceUpdate(serviceId: String, topic: String, key: String?, body: String)throws  -> ServicePublishReport  {
+    return try  FfiConverterTypeServicePublishReport_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(topic),
+        FfiConverterOptionString.lower(key),
+        FfiConverterString.lower(body),uniffiCallStatus
     )
 })
 }
@@ -1280,6 +1346,16 @@ open func registerService(serviceId: String, version: String, capabilities: [Str
         FfiConverterString.lower(serviceId),
         FfiConverterString.lower(version),
         FfiConverterDictionaryStringString.lower(capabilities),uniffiCallStatus
+    )
+}
+}
+    
+open func rejectServiceSubscription(subId: String, reason: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(subId),
+        FfiConverterString.lower(reason),uniffiCallStatus
     )
 }
 }
@@ -1298,6 +1374,15 @@ open func respondToServiceRequest(requestId: String, requester: String, serviceI
 })
 }
     
+open func resyncServiceSubscription(subId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(subId),uniffiCallStatus
+    )
+}
+}
+    
 open func sendServiceRequest(provider: String, serviceId: String, method: String, body: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
@@ -1311,12 +1396,77 @@ open func sendServiceRequest(provider: String, serviceId: String, method: String
 })
 }
     
+open func serviceSubscribers(serviceId: String?)throws  -> [ServiceSubscriberInfo]  {
+    return try  FfiConverterSequenceTypeServiceSubscriberInfo.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(serviceId),uniffiCallStatus
+    )
+})
+}
+    
+open func serviceSubscriptions()throws  -> [ServiceSubscriptionInfo]  {
+    return try  FfiConverterSequenceTypeServiceSubscriptionInfo.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func setServiceSubscriptionPolicy(serviceId: String, policy: SubscriptionPolicyConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),
+        FfiConverterTypeSubscriptionPolicyConfig_lower(policy),uniffiCallStatus
+    )
+}
+}
+    
+open func setServiceTopicCheckpoint(serviceId: String, topic: String, body: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(topic),
+        FfiConverterString.lower(body),uniffiCallStatus
+    )
+}
+}
+    
+open func subscribeService(provider: String, serviceId: String, topic: String, mode: SubscriptionMode, params: String, keys: [String])throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(provider),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(topic),
+        FfiConverterTypeSubscriptionMode_lower(mode),
+        FfiConverterString.lower(params),
+        FfiConverterSequenceString.lower(keys),uniffiCallStatus
+    )
+})
+}
+    
 open func unregisterService(serviceId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(serviceId),uniffiCallStatus
+    )
+})
+}
+    
+open func unsubscribeService(subId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(subId),uniffiCallStatus
     )
 })
 }
@@ -6577,6 +6727,290 @@ public func FfiConverterTypeSendMessageOptions_lower(_ value: SendMessageOptions
 }
 
 
+public struct ServicePublishReport: Equatable, Hashable {
+    public var subscribers: UInt32
+    public var sentLive: UInt32
+    public var queued: UInt32
+    public var coalesced: UInt32
+    public var failed: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(subscribers: UInt32, sentLive: UInt32, queued: UInt32, coalesced: UInt32, failed: UInt32) {
+        self.subscribers = subscribers
+        self.sentLive = sentLive
+        self.queued = queued
+        self.coalesced = coalesced
+        self.failed = failed
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ServicePublishReport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeServicePublishReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ServicePublishReport {
+        return
+            try ServicePublishReport(
+                subscribers: FfiConverterUInt32.read(from: &buf), 
+                sentLive: FfiConverterUInt32.read(from: &buf), 
+                queued: FfiConverterUInt32.read(from: &buf), 
+                coalesced: FfiConverterUInt32.read(from: &buf), 
+                failed: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ServicePublishReport, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.subscribers, into: &buf)
+        FfiConverterUInt32.write(value.sentLive, into: &buf)
+        FfiConverterUInt32.write(value.queued, into: &buf)
+        FfiConverterUInt32.write(value.coalesced, into: &buf)
+        FfiConverterUInt32.write(value.failed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServicePublishReport_lift(_ buf: RustBuffer) throws -> ServicePublishReport {
+    return try FfiConverterTypeServicePublishReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServicePublishReport_lower(_ value: ServicePublishReport) -> RustBuffer {
+    return FfiConverterTypeServicePublishReport.lower(value)
+}
+
+
+public struct ServiceSubscriberInfo: Equatable, Hashable {
+    public var subId: String
+    public var subscriber: String
+    public var serviceId: String
+    public var topic: String
+    public var mode: SubscriptionMode
+    public var state: String
+    public var params: String
+    public var keys: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(subId: String, subscriber: String, serviceId: String, topic: String, mode: SubscriptionMode, state: String, params: String, keys: [String]) {
+        self.subId = subId
+        self.subscriber = subscriber
+        self.serviceId = serviceId
+        self.topic = topic
+        self.mode = mode
+        self.state = state
+        self.params = params
+        self.keys = keys
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ServiceSubscriberInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ServiceSubscriberInfo {
+        return
+            try ServiceSubscriberInfo(
+                subId: FfiConverterString.read(from: &buf), 
+                subscriber: FfiConverterString.read(from: &buf), 
+                serviceId: FfiConverterString.read(from: &buf), 
+                topic: FfiConverterString.read(from: &buf), 
+                mode: FfiConverterTypeSubscriptionMode.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf), 
+                params: FfiConverterString.read(from: &buf), 
+                keys: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ServiceSubscriberInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.subId, into: &buf)
+        FfiConverterString.write(value.subscriber, into: &buf)
+        FfiConverterString.write(value.serviceId, into: &buf)
+        FfiConverterString.write(value.topic, into: &buf)
+        FfiConverterTypeSubscriptionMode.write(value.mode, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterString.write(value.params, into: &buf)
+        FfiConverterSequenceString.write(value.keys, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServiceSubscriberInfo_lift(_ buf: RustBuffer) throws -> ServiceSubscriberInfo {
+    return try FfiConverterTypeServiceSubscriberInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServiceSubscriberInfo_lower(_ value: ServiceSubscriberInfo) -> RustBuffer {
+    return FfiConverterTypeServiceSubscriberInfo.lower(value)
+}
+
+
+public struct ServiceSubscriptionInfo: Equatable, Hashable {
+    public var subId: String
+    public var provider: String
+    public var serviceId: String
+    public var topic: String
+    public var mode: SubscriptionMode
+    public var state: String
+    public var keys: [String]
+    public var topics: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(subId: String, provider: String, serviceId: String, topic: String, mode: SubscriptionMode, state: String, keys: [String], topics: [String]) {
+        self.subId = subId
+        self.provider = provider
+        self.serviceId = serviceId
+        self.topic = topic
+        self.mode = mode
+        self.state = state
+        self.keys = keys
+        self.topics = topics
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ServiceSubscriptionInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ServiceSubscriptionInfo {
+        return
+            try ServiceSubscriptionInfo(
+                subId: FfiConverterString.read(from: &buf), 
+                provider: FfiConverterString.read(from: &buf), 
+                serviceId: FfiConverterString.read(from: &buf), 
+                topic: FfiConverterString.read(from: &buf), 
+                mode: FfiConverterTypeSubscriptionMode.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf), 
+                keys: FfiConverterSequenceString.read(from: &buf), 
+                topics: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ServiceSubscriptionInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.subId, into: &buf)
+        FfiConverterString.write(value.provider, into: &buf)
+        FfiConverterString.write(value.serviceId, into: &buf)
+        FfiConverterString.write(value.topic, into: &buf)
+        FfiConverterTypeSubscriptionMode.write(value.mode, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterSequenceString.write(value.keys, into: &buf)
+        FfiConverterSequenceString.write(value.topics, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServiceSubscriptionInfo_lift(_ buf: RustBuffer) throws -> ServiceSubscriptionInfo {
+    return try FfiConverterTypeServiceSubscriptionInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServiceSubscriptionInfo_lower(_ value: ServiceSubscriptionInfo) -> RustBuffer {
+    return FfiConverterTypeServiceSubscriptionInfo.lower(value)
+}
+
+
+public struct SubscriptionPolicyConfig: Equatable, Hashable {
+    public var kind: SubscriptionPolicyKind
+    public var allowPeers: [String]
+    public var allowGroups: [String]
+    public var rulesFallback: SubscriptionRulesFallback
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: SubscriptionPolicyKind, allowPeers: [String], allowGroups: [String], rulesFallback: SubscriptionRulesFallback) {
+        self.kind = kind
+        self.allowPeers = allowPeers
+        self.allowGroups = allowGroups
+        self.rulesFallback = rulesFallback
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SubscriptionPolicyConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubscriptionPolicyConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubscriptionPolicyConfig {
+        return
+            try SubscriptionPolicyConfig(
+                kind: FfiConverterTypeSubscriptionPolicyKind.read(from: &buf), 
+                allowPeers: FfiConverterSequenceString.read(from: &buf), 
+                allowGroups: FfiConverterSequenceString.read(from: &buf), 
+                rulesFallback: FfiConverterTypeSubscriptionRulesFallback.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SubscriptionPolicyConfig, into buf: inout [UInt8]) {
+        FfiConverterTypeSubscriptionPolicyKind.write(value.kind, into: &buf)
+        FfiConverterSequenceString.write(value.allowPeers, into: &buf)
+        FfiConverterSequenceString.write(value.allowGroups, into: &buf)
+        FfiConverterTypeSubscriptionRulesFallback.write(value.rulesFallback, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionPolicyConfig_lift(_ buf: RustBuffer) throws -> SubscriptionPolicyConfig {
+    return try FfiConverterTypeSubscriptionPolicyConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionPolicyConfig_lower(_ value: SubscriptionPolicyConfig) -> RustBuffer {
+    return FfiConverterTypeSubscriptionPolicyConfig.lower(value)
+}
+
+
 public struct TelemetryConfig: Equatable, Hashable {
     public var apiKey: String
     public var appId: String
@@ -8156,6 +8590,211 @@ public func FfiConverterTypeRelaySyncState_lift(_ buf: RustBuffer) throws -> Rel
 #endif
 public func FfiConverterTypeRelaySyncState_lower(_ value: RelaySyncState) -> RustBuffer {
     return FfiConverterTypeRelaySyncState.lower(value)
+}
+
+
+
+
+public enum SubscriptionMode: Equatable, Hashable {
+    
+    case latest
+    case log
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SubscriptionMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubscriptionMode: FfiConverterRustBuffer {
+    typealias SwiftType = SubscriptionMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubscriptionMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .latest
+        
+        case 2: return .log
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SubscriptionMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .latest:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .log:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionMode_lift(_ buf: RustBuffer) throws -> SubscriptionMode {
+    return try FfiConverterTypeSubscriptionMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionMode_lower(_ value: SubscriptionMode) -> RustBuffer {
+    return FfiConverterTypeSubscriptionMode.lower(value)
+}
+
+
+
+
+public enum SubscriptionPolicyKind: Equatable, Hashable {
+    
+    case restricted
+    case acceptAll
+    case rules
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SubscriptionPolicyKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubscriptionPolicyKind: FfiConverterRustBuffer {
+    typealias SwiftType = SubscriptionPolicyKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubscriptionPolicyKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .restricted
+        
+        case 2: return .acceptAll
+        
+        case 3: return .rules
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SubscriptionPolicyKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .restricted:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .acceptAll:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .rules:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionPolicyKind_lift(_ buf: RustBuffer) throws -> SubscriptionPolicyKind {
+    return try FfiConverterTypeSubscriptionPolicyKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionPolicyKind_lower(_ value: SubscriptionPolicyKind) -> RustBuffer {
+    return FfiConverterTypeSubscriptionPolicyKind.lower(value)
+}
+
+
+
+
+public enum SubscriptionRulesFallback: Equatable, Hashable {
+    
+    case ask
+    case reject
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SubscriptionRulesFallback: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubscriptionRulesFallback: FfiConverterRustBuffer {
+    typealias SwiftType = SubscriptionRulesFallback
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubscriptionRulesFallback {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .ask
+        
+        case 2: return .reject
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SubscriptionRulesFallback, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .ask:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .reject:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionRulesFallback_lift(_ buf: RustBuffer) throws -> SubscriptionRulesFallback {
+    return try FfiConverterTypeSubscriptionRulesFallback.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionRulesFallback_lower(_ value: SubscriptionRulesFallback) -> RustBuffer {
+    return FfiConverterTypeSubscriptionRulesFallback.lower(value)
 }
 
 
@@ -10330,6 +10969,56 @@ fileprivate struct FfiConverterSequenceTypeNetworkNode: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeServiceSubscriberInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [ServiceSubscriberInfo]
+
+    public static func write(_ value: [ServiceSubscriberInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeServiceSubscriberInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ServiceSubscriberInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ServiceSubscriberInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeServiceSubscriberInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeServiceSubscriptionInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [ServiceSubscriptionInfo]
+
+    public static func write(_ value: [ServiceSubscriptionInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeServiceSubscriptionInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ServiceSubscriptionInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ServiceSubscriptionInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeServiceSubscriptionInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
     public static func write(_ value: [String: String], into buf: inout [UInt8]) {
         let len = Int32(value.count)
@@ -10499,19 +11188,55 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != 58624) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription() != 24108) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic() != 19137) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 43941) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription() != 13) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update() != 65376) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != 46597) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription() != 14676) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != 20926) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription() != 4072) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != 34689) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers() != 11372) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions() != 17809) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy() != 4258) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() != 51763) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != 1722) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 4997) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service() != 53713) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 50880) {

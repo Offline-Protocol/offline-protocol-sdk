@@ -625,15 +625,39 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage() != 2283:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription() != 24108:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic() != 19137:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 43941:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription() != 13:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update() != 65376:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != 46597:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription() != 14676:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != 20926:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription() != 4072:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != 34689:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers() != 11372:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions() != 17809:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy() != 4258:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() != 51763:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() != 1722:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 4997:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service() != 53713:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1141,21 +1165,57 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.res
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.restype = ctypes.c_uint16
@@ -1966,12 +2026,41 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage.
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1980,6 +2069,13 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_register_servic
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1990,6 +2086,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_serv
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_request.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1999,12 +2101,55 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_re
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_request.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service.restype = ctypes.c_int8
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -6992,6 +7137,380 @@ class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
         _UniffiFfiConverterOptionalString.write(value.app_id, buf)
 
+@dataclass
+class ServicePublishReport:
+    def __init__(self, *, subscribers:int, sent_live:int, queued:int, coalesced:int, failed:int):
+        self.subscribers = subscribers
+        self.sent_live = sent_live
+        self.queued = queued
+        self.coalesced = coalesced
+        self.failed = failed
+        
+        
+
+    
+    def __str__(self):
+        return "ServicePublishReport(subscribers={}, sent_live={}, queued={}, coalesced={}, failed={})".format(self.subscribers, self.sent_live, self.queued, self.coalesced, self.failed)
+    def __eq__(self, other):
+        if self.subscribers != other.subscribers:
+            return False
+        if self.sent_live != other.sent_live:
+            return False
+        if self.queued != other.queued:
+            return False
+        if self.coalesced != other.coalesced:
+            return False
+        if self.failed != other.failed:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeServicePublishReport(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ServicePublishReport(
+            subscribers=_UniffiFfiConverterUInt32.read(buf),
+            sent_live=_UniffiFfiConverterUInt32.read(buf),
+            queued=_UniffiFfiConverterUInt32.read(buf),
+            coalesced=_UniffiFfiConverterUInt32.read(buf),
+            failed=_UniffiFfiConverterUInt32.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt32.check_lower(value.subscribers)
+        _UniffiFfiConverterUInt32.check_lower(value.sent_live)
+        _UniffiFfiConverterUInt32.check_lower(value.queued)
+        _UniffiFfiConverterUInt32.check_lower(value.coalesced)
+        _UniffiFfiConverterUInt32.check_lower(value.failed)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt32.write(value.subscribers, buf)
+        _UniffiFfiConverterUInt32.write(value.sent_live, buf)
+        _UniffiFfiConverterUInt32.write(value.queued, buf)
+        _UniffiFfiConverterUInt32.write(value.coalesced, buf)
+        _UniffiFfiConverterUInt32.write(value.failed, buf)
+
+
+
+
+
+
+class SubscriptionMode(enum.Enum):
+    
+    LATEST = 0
+    
+    LOG = 1
+    
+
+
+class _UniffiFfiConverterTypeSubscriptionMode(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return SubscriptionMode.LATEST
+        if variant == 2:
+            return SubscriptionMode.LOG
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == SubscriptionMode.LATEST:
+            return
+        if value == SubscriptionMode.LOG:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == SubscriptionMode.LATEST:
+            buf.write_i32(1)
+        if value == SubscriptionMode.LOG:
+            buf.write_i32(2)
+
+
+
+@dataclass
+class ServiceSubscriberInfo:
+    def __init__(self, *, sub_id:str, subscriber:str, service_id:str, topic:str, mode:SubscriptionMode, state:str, params:str, keys:typing.List[str]):
+        self.sub_id = sub_id
+        self.subscriber = subscriber
+        self.service_id = service_id
+        self.topic = topic
+        self.mode = mode
+        self.state = state
+        self.params = params
+        self.keys = keys
+        
+        
+
+    
+    def __str__(self):
+        return "ServiceSubscriberInfo(sub_id={}, subscriber={}, service_id={}, topic={}, mode={}, state={}, params={}, keys={})".format(self.sub_id, self.subscriber, self.service_id, self.topic, self.mode, self.state, self.params, self.keys)
+    def __eq__(self, other):
+        if self.sub_id != other.sub_id:
+            return False
+        if self.subscriber != other.subscriber:
+            return False
+        if self.service_id != other.service_id:
+            return False
+        if self.topic != other.topic:
+            return False
+        if self.mode != other.mode:
+            return False
+        if self.state != other.state:
+            return False
+        if self.params != other.params:
+            return False
+        if self.keys != other.keys:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ServiceSubscriberInfo(
+            sub_id=_UniffiFfiConverterString.read(buf),
+            subscriber=_UniffiFfiConverterString.read(buf),
+            service_id=_UniffiFfiConverterString.read(buf),
+            topic=_UniffiFfiConverterString.read(buf),
+            mode=_UniffiFfiConverterTypeSubscriptionMode.read(buf),
+            state=_UniffiFfiConverterString.read(buf),
+            params=_UniffiFfiConverterString.read(buf),
+            keys=_UniffiFfiConverterSequenceString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.sub_id)
+        _UniffiFfiConverterString.check_lower(value.subscriber)
+        _UniffiFfiConverterString.check_lower(value.service_id)
+        _UniffiFfiConverterString.check_lower(value.topic)
+        _UniffiFfiConverterTypeSubscriptionMode.check_lower(value.mode)
+        _UniffiFfiConverterString.check_lower(value.state)
+        _UniffiFfiConverterString.check_lower(value.params)
+        _UniffiFfiConverterSequenceString.check_lower(value.keys)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.sub_id, buf)
+        _UniffiFfiConverterString.write(value.subscriber, buf)
+        _UniffiFfiConverterString.write(value.service_id, buf)
+        _UniffiFfiConverterString.write(value.topic, buf)
+        _UniffiFfiConverterTypeSubscriptionMode.write(value.mode, buf)
+        _UniffiFfiConverterString.write(value.state, buf)
+        _UniffiFfiConverterString.write(value.params, buf)
+        _UniffiFfiConverterSequenceString.write(value.keys, buf)
+
+@dataclass
+class ServiceSubscriptionInfo:
+    def __init__(self, *, sub_id:str, provider:str, service_id:str, topic:str, mode:SubscriptionMode, state:str, keys:typing.List[str], topics:typing.List[str]):
+        self.sub_id = sub_id
+        self.provider = provider
+        self.service_id = service_id
+        self.topic = topic
+        self.mode = mode
+        self.state = state
+        self.keys = keys
+        self.topics = topics
+        
+        
+
+    
+    def __str__(self):
+        return "ServiceSubscriptionInfo(sub_id={}, provider={}, service_id={}, topic={}, mode={}, state={}, keys={}, topics={})".format(self.sub_id, self.provider, self.service_id, self.topic, self.mode, self.state, self.keys, self.topics)
+    def __eq__(self, other):
+        if self.sub_id != other.sub_id:
+            return False
+        if self.provider != other.provider:
+            return False
+        if self.service_id != other.service_id:
+            return False
+        if self.topic != other.topic:
+            return False
+        if self.mode != other.mode:
+            return False
+        if self.state != other.state:
+            return False
+        if self.keys != other.keys:
+            return False
+        if self.topics != other.topics:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ServiceSubscriptionInfo(
+            sub_id=_UniffiFfiConverterString.read(buf),
+            provider=_UniffiFfiConverterString.read(buf),
+            service_id=_UniffiFfiConverterString.read(buf),
+            topic=_UniffiFfiConverterString.read(buf),
+            mode=_UniffiFfiConverterTypeSubscriptionMode.read(buf),
+            state=_UniffiFfiConverterString.read(buf),
+            keys=_UniffiFfiConverterSequenceString.read(buf),
+            topics=_UniffiFfiConverterSequenceString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.sub_id)
+        _UniffiFfiConverterString.check_lower(value.provider)
+        _UniffiFfiConverterString.check_lower(value.service_id)
+        _UniffiFfiConverterString.check_lower(value.topic)
+        _UniffiFfiConverterTypeSubscriptionMode.check_lower(value.mode)
+        _UniffiFfiConverterString.check_lower(value.state)
+        _UniffiFfiConverterSequenceString.check_lower(value.keys)
+        _UniffiFfiConverterSequenceString.check_lower(value.topics)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.sub_id, buf)
+        _UniffiFfiConverterString.write(value.provider, buf)
+        _UniffiFfiConverterString.write(value.service_id, buf)
+        _UniffiFfiConverterString.write(value.topic, buf)
+        _UniffiFfiConverterTypeSubscriptionMode.write(value.mode, buf)
+        _UniffiFfiConverterString.write(value.state, buf)
+        _UniffiFfiConverterSequenceString.write(value.keys, buf)
+        _UniffiFfiConverterSequenceString.write(value.topics, buf)
+
+
+
+
+
+
+class SubscriptionPolicyKind(enum.Enum):
+    
+    RESTRICTED = 0
+    
+    ACCEPT_ALL = 1
+    
+    RULES = 2
+    
+
+
+class _UniffiFfiConverterTypeSubscriptionPolicyKind(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return SubscriptionPolicyKind.RESTRICTED
+        if variant == 2:
+            return SubscriptionPolicyKind.ACCEPT_ALL
+        if variant == 3:
+            return SubscriptionPolicyKind.RULES
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == SubscriptionPolicyKind.RESTRICTED:
+            return
+        if value == SubscriptionPolicyKind.ACCEPT_ALL:
+            return
+        if value == SubscriptionPolicyKind.RULES:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == SubscriptionPolicyKind.RESTRICTED:
+            buf.write_i32(1)
+        if value == SubscriptionPolicyKind.ACCEPT_ALL:
+            buf.write_i32(2)
+        if value == SubscriptionPolicyKind.RULES:
+            buf.write_i32(3)
+
+
+
+
+
+
+
+
+class SubscriptionRulesFallback(enum.Enum):
+    
+    ASK = 0
+    
+    REJECT = 1
+    
+
+
+class _UniffiFfiConverterTypeSubscriptionRulesFallback(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return SubscriptionRulesFallback.ASK
+        if variant == 2:
+            return SubscriptionRulesFallback.REJECT
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == SubscriptionRulesFallback.ASK:
+            return
+        if value == SubscriptionRulesFallback.REJECT:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == SubscriptionRulesFallback.ASK:
+            buf.write_i32(1)
+        if value == SubscriptionRulesFallback.REJECT:
+            buf.write_i32(2)
+
+
+
+@dataclass
+class SubscriptionPolicyConfig:
+    def __init__(self, *, kind:SubscriptionPolicyKind, allow_peers:typing.List[str], allow_groups:typing.List[str], rules_fallback:SubscriptionRulesFallback):
+        self.kind = kind
+        self.allow_peers = allow_peers
+        self.allow_groups = allow_groups
+        self.rules_fallback = rules_fallback
+        
+        
+
+    
+    def __str__(self):
+        return "SubscriptionPolicyConfig(kind={}, allow_peers={}, allow_groups={}, rules_fallback={})".format(self.kind, self.allow_peers, self.allow_groups, self.rules_fallback)
+    def __eq__(self, other):
+        if self.kind != other.kind:
+            return False
+        if self.allow_peers != other.allow_peers:
+            return False
+        if self.allow_groups != other.allow_groups:
+            return False
+        if self.rules_fallback != other.rules_fallback:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeSubscriptionPolicyConfig(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return SubscriptionPolicyConfig(
+            kind=_UniffiFfiConverterTypeSubscriptionPolicyKind.read(buf),
+            allow_peers=_UniffiFfiConverterSequenceString.read(buf),
+            allow_groups=_UniffiFfiConverterSequenceString.read(buf),
+            rules_fallback=_UniffiFfiConverterTypeSubscriptionRulesFallback.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterTypeSubscriptionPolicyKind.check_lower(value.kind)
+        _UniffiFfiConverterSequenceString.check_lower(value.allow_peers)
+        _UniffiFfiConverterSequenceString.check_lower(value.allow_groups)
+        _UniffiFfiConverterTypeSubscriptionRulesFallback.check_lower(value.rules_fallback)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterTypeSubscriptionPolicyKind.write(value.kind, buf)
+        _UniffiFfiConverterSequenceString.write(value.allow_peers, buf)
+        _UniffiFfiConverterSequenceString.write(value.allow_groups, buf)
+        _UniffiFfiConverterTypeSubscriptionRulesFallback.write(value.rules_fallback, buf)
+
 
 
 
@@ -9087,18 +9606,88 @@ class _UniffiFfiConverterMapStringString(_UniffiConverterRustBuffer):
             d[key] = val
         return d
 
+class _UniffiFfiConverterSequenceTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        for item in value:
+            _UniffiFfiConverterTypeServiceSubscriberInfo.check_lower(item)
+
+    @classmethod
+    def write(cls, value, buf):
+        items = len(value)
+        buf.write_i32(items)
+        for item in value:
+            _UniffiFfiConverterTypeServiceSubscriberInfo.write(item, buf)
+
+    @classmethod
+    def read(cls, buf):
+        count = buf.read_i32()
+        if count < 0:
+            raise InternalError("Unexpected negative sequence length")
+
+        return [
+            _UniffiFfiConverterTypeServiceSubscriberInfo.read(buf) for i in range(count)
+        ]
+
+class _UniffiFfiConverterSequenceTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        for item in value:
+            _UniffiFfiConverterTypeServiceSubscriptionInfo.check_lower(item)
+
+    @classmethod
+    def write(cls, value, buf):
+        items = len(value)
+        buf.write_i32(items)
+        for item in value:
+            _UniffiFfiConverterTypeServiceSubscriptionInfo.write(item, buf)
+
+    @classmethod
+    def read(cls, buf):
+        count = buf.read_i32()
+        if count < 0:
+            raise InternalError("Unexpected negative sequence length")
+
+        return [
+            _UniffiFfiConverterTypeServiceSubscriptionInfo.read(buf) for i in range(count)
+        ]
+
 
 class MeshServicesProtocol(typing.Protocol):
     
+    def accept_service_subscription(self, sub_id: str) -> None:
+        raise NotImplementedError
+    def clear_service_topic(self, service_id: str,topic: str) -> None:
+        raise NotImplementedError
     def discover_services(self, service_id: typing.Optional[str]) -> str:
+        raise NotImplementedError
+    def end_service_subscription(self, sub_id: str,reason: str) -> None:
+        raise NotImplementedError
+    def publish_service_update(self, service_id: str,topic: str,key: typing.Optional[str],body: str) -> ServicePublishReport:
         raise NotImplementedError
     def register_service(self, service_id: str,version: str,capabilities: dict[str, str]) -> None:
         raise NotImplementedError
+    def reject_service_subscription(self, sub_id: str,reason: str) -> None:
+        raise NotImplementedError
     def respond_to_service_request(self, request_id: str,requester: str,service_id: str,status: str,body: str) -> str:
+        raise NotImplementedError
+    def resync_service_subscription(self, sub_id: str) -> None:
         raise NotImplementedError
     def send_service_request(self, provider: str,service_id: str,method: str,body: str) -> str:
         raise NotImplementedError
+    def service_subscribers(self, service_id: typing.Optional[str]) -> typing.List[ServiceSubscriberInfo]:
+        raise NotImplementedError
+    def service_subscriptions(self, ) -> typing.List[ServiceSubscriptionInfo]:
+        raise NotImplementedError
+    def set_service_subscription_policy(self, service_id: str,policy: SubscriptionPolicyConfig) -> None:
+        raise NotImplementedError
+    def set_service_topic_checkpoint(self, service_id: str,topic: str,body: str) -> None:
+        raise NotImplementedError
+    def subscribe_service(self, provider: str,service_id: str,topic: str,mode: SubscriptionMode,params: str,keys: typing.List[str]) -> str:
+        raise NotImplementedError
     def unregister_service(self, service_id: str) -> bool:
+        raise NotImplementedError
+    def unsubscribe_service(self, sub_id: str) -> bool:
         raise NotImplementedError
 
 class MeshServices(MeshServicesProtocol):
@@ -9136,6 +9725,39 @@ class MeshServices(MeshServicesProtocol):
         inst = cls.__new__(cls)
         inst._handle = handle
         return inst
+    def accept_service_subscription(self, sub_id: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(sub_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(sub_id),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def clear_service_topic(self, service_id: str,topic: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(service_id)
+
+        _UniffiFfiConverterString.check_lower(topic)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(service_id),
+            _UniffiFfiConverterString.lower(topic),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def discover_services(self, service_id: typing.Optional[str]) -> str:
         
         _UniffiFfiConverterOptionalString.check_lower(service_id)
@@ -9148,6 +9770,48 @@ class MeshServices(MeshServicesProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def end_service_subscription(self, sub_id: str,reason: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(sub_id)
+
+        _UniffiFfiConverterString.check_lower(reason)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(sub_id),
+            _UniffiFfiConverterString.lower(reason),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def publish_service_update(self, service_id: str,topic: str,key: typing.Optional[str],body: str) -> ServicePublishReport:
+        
+        _UniffiFfiConverterString.check_lower(service_id)
+
+        _UniffiFfiConverterString.check_lower(topic)
+
+        _UniffiFfiConverterOptionalString.check_lower(key)
+
+        _UniffiFfiConverterString.check_lower(body)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(service_id),
+            _UniffiFfiConverterString.lower(topic),
+            _UniffiFfiConverterOptionalString.lower(key),
+            _UniffiFfiConverterString.lower(body),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeServicePublishReport.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -9169,6 +9833,24 @@ class MeshServices(MeshServicesProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def reject_service_subscription(self, sub_id: str,reason: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(sub_id)
+
+        _UniffiFfiConverterString.check_lower(reason)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(sub_id),
+            _UniffiFfiConverterString.lower(reason),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -9199,6 +9881,21 @@ class MeshServices(MeshServicesProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def resync_service_subscription(self, sub_id: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(sub_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(sub_id),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def send_service_request(self, provider: str,service_id: str,method: str,body: str) -> str:
         
         _UniffiFfiConverterString.check_lower(provider)
@@ -9223,6 +9920,102 @@ class MeshServices(MeshServicesProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def service_subscribers(self, service_id: typing.Optional[str]) -> typing.List[ServiceSubscriberInfo]:
+        
+        _UniffiFfiConverterOptionalString.check_lower(service_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterOptionalString.lower(service_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterSequenceTypeServiceSubscriberInfo.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def service_subscriptions(self, ) -> typing.List[ServiceSubscriptionInfo]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterSequenceTypeServiceSubscriptionInfo.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def set_service_subscription_policy(self, service_id: str,policy: SubscriptionPolicyConfig) -> None:
+        
+        _UniffiFfiConverterString.check_lower(service_id)
+
+        _UniffiFfiConverterTypeSubscriptionPolicyConfig.check_lower(policy)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(service_id),
+            _UniffiFfiConverterTypeSubscriptionPolicyConfig.lower(policy),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def set_service_topic_checkpoint(self, service_id: str,topic: str,body: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(service_id)
+
+        _UniffiFfiConverterString.check_lower(topic)
+
+        _UniffiFfiConverterString.check_lower(body)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(service_id),
+            _UniffiFfiConverterString.lower(topic),
+            _UniffiFfiConverterString.lower(body),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def subscribe_service(self, provider: str,service_id: str,topic: str,mode: SubscriptionMode,params: str,keys: typing.List[str]) -> str:
+        
+        _UniffiFfiConverterString.check_lower(provider)
+
+        _UniffiFfiConverterString.check_lower(service_id)
+
+        _UniffiFfiConverterString.check_lower(topic)
+
+        _UniffiFfiConverterTypeSubscriptionMode.check_lower(mode)
+
+        _UniffiFfiConverterString.check_lower(params)
+
+        _UniffiFfiConverterSequenceString.check_lower(keys)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(provider),
+            _UniffiFfiConverterString.lower(service_id),
+            _UniffiFfiConverterString.lower(topic),
+            _UniffiFfiConverterTypeSubscriptionMode.lower(mode),
+            _UniffiFfiConverterString.lower(params),
+            _UniffiFfiConverterSequenceString.lower(keys),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def unregister_service(self, service_id: str) -> bool:
         
         _UniffiFfiConverterString.check_lower(service_id)
@@ -9235,6 +10028,21 @@ class MeshServices(MeshServicesProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def unsubscribe_service(self, sub_id: str) -> bool:
+        
+        _UniffiFfiConverterString.check_lower(sub_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(sub_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -13436,6 +14244,9 @@ __all__ = [
     "RelayPriority",
     "MessagePriority",
     "ContentType",
+    "SubscriptionMode",
+    "SubscriptionPolicyKind",
+    "SubscriptionRulesFallback",
     "TelemetryOs",
     "MlsVerbosity",
     "AppState",
@@ -13486,6 +14297,10 @@ __all__ = [
     "ReliabilityConfig",
     "ReticulumMessage",
     "SendMessageOptions",
+    "ServicePublishReport",
+    "ServiceSubscriberInfo",
+    "ServiceSubscriptionInfo",
+    "SubscriptionPolicyConfig",
     "TelemetryConfig",
     "TelemetryStats",
     "TransportConfig",
