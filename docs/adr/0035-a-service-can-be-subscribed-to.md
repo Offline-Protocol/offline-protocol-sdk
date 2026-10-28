@@ -127,6 +127,51 @@ Consumer A                                   Provider B
     |-- unsubscribe_service(sub_id) ------------>|  __SVC_UNSUB__
 ```
 
+### Topic patterns and key filters
+
+Two narrowings of what a subscription is sent, both applied by the provider,
+so that what the consumer did not ask for never leaves the provider's device.
+
+**A topic pattern** is a topic prefix followed by one `*` (`rooms/*`), or `*`
+alone for every topic of the service. One subscription then follows every
+topic in its mode whose name starts with the prefix, including a topic first
+published after the subscription was made, up to 64 topics
+(`MAX_PATTERN_TOPICS`). A `*` anywhere but the end is refused, so that a later
+reading of one as a mid-topic wildcard is never taken by this version as a
+literal. Each followed topic keeps its own stream, seqs, digest and
+checkpoint: a pattern subscription is caught up and recovered topic by topic,
+exactly as an exact subscription to each would be, and an update names its
+topic. A topic in the other mode is not followed rather than refused, since a
+pattern does not name it.
+
+A topic the consumer has never heard of, missing from its renewal, is one it
+holds nothing of: the provider catches it up from position zero on that
+topic's stream, which replays the buffer or sends the checkpoint. Without
+that, the first update of a topic created while the consumer was out of range
+would be lost for good, because the consumer cannot ask for a topic it does
+not know exists.
+
+**A key filter** lists the `latest` keys to be sent, each exact or a prefix
+ending in `*` (at most 32 entries). The provider sends only those keys, in the
+snapshot and live, and computes the renewal digest over them only; a digest
+over every key would differ from what a filtered consumer holds at every
+renewal and resend the snapshot each time. The consumer drops a key outside
+its filter even from its own provider. A `log` subscription takes no filter:
+its consumer tracks a contiguous position, and an update withheld by a filter
+would be a gap that never fills.
+
+`params` stays the application's. It is handed to the provider's application
+untouched, as before; the SDK does not parse it, and filtering is a separate,
+declarative field because the provider's engine must apply it per update
+without a call into the application, which a binding cannot answer
+synchronously.
+
+**Older providers.** Both features raise the wire version to 2. A provider on
+version 1 ignores the filter and refuses or literally matches the pattern, so
+a consumer that asked for either and is accepted at version 1 ends the
+subscription with `unsupported` (and tells the provider) rather than receive
+what it did not ask for.
+
 ### Admission policy
 
 Each registered service has a subscription policy, set with
@@ -181,6 +226,8 @@ Consumer:
 ```rust
 pub fn subscribe_service(&mut self, provider: &str, service_id: &str, topic: &str,
                          mode: SubscriptionMode, params: &str) -> Result<String>;   // sub_id
+pub fn subscribe_service_with(&mut self, provider: &str, service_id: &str, topic: &str,
+                              options: SubscribeOptions) -> Result<String>;     // + keys
 pub fn unsubscribe_service(&mut self, sub_id: &str) -> Result<bool>;
 pub fn resync_service_subscription(&mut self, sub_id: &str) -> Result<()>;
 pub fn service_subscriptions(&self) -> Vec<SubscriptionInfo>;
@@ -225,12 +272,16 @@ service frames, each only ever inside `__MLS_ENC__`:
 
 | Prefix | Direction | Body |
 |--------|-----------|------|
-| `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, lease_ms, resume?: {stream, seq, digest}, resync}` |
-| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost}` |
-| `__SVC_UPD__` | provider to consumer | `{v, sub_id, stream, seq, key?, body, snapshot}` |
+| `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, keys?, lease_ms, resume?: {stream, seq, digest, topics?}, resync}` |
+| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?}` |
+| `__SVC_UPD__` | provider to consumer | `{v, sub_id, topic?, stream, seq, key?, body, snapshot}` |
 | `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
 
 `status` is `accepted`, `rejected`, `not_found`, `mode_mismatch` or `full`.
+For a pattern subscription, `resume.topics` and the reply's `topics` carry
+`{topic, stream, seq, digest}` and `{topic, stream, seq, history_lost}` per
+topic in place of the single position, and `topic` on an update names the
+topic it was published to. `v` is 2; see *Older providers* above.
 `__SVC_SUB__` is also the renewal and the resync request: the same `sub_id`
 again, idempotent. `seq` in the reply is the baseline the consumer may treat
 as caught up to before the catch-up frames that follow it.
@@ -333,7 +384,9 @@ reported rather than silent.
 | Limit | Value | At the limit |
 |-------|-------|--------------|
 | Update or checkpoint body | 64 KiB (`MAX_SERVICE_BODY_SIZE`) | `PayloadTooLarge` at the call; dropped on receipt |
-| Topic | 1 to 128 bytes, `A-Z a-z 0-9 . _ - /` | `InvalidArgument` |
+| Topic | 1 to 128 bytes, `A-Z a-z 0-9 . _ - /`; a subscription may end it in `*` | `InvalidArgument` |
+| Topics one pattern subscription follows | 64 | Further matching topics are not followed |
+| Key filter | 32 entries, `latest` only | `InvalidArgument`; `invalid_subscription` on the provider |
 | Key | 1 to 256 bytes | `InvalidArgument` |
 | `params` | 4 KiB | `PayloadTooLarge` |
 | Subscriptions a provider holds | 256 | `full`, never eviction (invariant 6) |
@@ -372,10 +425,12 @@ reported rather than silent.
    together, the browser worker, and a device coordination example
    (`examples/web-coordination`). `ServiceSubscriptionConfig` is not on the
    bindings' config record yet, so a binding runs the defaults.
-3. **Later, each only if a product needs it:** group-backed topics (one MLS
-   group per topic; cryptographic revocation and one encryption for many
+3. **Narrowing and fan-out.** Topic patterns and key filters, as above,
+   through every binding and the example. Group-backed topics (one MLS group
+   per topic: cryptographic revocation and one encryption for many
    subscribers, at the cost of a commit per join and ADR 0032's ratchet-gap
-   budget), filtering by `params`, and topic wildcards.
+   budget) change how groups behave rather than how subscriptions do, and are
+   their own decision: [ADR 0036](0036-a-topic-can-be-backed-by-a-group.md).
 
 ## Consequences
 

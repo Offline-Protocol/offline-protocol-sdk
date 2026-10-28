@@ -421,6 +421,29 @@ protocol.resync_service_subscription(&sub_id)?;   // the whole state again, now
 protocol.unsubscribe_service(&sub_id)?;
 ```
 
+A subscription can be narrowed, and the provider applies both narrowings, so
+what was not asked for never leaves its device:
+
+```rust
+use offline_protocol::SubscribeOptions;
+
+// Every room, including rooms first published after this call; each update
+// names its topic ("rooms/kitchen"), and each topic is recovered on its own.
+protocol.subscribe_service(&provider, "home.v1", "rooms/*", SubscriptionMode::Latest, "")?;
+
+// Only these keys of a `latest` topic: exact, or a prefix ending in `*`.
+protocol.subscribe_service_with(&provider, "fleet.v1", "car", SubscribeOptions {
+    keys: vec!["battery".into(), "tyres.*".into()],
+    ..SubscribeOptions::new(SubscriptionMode::Latest)
+})?;
+```
+
+A pattern is a prefix and one final `*` (`*` alone is every topic), and
+follows at most 64 topics. A key filter applies to `latest` only: a `log`
+consumer tracks a contiguous position that a withheld update would leave a
+permanent gap in. A provider on a build without either ends the subscription
+with the reason `unsupported`.
+
 ### Provider
 
 ```rust

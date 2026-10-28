@@ -235,9 +235,9 @@ session between the consumer and the provider, toward a peer that advertised
 
 | Prefix | Direction | Body (JSON) |
 |--------|-----------|-------------|
-| `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, lease_ms, resume?: {stream, seq, digest}, resync}`. Subscribe, renew (with `resume`) or resync |
-| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost}`. `status` is `accepted`, `rejected`, `not_found`, `mode_mismatch` or `full` |
-| `__SVC_UPD__` | provider to consumer | `{v, sub_id, stream, seq, key?, body, snapshot}` |
+| `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, keys?, lease_ms, resume?: {stream, seq, digest, topics?}, resync}`. Subscribe, renew (with `resume`) or resync |
+| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?}`. `status` is `accepted`, `rejected`, `not_found`, `mode_mismatch` or `full` |
+| `__SVC_UPD__` | provider to consumer | `{v, sub_id, topic?, stream, seq, key?, body, snapshot}` |
 | `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
 
 A sender MUST NOT send a subscription frame in plaintext, and a sender that
@@ -247,6 +247,21 @@ subscription layer with the MLS-authenticated sender, and MUST drop one that
 arrives as plaintext whatever its signature says. It MUST accept an
 `__SVC_UPD__` or `__SVC_SUB_R__` only from the provider the subscription
 names, and an `__SVC_UNSUB__` only from the other side of it.
+
+`v` is 2. A `topic` that ends in `*` is a pattern: the provider follows
+every topic in the subscription's mode that starts with what precedes the
+`*`, up to 64, and positions each separately. For a pattern,
+`resume.topics` is a list of `{topic, stream, seq, digest}`, the reply's
+`topics` a list of `{topic, stream, seq, history_lost}`, and every update
+carries `topic`; a topic absent from a renewal's `resume.topics` is caught up
+from position zero. `keys`, on a `latest` subscription only, lists the keys
+to send, each exact or a prefix ending in `*` (at most 32); the provider
+sends no other key and computes the renewal digest over these keys only, and
+the consumer drops an update for any other key. A provider MUST answer
+`rejected` with reason `invalid_subscription` to `keys` on a `log`
+subscription, or a `*` anywhere but the end of `topic`. A consumer that used
+either and is accepted by a reply with `v` below 2 MUST end the subscription
+with `__SVC_UNSUB__` and reason `unsupported`: that provider applied neither.
 
 A `latest` update to a subscriber with no live link is queued so that it
 supersedes the one queued before it for the same subscription and key; one

@@ -103,6 +103,15 @@ updates and an optional checkpoint (`log`). It holds them whether or not
 anyone is subscribed, so the first subscriber gets state without the
 application publishing it again.
 
+**A pattern subscription** (`prefix*`) follows every topic in its mode whose
+name starts with the prefix, up to 64, each with its own stream and
+position: the table below applies to each topic separately, and a topic the
+subscriber's renewal does not name is caught up as a renewal at position
+zero would be (the buffer replayed, or the checkpoint). A topic created after
+the subscription is followed from its first publish. **A key filter** narrows
+a `latest` subscription to the keys it lists, in the snapshot, live, and in
+the digest a renewal is compared against.
+
 **An expired lease is dropped without a frame.** A subscriber that is still
 there renews, and the renewal subscribes it again through the policy; one that
 is gone would never read the frame.
@@ -114,7 +123,9 @@ publish_service_update(service, topic, key?, body)
   |
   |-- latest: table[key] = (seq, body); log: buffer.push(seq, body)
   |
-  +-- for each admitted subscriber on the topic:
+  +-- for each admitted subscriber on the topic, or on a pattern that
+  |   follows it (or now starts to, while it follows fewer than 64), whose
+  |   key filter passes the key:
         latest, sent less than min_update_interval ago -> key marked dirty;
                 the newest value goes on the first tick after the interval
         latest, otherwise:

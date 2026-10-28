@@ -365,6 +365,9 @@ protocol.onEvent((event) => {
     render(event.key, event.body);
   }
 });
+
+// Every topic under rooms/, and only two keys of each; updates name their topic.
+await protocol.subscribeService(providerAddress, 'home.v1', 'rooms/*', 'latest', '', ['temp', 'humidity']);
 ```
 
 ---

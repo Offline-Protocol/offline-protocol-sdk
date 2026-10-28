@@ -599,7 +599,8 @@ The worker exposes the service registry and service subscriptions
 ([ADR 0035](../adr/0035-a-service-can-be-subscribed-to.md)):
 `registerService`, `subscribeService`, `publishServiceUpdate`,
 `resyncServiceSubscription`, `setServiceSubscriptionPolicy` and the calls
-around them. Nothing about them is browser-specific: every subscription
+around them; `subscribeService` takes a topic pattern and a key filter as
+`{ mode, params, keys }`. Nothing about them is browser-specific: every subscription
 frame is sealed by the engine in the 1:1 session, a `latest` update to a
 neighbour with a live link is an ephemeral send (W10), and one to a device
 reached otherwise waits in the sealed log as the one value per key that

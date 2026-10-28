@@ -31,6 +31,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Python services wrapper and local API, and in the browser worker, where
   `examples/web-coordination` shows devices watching each other's state. The
   decision is ADR 0035, the behaviour `docs/state-machines/service-subscriptions.md`.
+- **A subscription can be narrowed.** A topic pattern (`rooms/*`, or `*`)
+  follows every matching topic in its mode, up to 64, including topics first
+  published after it, each caught up and recovered on its own; every update
+  names its topic. A key filter limits a `latest` subscription to the keys it
+  lists, exact or by prefix. The provider applies both, so a filtered key or
+  an unmatched topic never leaves its device. `subscribe_service_with` takes
+  the filter in Rust, and `subscribe_service` takes `keys` in every binding.
+  A provider on a build without either ends the subscription with
+  `unsupported`. Group-backed topics, the rest of ADR 0035's third phase, are
+  proposed in ADR 0036.
 
 ### Fixed
 

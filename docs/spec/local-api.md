@@ -477,7 +477,7 @@ registered it.
 | `services.discover_services` | `service_id?` | string (query id) |
 | `services.send_service_request` | `provider`, `service_id`, `method`, `body` | string (request id) |
 | `services.respond_to_service_request` | `request_id`, `requester`, `service_id`, `status`, `body` | string (message id) |
-| `services.subscribe_service` | `provider`, `service_id`, `topic`, `mode <SubscriptionMode>`, `params` | string (subscription id) |
+| `services.subscribe_service` | `provider`, `service_id`, `topic` (or a pattern, `prefix*`), `mode <SubscriptionMode>`, `params`, `keys <sequence<string>>` | string (subscription id) |
 | `services.unsubscribe_service` | `sub_id` | `!` |
 | `services.resync_service_subscription` | `sub_id` | `null` |
 | `services.service_subscriptions` | | `[{ServiceSubscriptionInfo}]` |
