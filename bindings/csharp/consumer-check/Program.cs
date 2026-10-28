@@ -1,5 +1,6 @@
 using OfflineProtocol.Sdk;
 using OfflineProtocol.Sdk.Storage;
+using OfflineProtocol.Sdk.Telemetry;
 
 // Every ProtocolConfig field without a default in the interface definition; the rest take the
 // definition's defaults. An example program's values, as in bindings/c/README.md, never the SDK's.
@@ -90,6 +91,36 @@ try
         Console.Error.WriteLine($"FAIL: poll_event mismatch polled={polled} callback={lastEvent}");
         return 1;
     }
+
+    try
+    {
+        await engine.EnableTelemetryAsync(
+            new TelemetryConfig
+            {
+                ApiKey = "",
+                AppId = "com.offlineprotocol.csharp.consumer",
+                OsMajor = TelemetryPlatform.OsMajor,
+            });
+    }
+    catch (ProtocolEngineException ex)
+    {
+        if (ex.Message.Contains("filled by the binding", StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine($"FAIL: enable_telemetry must not refuse binding-filled os: {ex.Message}");
+            return 1;
+        }
+    }
+
+    try
+    {
+        await engine.DisableTelemetryAsync();
+    }
+    catch (ProtocolEngineException)
+    {
+        // Enable may fail on an empty api_key before telemetry is active.
+    }
+    await engine.NotifyAppStateAsync(AppState.Background);
+    await engine.NotifyAppStateAsync(AppState.Active);
 
     await engine.StartAsync();
     await engine.StopAsync();

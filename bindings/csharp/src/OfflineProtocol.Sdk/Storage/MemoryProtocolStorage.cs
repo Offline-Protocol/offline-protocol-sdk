@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Text.Json;
 
 namespace OfflineProtocol.Sdk.Storage;
 
@@ -8,13 +7,14 @@ namespace OfflineProtocol.Sdk.Storage;
 /// </summary>
 public sealed class MemoryProtocolStorage : IProtocolStorage
 {
-    private readonly ConcurrentDictionary<(string Type, string Id), byte[]> _entries = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte[]>> _byType = new();
 
     public OfflineProtocolStorageStatus Store(string keyType, string keyId, ReadOnlySpan<byte> data)
     {
         try
         {
-            _entries[(keyType, keyId)] = data.ToArray();
+            var bucket = _byType.GetOrAdd(keyType, static _ => new ConcurrentDictionary<string, byte[]>());
+            bucket[keyId] = data.ToArray();
             return OfflineProtocolStorageStatus.Ok;
         }
         catch
@@ -25,24 +25,31 @@ public sealed class MemoryProtocolStorage : IProtocolStorage
 
     public byte[]? Load(string keyType, string keyId)
     {
-        return _entries.TryGetValue((keyType, keyId), out var data) ? data : null;
+        if (!_byType.TryGetValue(keyType, out var bucket))
+        {
+            return null;
+        }
+
+        return bucket.TryGetValue(keyId, out var data) ? data : null;
     }
 
     public OfflineProtocolStorageStatus Remove(string keyType, string keyId)
     {
-        _entries.TryRemove((keyType, keyId), out _);
+        if (_byType.TryGetValue(keyType, out var bucket))
+        {
+            bucket.TryRemove(keyId, out _);
+        }
+
         return OfflineProtocolStorageStatus.Ok;
     }
 
     public IReadOnlyList<string> ListKeyIds(string keyType)
     {
-        return _entries.Keys
-            .Where(k => k.Type == keyType)
-            .Select(k => k.Id)
-            .OrderBy(id => id, StringComparer.Ordinal)
-            .ToArray();
-    }
+        if (!_byType.TryGetValue(keyType, out var bucket))
+        {
+            return Array.Empty<string>();
+        }
 
-    internal string ListKeysJson(string keyType) =>
-        JsonSerializer.Serialize(ListKeyIds(keyType));
+        return bucket.Keys.OrderBy(id => id, StringComparer.Ordinal).ToArray();
+    }
 }

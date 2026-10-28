@@ -68,8 +68,11 @@ code is posted off the callback (see Events below).
 
 ### Events (PR2)
 
-`SetEventCallbackAsync` installs `offline_protocol_set_event_callback`. The
-handler runs on a **thread-pool** thread with a copy of the JSON. It must not
+`SetEventCallbackAsync` installs `offline_protocol_set_event_callback`. Events
+are copied on the engine thread, queued on a **bounded channel** (default 256,
+`DropWrite` when full), and delivered on a **dedicated background delivery
+thread**. Clearing the callback or disposing the engine **deactivates** the
+bridge first so queued events are not delivered afterward. The handler must not
 call back into the same `ProtocolEngine` synchronously. `PollEventAsync` reads
 the same queue as the C binding's `offline_protocol_poll_event`.
 

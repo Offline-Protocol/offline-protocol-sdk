@@ -137,10 +137,9 @@ public sealed class ProtocolEngine : IAsyncDisposable
         string method,
         string? paramsJson = null,
         CancellationToken cancellationToken = default) =>
-        Task.Run(
+        OffThreadExecution.RunAsync(
             () =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 NativeLibraryLoader.EnsureRegistered();
                 var err = default(OfflineProtocolError);
                 var status = OfflineProtocolNative.offline_protocol_call_static(method, paramsJson, out var resultPtr, ref err);
@@ -157,10 +156,9 @@ public sealed class ProtocolEngine : IAsyncDisposable
     public static Task<string> RunStorageConformanceAsync(
         NativeStorageProvider storage,
         CancellationToken cancellationToken = default) =>
-        Task.Run(
+        OffThreadExecution.RunAsync(
             () =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 NativeLibraryLoader.EnsureRegistered();
                 var err = default(OfflineProtocolError);
                 var native = storage.ToNative();
@@ -204,7 +202,7 @@ public sealed class ProtocolEngine : IAsyncDisposable
             cancellationToken);
 
     /// <summary>
-    /// Delivers events on the thread pool. The handler must not call back into this engine synchronously.
+    /// Delivers events on a dedicated delivery thread. The handler must not call back into this engine synchronously.
     /// </summary>
     public Task SetEventCallbackAsync(Action<string>? handler, CancellationToken cancellationToken = default) =>
         EnqueueAsync<object?>(
@@ -213,7 +211,9 @@ public sealed class ProtocolEngine : IAsyncDisposable
                 var err = default(OfflineProtocolError);
                 if (handler is null)
                 {
+                    var previous = _eventBridge;
                     _eventBridge = null;
+                    previous?.Deactivate();
                     var status = OfflineProtocolNative.offline_protocol_set_event_callback(
                         _handle,
                         IntPtr.Zero,
@@ -314,13 +314,15 @@ public sealed class ProtocolEngine : IAsyncDisposable
                     if (_handle != IntPtr.Zero)
                     {
                         var err = default(OfflineProtocolError);
+                        var previous = _eventBridge;
+                        _eventBridge = null;
+                        previous?.Deactivate();
                         OfflineProtocolNative.offline_protocol_set_event_callback(
                             _handle,
                             IntPtr.Zero,
                             IntPtr.Zero,
                             IntPtr.Zero,
                             ref err);
-                        _eventBridge = null;
                         OfflineProtocolNative.offline_protocol_free(_handle);
                         _handle = IntPtr.Zero;
                     }

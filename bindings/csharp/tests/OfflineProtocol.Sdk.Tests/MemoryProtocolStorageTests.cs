@@ -1,6 +1,7 @@
-namespace OfflineProtocol.Sdk.Tests;
-
+using System.Text.Json;
 using OfflineProtocol.Sdk.Storage;
+
+namespace OfflineProtocol.Sdk.Tests;
 
 public sealed class MemoryProtocolStorageTests
 {
@@ -18,12 +19,23 @@ public sealed class MemoryProtocolStorageTests
     }
 
     [Fact]
+    public void ListKeyIds_is_scoped_to_key_type()
+    {
+        var storage = new MemoryProtocolStorage();
+        storage.Store("a", "1", [0]);
+        storage.Store("b", "2", [0]);
+        var aKeys = storage.ListKeyIds("a");
+        Assert.Single(aKeys);
+        Assert.Equal("1", aKeys[0]);
+    }
+
+    [Fact]
     public void ListKeyIds_returns_json_safe_ids()
     {
         var storage = new MemoryProtocolStorage();
         storage.Store("kt", "a", [0]);
         storage.Store("kt", "b\"c", [0]);
-        var json = storage.ListKeysJson("kt");
+        var json = JsonSerializer.Serialize(storage.ListKeyIds("kt"));
         Assert.Contains("\"a\"", json, StringComparison.Ordinal);
         Assert.Contains("\"b\\\"c\"", json, StringComparison.Ordinal);
     }

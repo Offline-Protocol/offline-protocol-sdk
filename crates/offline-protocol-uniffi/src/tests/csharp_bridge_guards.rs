@@ -134,3 +134,16 @@ fn csharp_telemetry_config_omits_os_and_reads_the_section() {
         "TelemetryPlatform must supply os_major for C12"
     );
 }
+
+// Native callbacks run on the engine thread (CS1); the bridge must hand events
+// to its own thread and stop delivering before the native side drops it.
+#[test]
+fn csharp_events_are_delivered_off_the_engine_thread() {
+    let events = read("bindings/csharp/src/OfflineProtocol.Sdk/Native/EventCallbackBridge.cs");
+    assert!(
+        events.contains("Channel.CreateBounded")
+            && events.contains("Deactivate")
+            && events.contains("offline-protocol-events"),
+        "EventCallbackBridge must queue off the engine thread and deactivate before drop"
+    );
+}

@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using OfflineProtocol.Sdk.Native;
 
 namespace OfflineProtocol.Sdk.Storage;
@@ -145,9 +146,7 @@ public sealed class NativeStorageProvider
         {
             var self = FromCtx(ctx);
             var type = Utf8(keyType);
-            var json = self._storage is MemoryProtocolStorage memory
-                ? memory.ListKeysJson(type)
-                : System.Text.Json.JsonSerializer.Serialize(self._storage.ListKeyIds(type));
+            var json = JsonSerializer.Serialize(self._storage.ListKeyIds(type));
             var bytes = Encoding.UTF8.GetBytes(json);
             outJson = Marshal.AllocHGlobal(bytes.Length);
             if (bytes.Length > 0)
