@@ -459,7 +459,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
 
@@ -1352,7 +1352,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: ${{ matrix.python }}
           cache: "pip"
@@ -1408,7 +1408,7 @@ jobs:
           shared-key: ci-python-wheel-${{ matrix.platform }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
 
@@ -1496,7 +1496,7 @@ jobs:
       - name: Test the Python version conversion
         run: bash scripts/tests/test-pep440-version.sh
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
 
