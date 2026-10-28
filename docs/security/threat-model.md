@@ -1362,6 +1362,36 @@ bytes only: the engine announces a peer under the address its identity
 proves, never the advertised name, and MLS admits it to nothing until it is
 invited. The person can revoke a grant in the browser's site settings.
 
+### R32. A subscription tells its provider who is watching, and carriers when
+
+A subscription ([ADR 0035](../adr/0035-a-service-can-be-subscribed-to.md))
+is sealed end to end: every frame travels inside the 1:1 MLS session and has
+no plaintext form, so R9's fallback does not reach it. What remains:
+
+- **The provider learns who subscribed to what, and how often they renew.**
+  It must, to send to them. Subscribers do not learn about each other: each is
+  sent its own sealed copy.
+- **A carrier learns that two devices exchange frames on a rhythm.** An
+  update's frame is opaque, but one every 50 milliseconds from B to A says A
+  watches something live on B. Nothing pads or shapes the traffic.
+- **Revocation is a promise.** `end_service_subscription` stops the updates;
+  the subscriber keeps its session with the provider. A change of policy
+  (dropping a peer from `allow_peers`, or removing it from a group in
+  `allow_groups`) reaches a subscription already held at its next renewal, at
+  most half a lease later, because every renewal goes through the policy.
+  Were renewals exempt, a refused peer that keeps renewing would be streamed
+  to forever. Either way the peer is cut off by the provider's word, not by
+  cryptography: it still holds its session.
+- **A `latest` value that left before it was superseded can still arrive**,
+  from a relay mailbox or a custodian. The consumer drops anything not newer
+  than what it holds for the key, so a late value is never surfaced as
+  current; it still costs the frame.
+
+**What bounds it:** a provider holds at most 256 subscriptions and 16 from
+one peer, refusing rather than evicting at either cap, so a flood of fresh
+identities cannot push out the subscribers it already has. The default
+admission policy asks the application about every subscriber.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device
