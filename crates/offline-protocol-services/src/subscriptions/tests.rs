@@ -5,9 +5,10 @@
 use offline_protocol_core::time::{Duration, Instant};
 
 use super::*;
+use crate::error::ServiceError;
 use crate::payloads::{
-    is_subscription_frame, SubscriptionMode, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE,
-    SVC_UPDATE,
+    is_subscription_frame, SubscribeStatus, SubscriptionMode, MAX_PATTERN_TOPICS, SVC_SUBSCRIBE,
+    SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 
 const CONSUMER: &str = "alice";
@@ -90,9 +91,13 @@ impl Link {
     }
 
     fn subscribe(&mut self, topic: &str, mode: SubscriptionMode) -> String {
+        self.subscribe_with(topic, SubscribeOptions::new(mode))
+    }
+
+    fn subscribe_with(&mut self, topic: &str, options: SubscribeOptions) -> String {
         let (sub_id, frame) = self
             .consumer
-            .subscribe(PROVIDER, SVC, topic, mode, "", self.now)
+            .subscribe(PROVIDER, SVC, topic, &options, self.now)
             .unwrap();
         self.consumer.mark_sent(&sub_id);
         self.pump(SubscriptionOutput {
@@ -137,6 +142,22 @@ impl Link {
         updates
     }
 
+    /// `(topic, key, body)` of every update delivered, in order, then
+    /// forgotten.
+    fn take_topic_updates(&mut self) -> Vec<(String, Option<String>, String)> {
+        let mut updates = Vec::new();
+        self.events.retain(|event| match event {
+            ServiceEvent::ServiceUpdateReceived {
+                topic, key, body, ..
+            } => {
+                updates.push((topic.clone(), key.clone(), body.clone()));
+                false
+            }
+            _ => true,
+        });
+        updates
+    }
+
     /// `(role, state, reason)` of every state change, in order, then
     /// forgotten.
     fn take_changes(&mut self) -> Vec<(String, String, String)> {
@@ -171,6 +192,7 @@ fn update(sub_id: &str, stream: &str, seq: u64, key: Option<&str>, body: &str) -
         &crate::payloads::UpdatePayload {
             v: 1,
             sub_id: sub_id.to_string(),
+            topic: None,
             stream: stream.to_string(),
             seq,
             key: key.map(str::to_string),
@@ -345,11 +367,23 @@ fn a_pending_subscription_times_out_with_the_reason_it_waited_for() {
     let now = link.now;
     let (never_sent, _) = link
         .consumer
-        .subscribe(PROVIDER, SVC, "a", SubscriptionMode::Log, "", now)
+        .subscribe(
+            PROVIDER,
+            SVC,
+            "a",
+            &SubscribeOptions::new(SubscriptionMode::Log),
+            now,
+        )
         .unwrap();
     let (unanswered, _) = link
         .consumer
-        .subscribe(PROVIDER, SVC, "b", SubscriptionMode::Log, "", now)
+        .subscribe(
+            PROVIDER,
+            SVC,
+            "b",
+            &SubscribeOptions::new(SubscriptionMode::Log),
+            now,
+        )
         .unwrap();
     link.consumer.mark_sent(&unanswered);
     assert_eq!(link.consumer.frames_awaiting_session(PROVIDER).len(), 1);
@@ -509,6 +543,372 @@ fn one_subscription_per_topic_on_the_consumer() {
     link.subscribe("pos", SubscriptionMode::Latest);
     assert!(link
         .consumer
-        .subscribe(PROVIDER, SVC, "pos", SubscriptionMode::Latest, "", link.now)
+        .subscribe(
+            PROVIDER,
+            SVC,
+            "pos",
+            &SubscribeOptions::new(SubscriptionMode::Latest),
+            link.now
+        )
         .is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Key filters
+// ---------------------------------------------------------------------------
+
+fn keyed(keys: &[&str]) -> SubscribeOptions {
+    SubscribeOptions {
+        keys: keys.iter().map(|key| key.to_string()).collect(),
+        ..SubscribeOptions::new(SubscriptionMode::Latest)
+    }
+}
+
+#[test]
+fn a_key_filter_holds_back_every_other_key_in_the_snapshot_and_live() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("car", Some("battery"), "80");
+    link.publish("car", Some("temp"), "21");
+    link.publish("car", Some("pos.lat"), "51.5");
+    link.subscribe_with("car", keyed(&["battery", "pos.*"]));
+    let mut snapshot: Vec<_> = link
+        .take_updates()
+        .into_iter()
+        .map(|(key, body, _)| (key.unwrap(), body))
+        .collect();
+    snapshot.sort();
+    assert_eq!(
+        snapshot,
+        vec![
+            ("battery".to_string(), "80".to_string()),
+            ("pos.lat".to_string(), "51.5".to_string())
+        ]
+    );
+
+    link.now += Duration::from_secs(1);
+    let (out, outcome) = link
+        .provider
+        .publish(SVC, "car", Some("temp"), "22", link.now)
+        .unwrap();
+    assert_eq!(outcome.subscribers, 0, "a filtered key reaches nobody");
+    assert!(out.frames.is_empty());
+    link.publish("car", Some("pos.lon"), "-0.1");
+    assert_eq!(
+        link.take_updates(),
+        vec![(Some("pos.lon".into()), "-0.1".into(), false)]
+    );
+}
+
+/// The digest a renewal carries covers the filtered keys on both sides, so
+/// a caught-up filtered subscriber is not sent a snapshot at every renewal.
+#[test]
+fn a_filtered_subscriber_that_holds_everything_is_not_resent_it() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("car", Some("battery"), "80");
+    link.publish("car", Some("temp"), "21");
+    link.subscribe_with("car", keyed(&["battery"]));
+    link.take_updates();
+    // The consumer would drop a resent value it holds, so the frames are
+    // what show whether one was sent.
+    link.now += Duration::from_secs(31);
+    let renewal = link.consumer.tick(link.now);
+    assert_eq!(renewal.frames.len(), 1);
+    let answer = link.to_provider(&renewal.frames[0].content);
+    assert_eq!(answer.frames.len(), 1, "the reply alone");
+    assert!(answer.frames[0].content.starts_with(SVC_SUBSCRIBE_REPLY));
+}
+
+#[test]
+fn a_key_filter_on_a_log_subscription_is_refused_on_both_sides() {
+    let mut link = Link::new(Admission::Accept);
+    let options = SubscribeOptions {
+        keys: vec!["x".into()],
+        ..SubscribeOptions::new(SubscriptionMode::Log)
+    };
+    assert!(matches!(
+        link.consumer
+            .subscribe(PROVIDER, SVC, "ev", &options, link.now),
+        Err(ServiceError::InvalidArgument(_))
+    ));
+
+    let frame = super::encode(
+        SVC_SUBSCRIBE,
+        &crate::payloads::SubscribePayload {
+            v: 2,
+            sub_id: "s1".into(),
+            service_id: SVC.into(),
+            topic: "ev".into(),
+            mode: SubscriptionMode::Log,
+            params: String::new(),
+            keys: vec!["x".into()],
+            lease_ms: 60_000,
+            resume: None,
+            resync: false,
+        },
+    )
+    .unwrap();
+    let out = link.to_provider(&frame);
+    assert!(!link.provider.holds("s1"));
+    assert!(out.frames[0].content.contains("invalid_subscription"));
+}
+
+#[test]
+fn a_consumer_drops_a_key_its_filter_excludes_even_from_its_provider() {
+    let mut link = Link::new(Admission::Accept);
+    let sub_id = link.subscribe_with("car", keyed(&["battery"]));
+    // Checked before anything else about the update, its stream included.
+    let out = link.to_consumer(&update(&sub_id, "any", 1, Some("temp"), "21"));
+    assert!(out.events.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Topic patterns
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_pattern_snapshots_every_matching_topic_and_follows_new_ones() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("sensors/a", Some("v"), "1");
+    link.publish("other/b", Some("v"), "2");
+    link.publish("sensors/log", None, "an event");
+    let sub_id = link.subscribe_with("sensors/*", SubscribeOptions::new(SubscriptionMode::Latest));
+    assert_eq!(
+        link.take_topic_updates(),
+        vec![("sensors/a".into(), Some("v".into()), "1".into())]
+    );
+
+    link.now += Duration::from_secs(1);
+    link.publish("sensors/c", Some("v"), "3");
+    link.now += Duration::from_secs(1);
+    link.publish("other/b", Some("v"), "4");
+    link.publish("sensors/log", None, "another");
+    assert_eq!(
+        link.take_topic_updates(),
+        vec![("sensors/c".into(), Some("v".into()), "3".into())]
+    );
+    let info = link
+        .consumer
+        .subscriptions()
+        .into_iter()
+        .find(|info| info.sub_id == sub_id)
+        .unwrap();
+    assert_eq!(info.topic, "sensors/*");
+    assert_eq!(
+        info.topics,
+        vec!["sensors/a".to_string(), "sensors/c".to_string()]
+    );
+}
+
+/// The first update of a topic created while the subscriber was away is lost
+/// with it; the renewal names only the topics it knows, and the provider
+/// sends the rest from nothing.
+#[test]
+fn a_pattern_recovers_a_topic_it_never_heard_of_at_the_next_renewal() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("sensors/a", Some("v"), "1");
+    link.subscribe_with("sensors/*", SubscribeOptions::new(SubscriptionMode::Latest));
+    link.take_topic_updates();
+
+    link.drop_provider_frames = true;
+    link.now += Duration::from_secs(1);
+    link.publish("sensors/b", Some("v"), "2");
+    link.drop_provider_frames = false;
+    assert!(link.take_topic_updates().is_empty());
+
+    link.advance(Duration::from_secs(31));
+    assert_eq!(
+        link.take_topic_updates(),
+        vec![("sensors/b".into(), Some("v".into()), "2".into())]
+    );
+}
+
+#[test]
+fn a_log_pattern_replays_each_topic_from_its_own_position() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("doors/front", None, "f1");
+    link.subscribe_with("doors/*", SubscribeOptions::new(SubscriptionMode::Log));
+    assert!(
+        link.take_topic_updates().is_empty(),
+        "no checkpoint: nothing to catch up"
+    );
+
+    link.publish("doors/front", None, "f2");
+    link.publish("doors/back", None, "b1");
+    assert_eq!(link.take_topic_updates().len(), 2);
+
+    link.drop_provider_frames = true;
+    link.publish("doors/front", None, "f3");
+    link.publish("doors/back", None, "b2");
+    link.publish("doors/side", None, "s1");
+    link.drop_provider_frames = false;
+
+    link.advance(Duration::from_secs(31));
+    let mut replayed = link.take_topic_updates();
+    replayed.sort();
+    assert_eq!(
+        replayed,
+        vec![
+            ("doors/back".into(), None, "b2".into()),
+            ("doors/front".into(), None, "f3".into()),
+            ("doors/side".into(), None, "s1".into()),
+        ]
+    );
+}
+
+#[test]
+fn clearing_one_topic_resets_only_that_topic_of_a_pattern() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("sensors/a", Some("v"), "1");
+    link.publish("sensors/b", Some("v"), "1");
+    link.subscribe_with("sensors/*", SubscribeOptions::new(SubscriptionMode::Latest));
+    link.take_topic_updates();
+    link.take_changes();
+
+    let out = link.provider.clear_topic(SVC, "sensors/a").unwrap();
+    link.pump(out);
+    let resets: Vec<_> = link
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ServiceEvent::ServiceSubscriptionChanged { topic, reason, .. } => {
+                Some((topic.clone(), reason.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(resets, vec![("sensors/a".into(), "stream_reset".into())]);
+
+    // Its next value is delivered although its seq starts over.
+    link.events.clear();
+    link.now += Duration::from_secs(1);
+    link.publish("sensors/a", Some("v"), "fresh");
+    assert_eq!(
+        link.take_topic_updates(),
+        vec![("sensors/a".into(), Some("v".into()), "fresh".into())]
+    );
+}
+
+#[test]
+fn a_pattern_follows_at_most_its_cap_of_topics() {
+    let mut link = Link::new(Admission::Accept);
+    link.subscribe_with("t/*", SubscribeOptions::new(SubscriptionMode::Log));
+    for i in 0..=MAX_PATTERN_TOPICS {
+        link.publish(&format!("t/{i:03}"), None, "x");
+    }
+    let topics: std::collections::BTreeSet<_> = link
+        .take_topic_updates()
+        .into_iter()
+        .map(|(topic, _, _)| topic)
+        .collect();
+    assert_eq!(topics.len(), MAX_PATTERN_TOPICS);
+    assert!(!topics.contains(&format!("t/{MAX_PATTERN_TOPICS:03}")));
+}
+
+#[test]
+fn a_pattern_update_for_a_topic_it_does_not_cover_is_dropped() {
+    let mut link = Link::new(Admission::Accept);
+    let sub_id = link.subscribe_with("sensors/*", SubscribeOptions::new(SubscriptionMode::Log));
+    let mut frame = crate::payloads::UpdatePayload {
+        v: 2,
+        sub_id: sub_id.clone(),
+        topic: Some("other/x".into()),
+        stream: "s".into(),
+        seq: 1,
+        key: None,
+        body: "b".into(),
+        snapshot: false,
+    };
+    let out = link.to_consumer(&super::encode(SVC_UPDATE, &frame).unwrap());
+    assert!(out.events.is_empty());
+    frame.topic = None;
+    let out = link.to_consumer(&super::encode(SVC_UPDATE, &frame).unwrap());
+    assert!(out.events.is_empty());
+}
+
+#[test]
+fn a_pattern_is_refused_where_a_star_is_not_last() {
+    let link = Link::new(Admission::Accept);
+    let mut consumer = link.consumer;
+    for topic in ["a*b", "a/**", "*/x"] {
+        assert!(
+            consumer
+                .subscribe(
+                    PROVIDER,
+                    SVC,
+                    topic,
+                    &SubscribeOptions::new(SubscriptionMode::Log),
+                    link.now
+                )
+                .is_err(),
+            "{topic}"
+        );
+    }
+    for topic in ["*", "a/*", "a*"] {
+        assert!(
+            consumer
+                .subscribe(
+                    PROVIDER,
+                    SVC,
+                    topic,
+                    &SubscribeOptions::new(SubscriptionMode::Log),
+                    link.now
+                )
+                .is_ok(),
+            "{topic}"
+        );
+    }
+}
+
+/// A provider that predates patterns answers with version 1 and would treat
+/// `sensors/*` as a literal topic. The consumer ends it rather than wait on
+/// a topic nobody publishes to.
+#[test]
+fn a_provider_without_patterns_ends_a_pattern_subscription() {
+    let mut link = Link::new(Admission::Accept);
+    let (sub_id, _) = link
+        .consumer
+        .subscribe(
+            PROVIDER,
+            SVC,
+            "sensors/*",
+            &SubscribeOptions::new(SubscriptionMode::Latest),
+            link.now,
+        )
+        .unwrap();
+    link.consumer.mark_sent(&sub_id);
+    let reply = super::encode(
+        SVC_SUBSCRIBE_REPLY,
+        &crate::payloads::SubscribeReplyPayload {
+            v: 1,
+            sub_id: sub_id.clone(),
+            status: SubscribeStatus::Accepted,
+            reason: None,
+            lease_ms: 60_000,
+            stream: "s".into(),
+            seq: 0,
+            history_lost: false,
+            topics: Vec::new(),
+        },
+    )
+    .unwrap();
+    let out = link.to_consumer(&reply);
+    assert!(!link.consumer.holds(&sub_id));
+    assert!(out.frames[0].content.starts_with(SVC_UNSUBSCRIBE));
+    assert!(out.events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::ServiceSubscriptionChanged { reason, .. } if reason == "unsupported"
+    )));
+}
+
+#[test]
+fn a_caught_up_pattern_renews_with_nothing_resent() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("sensors/a", Some("v"), "1");
+    link.publish("sensors/b", Some("v"), "2");
+    link.subscribe_with("sensors/*", SubscribeOptions::new(SubscriptionMode::Latest));
+    assert_eq!(link.take_topic_updates().len(), 2);
+    link.now += Duration::from_secs(31);
+    let renewal = link.consumer.tick(link.now);
+    let answer = link.to_provider(&renewal.frames[0].content);
+    assert_eq!(answer.frames.len(), 1, "the reply alone");
 }

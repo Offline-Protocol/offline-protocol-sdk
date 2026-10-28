@@ -4,7 +4,8 @@ use offline_protocol_core::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use super::{
-    changed, clamp_reason, decode, digest, encode, validate_key, validate_topic, Admission,
+    changed, clamp_reason, decode, digest, encode, is_topic_pattern, key_matches, topic_matches,
+    validate_key, validate_key_filter, validate_subscription_topic, validate_topic, Admission,
     SubscriptionDelivery, SubscriptionFrame, SubscriptionOutput, SubscriptionPolicy,
     SubscriptionRole, SubscriptionState,
 };
@@ -12,10 +13,11 @@ use crate::error::ServiceError;
 use crate::events::ServiceEvent;
 use crate::payloads::{
     ResumePosition, SubscribePayload, SubscribeReplyPayload, SubscribeStatus, SubscriptionMode,
-    UnsubscribePayload, UpdatePayload, MAX_LATEST_BYTES, MAX_LATEST_KEYS, MAX_LOG_BYTES,
-    MAX_LOG_ENTRIES, MAX_PROVIDER_SUBSCRIPTIONS, MAX_SERVICE_BODY_SIZE, MAX_SUBSCRIPTIONS_PER_PEER,
-    MAX_SUBSCRIPTION_LEASE_MS, MAX_SUBSCRIPTION_PARAMS_SIZE, MIN_SUBSCRIPTION_LEASE_MS,
-    SUBSCRIPTION_WIRE_VERSION, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
+    TopicReply, UnsubscribePayload, UpdatePayload, MAX_LATEST_BYTES, MAX_LATEST_KEYS,
+    MAX_LOG_BYTES, MAX_LOG_ENTRIES, MAX_PATTERN_TOPICS, MAX_PROVIDER_SUBSCRIPTIONS,
+    MAX_SERVICE_BODY_SIZE, MAX_SUBSCRIPTIONS_PER_PEER, MAX_SUBSCRIPTION_LEASE_MS,
+    MAX_SUBSCRIPTION_PARAMS_SIZE, MIN_SUBSCRIPTION_LEASE_MS, SUBSCRIPTION_WIRE_VERSION,
+    SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 
 /// Longest subscription id accepted from a consumer. Ours are UUIDs.
@@ -40,7 +42,7 @@ pub struct SubscriberInfo {
     pub subscriber: String,
     /// The subscribed service.
     pub service_id: String,
-    /// The subscribed topic.
+    /// The subscribed topic, or a pattern (`prefix*`).
     pub topic: String,
     /// The topic's mode.
     pub mode: SubscriptionMode,
@@ -48,6 +50,8 @@ pub struct SubscriberInfo {
     pub state: SubscriptionState,
     /// The subscriber's parameters.
     pub params: String,
+    /// The `latest` keys the subscriber asked for; empty for every key.
+    pub keys: Vec<String>,
 }
 
 /// One topic's state. Kept whether or not anyone is subscribed, so the first
@@ -87,10 +91,13 @@ impl Topic {
         self.next_seq - 1
     }
 
-    fn digest(&self) -> u64 {
+    /// The digest of the keys `filter` passes: what a subscriber with that
+    /// filter holds when it is caught up.
+    fn digest(&self, filter: &[String]) -> u64 {
         digest(
             self.latest
                 .iter()
+                .filter(|(key, _)| key_matches(filter, key))
                 .map(|(key, (seq, _))| (key.as_str(), *seq)),
         )
     }
@@ -111,6 +118,12 @@ struct Sub {
     topic: String,
     mode: SubscriptionMode,
     params: String,
+    /// `latest` keys to send; empty for every key.
+    keys: Vec<String>,
+    /// A pattern subscription: the topics it follows, at most
+    /// [`MAX_PATTERN_TOPICS`]. A topic joins when it first exists in the
+    /// subscription's mode, and stays.
+    followed: BTreeSet<String>,
     /// `false` while the application decides.
     admitted: bool,
     asked_at: Instant,
@@ -122,9 +135,62 @@ struct Sub {
     pending_resync: bool,
     /// When the last `latest` update went to this subscriber.
     last_sent: Option<Instant>,
-    /// `latest` keys published faster than the update interval, waiting for
-    /// the next tick.
-    dirty: BTreeSet<String>,
+    /// `latest` (topic, key) pairs published faster than the update
+    /// interval, waiting for the next tick.
+    dirty: BTreeSet<(String, String)>,
+}
+
+impl Sub {
+    fn is_pattern(&self) -> bool {
+        is_topic_pattern(&self.topic)
+    }
+
+    /// Whether an update to `topic` in `mode` goes to this subscription. A
+    /// pattern subscription starts following a matching topic here when it
+    /// has room.
+    fn follows(&mut self, topic: &str, mode: SubscriptionMode) -> bool {
+        if !self.is_pattern() {
+            return self.topic == topic;
+        }
+        if mode != self.mode || !topic_matches(&self.topic, topic) {
+            return false;
+        }
+        if self.followed.contains(topic) {
+            return true;
+        }
+        if self.followed.len() >= MAX_PATTERN_TOPICS {
+            debug!(
+                topic,
+                "A pattern subscription follows as many topics as it may"
+            );
+            return false;
+        }
+        self.followed.insert(topic.to_string());
+        true
+    }
+
+    /// Adds every topic that exists and matches, in name order, while there
+    /// is room.
+    fn follow_existing(&mut self, topics: &HashMap<(String, String), Topic>) {
+        if !self.is_pattern() {
+            return;
+        }
+        let mut names: Vec<&String> = topics
+            .iter()
+            .filter(|((service, _), topic)| *service == self.service_id && topic.mode == self.mode)
+            .map(|((_, name), _)| name)
+            .collect();
+        names.sort();
+        for name in names {
+            self.follows(name, self.mode);
+        }
+    }
+
+    /// The topic an update frame names: only a pattern subscription needs
+    /// telling which of its topics the update belongs to.
+    fn label<'a>(&self, topic: &'a str) -> Option<&'a str> {
+        self.is_pattern().then_some(topic)
+    }
 }
 
 /// The provider half of subscriptions: who is subscribed to this device's
@@ -192,6 +258,7 @@ impl Provider {
                     SubscriptionState::Pending
                 },
                 params: sub.params.clone(),
+                keys: sub.keys.clone(),
             })
             .collect();
         list.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
@@ -227,7 +294,8 @@ impl Provider {
             content: reply_content(&payload.sub_id, status, Some(reason), 0, "", 0, false),
             delivery: SubscriptionDelivery::Superseding(reply_key(&payload.sub_id)),
         };
-        if validate_topic(&payload.topic).is_err()
+        if validate_subscription_topic(&payload.topic).is_err()
+            || validate_key_filter(&payload.keys, payload.mode).is_err()
             || payload.params.len() > MAX_SUBSCRIPTION_PARAMS_SIZE
         {
             out.frames
@@ -251,6 +319,8 @@ impl Provider {
             }
             sub.lease = lease;
             sub.lease_until = now + lease;
+            // The filter is the subscriber's to change; a renewal carries it.
+            sub.keys = payload.keys.clone();
             if !sub.admitted {
                 // Still with the application; the answer follows its decision.
                 sub.pending_resume = payload.resume;
@@ -272,8 +342,10 @@ impl Provider {
         // A subscription this device does not hold: new, or a renewal of one
         // it lost to a restart or a lapsed lease.
         let renewal = payload.resume.is_some();
+        let pattern = is_topic_pattern(&payload.topic);
         let topic_key = (payload.service_id.clone(), payload.topic.clone());
-        if let Some(topic) = self.topics.get(&topic_key) {
+        // A pattern takes the topics in its mode and passes over the rest.
+        if let Some(topic) = self.topics.get(&topic_key).filter(|_| !pattern) {
             if topic.mode != payload.mode {
                 out.frames
                     .push(refuse(SubscribeStatus::ModeMismatch, "mode_mismatch"));
@@ -323,28 +395,31 @@ impl Provider {
             return out;
         }
 
-        self.topics
-            .entry(topic_key)
-            .or_insert_with(|| Topic::new(payload.mode));
+        if !pattern {
+            self.topics
+                .entry(topic_key)
+                .or_insert_with(|| Topic::new(payload.mode));
+        }
         let sub_id = payload.sub_id.clone();
-        self.subs.insert(
-            sub_id.clone(),
-            Sub {
-                subscriber: sender.to_string(),
-                service_id: payload.service_id.clone(),
-                topic: payload.topic.clone(),
-                mode: payload.mode,
-                params: payload.params.clone(),
-                admitted: admission == Admission::Accept,
-                asked_at: now,
-                lease,
-                lease_until: now + lease,
-                pending_resume: None,
-                pending_resync: false,
-                last_sent: None,
-                dirty: BTreeSet::new(),
-            },
-        );
+        let mut sub = Sub {
+            subscriber: sender.to_string(),
+            service_id: payload.service_id.clone(),
+            topic: payload.topic.clone(),
+            mode: payload.mode,
+            params: payload.params.clone(),
+            keys: payload.keys.clone(),
+            followed: BTreeSet::new(),
+            admitted: admission == Admission::Accept,
+            asked_at: now,
+            lease,
+            lease_until: now + lease,
+            pending_resume: None,
+            pending_resync: false,
+            last_sent: None,
+            dirty: BTreeSet::new(),
+        };
+        sub.follow_existing(&self.topics);
+        self.subs.insert(sub_id.clone(), sub);
 
         if admission == Admission::Ask {
             if let Some(sub) = self.subs.get_mut(&sub_id) {
@@ -599,25 +674,32 @@ impl Provider {
         let mut out = SubscriptionOutput::default();
         let mut outcome = PublishOutcome::default();
         let interval = self.min_update_interval;
-        for (sub_id, sub) in self.subs.iter_mut().filter(|(_, sub)| {
-            sub.admitted && sub.service_id == service_id && sub.topic == topic_name
-        }) {
+        for (sub_id, sub) in self.subs.iter_mut() {
+            if !sub.admitted
+                || sub.service_id != service_id
+                || key.is_some_and(|key| !key_matches(&sub.keys, key))
+                || !sub.follows(topic_name, mode)
+            {
+                continue;
+            }
             outcome.subscribers += 1;
+            let label = sub.label(topic_name);
             match key {
                 Some(key) => {
                     let due = sub
                         .last_sent
                         .is_none_or(|at| now.saturating_duration_since(at) >= interval);
                     if !due {
-                        sub.dirty.insert(key.to_string());
+                        sub.dirty.insert((topic_name.to_string(), key.to_string()));
                         outcome.coalesced += 1;
                         continue;
                     }
-                    sub.dirty.remove(key);
+                    sub.dirty.remove(&(topic_name.to_string(), key.to_string()));
                     sub.last_sent = Some(now);
                     out.frames.push(update_frame(
                         &sub.subscriber,
                         sub_id,
+                        label,
                         &stream,
                         seq,
                         Some(key),
@@ -628,6 +710,7 @@ impl Provider {
                 None => out.frames.push(update_frame(
                     &sub.subscriber,
                     sub_id,
+                    label,
                     &stream,
                     seq,
                     None,
@@ -688,21 +771,44 @@ impl Provider {
         self.topics.insert(topic_key, topic);
         let mut out = SubscriptionOutput::default();
         for (sub_id, sub) in self.subs.iter_mut().filter(|(_, sub)| {
-            sub.admitted && sub.service_id == service_id && sub.topic == topic_name
+            sub.admitted
+                && sub.service_id == service_id
+                && (sub.topic == topic_name || sub.followed.contains(topic_name))
         }) {
-            sub.dirty.clear();
-            out.frames.push(SubscriptionFrame {
-                recipient: sub.subscriber.clone(),
-                content: reply_content(
+            sub.dirty.retain(|(topic, _)| topic != topic_name);
+            let lease_ms = sub.lease.as_millis() as u64;
+            let content = if sub.is_pattern() {
+                pattern_reply_content(
+                    sub_id,
+                    lease_ms,
+                    vec![TopicReply {
+                        topic: topic_name.to_string(),
+                        stream: stream.clone(),
+                        seq: 0,
+                        history_lost: false,
+                    }],
+                )
+            } else {
+                reply_content(
                     sub_id,
                     SubscribeStatus::Accepted,
                     None,
-                    sub.lease.as_millis() as u64,
+                    lease_ms,
                     &stream,
                     0,
                     false,
-                ),
-                delivery: SubscriptionDelivery::Superseding(reply_key(sub_id)),
+                )
+            };
+            // Not under the reply key: a pattern subscription can be told of
+            // several topics starting over, and each must arrive.
+            out.frames.push(SubscriptionFrame {
+                recipient: sub.subscriber.clone(),
+                content,
+                delivery: if sub.is_pattern() {
+                    SubscriptionDelivery::Reliable
+                } else {
+                    SubscriptionDelivery::Superseding(reply_key(sub_id))
+                },
             });
         }
         Ok(out)
@@ -770,18 +876,18 @@ impl Provider {
             {
                 continue;
             }
-            let Some(topic) = self
-                .topics
-                .get(&(sub.service_id.clone(), sub.topic.clone()))
-            else {
-                sub.dirty.clear();
-                continue;
-            };
-            for key in std::mem::take(&mut sub.dirty) {
+            for (topic_name, key) in std::mem::take(&mut sub.dirty) {
+                let Some(topic) = self
+                    .topics
+                    .get(&(sub.service_id.clone(), topic_name.clone()))
+                else {
+                    continue;
+                };
                 if let Some((seq, body)) = topic.latest.get(&key) {
                     out.frames.push(update_frame(
                         &sub.subscriber,
                         sub_id,
+                        sub.label(&topic_name),
                         &topic.stream,
                         *seq,
                         Some(&key),
@@ -800,19 +906,7 @@ impl Provider {
     // ------------------------------------------------------------------
 
     /// Answers an admitted subscription with `__SVC_SUB_R__` and whatever
-    /// catches the subscriber up from `resume`.
-    ///
-    /// `latest`: a full snapshot when the subscriber is new, asked for one,
-    /// names another stream, or holds a digest that differs from ours.
-    /// Otherwise nothing: it holds what we hold.
-    ///
-    /// `log`: what follows the subscriber's position, from the buffer; the
-    /// checkpoint and what follows it when the buffer no longer reaches back
-    /// that far; and `history_lost` when neither covers it. A new subscriber
-    /// with no position is sent the checkpoint, if there is one, and nothing
-    /// else: the checkpoint is the topic's state, the buffer its recent news.
-    /// A resync is sent the checkpoint and what follows it when there is one,
-    /// and otherwise what follows its position.
+    /// catches the subscriber up from `resume` (see [`catch_up_topic`]).
     fn answer(
         &mut self,
         sub_id: &str,
@@ -825,123 +919,244 @@ impl Provider {
         let Some(sub) = self.subs.get_mut(sub_id) else {
             return;
         };
-        let Some(topic) = self
-            .topics
-            .get(&(sub.service_id.clone(), sub.topic.clone()))
-        else {
-            return;
-        };
-        let same_stream = resume.filter(|position| position.stream == topic.stream);
-        let mut baseline = topic.last_seq();
-        let mut history_lost = false;
+        let lease_ms = sub.lease.as_millis() as u64;
         let mut catch_up: Vec<SubscriptionFrame> = Vec::new();
 
-        match topic.mode {
-            SubscriptionMode::Latest => {
-                let full = fresh
-                    || resync
-                    || same_stream.is_none_or(|position| position.digest != topic.digest());
-                if full {
-                    for (key, (seq, body)) in &topic.latest {
-                        catch_up.push(update_frame(
-                            &sub.subscriber,
-                            sub_id,
-                            &topic.stream,
-                            *seq,
-                            Some(key),
-                            body,
-                            true,
-                        ));
-                    }
-                    sub.dirty.clear();
-                    // The interval runs from a value sent, not from an
-                    // empty snapshot, or the first publish to a new
-                    // subscriber of an empty topic would wait for it.
-                    if !topic.latest.is_empty() {
-                        sub.last_sent = Some(now);
-                    }
-                }
-            }
-            SubscriptionMode::Log => {
-                let replay_after = |after: u64, catch_up: &mut Vec<SubscriptionFrame>| {
-                    for (seq, body) in topic.log.iter().filter(|(seq, _)| *seq > after) {
-                        catch_up.push(update_frame(
-                            &sub.subscriber,
-                            sub_id,
-                            &topic.stream,
-                            *seq,
-                            None,
-                            body,
-                            false,
-                        ));
-                    }
-                };
-                let from_checkpoint = |catch_up: &mut Vec<SubscriptionFrame>| {
-                    let (seq, body) = topic.checkpoint.as_ref()?;
-                    if !topic.buffer_covers_after(*seq) {
-                        return None;
-                    }
+        if !sub.is_pattern() {
+            let Some(topic) = self
+                .topics
+                .get(&(sub.service_id.clone(), sub.topic.clone()))
+            else {
+                return;
+            };
+            let same_stream = resume.filter(|position| position.stream == topic.stream);
+            let name = sub.topic.clone();
+            let caught = catch_up_topic(
+                sub_id,
+                sub,
+                &name,
+                topic,
+                same_stream,
+                resync,
+                fresh,
+                now,
+                &mut catch_up,
+            );
+            out.frames.push(SubscriptionFrame {
+                recipient: sub.subscriber.clone(),
+                content: reply_content(
+                    sub_id,
+                    SubscribeStatus::Accepted,
+                    None,
+                    lease_ms,
+                    &topic.stream,
+                    caught.baseline,
+                    caught.history_lost,
+                ),
+                delivery: SubscriptionDelivery::Superseding(reply_key(sub_id)),
+            });
+            out.frames.extend(catch_up);
+            return;
+        }
+
+        // A pattern: each topic it follows is caught up as an exact
+        // subscription to it would be. A topic missing from a renewal is one
+        // the subscriber never heard of on this stream, so it holds nothing
+        // of it: position zero, which replays the buffer or the checkpoint.
+        // On a first subscribe there is no position, and the checkpoint is
+        // the state.
+        sub.follow_existing(&self.topics);
+        let mut replies = Vec::new();
+        for name in sub.followed.clone() {
+            let Some(topic) = self.topics.get(&(sub.service_id.clone(), name.clone())) else {
+                continue;
+            };
+            let held =
+                resume.and_then(|position| position.topics.iter().find(|held| held.topic == name));
+            let position = match held {
+                Some(held) if held.stream == topic.stream => Some(ResumePosition {
+                    stream: held.stream.clone(),
+                    seq: held.seq,
+                    digest: held.digest,
+                    topics: Vec::new(),
+                }),
+                Some(_) => None,
+                None if resume.is_some() && !fresh => Some(ResumePosition {
+                    stream: topic.stream.clone(),
+                    seq: 0,
+                    digest: digest(std::iter::empty()),
+                    topics: Vec::new(),
+                }),
+                None => None,
+            };
+            let caught = catch_up_topic(
+                sub_id,
+                sub,
+                &name,
+                topic,
+                position.as_ref(),
+                resync,
+                fresh,
+                now,
+                &mut catch_up,
+            );
+            replies.push(TopicReply {
+                topic: name,
+                stream: topic.stream.clone(),
+                seq: caught.baseline,
+                history_lost: caught.history_lost,
+            });
+        }
+        out.frames.push(SubscriptionFrame {
+            recipient: sub.subscriber.clone(),
+            content: pattern_reply_content(sub_id, lease_ms, replies),
+            delivery: SubscriptionDelivery::Superseding(reply_key(sub_id)),
+        });
+        out.frames.extend(catch_up);
+    }
+}
+
+/// Where one topic's catch-up left a subscriber.
+struct CaughtUp {
+    /// The position the subscriber may take itself to be at before the
+    /// frames that follow.
+    baseline: u64,
+    /// Neither the buffer nor the checkpoint covers its position.
+    history_lost: bool,
+}
+
+/// Catches `sub` up on one topic from `same_stream`, its position when it is
+/// on the topic's current stream.
+///
+/// `latest`: a full snapshot of the keys its filter passes when the
+/// subscriber is new, asked for one, names another stream, or holds a digest
+/// that differs from ours. Otherwise nothing: it holds what we hold.
+///
+/// `log`: what follows the subscriber's position, from the buffer; the
+/// checkpoint and what follows it when the buffer no longer reaches back
+/// that far; and `history_lost` when neither covers it. A new subscriber
+/// with no position is sent the checkpoint, if there is one, and nothing
+/// else: the checkpoint is the topic's state, the buffer its recent news. A
+/// resync is sent the checkpoint and what follows it when there is one, and
+/// otherwise what follows its position.
+#[allow(clippy::too_many_arguments)]
+fn catch_up_topic(
+    sub_id: &str,
+    sub: &mut Sub,
+    name: &str,
+    topic: &Topic,
+    same_stream: Option<&ResumePosition>,
+    resync: bool,
+    fresh: bool,
+    now: Instant,
+    catch_up: &mut Vec<SubscriptionFrame>,
+) -> CaughtUp {
+    let label = sub.label(name);
+    let mut baseline = topic.last_seq();
+    let mut history_lost = false;
+    match topic.mode {
+        SubscriptionMode::Latest => {
+            let full = fresh
+                || resync
+                || same_stream.is_none_or(|position| position.digest != topic.digest(&sub.keys));
+            if full {
+                let mut sent = false;
+                for (key, (seq, body)) in topic
+                    .latest
+                    .iter()
+                    .filter(|(key, _)| key_matches(&sub.keys, key))
+                {
+                    sent = true;
                     catch_up.push(update_frame(
                         &sub.subscriber,
                         sub_id,
+                        label,
+                        &topic.stream,
+                        *seq,
+                        Some(key),
+                        body,
+                        true,
+                    ));
+                }
+                sub.dirty.retain(|(dirty_topic, _)| dirty_topic != name);
+                // The interval runs from a value sent, not from an empty
+                // snapshot, or the first publish to a new subscriber of an
+                // empty topic would wait for it.
+                if sent {
+                    sub.last_sent = Some(now);
+                }
+            }
+        }
+        SubscriptionMode::Log => {
+            let replay_after = |after: u64, catch_up: &mut Vec<SubscriptionFrame>| {
+                for (seq, body) in topic.log.iter().filter(|(seq, _)| *seq > after) {
+                    catch_up.push(update_frame(
+                        &sub.subscriber,
+                        sub_id,
+                        label,
                         &topic.stream,
                         *seq,
                         None,
                         body,
-                        true,
+                        false,
                     ));
-                    Some(*seq)
-                };
-                // A resync asks for the state, so the checkpoint comes first
-                // when there is one; the consumer has forgotten its position.
-                let resynced = if resync {
-                    from_checkpoint(&mut catch_up)
-                } else {
-                    None
-                };
-                match (resynced, same_stream) {
-                    (Some(seq), _) => {
+                }
+            };
+            let from_checkpoint = |catch_up: &mut Vec<SubscriptionFrame>| {
+                let (seq, body) = topic.checkpoint.as_ref()?;
+                if !topic.buffer_covers_after(*seq) {
+                    return None;
+                }
+                catch_up.push(update_frame(
+                    &sub.subscriber,
+                    sub_id,
+                    label,
+                    &topic.stream,
+                    *seq,
+                    None,
+                    body,
+                    true,
+                ));
+                Some(*seq)
+            };
+            // A resync asks for the state, so the checkpoint comes first
+            // when there is one; the consumer has forgotten its position.
+            let resynced = if resync {
+                from_checkpoint(catch_up)
+            } else {
+                None
+            };
+            match (resynced, same_stream) {
+                (Some(seq), _) => {
+                    baseline = seq;
+                    replay_after(seq, catch_up);
+                }
+                (None, Some(position)) if topic.buffer_covers_after(position.seq) => {
+                    baseline = position.seq.min(topic.last_seq());
+                    replay_after(baseline, catch_up);
+                }
+                (None, Some(_)) => match from_checkpoint(catch_up) {
+                    Some(seq) => {
                         baseline = seq;
-                        replay_after(seq, &mut catch_up);
+                        replay_after(seq, catch_up);
                     }
-                    (None, Some(position)) if topic.buffer_covers_after(position.seq) => {
-                        baseline = position.seq.min(topic.last_seq());
-                        replay_after(baseline, &mut catch_up);
-                    }
-                    (None, Some(_)) => match from_checkpoint(&mut catch_up) {
-                        Some(seq) => {
-                            baseline = seq;
-                            replay_after(seq, &mut catch_up);
-                        }
-                        None => history_lost = true,
-                    },
-                    // New, or a previous life of this topic: the checkpoint is
-                    // the state, if there is one. The consumer reports a
-                    // stream change itself, so it is not also history lost.
-                    (None, None) => {
-                        if let Some(seq) = from_checkpoint(&mut catch_up) {
-                            baseline = seq;
-                            replay_after(seq, &mut catch_up);
-                        }
+                    None => history_lost = true,
+                },
+                // New, or a previous life of this topic: the checkpoint is
+                // the state, if there is one. The consumer reports a stream
+                // change itself, so it is not also history lost.
+                (None, None) => {
+                    if let Some(seq) = from_checkpoint(catch_up) {
+                        baseline = seq;
+                        replay_after(seq, catch_up);
                     }
                 }
             }
         }
-
-        out.frames.push(SubscriptionFrame {
-            recipient: sub.subscriber.clone(),
-            content: reply_content(
-                sub_id,
-                SubscribeStatus::Accepted,
-                None,
-                sub.lease.as_millis() as u64,
-                &topic.stream,
-                baseline,
-                history_lost,
-            ),
-            delivery: SubscriptionDelivery::Superseding(reply_key(sub_id)),
-        });
-        out.frames.extend(catch_up);
+    }
+    CaughtUp {
+        baseline,
+        history_lost,
     }
 }
 
@@ -989,14 +1204,33 @@ fn reply_content(
         stream: stream.to_string(),
         seq,
         history_lost,
+        topics: Vec::new(),
     };
     // Serialising a struct of strings and integers cannot fail.
     encode(SVC_SUBSCRIBE_REPLY, &payload).unwrap_or_default()
 }
 
+/// An acceptance of a pattern subscription, with a position per topic.
+fn pattern_reply_content(sub_id: &str, lease_ms: u64, topics: Vec<TopicReply>) -> String {
+    let payload = SubscribeReplyPayload {
+        v: SUBSCRIPTION_WIRE_VERSION,
+        sub_id: sub_id.to_string(),
+        status: SubscribeStatus::Accepted,
+        reason: None,
+        lease_ms,
+        stream: String::new(),
+        seq: 0,
+        history_lost: false,
+        topics,
+    };
+    encode(SVC_SUBSCRIBE_REPLY, &payload).unwrap_or_default()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn update_frame(
     recipient: &str,
     sub_id: &str,
+    topic: Option<&str>,
     stream: &str,
     seq: u64,
     key: Option<&str>,
@@ -1006,6 +1240,7 @@ fn update_frame(
     let payload = UpdatePayload {
         v: SUBSCRIPTION_WIRE_VERSION,
         sub_id: sub_id.to_string(),
+        topic: topic.map(str::to_string),
         stream: stream.to_string(),
         seq,
         key: key.map(str::to_string),
@@ -1013,8 +1248,12 @@ fn update_frame(
         snapshot,
     };
     let delivery = match key {
-        // At most one value per key waits for an absent subscriber.
-        Some(key) => SubscriptionDelivery::LiveOrSuperseding(format!("upd:{sub_id}:{key}")),
+        // At most one value per key waits for an absent subscriber. A topic
+        // has no `:`, so the topic and key cannot run into each other.
+        Some(key) => SubscriptionDelivery::LiveOrSuperseding(match topic {
+            Some(topic) => format!("upd:{sub_id}:{topic}:{key}"),
+            None => format!("upd:{sub_id}:{key}"),
+        }),
         // Every log update matters, and a checkpoint is followed by them.
         None => SubscriptionDelivery::Reliable,
     };
@@ -1060,6 +1299,7 @@ mod tests {
                 topic: topic.to_string(),
                 mode,
                 params: String::new(),
+                keys: Vec::new(),
                 lease_ms: 60_000,
                 resume: None,
                 resync: false,
@@ -1083,6 +1323,7 @@ mod tests {
                 topic: topic.to_string(),
                 mode,
                 params: String::new(),
+                keys: Vec::new(),
                 lease_ms: 60_000,
                 resume: Some(resume),
                 resync: false,
@@ -1414,6 +1655,7 @@ mod tests {
                 stream: stream.clone(),
                 seq: 1,
                 digest: held,
+                topics: Vec::new(),
             },
         );
         let out = subscribe(&mut p, ALICE, &renewal, Admission::Accept, now);
@@ -1428,6 +1670,7 @@ mod tests {
                 stream,
                 seq: 1,
                 digest: held ^ 1,
+                topics: Vec::new(),
             },
         );
         assert_eq!(
@@ -1459,6 +1702,7 @@ mod tests {
                 stream,
                 seq: 2,
                 digest: 0,
+                topics: Vec::new(),
             },
         );
         let out = subscribe(&mut p, ALICE, &renewal, Admission::Accept, now);
@@ -1492,6 +1736,7 @@ mod tests {
                 stream: stream.clone(),
                 seq: 1,
                 digest: 0,
+                topics: Vec::new(),
             },
         );
         let out = subscribe(&mut p, ALICE, &renewal, Admission::Accept, now);

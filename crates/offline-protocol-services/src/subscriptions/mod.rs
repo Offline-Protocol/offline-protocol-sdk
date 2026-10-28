@@ -32,12 +32,38 @@ use serde::Serialize;
 use crate::error::ServiceError;
 use crate::events::ServiceEvent;
 use crate::payloads::{
-    MAX_SERVICE_PAYLOAD_SIZE, MAX_SUBSCRIPTION_KEY_LEN, MAX_SUBSCRIPTION_REASON_LEN,
-    MAX_SUBSCRIPTION_TOPIC_LEN,
+    SubscriptionMode, MAX_SERVICE_PAYLOAD_SIZE, MAX_SUBSCRIPTION_FILTER_KEYS,
+    MAX_SUBSCRIPTION_KEY_LEN, MAX_SUBSCRIPTION_REASON_LEN, MAX_SUBSCRIPTION_TOPIC_LEN,
 };
 
 pub use consumer::{Consumer, SubscriptionInfo};
 pub use provider::{Provider, PublishOutcome, SubscriberInfo};
+
+/// What a consumer asks for when it subscribes, beyond the provider, service
+/// and topic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscribeOptions {
+    /// `latest` for state, `log` for events.
+    pub mode: SubscriptionMode,
+    /// Handed to the provider's application with the request, untouched by
+    /// the SDK: the application's own terms of the subscription.
+    pub params: String,
+    /// `latest` only: the keys to be sent, each exact or a prefix ending in
+    /// `*`. Empty: every key. The provider applies it, so a filtered key
+    /// never leaves the provider.
+    pub keys: Vec<String>,
+}
+
+impl SubscribeOptions {
+    /// Every key of a topic in `mode`, with no parameters.
+    pub fn new(mode: SubscriptionMode) -> Self {
+        Self {
+            mode,
+            params: String::new(),
+            keys: Vec::new(),
+        }
+    }
+}
 
 /// How the engine must send one subscription frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +232,77 @@ pub(crate) fn validate_topic(topic: &str) -> Result<(), ServiceError> {
     }
 }
 
+/// Whether a subscription's topic is a pattern: a topic prefix followed by
+/// one `*`, which matches every topic that starts with the prefix. `*` alone
+/// matches every topic of the service.
+pub fn is_topic_pattern(topic: &str) -> bool {
+    topic.ends_with('*')
+}
+
+/// Whether `topic` is one that `subscribed` (a topic or a pattern) covers.
+pub(crate) fn topic_matches(subscribed: &str, topic: &str) -> bool {
+    match subscribed.strip_suffix('*') {
+        Some(prefix) => topic.starts_with(prefix),
+        None => subscribed == topic,
+    }
+}
+
+/// What a subscription may name: a topic, or a pattern whose prefix is
+/// empty or made of topic characters. A `*` anywhere but the end is refused,
+/// so that a later reading of it as a mid-topic wildcard is not taken by an
+/// older provider as a literal.
+pub(crate) fn validate_subscription_topic(topic: &str) -> Result<(), ServiceError> {
+    match topic.strip_suffix('*') {
+        Some("") => Ok(()),
+        Some(prefix) if topic.len() <= MAX_SUBSCRIPTION_TOPIC_LEN => validate_topic(prefix),
+        _ => validate_topic(topic),
+    }
+}
+
+/// A key filter: at most [`MAX_SUBSCRIPTION_FILTER_KEYS`] entries, each a
+/// key or a key prefix followed by `*`, and only on a `latest` subscription.
+/// A `log` topic has no keys, and its consumer tracks a contiguous position
+/// that an update withheld by a filter would leave a permanent gap in.
+pub(crate) fn validate_key_filter(
+    keys: &[String],
+    mode: SubscriptionMode,
+) -> Result<(), ServiceError> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    if mode != SubscriptionMode::Latest {
+        return Err(ServiceError::InvalidArgument(
+            "a key filter applies to a `latest` subscription only".to_string(),
+        ));
+    }
+    if keys.len() > MAX_SUBSCRIPTION_FILTER_KEYS {
+        return Err(ServiceError::InvalidArgument(format!(
+            "a key filter holds at most {MAX_SUBSCRIPTION_FILTER_KEYS} entries"
+        )));
+    }
+    for entry in keys {
+        match entry.strip_suffix('*') {
+            Some(prefix) if prefix.contains('*') => {
+                return Err(ServiceError::InvalidArgument(
+                    "a key filter entry has at most one `*`, at its end".to_string(),
+                ))
+            }
+            Some(_) if entry.len() <= MAX_SUBSCRIPTION_KEY_LEN => {}
+            _ => validate_key(entry)?,
+        }
+    }
+    Ok(())
+}
+
+/// Whether `key` passes `filter`. An empty filter passes every key.
+pub(crate) fn key_matches(filter: &[String], key: &str) -> bool {
+    filter.is_empty()
+        || filter.iter().any(|entry| match entry.strip_suffix('*') {
+            Some(prefix) => key.starts_with(prefix),
+            None => entry == key,
+        })
+}
+
 /// A key of a `latest` topic: 1 to [`MAX_SUBSCRIPTION_KEY_LEN`] bytes.
 pub(crate) fn validate_key(key: &str) -> Result<(), ServiceError> {
     if key.is_empty() || key.len() > MAX_SUBSCRIPTION_KEY_LEN {
@@ -262,7 +359,9 @@ pub fn requested_service(content: &str) -> Option<String> {
         .map(|payload| payload.service_id)
 }
 
-/// The event every state change is reported with.
+/// The event every state change is reported with. `topic` is the topic the
+/// change concerns: the subscription's own, or for a pattern subscription
+/// the one topic a `stream_reset` or `history_lost` is about.
 pub(crate) fn changed(
     sub_id: &str,
     role: SubscriptionRole,

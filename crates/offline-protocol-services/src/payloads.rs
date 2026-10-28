@@ -110,13 +110,25 @@ pub fn is_subscription_frame(content: &str) -> bool {
         .any(|prefix| content.starts_with(prefix))
 }
 
-/// Version written into every subscription payload.
-pub(crate) const SUBSCRIPTION_WIRE_VERSION: u8 = 1;
+/// Version written into every subscription payload. 2 adds topic patterns
+/// and key filters: a provider that answers with 1 applied neither, so a
+/// consumer that asked for one ends the subscription rather than receive
+/// what it did not ask for.
+pub(crate) const SUBSCRIPTION_WIRE_VERSION: u8 = 2;
+/// The first version that applies topic patterns and key filters.
+pub(crate) const SUBSCRIPTION_FILTERS_VERSION: u8 = 2;
 
 /// Longest topic name, in bytes.
 pub const MAX_SUBSCRIPTION_TOPIC_LEN: usize = 128;
 /// Longest key of a `latest` topic, in bytes.
 pub const MAX_SUBSCRIPTION_KEY_LEN: usize = 256;
+/// Entries in a key filter.
+pub const MAX_SUBSCRIPTION_FILTER_KEYS: usize = 32;
+/// Topics one pattern subscription follows. A provider stops adding topics
+/// to it here, and a consumer stops tracking them, which bounds both the
+/// catch-up a renewal can cost and what a hostile provider can make a
+/// consumer remember.
+pub const MAX_PATTERN_TOPICS: usize = 64;
 /// Largest `params` a subscriber may hand the provider's application.
 pub const MAX_SUBSCRIPTION_PARAMS_SIZE: usize = 4096;
 /// Longest reason string carried in a reply or an unsubscribe.
@@ -215,6 +227,33 @@ pub(crate) struct ResumePosition {
     /// `latest` only: the digest of the (key, seq) pairs held.
     #[serde(default)]
     pub digest: u64,
+    /// A pattern subscription: where it stands in each topic it has seen.
+    /// The three fields above are unused for one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<TopicPosition>,
+}
+
+/// One topic's position in a pattern subscription's renewal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TopicPosition {
+    pub topic: String,
+    pub stream: String,
+    pub seq: u64,
+    #[serde(default)]
+    pub digest: u64,
+}
+
+/// One topic's answer in a pattern subscription's reply: what
+/// [`SubscribeReplyPayload`]'s `stream`, `seq` and `history_lost` say for an
+/// exact topic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TopicReply {
+    pub topic: String,
+    pub stream: String,
+    #[serde(default)]
+    pub seq: u64,
+    #[serde(default)]
+    pub history_lost: bool,
 }
 
 /// `__SVC_SUB__`: subscribe, renew or resync.
@@ -228,6 +267,10 @@ pub(crate) struct SubscribePayload {
     pub mode: SubscriptionMode,
     #[serde(default)]
     pub params: String,
+    /// `latest` only: the keys to send, each exact or a prefix ending in
+    /// `*`. Empty: every key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
     pub lease_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumePosition>,
@@ -258,6 +301,10 @@ pub(crate) struct SubscribeReplyPayload {
     /// checkpoint; it has been moved to the present.
     #[serde(default)]
     pub history_lost: bool,
+    /// A pattern subscription: the position in each topic it follows, in
+    /// place of `stream`, `seq` and `history_lost`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<TopicReply>,
 }
 
 /// `__SVC_UPD__`: one update.
@@ -266,6 +313,9 @@ pub(crate) struct UpdatePayload {
     #[serde(default = "subscription_wire_version")]
     pub v: u8,
     pub sub_id: String,
+    /// A pattern subscription: the topic the update was published to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
     pub stream: String,
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,15 +383,16 @@ mod tests {
         .unwrap();
         assert_eq!(sub.v, SUBSCRIPTION_WIRE_VERSION);
         assert!(sub.resume.is_none() && !sub.resync && sub.params.is_empty());
+        assert!(sub.keys.is_empty());
 
         let reply: SubscribeReplyPayload =
             serde_json::from_str(r#"{"sub_id":"s","status":"mode_mismatch"}"#).unwrap();
         assert_eq!(reply.status, SubscribeStatus::ModeMismatch);
-        assert!(!reply.history_lost);
+        assert!(!reply.history_lost && reply.topics.is_empty());
 
         let update: UpdatePayload =
             serde_json::from_str(r#"{"sub_id":"s","stream":"x","seq":3,"body":"b"}"#).unwrap();
-        assert!(update.key.is_none() && !update.snapshot);
+        assert!(update.key.is_none() && !update.snapshot && update.topic.is_none());
     }
 
     #[test]

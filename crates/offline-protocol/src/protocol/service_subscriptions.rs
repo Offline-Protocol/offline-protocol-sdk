@@ -432,7 +432,16 @@ impl OfflineProtocol {
         let (sub_id, frame) = self
             .service_subscriptions
             .consumer
-            .subscribe(provider, service_id, topic, mode, params, Instant::now())
+            .subscribe(
+                provider,
+                service_id,
+                topic,
+                &offline_protocol_services::SubscribeOptions {
+                    params: params.to_string(),
+                    ..offline_protocol_services::SubscribeOptions::new(mode)
+                },
+                Instant::now(),
+            )
             .map_err(Error::Service)?;
         match self.send_subscription_frame(frame) {
             Ok(_) => self.service_subscriptions.consumer.mark_sent(&sub_id),

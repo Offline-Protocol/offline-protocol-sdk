@@ -19,10 +19,11 @@ pub use events::ServiceEvent;
 pub use payloads::{
     is_subscription_frame, SubscribeStatus, SubscriptionMode, DEFAULT_SUBSCRIPTION_LEASE_MS,
     MAX_CONSUMER_SUBSCRIPTIONS, MAX_LATEST_BYTES, MAX_LATEST_KEYS, MAX_LOG_BYTES, MAX_LOG_ENTRIES,
-    MAX_PROVIDER_SUBSCRIPTIONS, MAX_SUBSCRIPTIONS_PER_PEER, MAX_SUBSCRIPTION_KEY_LEN,
-    MAX_SUBSCRIPTION_LEASE_MS, MAX_SUBSCRIPTION_PARAMS_SIZE, MAX_SUBSCRIPTION_REASON_LEN,
-    MAX_SUBSCRIPTION_TOPIC_LEN, MIN_SUBSCRIPTION_LEASE_MS, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY,
-    SVC_SUBSCRIPTION_PREFIXES, SVC_UNSUBSCRIBE, SVC_UPDATE,
+    MAX_PATTERN_TOPICS, MAX_PROVIDER_SUBSCRIPTIONS, MAX_SUBSCRIPTIONS_PER_PEER,
+    MAX_SUBSCRIPTION_FILTER_KEYS, MAX_SUBSCRIPTION_KEY_LEN, MAX_SUBSCRIPTION_LEASE_MS,
+    MAX_SUBSCRIPTION_PARAMS_SIZE, MAX_SUBSCRIPTION_REASON_LEN, MAX_SUBSCRIPTION_TOPIC_LEN,
+    MIN_SUBSCRIPTION_LEASE_MS, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY, SVC_SUBSCRIPTION_PREFIXES,
+    SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 pub use payloads::{
     DISCOVERY_GOSSIP_MAX_FANOUT, DISCOVERY_INITIAL_BROADCAST_MAX, DISCOVERY_QUERY_DEDUP_TTL_SECS,
@@ -35,7 +36,7 @@ pub use services::{
     ServiceAction,
 };
 pub use subscriptions::{
-    requested_service, Admission, Consumer, Provider, PublishOutcome, RulesFallback,
-    SubscriberInfo, SubscriptionDelivery, SubscriptionFrame, SubscriptionInfo, SubscriptionOutput,
-    SubscriptionPolicy, SubscriptionRole, SubscriptionState,
+    is_topic_pattern, requested_service, Admission, Consumer, Provider, PublishOutcome,
+    RulesFallback, SubscribeOptions, SubscriberInfo, SubscriptionDelivery, SubscriptionFrame,
+    SubscriptionInfo, SubscriptionOutput, SubscriptionPolicy, SubscriptionRole, SubscriptionState,
 };
