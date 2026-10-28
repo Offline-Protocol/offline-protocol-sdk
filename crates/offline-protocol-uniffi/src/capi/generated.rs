@@ -1820,6 +1820,219 @@ impl Codec for Vec<crate::TelemetryStats> {
     }
 }
 
+impl Codec for crate::SubscriptionMode {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        match value.as_str() {
+            Some("Latest") => Ok(Self::Latest),
+            Some("Log") => Ok(Self::Log),
+            _ => Err(variant_error(at, "SubscriptionMode", &["Latest", "Log"])),
+        }
+    }
+    fn encode(&self) -> Value {
+        Value::from(match self {
+            Self::Latest => "Latest",
+            Self::Log => "Log",
+        })
+    }
+}
+
+impl Codec for Vec<crate::SubscriptionMode> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::SubscriptionPolicyKind {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        match value.as_str() {
+            Some("Restricted") => Ok(Self::Restricted),
+            Some("AcceptAll") => Ok(Self::AcceptAll),
+            Some("Rules") => Ok(Self::Rules),
+            _ => Err(variant_error(at, "SubscriptionPolicyKind", &["Restricted", "AcceptAll", "Rules"])),
+        }
+    }
+    fn encode(&self) -> Value {
+        Value::from(match self {
+            Self::Restricted => "Restricted",
+            Self::AcceptAll => "AcceptAll",
+            Self::Rules => "Rules",
+        })
+    }
+}
+
+impl Codec for Vec<crate::SubscriptionPolicyKind> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::SubscriptionRulesFallback {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        match value.as_str() {
+            Some("Ask") => Ok(Self::Ask),
+            Some("Reject") => Ok(Self::Reject),
+            _ => Err(variant_error(at, "SubscriptionRulesFallback", &["Ask", "Reject"])),
+        }
+    }
+    fn encode(&self) -> Value {
+        Value::from(match self {
+            Self::Ask => "Ask",
+            Self::Reject => "Reject",
+        })
+    }
+}
+
+impl Codec for Vec<crate::SubscriptionRulesFallback> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::SubscriptionPolicyConfig {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "SubscriptionPolicyConfig")?;
+        let out = Self {
+            kind: f.take("kind")?,
+            allow_peers: f.take("allow_peers")?,
+            allow_groups: f.take("allow_groups")?,
+            rules_fallback: f.take("rules_fallback")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("kind", self.kind.encode()),
+            ("allow_peers", self.allow_peers.encode()),
+            ("allow_groups", self.allow_groups.encode()),
+            ("rules_fallback", self.rules_fallback.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::SubscriptionPolicyConfig> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::ServicePublishReport {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "ServicePublishReport")?;
+        let out = Self {
+            subscribers: f.take("subscribers")?,
+            sent_live: f.take("sent_live")?,
+            queued: f.take("queued")?,
+            coalesced: f.take("coalesced")?,
+            failed: f.take("failed")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("subscribers", self.subscribers.encode()),
+            ("sent_live", self.sent_live.encode()),
+            ("queued", self.queued.encode()),
+            ("coalesced", self.coalesced.encode()),
+            ("failed", self.failed.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::ServicePublishReport> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::ServiceSubscriptionInfo {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "ServiceSubscriptionInfo")?;
+        let out = Self {
+            sub_id: f.take("sub_id")?,
+            provider: f.take("provider")?,
+            service_id: f.take("service_id")?,
+            topic: f.take("topic")?,
+            mode: f.take("mode")?,
+            state: f.take("state")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("sub_id", self.sub_id.encode()),
+            ("provider", self.provider.encode()),
+            ("service_id", self.service_id.encode()),
+            ("topic", self.topic.encode()),
+            ("mode", self.mode.encode()),
+            ("state", self.state.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::ServiceSubscriptionInfo> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::ServiceSubscriberInfo {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "ServiceSubscriberInfo")?;
+        let out = Self {
+            sub_id: f.take("sub_id")?,
+            subscriber: f.take("subscriber")?,
+            service_id: f.take("service_id")?,
+            topic: f.take("topic")?,
+            mode: f.take("mode")?,
+            state: f.take("state")?,
+            params: f.take("params")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("sub_id", self.sub_id.encode()),
+            ("subscriber", self.subscriber.encode()),
+            ("service_id", self.service_id.encode()),
+            ("topic", self.topic.encode()),
+            ("mode", self.mode.encode()),
+            ("state", self.state.encode()),
+            ("params", self.params.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::ServiceSubscriberInfo> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
 impl Codec for crate::BleFragment {
     fn decode(value: &Value, at: &str) -> Decoded<Self> {
         let mut f = Fields::new(value, at, "BleFragment")?;
@@ -3211,6 +3424,90 @@ pub fn call_services(target: &crate::MeshServices, method: &str, mut args: Field
             let arg_body = args.take("body")?;
             args.finish()?;
             let result = target.respond_to_service_request(arg_request_id, arg_requester, arg_service_id, arg_status, arg_body)?;
+            Ok(result.encode())
+        }
+        "subscribe_service" => {
+            let arg_provider = args.take("provider")?;
+            let arg_service_id = args.take("service_id")?;
+            let arg_topic = args.take("topic")?;
+            let arg_mode = args.take("mode")?;
+            let arg_params = args.take("params")?;
+            args.finish()?;
+            let result = target.subscribe_service(arg_provider, arg_service_id, arg_topic, arg_mode, arg_params)?;
+            Ok(result.encode())
+        }
+        "unsubscribe_service" => {
+            let arg_sub_id = args.take("sub_id")?;
+            args.finish()?;
+            let result = target.unsubscribe_service(arg_sub_id)?;
+            Ok(result.encode())
+        }
+        "resync_service_subscription" => {
+            let arg_sub_id = args.take("sub_id")?;
+            args.finish()?;
+            target.resync_service_subscription(arg_sub_id)?;
+            Ok(Value::Null)
+        }
+        "service_subscriptions" => {
+            args.finish()?;
+            let result = target.service_subscriptions()?;
+            Ok(result.encode())
+        }
+        "set_service_subscription_policy" => {
+            let arg_service_id = args.take("service_id")?;
+            let arg_policy = args.take("policy")?;
+            args.finish()?;
+            target.set_service_subscription_policy(arg_service_id, arg_policy)?;
+            Ok(Value::Null)
+        }
+        "accept_service_subscription" => {
+            let arg_sub_id = args.take("sub_id")?;
+            args.finish()?;
+            target.accept_service_subscription(arg_sub_id)?;
+            Ok(Value::Null)
+        }
+        "reject_service_subscription" => {
+            let arg_sub_id = args.take("sub_id")?;
+            let arg_reason = args.take("reason")?;
+            args.finish()?;
+            target.reject_service_subscription(arg_sub_id, arg_reason)?;
+            Ok(Value::Null)
+        }
+        "end_service_subscription" => {
+            let arg_sub_id = args.take("sub_id")?;
+            let arg_reason = args.take("reason")?;
+            args.finish()?;
+            target.end_service_subscription(arg_sub_id, arg_reason)?;
+            Ok(Value::Null)
+        }
+        "publish_service_update" => {
+            let arg_service_id = args.take("service_id")?;
+            let arg_topic = args.take("topic")?;
+            let arg_key = args.take("key")?;
+            let arg_body = args.take("body")?;
+            args.finish()?;
+            let result = target.publish_service_update(arg_service_id, arg_topic, arg_key, arg_body)?;
+            Ok(result.encode())
+        }
+        "set_service_topic_checkpoint" => {
+            let arg_service_id = args.take("service_id")?;
+            let arg_topic = args.take("topic")?;
+            let arg_body = args.take("body")?;
+            args.finish()?;
+            target.set_service_topic_checkpoint(arg_service_id, arg_topic, arg_body)?;
+            Ok(Value::Null)
+        }
+        "clear_service_topic" => {
+            let arg_service_id = args.take("service_id")?;
+            let arg_topic = args.take("topic")?;
+            args.finish()?;
+            target.clear_service_topic(arg_service_id, arg_topic)?;
+            Ok(Value::Null)
+        }
+        "service_subscribers" => {
+            let arg_service_id = args.take("service_id")?;
+            args.finish()?;
+            let result = target.service_subscribers(arg_service_id)?;
             Ok(result.encode())
         }
         _ => Err(CallError::MethodNotFound(format!("no method {}{method}", "services."))),

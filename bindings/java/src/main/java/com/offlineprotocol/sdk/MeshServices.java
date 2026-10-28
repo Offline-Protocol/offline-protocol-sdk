@@ -113,6 +113,72 @@ public class MeshServices implements AutoCloseable, MeshServicesInterface {
 
   
     @Override
+    public void acceptServiceSubscription(java.lang.String subId) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(subId), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void clearServiceTopic(java.lang.String serviceId, java.lang.String topic) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(serviceId), FfiConverterString.INSTANCE.lower(topic), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public java.lang.String discoverServices(java.lang.String serviceId) throws ProtocolException {
             try {
                 return FfiConverterString.INSTANCE.lift(
@@ -147,6 +213,73 @@ public class MeshServices implements AutoCloseable, MeshServicesInterface {
 
   
     @Override
+    public void endServiceSubscription(java.lang.String subId, java.lang.String reason) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(subId), FfiConverterString.INSTANCE.lower(reason), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public ServicePublishReport publishServiceUpdate(java.lang.String serviceId, java.lang.String topic, java.lang.String key, java.lang.String body) throws ProtocolException {
+            try {
+                return FfiConverterTypeServicePublishReport.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update(_allocator, _uniffiHandle,
+            FfiConverterString.INSTANCE.lower(serviceId), FfiConverterString.INSTANCE.lower(topic), FfiConverterOptionalString.INSTANCE.lower(key), FfiConverterString.INSTANCE.lower(body), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public void registerService(java.lang.String serviceId, java.lang.String version, java.util.Map<java.lang.String, java.lang.String> capabilities) throws ProtocolException {
             try {
                 
@@ -156,6 +289,39 @@ public class MeshServices implements AutoCloseable, MeshServicesInterface {
     UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
         UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service(_uniffiHandle,
             FfiConverterString.INSTANCE.lower(serviceId), FfiConverterString.INSTANCE.lower(version), FfiConverterMapStringString.INSTANCE.lower(capabilities), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void rejectServiceSubscription(java.lang.String subId, java.lang.String reason) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(subId), FfiConverterString.INSTANCE.lower(reason), _status);
     });
     } catch (java.lang.RuntimeException _uniffi_ex) {
             throw _uniffi_ex;
@@ -214,6 +380,39 @@ public class MeshServices implements AutoCloseable, MeshServicesInterface {
 
   
     @Override
+    public void resyncServiceSubscription(java.lang.String subId) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(subId), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public java.lang.String sendServiceRequest(java.lang.String provider, java.lang.String serviceId, java.lang.String method, java.lang.String body) throws ProtocolException {
             try {
                 return FfiConverterString.INSTANCE.lift(
@@ -248,6 +447,174 @@ public class MeshServices implements AutoCloseable, MeshServicesInterface {
 
   
     @Override
+    public java.util.List<ServiceSubscriberInfo> serviceSubscribers(java.lang.String serviceId) throws ProtocolException {
+            try {
+                return FfiConverterSequenceTypeServiceSubscriberInfo.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers(_allocator, _uniffiHandle,
+            FfiConverterOptionalString.INSTANCE.lower(serviceId), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public java.util.List<ServiceSubscriptionInfo> serviceSubscriptions() throws ProtocolException {
+            try {
+                return FfiConverterSequenceTypeServiceSubscriptionInfo.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions(_allocator, _uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void setServiceSubscriptionPolicy(java.lang.String serviceId, SubscriptionPolicyConfig policy) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(serviceId), FfiConverterTypeSubscriptionPolicyConfig.INSTANCE.lower(policy), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void setServiceTopicCheckpoint(java.lang.String serviceId, java.lang.String topic, java.lang.String body) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(serviceId), FfiConverterString.INSTANCE.lower(topic), FfiConverterString.INSTANCE.lower(body), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public java.lang.String subscribeService(java.lang.String provider, java.lang.String serviceId, java.lang.String topic, SubscriptionMode mode, java.lang.String params) throws ProtocolException {
+            try {
+                return FfiConverterString.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(_allocator, _uniffiHandle,
+            FfiConverterString.INSTANCE.lower(provider), FfiConverterString.INSTANCE.lower(serviceId), FfiConverterString.INSTANCE.lower(topic), FfiConverterTypeSubscriptionMode.INSTANCE.lower(mode), FfiConverterString.INSTANCE.lower(params), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public boolean unregisterService(java.lang.String serviceId) throws ProtocolException {
             try {
                 return FfiConverterBoolean.INSTANCE.lift(
@@ -258,6 +625,40 @@ public class MeshServices implements AutoCloseable, MeshServicesInterface {
     UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
         return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(_uniffiHandle,
             FfiConverterString.INSTANCE.lower(serviceId), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public boolean unsubscribeService(java.lang.String subId) throws ProtocolException {
+            try {
+                return FfiConverterBoolean.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(subId), _status);
     });
     } catch (java.lang.RuntimeException _uniffi_ex) {
             throw _uniffi_ex;

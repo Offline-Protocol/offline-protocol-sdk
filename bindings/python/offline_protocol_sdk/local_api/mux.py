@@ -28,7 +28,13 @@ HELD_TAGS: frozenset[str] = frozenset({"message_received", "file_received", "med
 HOLD_CAPACITY = 256
 
 #: Identifier fields the server correlates by, in the order they are read.
-CORRELATION_KEYS: tuple[str, ...] = ("message_id", "file_id", "query_id", "request_id")
+CORRELATION_KEYS: tuple[str, ...] = (
+    "message_id",
+    "file_id",
+    "query_id",
+    "request_id",
+    "sub_id",
+)
 
 #: How many issued identifiers are remembered. An identifier is forgotten on
 #: its terminal event; one whose terminal event never comes (a query, a

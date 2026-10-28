@@ -138,6 +138,18 @@ EXPOSED: frozenset[str] = frozenset(
         "services.discover_services",
         "services.send_service_request",
         "services.respond_to_service_request",
+        "services.subscribe_service",
+        "services.unsubscribe_service",
+        "services.resync_service_subscription",
+        "services.service_subscriptions",
+        "services.set_service_subscription_policy",
+        "services.accept_service_subscription",
+        "services.reject_service_subscription",
+        "services.end_service_subscription",
+        "services.publish_service_update",
+        "services.set_service_topic_checkpoint",
+        "services.clear_service_topic",
+        "services.service_subscribers",
         # documents
         "data.create_doc",
         "data.delete_doc",
@@ -334,6 +346,7 @@ ID_RESULTS: frozenset[str] = frozenset(
         "services.discover_services",
         "services.send_service_request",
         "services.respond_to_service_request",
+        "services.subscribe_service",
     }
 )
 
@@ -481,7 +494,16 @@ class Dispatcher:
             service_id = args.get("service_id")
             if declaration == "register_service":
                 self._ownership.claim(service_id, app_id)
-            elif declaration in ("unregister_service", "respond_to_service_request"):
+            elif declaration in (
+                "unregister_service",
+                "respond_to_service_request",
+                # A topic belongs to its service: only the owner publishes to
+                # it, summarises it, clears it, or decides who may watch it.
+                "set_service_subscription_policy",
+                "publish_service_update",
+                "set_service_topic_checkpoint",
+                "clear_service_topic",
+            ):
                 self._ownership.check(service_id, app_id)
             return self._services, declaration, args, result_type
         if obj == "DataStore":

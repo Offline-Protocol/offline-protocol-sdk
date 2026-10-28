@@ -931,15 +931,39 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request(
     ): Int
@@ -1442,15 +1466,39 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new(`protocol`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription(`ptr`: Long,`subId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`topic`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription(`ptr`: Long,`subId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`topic`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`version`: RustBuffer.ByValue,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription(`ptr`: Long,`subId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request(`ptr`: Long,`requestId`: RustBuffer.ByValue,`requester`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription(`ptr`: Long,`subId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_request(`ptr`: Long,`provider`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`method`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`policy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`topic`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(`ptr`: Long,`provider`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`topic`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service(`ptr`: Long,`subId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -2066,19 +2114,55 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() and 0xFFFF) != 58624) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription() and 0xFFFF) != 24108) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic() and 0xFFFF) != 19137) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() and 0xFFFF) != 43941) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription() and 0xFFFF) != 13) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update() and 0xFFFF) != 65376) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() and 0xFFFF) != 46597) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription() and 0xFFFF) != 14676) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() and 0xFFFF) != 20926) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription() and 0xFFFF) != 4072) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() and 0xFFFF) != 34689) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers() and 0xFFFF) != 11372) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions() and 0xFFFF) != 17809) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy() and 0xFFFF) != 4258) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() and 0xFFFF) != 51763) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() and 0xFFFF) != 6997) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() and 0xFFFF) != 4997) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service() and 0xFFFF) != 53713) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() and 0xFFFF) != 50880) {
@@ -4042,15 +4126,39 @@ public object FfiConverterTypeDataStore: FfiConverter<DataStore, Long> {
 
 public interface MeshServicesInterface {
     
+    fun `acceptServiceSubscription`(`subId`: kotlin.String)
+    
+    fun `clearServiceTopic`(`serviceId`: kotlin.String, `topic`: kotlin.String)
+    
     fun `discoverServices`(`serviceId`: kotlin.String?): kotlin.String
+    
+    fun `endServiceSubscription`(`subId`: kotlin.String, `reason`: kotlin.String)
+    
+    fun `publishServiceUpdate`(`serviceId`: kotlin.String, `topic`: kotlin.String, `key`: kotlin.String?, `body`: kotlin.String): ServicePublishReport
     
     fun `registerService`(`serviceId`: kotlin.String, `version`: kotlin.String, `capabilities`: Map<kotlin.String, kotlin.String>)
     
+    fun `rejectServiceSubscription`(`subId`: kotlin.String, `reason`: kotlin.String)
+    
     fun `respondToServiceRequest`(`requestId`: kotlin.String, `requester`: kotlin.String, `serviceId`: kotlin.String, `status`: kotlin.String, `body`: kotlin.String): kotlin.String
+    
+    fun `resyncServiceSubscription`(`subId`: kotlin.String)
     
     fun `sendServiceRequest`(`provider`: kotlin.String, `serviceId`: kotlin.String, `method`: kotlin.String, `body`: kotlin.String): kotlin.String
     
+    fun `serviceSubscribers`(`serviceId`: kotlin.String?): List<ServiceSubscriberInfo>
+    
+    fun `serviceSubscriptions`(): List<ServiceSubscriptionInfo>
+    
+    fun `setServiceSubscriptionPolicy`(`serviceId`: kotlin.String, `policy`: SubscriptionPolicyConfig)
+    
+    fun `setServiceTopicCheckpoint`(`serviceId`: kotlin.String, `topic`: kotlin.String, `body`: kotlin.String)
+    
+    fun `subscribeService`(`provider`: kotlin.String, `serviceId`: kotlin.String, `topic`: kotlin.String, `mode`: SubscriptionMode, `params`: kotlin.String): kotlin.String
+    
     fun `unregisterService`(`serviceId`: kotlin.String): kotlin.Boolean
+    
+    fun `unsubscribeService`(`subId`: kotlin.String): kotlin.Boolean
     
     companion object
 }
@@ -4166,6 +4274,35 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     }
 
     
+    @Throws(ProtocolException::class)override fun `acceptServiceSubscription`(`subId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription(
+        it,
+        
+        FfiConverterString.lower(`subId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `clearServiceTopic`(`serviceId`: kotlin.String, `topic`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic(
+        it,
+        
+        FfiConverterString.lower(`serviceId`),
+        FfiConverterString.lower(`topic`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(ProtocolException::class)override fun `discoverServices`(`serviceId`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -4174,6 +4311,39 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
         it,
         
         FfiConverterOptionalString.lower(`serviceId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `endServiceSubscription`(`subId`: kotlin.String, `reason`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription(
+        it,
+        
+        FfiConverterString.lower(`subId`),
+        FfiConverterString.lower(`reason`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `publishServiceUpdate`(`serviceId`: kotlin.String, `topic`: kotlin.String, `key`: kotlin.String?, `body`: kotlin.String): ServicePublishReport {
+            return FfiConverterTypeServicePublishReport.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update(
+        it,
+        
+        FfiConverterString.lower(`serviceId`),
+        FfiConverterString.lower(`topic`),
+        FfiConverterOptionalString.lower(`key`),
+        FfiConverterString.lower(`body`),_status)
 }
     }
     )
@@ -4191,6 +4361,21 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
         FfiConverterString.lower(`serviceId`),
         FfiConverterString.lower(`version`),
         FfiConverterMapStringString.lower(`capabilities`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `rejectServiceSubscription`(`subId`: kotlin.String, `reason`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription(
+        it,
+        
+        FfiConverterString.lower(`subId`),
+        FfiConverterString.lower(`reason`),_status)
 }
     }
     
@@ -4216,6 +4401,20 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `resyncServiceSubscription`(`subId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription(
+        it,
+        
+        FfiConverterString.lower(`subId`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(ProtocolException::class)override fun `sendServiceRequest`(`provider`: kotlin.String, `serviceId`: kotlin.String, `method`: kotlin.String, `body`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -4234,6 +4433,85 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `serviceSubscribers`(`serviceId`: kotlin.String?): List<ServiceSubscriberInfo> {
+            return FfiConverterSequenceTypeServiceSubscriberInfo.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers(
+        it,
+        
+        FfiConverterOptionalString.lower(`serviceId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `serviceSubscriptions`(): List<ServiceSubscriptionInfo> {
+            return FfiConverterSequenceTypeServiceSubscriptionInfo.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `setServiceSubscriptionPolicy`(`serviceId`: kotlin.String, `policy`: SubscriptionPolicyConfig)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy(
+        it,
+        
+        FfiConverterString.lower(`serviceId`),
+        FfiConverterTypeSubscriptionPolicyConfig.lower(`policy`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `setServiceTopicCheckpoint`(`serviceId`: kotlin.String, `topic`: kotlin.String, `body`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint(
+        it,
+        
+        FfiConverterString.lower(`serviceId`),
+        FfiConverterString.lower(`topic`),
+        FfiConverterString.lower(`body`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `subscribeService`(`provider`: kotlin.String, `serviceId`: kotlin.String, `topic`: kotlin.String, `mode`: SubscriptionMode, `params`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(
+        it,
+        
+        FfiConverterString.lower(`provider`),
+        FfiConverterString.lower(`serviceId`),
+        FfiConverterString.lower(`topic`),
+        FfiConverterTypeSubscriptionMode.lower(`mode`),
+        FfiConverterString.lower(`params`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `unregisterService`(`serviceId`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithHandle {
@@ -4242,6 +4520,21 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
         it,
         
         FfiConverterString.lower(`serviceId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `unsubscribeService`(`subId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service(
+        it,
+        
+        FfiConverterString.lower(`subId`),_status)
 }
     }
     )
@@ -10029,6 +10322,228 @@ public object FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer<SendMes
 
 
 
+data class ServicePublishReport (
+    var `subscribers`: kotlin.UInt
+    , 
+    var `sentLive`: kotlin.UInt
+    , 
+    var `queued`: kotlin.UInt
+    , 
+    var `coalesced`: kotlin.UInt
+    , 
+    var `failed`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeServicePublishReport: FfiConverterRustBuffer<ServicePublishReport> {
+    override fun read(buf: ByteBuffer): ServicePublishReport {
+        return ServicePublishReport(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ServicePublishReport) = (
+            FfiConverterUInt.allocationSize(value.`subscribers`) +
+            FfiConverterUInt.allocationSize(value.`sentLive`) +
+            FfiConverterUInt.allocationSize(value.`queued`) +
+            FfiConverterUInt.allocationSize(value.`coalesced`) +
+            FfiConverterUInt.allocationSize(value.`failed`)
+    )
+
+    override fun write(value: ServicePublishReport, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`subscribers`, buf)
+            FfiConverterUInt.write(value.`sentLive`, buf)
+            FfiConverterUInt.write(value.`queued`, buf)
+            FfiConverterUInt.write(value.`coalesced`, buf)
+            FfiConverterUInt.write(value.`failed`, buf)
+    }
+}
+
+
+
+data class ServiceSubscriberInfo (
+    var `subId`: kotlin.String
+    , 
+    var `subscriber`: kotlin.String
+    , 
+    var `serviceId`: kotlin.String
+    , 
+    var `topic`: kotlin.String
+    , 
+    var `mode`: SubscriptionMode
+    , 
+    var `state`: kotlin.String
+    , 
+    var `params`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer<ServiceSubscriberInfo> {
+    override fun read(buf: ByteBuffer): ServiceSubscriberInfo {
+        return ServiceSubscriberInfo(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeSubscriptionMode.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ServiceSubscriberInfo) = (
+            FfiConverterString.allocationSize(value.`subId`) +
+            FfiConverterString.allocationSize(value.`subscriber`) +
+            FfiConverterString.allocationSize(value.`serviceId`) +
+            FfiConverterString.allocationSize(value.`topic`) +
+            FfiConverterTypeSubscriptionMode.allocationSize(value.`mode`) +
+            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterString.allocationSize(value.`params`)
+    )
+
+    override fun write(value: ServiceSubscriberInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`subId`, buf)
+            FfiConverterString.write(value.`subscriber`, buf)
+            FfiConverterString.write(value.`serviceId`, buf)
+            FfiConverterString.write(value.`topic`, buf)
+            FfiConverterTypeSubscriptionMode.write(value.`mode`, buf)
+            FfiConverterString.write(value.`state`, buf)
+            FfiConverterString.write(value.`params`, buf)
+    }
+}
+
+
+
+data class ServiceSubscriptionInfo (
+    var `subId`: kotlin.String
+    , 
+    var `provider`: kotlin.String
+    , 
+    var `serviceId`: kotlin.String
+    , 
+    var `topic`: kotlin.String
+    , 
+    var `mode`: SubscriptionMode
+    , 
+    var `state`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer<ServiceSubscriptionInfo> {
+    override fun read(buf: ByteBuffer): ServiceSubscriptionInfo {
+        return ServiceSubscriptionInfo(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeSubscriptionMode.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ServiceSubscriptionInfo) = (
+            FfiConverterString.allocationSize(value.`subId`) +
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterString.allocationSize(value.`serviceId`) +
+            FfiConverterString.allocationSize(value.`topic`) +
+            FfiConverterTypeSubscriptionMode.allocationSize(value.`mode`) +
+            FfiConverterString.allocationSize(value.`state`)
+    )
+
+    override fun write(value: ServiceSubscriptionInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`subId`, buf)
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterString.write(value.`serviceId`, buf)
+            FfiConverterString.write(value.`topic`, buf)
+            FfiConverterTypeSubscriptionMode.write(value.`mode`, buf)
+            FfiConverterString.write(value.`state`, buf)
+    }
+}
+
+
+
+data class SubscriptionPolicyConfig (
+    var `kind`: SubscriptionPolicyKind
+    , 
+    var `allowPeers`: List<kotlin.String>
+    , 
+    var `allowGroups`: List<kotlin.String>
+    , 
+    var `rulesFallback`: SubscriptionRulesFallback
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSubscriptionPolicyConfig: FfiConverterRustBuffer<SubscriptionPolicyConfig> {
+    override fun read(buf: ByteBuffer): SubscriptionPolicyConfig {
+        return SubscriptionPolicyConfig(
+            FfiConverterTypeSubscriptionPolicyKind.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterTypeSubscriptionRulesFallback.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SubscriptionPolicyConfig) = (
+            FfiConverterTypeSubscriptionPolicyKind.allocationSize(value.`kind`) +
+            FfiConverterSequenceString.allocationSize(value.`allowPeers`) +
+            FfiConverterSequenceString.allocationSize(value.`allowGroups`) +
+            FfiConverterTypeSubscriptionRulesFallback.allocationSize(value.`rulesFallback`)
+    )
+
+    override fun write(value: SubscriptionPolicyConfig, buf: ByteBuffer) {
+            FfiConverterTypeSubscriptionPolicyKind.write(value.`kind`, buf)
+            FfiConverterSequenceString.write(value.`allowPeers`, buf)
+            FfiConverterSequenceString.write(value.`allowGroups`, buf)
+            FfiConverterTypeSubscriptionRulesFallback.write(value.`rulesFallback`, buf)
+    }
+}
+
+
+
 data class TelemetryConfig (
     var `apiKey`: kotlin.String
     , 
@@ -11048,6 +11563,109 @@ public object FfiConverterTypeRelaySyncState: FfiConverterRustBuffer<RelaySyncSt
     override fun allocationSize(value: RelaySyncState) = 4UL
 
     override fun write(value: RelaySyncState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class SubscriptionMode {
+    
+    LATEST,
+    LOG;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSubscriptionMode: FfiConverterRustBuffer<SubscriptionMode> {
+    override fun read(buf: ByteBuffer) = try {
+        SubscriptionMode.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SubscriptionMode) = 4UL
+
+    override fun write(value: SubscriptionMode, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class SubscriptionPolicyKind {
+    
+    RESTRICTED,
+    ACCEPT_ALL,
+    RULES;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSubscriptionPolicyKind: FfiConverterRustBuffer<SubscriptionPolicyKind> {
+    override fun read(buf: ByteBuffer) = try {
+        SubscriptionPolicyKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SubscriptionPolicyKind) = 4UL
+
+    override fun write(value: SubscriptionPolicyKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class SubscriptionRulesFallback {
+    
+    ASK,
+    REJECT;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSubscriptionRulesFallback: FfiConverterRustBuffer<SubscriptionRulesFallback> {
+    override fun read(buf: ByteBuffer) = try {
+        SubscriptionRulesFallback.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SubscriptionRulesFallback) = 4UL
+
+    override fun write(value: SubscriptionRulesFallback, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -12807,6 +13425,62 @@ public object FfiConverterSequenceTypeNetworkNode: FfiConverterRustBuffer<List<N
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNetworkNode.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeServiceSubscriberInfo: FfiConverterRustBuffer<List<ServiceSubscriberInfo>> {
+    override fun read(buf: ByteBuffer): List<ServiceSubscriberInfo> {
+        val len = buf.getInt()
+        return List<ServiceSubscriberInfo>(len) {
+            FfiConverterTypeServiceSubscriberInfo.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ServiceSubscriberInfo>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeServiceSubscriberInfo.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ServiceSubscriberInfo>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeServiceSubscriberInfo.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeServiceSubscriptionInfo: FfiConverterRustBuffer<List<ServiceSubscriptionInfo>> {
+    override fun read(buf: ByteBuffer): List<ServiceSubscriptionInfo> {
+        val len = buf.getInt()
+        return List<ServiceSubscriptionInfo>(len) {
+            FfiConverterTypeServiceSubscriptionInfo.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ServiceSubscriptionInfo>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeServiceSubscriptionInfo.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ServiceSubscriptionInfo>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeServiceSubscriptionInfo.write(it, buf)
         }
     }
 }

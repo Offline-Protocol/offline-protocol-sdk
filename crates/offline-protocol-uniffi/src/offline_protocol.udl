@@ -2132,6 +2132,78 @@ interface OfflineProtocol {
 
 };
 
+// ========================================================================
+// SERVICE SUBSCRIPTIONS (ADR 0035)
+// ========================================================================
+
+// How a topic treats its updates. Latest: state, one current value per key.
+// Log: events, every update in order, with an optional checkpoint.
+enum SubscriptionMode {
+    "Latest",
+    "Log",
+};
+
+// Who may subscribe to a service. Restricted (the default) asks the app
+// about every subscriber; AcceptAll admits every peer with a session; Rules
+// admits allow_peers and members of allow_groups and asks or refuses the
+// rest by rules_fallback.
+enum SubscriptionPolicyKind {
+    "Restricted",
+    "AcceptAll",
+    "Rules",
+};
+
+enum SubscriptionRulesFallback {
+    "Ask",
+    "Reject",
+};
+
+// allow_peers, allow_groups and rules_fallback are read only for Rules.
+dictionary SubscriptionPolicyConfig {
+    SubscriptionPolicyKind kind;
+    sequence<string> allow_peers;
+    sequence<string> allow_groups;
+    SubscriptionRulesFallback rules_fallback;
+};
+
+// What one publish_service_update did, per subscriber.
+dictionary ServicePublishReport {
+    // Active subscriptions on the topic.
+    u32 subscribers;
+    // Sent once over a live direct link.
+    u32 sent_live;
+    // Queued on the reliable ladder, across hops; a latest value replaces the
+    // one queued before it for its key.
+    u32 queued;
+    // Held back by the update interval; the newest value follows.
+    u32 coalesced;
+    // Not sealed (no confirmed session); the next renewal catches it up.
+    u32 failed;
+};
+
+// A subscription this device holds on another.
+dictionary ServiceSubscriptionInfo {
+    string sub_id;
+    string provider;
+    string service_id;
+    string topic;
+    SubscriptionMode mode;
+    // "pending", "active", "paused" or "ended".
+    string state;
+};
+
+// A subscription another device holds on this one.
+dictionary ServiceSubscriberInfo {
+    string sub_id;
+    string subscriber;
+    string service_id;
+    string topic;
+    SubscriptionMode mode;
+    // "pending" while the app decides, "active" after.
+    string state;
+    string params;
+};
+
 // Standalone mesh services interface
 interface MeshServices {
     [Throws=ProtocolError]
@@ -2151,6 +2223,47 @@ interface MeshServices {
 
     [Throws=ProtocolError]
     string respond_to_service_request(string request_id, string requester, string service_id, string status, string body);
+
+    // Subscriptions (ADR 0035). Every subscription frame is sealed in the
+    // 1:1 MLS session, with no plaintext fallback. Returns the sub_id.
+    [Throws=ProtocolError]
+    string subscribe_service(string provider, string service_id, string topic, SubscriptionMode mode, string params);
+
+    [Throws=ProtocolError]
+    boolean unsubscribe_service(string sub_id);
+
+    // Asks the provider for the whole state again now.
+    [Throws=ProtocolError]
+    void resync_service_subscription(string sub_id);
+
+    [Throws=ProtocolError]
+    sequence<ServiceSubscriptionInfo> service_subscriptions();
+
+    [Throws=ProtocolError]
+    void set_service_subscription_policy(string service_id, SubscriptionPolicyConfig policy);
+
+    [Throws=ProtocolError]
+    void accept_service_subscription(string sub_id);
+
+    [Throws=ProtocolError]
+    void reject_service_subscription(string sub_id, string reason);
+
+    // Ends a subscription another device holds on this one.
+    [Throws=ProtocolError]
+    void end_service_subscription(string sub_id, string reason);
+
+    // With a key the topic is latest; without one it is log.
+    [Throws=ProtocolError]
+    ServicePublishReport publish_service_update(string service_id, string topic, string? key, string body);
+
+    [Throws=ProtocolError]
+    void set_service_topic_checkpoint(string service_id, string topic, string body);
+
+    [Throws=ProtocolError]
+    void clear_service_topic(string service_id, string topic);
+
+    [Throws=ProtocolError]
+    sequence<ServiceSubscriberInfo> service_subscribers(string? service_id);
 };
 
 // ========================================================================
