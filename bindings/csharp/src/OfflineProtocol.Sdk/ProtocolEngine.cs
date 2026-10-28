@@ -202,7 +202,9 @@ public sealed class ProtocolEngine : IAsyncDisposable
             cancellationToken);
 
     /// <summary>
-    /// Delivers events on a dedicated delivery thread. The handler must not call back into this engine synchronously.
+    /// Delivers events on a dedicated delivery thread. Keep handlers short and non-blocking:
+    /// dispose and callback removal wait for the current handler to finish on that thread.
+    /// The handler must not call back into this engine synchronously.
     /// </summary>
     public Task SetEventCallbackAsync(Action<string>? handler, CancellationToken cancellationToken = default) =>
         EnqueueAsync<object?>(
@@ -245,6 +247,12 @@ public sealed class ProtocolEngine : IAsyncDisposable
                 return null;
             },
             cancellationToken);
+
+    /// <summary>
+    /// Events dropped because the delivery queue was full since the current callback was installed.
+    /// Use <see cref="PollEventAsync"/> if the app must not miss events under burst load.
+    /// </summary>
+    public long DroppedEventDeliveryCount => _eventBridge?.DroppedEventCount ?? 0;
 
     public Task<string?> PollEventAsync(CancellationToken cancellationToken = default) =>
         EnqueueAsync<string?>(

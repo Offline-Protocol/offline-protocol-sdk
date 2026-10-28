@@ -19,6 +19,15 @@ public sealed class MemoryProtocolStorageTests
     }
 
     [Fact]
+    public void Remove_drops_empty_key_type_bucket()
+    {
+        var storage = new MemoryProtocolStorage();
+        storage.Store("only", "k", [0]);
+        storage.Remove("only", "k");
+        Assert.Empty(storage.ListKeyIds("only"));
+    }
+
+    [Fact]
     public void ListKeyIds_is_scoped_to_key_type()
     {
         var storage = new MemoryProtocolStorage();

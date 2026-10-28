@@ -14,12 +14,14 @@ internal sealed class EventCallbackBridge
     private readonly GCHandle _selfHandle;
     private readonly EventFn _onEvent;
     private readonly DropFn _onDrop;
-    private readonly Channel<string> _channel;
-    private readonly ChannelWriter<string> _writer;
-    private readonly ChannelReader<string> _reader;
+    private readonly Channel<EventEnvelope> _channel;
+    private readonly ChannelWriter<EventEnvelope> _writer;
+    private readonly ChannelReader<EventEnvelope> _reader;
     private readonly Thread _deliveryThread;
     private int _accepting;
+    private int _deliveryGeneration;
     private int _teardownFinished;
+    private long _droppedEventCount;
 
     public EventCallbackBridge(Action<string> handler, int queueCapacity = DefaultEventQueueCapacity)
     {
@@ -27,7 +29,7 @@ internal sealed class EventCallbackBridge
         _selfHandle = GCHandle.Alloc(this);
         _onEvent = OnEvent;
         _onDrop = OnDrop;
-        _channel = Channel.CreateBounded<string>(
+        _channel = Channel.CreateBounded<EventEnvelope>(
             new BoundedChannelOptions(queueCapacity)
             {
                 FullMode = BoundedChannelFullMode.DropWrite,
@@ -37,6 +39,7 @@ internal sealed class EventCallbackBridge
         _writer = _channel.Writer;
         _reader = _channel.Reader;
         _accepting = 1;
+        _deliveryGeneration = 1;
         _deliveryThread = new Thread(RunDeliveryLoop)
         {
             Name = "offline-protocol-events",
@@ -51,6 +54,9 @@ internal sealed class EventCallbackBridge
 
     public IntPtr DropPointer => Marshal.GetFunctionPointerForDelegate(_onDrop);
 
+    /// <summary>Events not delivered because the bounded queue rejected a write.</summary>
+    internal long DroppedEventCount => Interlocked.Read(ref _droppedEventCount);
+
     /// <summary>Stops accepting and delivering events; waits for the delivery thread to exit.</summary>
     internal void Deactivate()
     {
@@ -60,6 +66,7 @@ internal sealed class EventCallbackBridge
         }
 
         Volatile.Write(ref _accepting, 0);
+        Interlocked.Increment(ref _deliveryGeneration);
         _writer.TryComplete();
         _deliveryThread.Join();
     }
@@ -80,6 +87,8 @@ internal sealed class EventCallbackBridge
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void DropFn(IntPtr ctx);
 
+    private readonly record struct EventEnvelope(int Generation, string Json);
+
     private static void OnEvent(IntPtr ctx, IntPtr eventJson)
     {
         if (GCHandle.FromIntPtr(ctx).Target is not EventCallbackBridge bridge)
@@ -92,8 +101,12 @@ internal sealed class EventCallbackBridge
             return;
         }
 
+        var generation = Volatile.Read(ref bridge._deliveryGeneration);
         var json = Marshal.PtrToStringUTF8(eventJson) ?? "";
-        bridge._writer.TryWrite(json);
+        if (!bridge._writer.TryWrite(new EventEnvelope(generation, json)))
+        {
+            Interlocked.Increment(ref bridge._droppedEventCount);
+        }
     }
 
     private void RunDeliveryLoop()
@@ -102,14 +115,14 @@ internal sealed class EventCallbackBridge
         {
             while (_reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult())
             {
-                while (_reader.TryRead(out var json))
+                while (_reader.TryRead(out var envelope))
                 {
-                    if (Volatile.Read(ref _accepting) == 0)
+                    if (envelope.Generation != Volatile.Read(ref _deliveryGeneration))
                     {
                         continue;
                     }
 
-                    _handler(json);
+                    _handler(envelope.Json);
                 }
             }
         }

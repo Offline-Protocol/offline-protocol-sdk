@@ -35,9 +35,11 @@ public sealed class MemoryProtocolStorage : IProtocolStorage
 
     public OfflineProtocolStorageStatus Remove(string keyType, string keyId)
     {
-        if (_byType.TryGetValue(keyType, out var bucket))
+        if (_byType.TryGetValue(keyType, out var bucket)
+            && bucket.TryRemove(keyId, out _)
+            && bucket.IsEmpty)
         {
-            bucket.TryRemove(keyId, out _);
+            _byType.TryRemove(keyType, out _);
         }
 
         return OfflineProtocolStorageStatus.Ok;

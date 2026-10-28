@@ -143,7 +143,15 @@ fn csharp_events_are_delivered_off_the_engine_thread() {
     assert!(
         events.contains("Channel.CreateBounded")
             && events.contains("Deactivate")
+            && events.contains("_deliveryGeneration")
+            && events.contains("DroppedEventCount")
             && events.contains("offline-protocol-events"),
-        "EventCallbackBridge must queue off the engine thread and deactivate before drop"
+        "EventCallbackBridge must queue off the engine thread, generation-stamp delivery, \
+         and count dropped events"
+    );
+    let engine = read("bindings/csharp/src/OfflineProtocol.Sdk/ProtocolEngine.cs");
+    assert!(
+        engine.contains("DroppedEventDeliveryCount"),
+        "ProtocolEngine must expose dropped event delivery count"
     );
 }

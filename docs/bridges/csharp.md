@@ -71,10 +71,15 @@ code is posted off the callback (see Events below).
 `SetEventCallbackAsync` installs `offline_protocol_set_event_callback`. Events
 are copied on the engine thread, queued on a **bounded channel** (default 256,
 `DropWrite` when full), and delivered on a **dedicated background delivery
-thread**. Clearing the callback or disposing the engine **deactivates** the
-bridge first so queued events are not delivered afterward. The handler must not
-call back into the same `ProtocolEngine` synchronously. `PollEventAsync` reads
-the same queue as the C binding's `offline_protocol_poll_event`.
+thread**. A **generation stamp** drops any item queued before deactivate, so
+teardown does not invoke the handler for stale work. **`DroppedEventDeliveryCount`**
+counts queue rejections since the current callback was installed. Under burst
+load, **`PollEventAsync`** reads the same native queue as the C binding and does
+not share the delivery channel cap. Clearing the callback or disposing the engine
+**deactivates** the bridge first (which **joins** the delivery thread after the
+current handler returns). Keep handlers **short and non-blocking**: a slow handler
+delays dispose and blocks the engine thread until delivery finishes. The handler
+must not call back into the same `ProtocolEngine` synchronously.
 
 ## CS2. String ownership
 
