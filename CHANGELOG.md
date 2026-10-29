@@ -78,19 +78,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   iPhone keeps its Bluetooth LE links across an app restart, and its new
   process knows nothing about them: not the hello that named the Android
   phone, and not where it was subscribed. Android saw no disconnect and
-  carried nothing more, in one direction or both, until its own app
-  restarted. Android now sends over any ready client link to the peer, not
-  only the address the peer's hello mapped. A dial that proves who writes to
-  its server, and is then refused as a duplicate link, now maps that writer
-  before it closes. And a client link that keeps taking writes and has never
-  had an answer is dropped and redialled, which writes the hello again,
-  about 20 to 25 seconds after its first write, even when the peer holds
-  another link. A link the peer has answered once, even before it
-  restarted, is never dropped for silence, and a peer is redialled once until it is heard from again, so one
-  that only receives frames asking for no acknowledgement is not redialled
-  over and over. On two phones, the first iPhone restart
-  beside a linked Android phone failed before, as did one in ten restarts of
-  both apps; after, 62 of 62 restarts and connects carried messages
+  carried nothing more, in one direction or both, until its own app restarted.
+  Android now sends over any ready client link to the peer, not only the
+  address the peer's hello mapped. A dial that proves who writes to its
+  server, and is then refused as a duplicate link, now maps that writer before
+  it closes. And a client link that keeps taking writes and has never had an
+  answer is dropped and redialled, which writes the hello again, about 20 to
+  25 seconds after its first write, even when the peer holds another link. A
+  link the peer has answered once, even before it restarted, is never dropped
+  for silence, and a peer is redialled once until it is heard from again, so
+  one that only receives frames asking for no acknowledgement is not redialled
+  over and over. On two phones, the first iPhone restart beside a linked
+  Android phone failed before, as did one in ten restarts of both apps; after,
+  36 of 36 restarts and connects carried messages, one of them only because a
+  dead link was redialled
   ([kotlin-devices.md](docs/bridges/kotlin-devices.md),
   [K9](docs/bridges/kotlin.md#k9-a-bluetooth-le-link-outlives-the-app-on-the-other-end)).
 

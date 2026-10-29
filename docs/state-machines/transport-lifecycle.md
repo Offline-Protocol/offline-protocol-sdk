@@ -204,19 +204,19 @@ because each restart gives the advertisement a new random address
 ([ADR 0030](../adr/0030-one-bluetooth-le-link-per-peer-pair.md)).
 
 **A Bluetooth LE link that only takes writes is redialled within a bound.** A
-write without response reports success whether or not the peer can use it,
-and a link outlives the app on the other end while what it meant does not: an
+write without response reports success whether or not the peer can use it, and
+a link outlives the app on the other end while what it meant does not: an
 iPhone whose app restarts keeps its links through state restoration, but the
 new process never heard the hello that named the central, so it cannot
 attribute what that central writes. On Android, a client link is disconnected
 and redialled at the same address, which writes its hello again, once nothing
-from the peer has arrived on any link since the link came up, and a write at least
-10 seconds after its first one (the acknowledgement timeout, so the core's
-resend or another message) has itself gone 10 seconds unanswered. That is 20
-to 25 seconds after the first write (the check runs every 5 seconds), and the
-redial follows within the 5 second reconnect backoff, whether or not the peer
-holds another link; on two phones the first message crossed
-26 seconds after the dead link came up. One unanswered write never counts,
+from the peer has arrived on any link since the link came up, and a write at
+least 10 seconds after its first one (the acknowledgement timeout, so the
+core's resend or another message) has itself gone 10 seconds unanswered. That
+is 20 to 25 seconds after the first write (the check runs every 5 seconds),
+and the redial follows within the 5 second reconnect backoff, whether or not
+the peer holds another link; on two phones the first message crossed 26
+seconds after the dead link came up. One unanswered write never counts,
 because the last frame of an exchange is often an acknowledgement. Only a
 fragment counts as hearing the peer: a hello or a subscription shows the peer
 is up, not that it can use what this side writes.
@@ -237,22 +237,24 @@ the session healed. So a link that dies after its first answer is not caught
 by this rule, and that includes a link the peer's restart kills: Android sees
 no disconnect, so a link the old process answered keeps its answer, and the
 new process writing to our server would count as an answer anyway. The rule
-covers a link that came up and was never answered, the shape of the
-2026-10-29 log. A link answered before the restart recovers through the
-egress fallback and the duplicate-dial binding where they apply
+covers a link that came up and was never answered, the shape of the 2026-10-29
+log. A link answered before the restart recovers through the egress fallback
+and the duplicate-dial binding where they apply
 ([K9](../bridges/kotlin.md#k9-a-bluetooth-le-link-outlives-the-app-on-the-other-end));
-past those, it needs the peripheral to handshake its restored links again,
-or delivery evidence from the core, which the transport does not see. A peer whose replies come back over another carrier while Android
-sends over this one looks silent here, because the transport cannot see them.
-And a link that is dead in one direction only is not caught: a fragment the
-peer writes to our server counts as an answer on every client link to it,
-whether or not the peer can use what Android writes on that link. Narrowing
-an answer to a fragment on the link itself would tear down healthy links,
-because an iPhone that holds its own link to our server replies over it and
-notifies on Android's link only when it holds none.
-Without the bound, on 2026-10-29, an Android phone wrote to a restarted
-iPhone for more than 90 seconds, and the pair carried nothing until the
-Android app was restarted.
+past those, it needs the peripheral to handshake its restored links again, or
+delivery evidence from the core, which the transport does not see. A peer
+whose replies come back over another carrier while Android sends over this one
+looks silent here, because the transport cannot see them. And a link that is
+dead in one direction only is not caught: a fragment the peer writes to our
+server counts as an answer on every client link to it, whether or not the peer
+can use what Android writes on that link. Narrowing an answer to a fragment on
+the link itself would tear down healthy links, because an iPhone that holds
+its own link to our server replies over it and notifies on Android's link only
+when it holds none.
+
+Without the bound, on 2026-10-29, an Android phone wrote to a restarted iPhone
+for more than 90 seconds, and the pair carried nothing until the Android app
+was restarted.
 
 ## What "sent" means at each layer
 
