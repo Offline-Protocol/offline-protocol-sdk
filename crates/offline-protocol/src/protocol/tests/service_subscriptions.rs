@@ -491,6 +491,28 @@ fn a_queued_subscription_frame_is_never_written_to_the_outbox_store() {
     for id in &queued {
         assert!(!stored.contains(id), "a subscription frame was persisted");
     }
+
+    // The mark is the entry's own, not read back from its re-seal
+    // provenance: an entry that lost its provenance still stays unwritten.
+    let marked: Vec<_> = pair
+        .bob
+        .protocol
+        .outbox
+        .values_mut()
+        .filter(|entry| entry.subscription_frame)
+        .map(|entry| {
+            entry.reseal = None;
+            entry.clone()
+        })
+        .collect();
+    assert_eq!(marked.len(), queued.len());
+    for entry in &marked {
+        pair.bob.protocol.persist_outbox_entry(entry);
+    }
+    let stored = pair.bob.state.list_keys(storage_keys::OUTBOX).unwrap();
+    for id in &queued {
+        assert!(!stored.contains(id), "a subscription frame was persisted");
+    }
 }
 
 #[test]

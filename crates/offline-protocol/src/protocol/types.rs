@@ -2685,6 +2685,14 @@ pub(crate) struct OutboxEntry {
     /// telemetry.
     #[serde(default)]
     pub(crate) app_send: bool,
+    /// A service subscription frame, marked when it was queued, while its
+    /// plaintext was still in hand: the stored message is the sealed
+    /// envelope, which looks like any direct message. Never written to the
+    /// outbox's store (ADR 0035, *Restart*). Memory-only like `reseal`, and
+    /// kept apart from it so that nothing done to the re-seal provenance
+    /// later can let a subscription frame be persisted.
+    #[serde(skip)]
+    pub(crate) subscription_frame: bool,
 }
 
 #[derive(Clone)]

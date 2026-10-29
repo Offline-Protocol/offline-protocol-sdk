@@ -3455,6 +3455,7 @@ impl OfflineProtocol {
         // (non-media) entry here (the failure/retry path); later calls find the
         // entry already present and leave its `reseal` intact.
         let staged_reseal = self.take_staged_reseal(message, is_media);
+        let subscription_frame = Self::is_subscription_reseal(staged_reseal.as_ref());
         let app_send = !is_media && self.is_staged_app_send(message);
         let outbox = if is_media {
             &mut self.media_outbox
@@ -3473,6 +3474,7 @@ impl OfflineProtocol {
                 reseal: staged_reseal,
                 relay_pushed: false,
                 app_send,
+                subscription_frame,
             });
         // Persist newly-created main-outbox entries so they survive a restart.
         // media entries are intentionally not persisted.
@@ -3509,6 +3511,7 @@ impl OfflineProtocol {
         // (non-media) outbox entry; on later attempts the entry already carries
         // it. Staging for media is never populated.
         let staged_reseal = self.take_staged_reseal(message, is_media);
+        let subscription_frame = Self::is_subscription_reseal(staged_reseal.as_ref());
         let app_send = !is_media && self.is_staged_app_send(message);
         let outbox = if is_media {
             &mut self.media_outbox
@@ -3527,6 +3530,7 @@ impl OfflineProtocol {
                 reseal: staged_reseal,
                 relay_pushed: false,
                 app_send,
+                subscription_frame,
             });
 
         entry.message = message.clone();
@@ -4037,17 +4041,19 @@ impl OfflineProtocol {
     /// and a restored renewal would name a subscription its sender no longer
     /// holds.
     ///
-    /// Told apart by the re-seal provenance staged when the frame was queued
-    /// (`send_subscription_reliable` stages it for every one), because that
-    /// is the only place its plaintext is: the stored message is the
-    /// `__MLS_ENC__` envelope, so a restored subscription frame cannot be told
-    /// from a restored direct message, and a test at restore would find
-    /// nothing. The provenance is never persisted, and nothing clears it from
-    /// a live entry.
+    /// Marked when the entry is created, from the re-seal provenance staged
+    /// as the frame was queued (`send_subscription_reliable` stages it for
+    /// every one), because that is the only place its plaintext is: the
+    /// stored message is the `__MLS_ENC__` envelope, so a restored
+    /// subscription frame cannot be told from a restored direct message, and
+    /// a test at restore would find nothing.
     pub(super) fn is_subscription_outbox_entry(entry: &OutboxEntry) -> bool {
-        entry
-            .reseal
-            .as_ref()
+        entry.subscription_frame
+    }
+
+    /// Whether staged re-seal provenance is a subscription frame's.
+    fn is_subscription_reseal(reseal: Option<&OutboxReseal>) -> bool {
+        reseal
             .is_some_and(|reseal| offline_protocol_services::is_subscription_frame(&reseal.content))
     }
 
