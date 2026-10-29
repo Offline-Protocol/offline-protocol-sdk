@@ -9,7 +9,7 @@ namespace OfflineProtocol.Sdk.Tests;
 public sealed class ProtocolEngineTests
 {
     // Every ProtocolConfig field without a default in the interface definition.
-    private const string Config =
+    internal const string Config =
         """
         {
           "app_id": "com.offlineprotocol.csharp.tests",

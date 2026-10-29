@@ -19,12 +19,23 @@ public sealed class MemoryProtocolStorageTests
     }
 
     [Fact]
-    public void Remove_drops_empty_key_type_bucket()
+    public void Removing_the_last_key_leaves_no_ids_and_the_type_still_takes_writes()
     {
         var storage = new MemoryProtocolStorage();
         storage.Store("only", "k", [0]);
         storage.Remove("only", "k");
         Assert.Empty(storage.ListKeyIds("only"));
+
+        // The emptied bucket is kept, so a write after the remove is never discarded.
+        storage.Store("only", "k2", [1]);
+        Assert.Equal("k2", Assert.Single(storage.ListKeyIds("only")));
+    }
+
+    [Fact]
+    public void Removing_an_absent_key_is_success()
+    {
+        var storage = new MemoryProtocolStorage();
+        Assert.Equal(OfflineProtocolStorageStatus.Ok, storage.Remove("none", "k"));
     }
 
     [Fact]
@@ -45,7 +56,9 @@ public sealed class MemoryProtocolStorageTests
         storage.Store("kt", "a", [0]);
         storage.Store("kt", "b\"c", [0]);
         var json = JsonSerializer.Serialize(storage.ListKeyIds("kt"));
-        Assert.Contains("\"a\"", json, StringComparison.Ordinal);
-        Assert.Contains("\"b\\\"c\"", json, StringComparison.Ordinal);
+
+        // Parsed back rather than matched as text: the encoder may write a quote as \" or
+        // \u0022, and both are the same JSON string to the native parser.
+        Assert.Equal(new[] { "a", "b\"c" }, JsonSerializer.Deserialize<string[]>(json));
     }
 }

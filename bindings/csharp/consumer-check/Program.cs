@@ -92,6 +92,9 @@ try
         return 1;
     }
 
+    // An empty key is refused by the engine's own validation, so nothing is enabled and nothing
+    // leaves the machine. Reaching that refusal, and no other, proves the C API filled `os` and
+    // the JSON this binding built decoded.
     try
     {
         await engine.EnableTelemetryAsync(
@@ -101,24 +104,20 @@ try
                 AppId = "com.offlineprotocol.csharp.consumer",
                 OsMajor = TelemetryPlatform.OsMajor,
             });
+        Console.Error.WriteLine("FAIL: enable_telemetry accepted an empty api_key");
+        return 1;
     }
-    catch (ProtocolEngineException ex)
+    catch (ProtocolEngineException ex) when (ex.Variant == "TelemetryConfigInvalid" && ex.Message.Contains("api_key", StringComparison.Ordinal))
     {
-        if (ex.Message.Contains("filled by the binding", StringComparison.Ordinal))
-        {
-            Console.Error.WriteLine($"FAIL: enable_telemetry must not refuse binding-filled os: {ex.Message}");
-            return 1;
-        }
     }
 
-    try
+    await engine.DisableTelemetryAsync();
+    if (await engine.FlushTelemetryBlockingAsync(50))
     {
-        await engine.DisableTelemetryAsync();
+        Console.Error.WriteLine("FAIL: flush_telemetry_blocking reported a finished upload with telemetry disabled");
+        return 1;
     }
-    catch (ProtocolEngineException)
-    {
-        // Enable may fail on an empty api_key before telemetry is active.
-    }
+
     await engine.NotifyAppStateAsync(AppState.Background);
     await engine.NotifyAppStateAsync(AppState.Active);
 

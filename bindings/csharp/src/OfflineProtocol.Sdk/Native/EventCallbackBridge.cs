@@ -11,17 +11,22 @@ internal sealed class EventCallbackBridge
     public const int DefaultEventQueueCapacity = 256;
 
     private readonly Action<string> _handler;
-    private readonly GCHandle _selfHandle;
     private readonly EventFn _onEvent;
     private readonly DropFn _onDrop;
     private readonly Channel<EventEnvelope> _channel;
     private readonly ChannelWriter<EventEnvelope> _writer;
     private readonly ChannelReader<EventEnvelope> _reader;
     private readonly Thread _deliveryThread;
+
+    // Not readonly: GCHandle is a struct, and Free() on a readonly field frees a defensive
+    // copy, leaving IsAllocated true here. The flag below is what makes the free happen once.
+    private GCHandle _selfHandle;
+    private int _handleFreed;
     private int _accepting;
     private int _deliveryGeneration;
     private int _teardownFinished;
     private long _droppedEventCount;
+    private long _handlerFailureCount;
 
     public EventCallbackBridge(Action<string> handler, int queueCapacity = DefaultEventQueueCapacity)
     {
@@ -57,6 +62,9 @@ internal sealed class EventCallbackBridge
     /// <summary>Events not delivered because the bounded queue rejected a write.</summary>
     internal long DroppedEventCount => Interlocked.Read(ref _droppedEventCount);
 
+    /// <summary>Events whose handler threw. Delivery continues after a throw.</summary>
+    internal long HandlerFailureCount => Interlocked.Read(ref _handlerFailureCount);
+
     /// <summary>Stops accepting and delivering events; waits for the delivery thread to exit.</summary>
     internal void Deactivate()
     {
@@ -68,14 +76,27 @@ internal sealed class EventCallbackBridge
         Volatile.Write(ref _accepting, 0);
         Interlocked.Increment(ref _deliveryGeneration);
         _writer.TryComplete();
-        _deliveryThread.Join();
+
+        // A handler that disposes the engine from the delivery thread would otherwise join itself.
+        if (Thread.CurrentThread != _deliveryThread)
+        {
+            _deliveryThread.Join();
+        }
     }
 
-    /// <summary>When native never took ownership (install refused).</summary>
+    /// <summary>
+    /// Releases the bridge when the install call returned. Safe after a refused install too:
+    /// the C API calls <c>drop</c> on every refusal, and the handle is freed only once.
+    /// </summary>
     internal void ReleaseLocal()
     {
         Deactivate();
-        if (_selfHandle.IsAllocated)
+        FreeHandleOnce();
+    }
+
+    private void FreeHandleOnce()
+    {
+        if (Interlocked.CompareExchange(ref _handleFreed, 1, 0) == 0)
         {
             _selfHandle.Free();
         }
@@ -89,23 +110,32 @@ internal sealed class EventCallbackBridge
 
     private readonly record struct EventEnvelope(int Generation, string Json);
 
+    // Runs on the engine thread inside the native library. An exception escaping a reverse
+    // P/Invoke terminates the process, so nothing may leave this method.
     private static void OnEvent(IntPtr ctx, IntPtr eventJson)
     {
-        if (GCHandle.FromIntPtr(ctx).Target is not EventCallbackBridge bridge)
+        try
         {
-            return;
-        }
+            if (GCHandle.FromIntPtr(ctx).Target is not EventCallbackBridge bridge)
+            {
+                return;
+            }
 
-        if (Volatile.Read(ref bridge._accepting) == 0)
-        {
-            return;
-        }
+            if (Volatile.Read(ref bridge._accepting) == 0)
+            {
+                return;
+            }
 
-        var generation = Volatile.Read(ref bridge._deliveryGeneration);
-        var json = Marshal.PtrToStringUTF8(eventJson) ?? "";
-        if (!bridge._writer.TryWrite(new EventEnvelope(generation, json)))
+            var generation = Volatile.Read(ref bridge._deliveryGeneration);
+            var json = Marshal.PtrToStringUTF8(eventJson) ?? "";
+            if (!bridge._writer.TryWrite(new EventEnvelope(generation, json)))
+            {
+                Interlocked.Increment(ref bridge._droppedEventCount);
+            }
+        }
+        catch
         {
-            Interlocked.Increment(ref bridge._droppedEventCount);
+            // Dropping one event is the only safe outcome on the engine thread.
         }
     }
 
@@ -122,7 +152,16 @@ internal sealed class EventCallbackBridge
                         continue;
                     }
 
-                    _handler(envelope.Json);
+                    try
+                    {
+                        _handler(envelope.Json);
+                    }
+                    catch
+                    {
+                        // An exception escaping a dedicated thread terminates the process. App
+                        // code must not be able to do that through the event handler.
+                        Interlocked.Increment(ref _handlerFailureCount);
+                    }
                 }
             }
         }
@@ -133,13 +172,17 @@ internal sealed class EventCallbackBridge
 
     private static void OnDrop(IntPtr ctx)
     {
-        if (GCHandle.FromIntPtr(ctx).Target is EventCallbackBridge bridge)
+        try
         {
-            bridge.Deactivate();
-            if (bridge._selfHandle.IsAllocated)
+            if (GCHandle.FromIntPtr(ctx).Target is EventCallbackBridge bridge)
             {
-                bridge._selfHandle.Free();
+                bridge.Deactivate();
+                bridge.FreeHandleOnce();
             }
+        }
+        catch
+        {
+            // Same reverse P/Invoke rule as OnEvent.
         }
     }
 }

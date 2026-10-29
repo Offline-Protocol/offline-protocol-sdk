@@ -175,6 +175,10 @@ public sealed class ProtocolEngine : IAsyncDisposable
             },
             cancellationToken);
 
+    /// <summary>
+    /// Attaches the two storage providers, as <c>initialize_mls</c>. Each provider is single use:
+    /// the library drops both when the engine is freed, or before this returns when it is refused.
+    /// </summary>
     public Task InitializeMlsAsync(
         NativeStorageProvider secureStorage,
         NativeStorageProvider protocolStateStorage,
@@ -182,6 +186,16 @@ public sealed class ProtocolEngine : IAsyncDisposable
         EnqueueAsync<object?>(
             () =>
             {
+                if (ReferenceEquals(secureStorage, protocolStateStorage))
+                {
+                    throw new ArgumentException(
+                        "secure storage and protocol-state storage must be two providers; the library drops each once",
+                        nameof(protocolStateStorage));
+                }
+
+                // Both checked before either is handed out, so a refusal strands neither.
+                secureStorage.ThrowIfHandedOut();
+                protocolStateStorage.ThrowIfHandedOut();
                 var err = default(OfflineProtocolError);
                 var secureNative = secureStorage.ToNative();
                 var stateNative = protocolStateStorage.ToNative();
@@ -254,6 +268,12 @@ public sealed class ProtocolEngine : IAsyncDisposable
     /// </summary>
     public long DroppedEventDeliveryCount => _eventBridge?.DroppedEventCount ?? 0;
 
+    /// <summary>
+    /// Events whose handler threw since the current callback was installed. A throwing handler
+    /// never stops delivery and never reaches the process: the bridge contains it and counts it.
+    /// </summary>
+    public long EventHandlerFailureCount => _eventBridge?.HandlerFailureCount ?? 0;
+
     public Task<string?> PollEventAsync(CancellationToken cancellationToken = default) =>
         EnqueueAsync<string?>(
             () =>
@@ -281,9 +301,26 @@ public sealed class ProtocolEngine : IAsyncDisposable
     public Task EndTelemetrySessionAsync(CancellationToken cancellationToken = default) =>
         CallAsync("end_telemetry_session", null, cancellationToken);
 
-    /// <summary>Blocks the engine thread until telemetry flush completes. Do not await from a UI thread.</summary>
-    public Task FlushTelemetryBlockingAsync(CancellationToken cancellationToken = default) =>
-        CallAsync("flush_telemetry_blocking", null, cancellationToken);
+    /// <summary>
+    /// Flushes telemetry and waits up to <paramref name="deadlineMs"/> for the uploader, holding the
+    /// engine thread meanwhile. Returns whether the uploader finished in time; <see langword="false"/>
+    /// while telemetry is not enabled. Meant for a background-transition handler, never a UI thread.
+    /// </summary>
+    public async Task<bool> FlushTelemetryBlockingAsync(
+        ulong deadlineMs,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await CallWithResultAsync(
+            "flush_telemetry_blocking",
+            $"{{\"deadline_ms\":{deadlineMs}}}",
+            cancellationToken).ConfigureAwait(false);
+        return result switch
+        {
+            "true" => true,
+            "false" => false,
+            _ => throw new FormatException($"flush_telemetry_blocking returned {result}, not a boolean"),
+        };
+    }
 
     /// <summary>
     /// Refuses new calls, lets every accepted call finish on the engine thread, then frees the

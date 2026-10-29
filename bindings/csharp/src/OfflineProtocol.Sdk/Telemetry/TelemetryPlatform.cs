@@ -6,22 +6,9 @@ namespace OfflineProtocol.Sdk.Telemetry;
 /// </summary>
 public static class TelemetryPlatform
 {
-    /// <summary>Operating-system major version for telemetry aggregates.</summary>
-    public static ushort OsMajor
-    {
-        get
-        {
-            if (OperatingSystem.IsWindows())
-            {
-                return (ushort)Math.Clamp(Environment.OSVersion.Version.Major, 0, ushort.MaxValue);
-            }
-
-            if (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux())
-            {
-                return (ushort)Math.Clamp(Environment.OSVersion.Version.Major, 0, ushort.MaxValue);
-            }
-
-            return 0;
-        }
-    }
+    /// <summary>Operating-system major version for telemetry aggregates; 0 on a platform the binding does not ship for.</summary>
+    public static ushort OsMajor =>
+        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()
+            ? (ushort)Math.Clamp(Environment.OSVersion.Version.Major, 0, ushort.MaxValue)
+            : (ushort)0;
 }

@@ -4,21 +4,22 @@ internal static class OffThreadExecution
 {
     /// <summary>
     /// Runs work off the UI synchronization context when one is present; otherwise runs inline (CLI / tests).
+    /// Every failure, a cancellation included, faults the returned task rather than throwing at the call.
     /// </summary>
-    internal static Task<T> RunAsync<T>(Func<T> work, CancellationToken cancellationToken)
+    internal static async Task<T> RunAsync<T>(Func<T> work, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (SynchronizationContext.Current is null)
         {
-            return Task.FromResult(work());
+            return work();
         }
 
-        return Task.Run(
+        return await Task.Run(
             () =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 return work();
             },
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
     }
 }

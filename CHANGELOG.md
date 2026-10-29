@@ -38,10 +38,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   through the C API, runs engine calls on a dedicated thread, and ships a
   consumer check for create → file-store MLS → start/stop
   ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
-- **C# storage providers and telemetry (PR2).** `NativeStorageProvider` and
-  `MemoryProtocolStorage` wire `offline_protocol_initialize_mls` and storage
-  conformance; event callback/poll; `TelemetryConfig` JSON for
-  `enable_telemetry` with platform `os_major` and C12 lifecycle helpers
+- **C# storage providers, events and telemetry.** Custom storage plugs in
+  through `IProtocolStorage` and a single-use `NativeStorageProvider`, with
+  `RunStorageConformanceAsync` to verify a backend and an in-memory
+  `MemoryProtocolStorage`. Events arrive on a dedicated delivery thread, where
+  a throwing handler is counted instead of ending the process, or through
+  `PollEventAsync`. `EnableTelemetryAsync` lets the library fill `os` and the
+  binding fill `os_major`, and the lifecycle calls follow C12
   ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
 
 ### Fixed

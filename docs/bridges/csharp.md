@@ -66,7 +66,7 @@ library ([C K2](c.md#k2-callbacks-run-on-the-engines-thread-inside-the-engine)).
 They must not call back into the engine: copy JSON and return; delivery to app
 code is posted off the callback (see Events below).
 
-### Events (PR2)
+### Events
 
 `SetEventCallbackAsync` installs `offline_protocol_set_event_callback`. Events
 are copied on the engine thread, queued on a **bounded channel** (default 256,
@@ -80,6 +80,18 @@ not share the delivery channel cap. Clearing the callback or disposing the engin
 current handler returns). Keep handlers **short and non-blocking**: a slow handler
 delays dispose and blocks the engine thread until delivery finishes. The handler
 must not call back into the same `ProtocolEngine` synchronously.
+
+**A throwing handler never ends the process.** An exception escaping a dedicated
+thread, or a callback the native library invoked, terminates a .NET process, so
+the bridge catches what the handler throws, counts it in
+**`EventHandlerFailureCount`**, and goes on delivering. The native callbacks
+themselves catch everything too. Without this, one bug in app code would take the
+host down from a thread it never created.
+
+The bridge's context handle is freed **once**, by whichever of the native `drop`
+and the managed release runs first. The C API calls `drop` on every refused
+install as well as on replacement, so freeing on both paths would free a handle
+twice and could release another object's.
 
 ## CS2. String ownership
 
@@ -103,23 +115,36 @@ CI runs the consumer check both ways on all three systems.
 
 Release archives ship `offline_protocol_uniffi.dll` on Windows x64.
 
-## CS4. Storage providers (PR2)
+## CS4. Storage providers
 
 `NativeStorageProvider` wraps an `IProtocolStorage` as
 `OfflineProtocolStorage` for `offline_protocol_initialize_mls` and
 `offline_protocol_run_storage_conformance`. **`MemoryProtocolStorage`** is a
 thread-safe in-memory backend for tests and consumer-check; production hosts
 should implement `IProtocolStorage` over durable, atomic storage (Windows
-Credential Manager, DPAPI-protected files, and so on) in a later PR.
+Credential Manager, DPAPI-protected files, and so on). Every method may be called
+from any thread concurrently, as the C header says. `MemoryProtocolStorage` keeps
+an emptied key-type bucket rather than pruning it, because a prune between the
+emptiness check and the removal discards a concurrent write, and the conformance
+suite is single-threaded so it would not notice.
 
 Keep each `NativeStorageProvider` alive until the engine has dropped it (after
 `DisposeAsync`). The engine holds references after a successful
 `InitializeMlsAsync`.
 
+**A provider is single use.** The library calls its `drop` once it lets go: when
+the engine is freed, before a refused `InitializeMlsAsync` returns, and as soon as
+`RunStorageConformanceAsync` returns. Its context handle dies with that drop, so
+handing the provider over again throws `ObjectDisposedException` rather than give
+native a freed handle. To probe a backend and then use it, wrap the same
+`IProtocolStorage` in a new provider. `InitializeMlsAsync` checks both providers,
+and refuses one provider passed twice, before it hands either out, so a refusal
+strands neither.
+
 `InitializeMlsWithFileStoresAsync` remains the filesystem path when no custom
 provider is needed ([C K5](c.md#k5-what-offline_protocol_call-does-not-reach)).
 
-## CS5. Telemetry (PR2, C12)
+## CS5. Telemetry (C12)
 
 Same split as [C K3](c.md#k3-the-binding-fills-the-telemetry-platform):
 
@@ -131,8 +156,10 @@ Same split as [C K3](c.md#k3-the-binding-fills-the-telemetry-platform):
 The binding **owns the lifecycle**: WinUI/WPF/MAUI must call
 `NotifyAppStateAsync(AppState.Background)` when the app leaves the foreground
 and `AppState.Active` when it returns, matching Kotlin's process lifecycle and
-Swift's `UIApplication` edges. Do not call `FlushTelemetryBlockingAsync` from a
-UI thread; it blocks the engine thread until the uploader finishes.
+Swift's `UIApplication` edges. `FlushTelemetryBlockingAsync(deadlineMs)` holds
+the engine thread for up to the deadline and returns whether the uploader finished;
+it is `false` while telemetry is off. Call it from a background-transition handler,
+never from a UI thread.
 
 ## What CI runs
 
@@ -142,8 +169,8 @@ header or the FFI crate changes:
 | Step | What it proves |
 |------|----------------|
 | `dotnet build` | The SDK, the tests and the consumer check compile with warnings as errors |
-| `dotnet test` | The engine facade against the library built from the same tree: each status, the queue under backpressure, dispose after unawaited calls, cancellation |
-| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | Static calls, storage conformance, create, MLS over custom providers, events, telemetry lifecycle, start, stop, file-store MLS, close (CS3 step 1) |
+| `dotnet test` | The engine facade against the library built from the same tree: each status, the queue under backpressure, dispose after unawaited calls, cancellation; events on the delivery thread, a throwing handler contained, a cleared callback; conformance of the memory store, single-use providers, MLS over two providers; the telemetry refusal reached past the `os` fill, and the lifecycle calls with telemetry off |
+| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | Static calls, storage conformance, create, MLS over custom providers, events, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, close (CS3 step 1) |
 | `consumer-check`, library beside it | The same run with the variable unset (CS3 step 2) |
 
 `the_csharp_binding_has_a_ci_job_the_result_waits_on` holds the job, its

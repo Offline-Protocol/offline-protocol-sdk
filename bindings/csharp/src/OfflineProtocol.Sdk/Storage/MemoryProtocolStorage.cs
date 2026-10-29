@@ -33,13 +33,16 @@ public sealed class MemoryProtocolStorage : IProtocolStorage
         return bucket.TryGetValue(keyId, out var data) ? data : null;
     }
 
+    /// <remarks>
+    /// An emptied key-type bucket is kept, never pruned: pruning between the emptiness check and
+    /// the removal would discard a concurrent <see cref="Store"/> into the same key type. The
+    /// buckets are bounded by the handful of key types the engine uses.
+    /// </remarks>
     public OfflineProtocolStorageStatus Remove(string keyType, string keyId)
     {
-        if (_byType.TryGetValue(keyType, out var bucket)
-            && bucket.TryRemove(keyId, out _)
-            && bucket.IsEmpty)
+        if (_byType.TryGetValue(keyType, out var bucket))
         {
-            _byType.TryRemove(keyType, out _);
+            bucket.TryRemove(keyId, out _);
         }
 
         return OfflineProtocolStorageStatus.Ok;
