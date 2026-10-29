@@ -61,7 +61,7 @@ key replaces, and the newer value takes custody in its place.
 
 | State | Holds | Leaves on |
 |-------|-------|-----------|
-| `pending` | The subscribe frame, sent or waiting for the session | A reply (`active`, or `ended` with its status), or `pending_timeout_ms`: `session_timeout` if the frame never left, `no_reply` if it did |
+| `pending` | The subscribe frame, sent or waiting for the session. A sent one goes again every quarter of `pending_timeout_ms` | A reply (`active`, or `ended` with its status), or `pending_timeout_ms`: `session_timeout` if the frame never left, `no_reply` if it did |
 | `active` | Stream, per-key seqs (`latest`) or contiguous position and seqs seen ahead (`log`), granted lease, next renewal | Three renewals in a row unanswered (`paused`), an `__SVC_UNSUB__` from the provider, or `unsubscribe_service` (`ended`) |
 | `paused` | The same | A reply (`active`, `resumed`), or `max_pause_ms` (`ended`, `provider_unreachable`) |
 

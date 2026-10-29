@@ -159,8 +159,10 @@ impl OfflineProtocol {
     }
 
     /// Sends every frame in `output` and emits every event, in order. A frame
-    /// that cannot be sealed is not sent; the state machines recover it
-    /// (the consumer's renewal, the provider's next catch-up).
+    /// that cannot be sealed is not sent. On an active subscription the next
+    /// renewal recovers it (the provider answers it and catches the consumer
+    /// up); a pending consumer sends its subscribe again until it is
+    /// answered or times out.
     pub(crate) fn apply_subscription_output(&mut self, output: SubscriptionOutput) {
         self.send_subscription_frames(output.frames);
         self.emit_subscription_events(output.events);

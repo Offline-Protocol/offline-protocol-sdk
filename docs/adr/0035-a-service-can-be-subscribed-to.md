@@ -477,7 +477,12 @@ the seqs seen above it (`log`), the granted lease and the renewal schedule.
   minutes), it ends with `provider_unreachable`.
 - **Pending.** A subscription with no reply after `pending_timeout_ms`
   (default 120 s) ends with `no_reply`, or `session_timeout` if the session
-  never confirmed.
+  never confirmed. A subscribe that left goes again every quarter of that
+  timeout until it is answered, superseding the one still queued. A pending
+  subscription has no renewal, and a provider that admitted it but could not
+  seal its reply drops the reply: without the re-send the consumer times out
+  while the provider holds it admitted. A provider that holds it reads the
+  frame as a renewal and answers it.
 - **Resync is not lost to a renewal.** A renewal that falls due while a
   resync is queued supersedes it and carries `resync` itself. Otherwise the
   application's explicit request vanishes, and a `latest` renewal whose
