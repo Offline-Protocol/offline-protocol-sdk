@@ -13,10 +13,13 @@
 //! before anything reads it. Copying the request floor here would put a
 //! stream of live device state in the clear for every carrier.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{ContentType, MessageId, MessagePriority};
+use offline_protocol_mls::{GroupId, MlsManager};
 use offline_protocol_services::{
     is_subscription_frame, requested_service, Admission, Consumer, Provider, RulesFallback,
     SubscriptionDelivery, SubscriptionFrame, SubscriptionOutput, SubscriptionPolicy, SVC_SUBSCRIBE,
@@ -331,13 +334,19 @@ impl OfflineProtocol {
                 return;
             };
             let registered = self.mesh_services.has_service(&service_id);
-            let admission = self.admission_for(&service_id, sender);
+            // Worked out only if the provider asks, which is after the frame
+            // is validated, its id checked against the retired and against
+            // its sender, and the caps: a group roster is a storage read, and
+            // a frame about to be dropped must not cost one per group.
+            let policy = self.service_subscriptions.provider.policy(&service_id);
+            let mls = self.mls_manager.clone();
+            let admission = OnceCell::new();
             self.service_subscriptions.provider.handle_subscribe(
                 content,
                 sender,
                 now,
                 &|_| registered,
-                &|_| admission,
+                &|_| *admission.get_or_init(|| admission_under(&policy, sender, mls.as_ref())),
             )
         } else if content.starts_with(SVC_SUBSCRIBE_REPLY) {
             self.service_subscriptions
@@ -419,30 +428,55 @@ impl OfflineProtocol {
             self.forget_outbound_message(&message_id);
         }
     }
+}
 
-    /// What `service_id`'s policy says about `subscriber`.
-    pub(crate) fn admission_for(&self, service_id: &str, subscriber: &str) -> Admission {
-        match self.service_subscriptions.provider.policy(service_id) {
-            SubscriptionPolicy::Restricted => Admission::Ask,
-            SubscriptionPolicy::AcceptAll => Admission::Accept,
-            SubscriptionPolicy::Rules {
-                allow_peers,
-                allow_groups,
-                fallback,
-            } => {
-                let allowed = allow_peers.iter().any(|peer| peer == subscriber)
-                    || allow_groups.iter().any(|group_id| {
-                        self.get_group_roles(group_id)
-                            .is_ok_and(|members| members.contains_key(subscriber))
-                    });
-                match (allowed, fallback) {
-                    (true, _) => Admission::Accept,
-                    (false, RulesFallback::Ask) => Admission::Ask,
-                    (false, RulesFallback::Reject) => Admission::Reject,
-                }
+/// What `policy` says about `subscriber`.
+///
+/// A group in `allow_groups` admits the members of its MLS roster on this
+/// device: [`offline_protocol_mls::GroupInfo::members`], which lists only
+/// members whose credential is proved. Not the group's roles, which name the
+/// creator and anyone given a role explicitly, and would admit the admins
+/// alone. A group this device is not in admits nobody.
+fn admission_under(
+    policy: &SubscriptionPolicy,
+    subscriber: &str,
+    mls: Option<&Arc<RwLock<MlsManager>>>,
+) -> Admission {
+    match policy {
+        SubscriptionPolicy::Restricted => Admission::Ask,
+        SubscriptionPolicy::AcceptAll => Admission::Accept,
+        SubscriptionPolicy::Rules {
+            allow_peers,
+            allow_groups,
+            fallback,
+        } => {
+            let allowed = allow_peers.iter().any(|peer| peer == subscriber)
+                || allow_groups
+                    .iter()
+                    .any(|group_id| group_member(mls, group_id, subscriber));
+            match (allowed, fallback) {
+                (true, _) => Admission::Accept,
+                (false, RulesFallback::Ask) => Admission::Ask,
+                (false, RulesFallback::Reject) => Admission::Reject,
             }
         }
     }
+}
+
+/// Whether `peer` is a proved member of `group_id` on this device. Any
+/// failure to read the roster is "no".
+fn group_member(mls: Option<&Arc<RwLock<MlsManager>>>, group_id: &str, peer: &str) -> bool {
+    let (Some(mls), Ok(gid)) = (mls, GroupId::new(group_id)) else {
+        return false;
+    };
+    let Ok(manager) = mls.read() else {
+        return false;
+    };
+    manager
+        .get_group_info(&gid)
+        .ok()
+        .flatten()
+        .is_some_and(|info| info.members.iter().any(|member| member == peer))
 }
 
 // ============================================================================

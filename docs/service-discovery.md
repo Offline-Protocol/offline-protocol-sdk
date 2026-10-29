@@ -471,7 +471,7 @@ Who may subscribe is the service's **policy**:
 |--------|--------------------|
 | `Restricted` (the default) | Held, and the application is asked with `service_subscribe_received`; it calls `accept_service_subscription` or `reject_service_subscription`. Unanswered for 60 seconds, it is rejected |
 | `AcceptAll` | Admitted. Any peer with a session can watch the service |
-| `Rules` | Admitted when listed in `allow_peers` or a member of a group in `allow_groups`; anyone else is asked (`Ask`) or refused (`Reject`) |
+| `Rules` | Admitted when listed in `allow_peers` or a member of a group in `allow_groups` (in this device's roster of that group); anyone else is asked (`Ask`) or refused (`Reject`) |
 
 `renewal` on `service_subscribe_received` means the subscriber says it held
 the subscription before this device restarted or its lease lapsed. It is the

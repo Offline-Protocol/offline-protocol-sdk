@@ -199,7 +199,7 @@ Each registered service has a subscription policy, set with
 |--------|----------------------|
 | `restricted` (the default) | Held, and the application is asked with `service_subscribe_received`. It calls `accept_service_subscription` or `reject_service_subscription`. Unanswered after `approval_timeout_ms`, it is rejected with `approval_timeout` |
 | `accept_all` | Accepted by the engine. Any peer with a confirmed session can watch the service |
-| `rules` | Accepted when the subscriber is in `allow_peers` or a member of one of `allow_groups`; otherwise either asked (`fallback: ask`) or rejected (`fallback: reject`) |
+| `rules` | Accepted when the subscriber is in `allow_peers` or a member of one of `allow_groups`; otherwise either asked (`fallback: ask`) or rejected (`fallback: reject`). A member is one in the group's MLS roster on the provider, which lists only members whose credential is proved; not one with a role, since roles name the creator and anyone given one explicitly |
 
 The default is `restricted` because "who can watch this device" should be a
 decision, not a default. A subscription to a service the provider has not

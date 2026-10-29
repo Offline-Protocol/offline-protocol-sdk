@@ -735,6 +735,96 @@ fn only_an_encryption_capable_sender_is_recorded_as_proved() {
     );
 }
 
+/// Bob makes a group and adds Alice to it as a plain member, with no role:
+/// a role is recorded for the creator and for anyone given one, so a member
+/// is in the roster and not in the roles. Returns the group id.
+fn group_with_alice(pair: &Pair, name: &str) -> String {
+    let bob = pair.bob.protocol.mls_manager_for_testing().read().unwrap();
+    let group_id = bob.create_group(name).unwrap().group_id;
+    let key_package = {
+        let alice = pair
+            .alice
+            .protocol
+            .mls_manager_for_testing()
+            .read()
+            .unwrap();
+        alice.generate_key_package().unwrap()
+    };
+    let (welcome, _) = bob
+        .add_group_member(
+            &group_id,
+            &pair.alice.address,
+            &key_package.key_package_data,
+        )
+        .unwrap();
+    {
+        let alice = pair
+            .alice
+            .protocol
+            .mls_manager_for_testing()
+            .read()
+            .unwrap();
+        alice.join_group(&welcome).unwrap();
+    }
+    group_id.as_str().to_string()
+}
+
+/// `allow_groups` admits a member of a listed group by the group's roster on
+/// the provider. Read from the roles instead, it admitted the creator and
+/// anyone given a role, and refused every plain member.
+#[test]
+fn rules_admit_a_member_of_a_listed_group_and_refuse_a_non_member() {
+    let mut pair = Pair::new();
+    let with_alice = group_with_alice(&pair, "fleet");
+    let without_alice = pair
+        .bob
+        .protocol
+        .mls_manager_for_testing()
+        .read()
+        .unwrap()
+        .create_group("office")
+        .unwrap()
+        .group_id
+        .as_str()
+        .to_string();
+    assert!(!pair
+        .bob
+        .protocol
+        .get_group_roles(&with_alice)
+        .unwrap()
+        .contains_key(&pair.alice.address));
+
+    pair.bob.register(SubscriptionPolicy::Rules {
+        allow_peers: Vec::new(),
+        allow_groups: vec![without_alice.clone()],
+        fallback: RulesFallback::Reject,
+    });
+    let refused = pair.subscribe("battery", SubscriptionMode::Latest);
+    assert_eq!(pair.alice.state_of(&refused), None);
+    assert!(pair.alice.take_changes().contains(&(
+        "consumer".into(),
+        "ended".into(),
+        "policy".into()
+    )));
+
+    pair.bob
+        .protocol
+        .set_service_subscription_policy(
+            SVC,
+            SubscriptionPolicy::Rules {
+                allow_peers: Vec::new(),
+                allow_groups: vec![without_alice, with_alice],
+                fallback: RulesFallback::Reject,
+            },
+        )
+        .unwrap();
+    let admitted = pair.subscribe("battery", SubscriptionMode::Latest);
+    assert_eq!(
+        pair.alice.state_of(&admitted),
+        Some(SubscriptionState::Active)
+    );
+}
+
 /// Blocking is bidirectional, and a subscription is no exception. The
 /// provider that blocks a subscriber stops streaming to it at once, not at
 /// the end of a lease, and queues nothing for it; the consumer that blocks a
