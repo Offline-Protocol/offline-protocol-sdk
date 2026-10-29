@@ -1,4 +1,6 @@
 using OfflineProtocol.Sdk;
+using OfflineProtocol.Sdk.Storage;
+using OfflineProtocol.Sdk.Telemetry;
 
 // Every ProtocolConfig field without a default in the interface definition; the rest take the
 // definition's defaults. An example program's values, as in bindings/c/README.md, never the SDK's.
@@ -27,6 +29,27 @@ const string Config =
 // A fixed placeholder key for a throwaway store; a real host keeps its key out of the source.
 const string StoreKeyBase64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
+Console.WriteLine($"library version: {ProtocolEngine.LibraryVersion}");
+
+var derive = await ProtocolEngine.CallStaticAsync(
+    "derive_address",
+    """{"public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}""");
+if (!derive.StartsWith("\"off1", StringComparison.Ordinal))
+{
+    Console.Error.WriteLine($"FAIL: derive_address expected off1… prefix, got {derive}");
+    return 1;
+}
+
+var conformance = await ProtocolEngine.RunStorageConformanceAsync(
+    new NativeStorageProvider(new MemoryProtocolStorage()));
+var stateStorage = new MemoryProtocolStorage();
+var stateProvider = new NativeStorageProvider(stateStorage);
+if (!conformance.Contains("\"failures\":[]", StringComparison.Ordinal))
+{
+    Console.Error.WriteLine($"FAIL: storage conformance {conformance}");
+    return 1;
+}
+
 var mlsRoot = Path.Combine(Path.GetTempPath(), "op-csharp-mls-" + Guid.NewGuid().ToString("N"));
 var stateRoot = Path.Combine(Path.GetTempPath(), "op-csharp-state-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(mlsRoot);
@@ -34,10 +57,11 @@ Directory.CreateDirectory(stateRoot);
 
 try
 {
-    Console.WriteLine($"library version: {ProtocolEngine.LibraryVersion}");
-
     await using var engine = await ProtocolEngine.CreateAsync(Config);
-    await engine.InitializeMlsWithFileStoresAsync(mlsRoot, stateRoot, StoreKeyBase64);
+
+    var secureStorage = new MemoryProtocolStorage();
+    var secureProvider = new NativeStorageProvider(secureStorage);
+    await engine.InitializeMlsAsync(secureProvider, stateProvider);
     var addressJson = await engine.LocalAddressAsync();
     if (!addressJson.StartsWith("\"off1", StringComparison.Ordinal))
     {
@@ -45,9 +69,86 @@ try
         return 1;
     }
 
+    var seenEvents = 0;
+    string? lastEvent = null;
+    using var eventGate = new ManualResetEventSlim(false);
+    await engine.SetEventCallbackAsync(json =>
+    {
+        Interlocked.Increment(ref seenEvents);
+        lastEvent = json;
+        eventGate.Set();
+    });
+    await engine.CallAsync("emit_test_event");
+    if (!eventGate.Wait(TimeSpan.FromSeconds(5)))
+    {
+        Console.Error.WriteLine("FAIL: event callback timeout");
+        return 1;
+    }
+
+    // Every event is also queued for polling, and the queue already holds what came before the
+    // callback was installed (initialize_mls emits identity_ready). Drain it in order until the
+    // event the callback saw turns up.
+    var polledEvents = new List<string>();
+    var matched = false;
+    while (await engine.PollEventAsync() is { } polled)
+    {
+        polledEvents.Add(polled);
+        if (polled == lastEvent)
+        {
+            matched = true;
+            break;
+        }
+    }
+
+    if (!matched)
+    {
+        Console.Error.WriteLine(
+            $"FAIL: poll_event never returned the callback's event {lastEvent}; polled [{string.Join(", ", polledEvents)}]");
+        return 1;
+    }
+
+    // An empty key is refused by the engine's own validation, so nothing is enabled and nothing
+    // leaves the machine. Reaching that refusal, and no other, proves the C API filled `os` and
+    // the JSON this binding built decoded.
+    try
+    {
+        await engine.EnableTelemetryAsync(
+            new TelemetryConfig
+            {
+                ApiKey = "",
+                AppId = "com.offlineprotocol.csharp.consumer",
+                OsMajor = TelemetryPlatform.OsMajor,
+            });
+        Console.Error.WriteLine("FAIL: enable_telemetry accepted an empty api_key");
+        return 1;
+    }
+    catch (ProtocolEngineException ex) when (ex.Variant == "TelemetryConfigInvalid" && ex.Message.Contains("api_key", StringComparison.Ordinal))
+    {
+    }
+
+    await engine.DisableTelemetryAsync();
+    if (await engine.FlushTelemetryBlockingAsync(50))
+    {
+        Console.Error.WriteLine("FAIL: flush_telemetry_blocking reported a finished upload with telemetry disabled");
+        return 1;
+    }
+
+    await engine.NotifyAppStateAsync(AppState.Background);
+    await engine.NotifyAppStateAsync(AppState.Active);
+
     await engine.StartAsync();
     await engine.StopAsync();
-    await engine.CallAsync("close_file_stores");
+
+    await using var fileEngine = await ProtocolEngine.CreateAsync(Config);
+    await fileEngine.InitializeMlsWithFileStoresAsync(mlsRoot, stateRoot, StoreKeyBase64);
+    var fileAddress = await fileEngine.LocalAddressAsync();
+    if (!fileAddress.StartsWith("\"off1", StringComparison.Ordinal))
+    {
+        Console.Error.WriteLine($"FAIL: file-store local_address {fileAddress}");
+        return 1;
+    }
+
+    await fileEngine.CallAsync("close_file_stores");
     Console.WriteLine("csharp consumer check: ok");
     return 0;
 }

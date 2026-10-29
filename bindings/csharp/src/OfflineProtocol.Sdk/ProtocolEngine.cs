@@ -1,6 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using OfflineProtocol.Sdk.Native;
+using OfflineProtocol.Sdk.Storage;
+using OfflineProtocol.Sdk.Telemetry;
 
 namespace OfflineProtocol.Sdk;
 
@@ -24,6 +26,8 @@ public sealed class ProtocolEngine : IAsyncDisposable
     /// Calls accepted and not yet finished: waiting to enter the channel, queued, or running.
     /// </summary>
     private int _outboundWork;
+    private readonly List<NativeStorageProvider> _attachedStorageProviders = [];
+    private EventCallbackBridge? _eventBridge;
 
     private ProtocolEngine(int queueCapacity)
     {
@@ -128,6 +132,196 @@ public sealed class ProtocolEngine : IAsyncDisposable
     public Task<string> LocalAddressAsync(CancellationToken cancellationToken = default) =>
         CallWithResultAsync("local_address", null, cancellationToken);
 
+    /// <summary>Instance-less local API call (no engine handle).</summary>
+    public static Task<string> CallStaticAsync(
+        string method,
+        string? paramsJson = null,
+        CancellationToken cancellationToken = default) =>
+        OffThreadExecution.RunAsync(
+            () =>
+            {
+                NativeLibraryLoader.EnsureRegistered();
+                var err = default(OfflineProtocolError);
+                var status = OfflineProtocolNative.offline_protocol_call_static(method, paramsJson, out var resultPtr, ref err);
+                if (status != OfflineProtocolStatus.Ok)
+                {
+                    throw FromError(status, ref err);
+                }
+
+                return OfflineProtocolNative.TakeUtf8String(resultPtr);
+            },
+            cancellationToken);
+
+    /// <summary>Runs the protocol-state storage conformance suite against a provider.</summary>
+    public static Task<string> RunStorageConformanceAsync(
+        NativeStorageProvider storage,
+        CancellationToken cancellationToken = default) =>
+        OffThreadExecution.RunAsync(
+            () =>
+            {
+                NativeLibraryLoader.EnsureRegistered();
+                var err = default(OfflineProtocolError);
+                var native = storage.ToNative();
+                var status = OfflineProtocolNative.offline_protocol_run_storage_conformance(
+                    in native,
+                    out var resultPtr,
+                    ref err);
+                if (status != OfflineProtocolStatus.Ok)
+                {
+                    throw FromError(status, ref err);
+                }
+
+                return OfflineProtocolNative.TakeUtf8String(resultPtr);
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Attaches the two storage providers, as <c>initialize_mls</c>. Each provider is single use:
+    /// the library drops both when the engine is freed, or before this returns when it is refused.
+    /// </summary>
+    public Task InitializeMlsAsync(
+        NativeStorageProvider secureStorage,
+        NativeStorageProvider protocolStateStorage,
+        CancellationToken cancellationToken = default) =>
+        EnqueueAsync<object?>(
+            () =>
+            {
+                if (ReferenceEquals(secureStorage, protocolStateStorage))
+                {
+                    throw new ArgumentException(
+                        "secure storage and protocol-state storage must be two providers; the library drops each once",
+                        nameof(protocolStateStorage));
+                }
+
+                // Both checked before either is handed out, so a refusal strands neither.
+                secureStorage.ThrowIfHandedOut();
+                protocolStateStorage.ThrowIfHandedOut();
+                var err = default(OfflineProtocolError);
+                var secureNative = secureStorage.ToNative();
+                var stateNative = protocolStateStorage.ToNative();
+                var status = OfflineProtocolNative.offline_protocol_initialize_mls(
+                    _handle,
+                    in secureNative,
+                    in stateNative,
+                    ref err);
+                if (status != OfflineProtocolStatus.Ok)
+                {
+                    throw FromError(status, ref err);
+                }
+
+                _attachedStorageProviders.Add(secureStorage);
+                _attachedStorageProviders.Add(protocolStateStorage);
+                return null;
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Delivers events on a dedicated delivery thread. Keep handlers short and non-blocking:
+    /// dispose and callback removal wait for the current handler to finish on that thread.
+    /// The handler must not call back into this engine synchronously.
+    /// </summary>
+    public Task SetEventCallbackAsync(Action<string>? handler, CancellationToken cancellationToken = default) =>
+        EnqueueAsync<object?>(
+            () =>
+            {
+                var err = default(OfflineProtocolError);
+                if (handler is null)
+                {
+                    var previous = _eventBridge;
+                    _eventBridge = null;
+                    previous?.Deactivate();
+                    var status = OfflineProtocolNative.offline_protocol_set_event_callback(
+                        _handle,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        ref err);
+                    if (status != OfflineProtocolStatus.Ok)
+                    {
+                        throw FromError(status, ref err);
+                    }
+
+                    return null;
+                }
+
+                var bridge = new EventCallbackBridge(handler);
+                var install = OfflineProtocolNative.offline_protocol_set_event_callback(
+                    _handle,
+                    bridge.OnEventPointer,
+                    bridge.DropPointer,
+                    bridge.Context,
+                    ref err);
+                if (install != OfflineProtocolStatus.Ok)
+                {
+                    bridge.ReleaseLocal();
+                    throw FromError(install, ref err);
+                }
+
+                _eventBridge = bridge;
+                return null;
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Events dropped because the delivery queue was full since the current callback was installed.
+    /// Use <see cref="PollEventAsync"/> if the app must not miss events under burst load.
+    /// </summary>
+    public long DroppedEventDeliveryCount => _eventBridge?.DroppedEventCount ?? 0;
+
+    /// <summary>
+    /// Events whose handler threw since the current callback was installed. A throwing handler
+    /// never stops delivery and never reaches the process: the bridge contains it and counts it.
+    /// </summary>
+    public long EventHandlerFailureCount => _eventBridge?.HandlerFailureCount ?? 0;
+
+    public Task<string?> PollEventAsync(CancellationToken cancellationToken = default) =>
+        EnqueueAsync<string?>(
+            () =>
+            {
+                var ptr = OfflineProtocolNative.offline_protocol_poll_event(_handle);
+                return ptr == IntPtr.Zero ? null : OfflineProtocolNative.TakeUtf8String(ptr);
+            },
+            cancellationToken);
+
+    public Task EnableTelemetryAsync(
+        TelemetryConfig config,
+        AppState initialAppState = AppState.Active,
+        CancellationToken cancellationToken = default) =>
+        CallAsync(
+            "enable_telemetry",
+            TelemetryConfigJson.EnableTelemetry(config, initialAppState),
+            cancellationToken);
+
+    public Task NotifyAppStateAsync(AppState state, CancellationToken cancellationToken = default) =>
+        CallAsync("notify_app_state", $"{{\"state\":\"{state}\"}}", cancellationToken);
+
+    public Task DisableTelemetryAsync(CancellationToken cancellationToken = default) =>
+        CallAsync("disable_telemetry", null, cancellationToken);
+
+    public Task EndTelemetrySessionAsync(CancellationToken cancellationToken = default) =>
+        CallAsync("end_telemetry_session", null, cancellationToken);
+
+    /// <summary>
+    /// Flushes telemetry and waits up to <paramref name="deadlineMs"/> for the uploader, holding the
+    /// engine thread meanwhile. Returns whether the uploader finished in time; <see langword="false"/>
+    /// while telemetry is not enabled. Meant for a background-transition handler, never a UI thread.
+    /// </summary>
+    public async Task<bool> FlushTelemetryBlockingAsync(
+        ulong deadlineMs,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await CallWithResultAsync(
+            "flush_telemetry_blocking",
+            $"{{\"deadline_ms\":{deadlineMs}}}",
+            cancellationToken).ConfigureAwait(false);
+        return result switch
+        {
+            "true" => true,
+            "false" => false,
+            _ => throw new FormatException($"flush_telemetry_blocking returned {result}, not a boolean"),
+        };
+    }
+
     /// <summary>
     /// Refuses new calls, lets every accepted call finish on the engine thread, then frees the
     /// native handle there. Never blocks the calling thread: a UI thread may await it. Every
@@ -164,10 +358,21 @@ public sealed class ProtocolEngine : IAsyncDisposable
                 {
                     if (_handle != IntPtr.Zero)
                     {
+                        var err = default(OfflineProtocolError);
+                        var previous = _eventBridge;
+                        _eventBridge = null;
+                        previous?.Deactivate();
+                        OfflineProtocolNative.offline_protocol_set_event_callback(
+                            _handle,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            ref err);
                         OfflineProtocolNative.offline_protocol_free(_handle);
                         _handle = IntPtr.Zero;
                     }
 
+                    _attachedStorageProviders.Clear();
                     return null;
                 },
                 CancellationToken.None,
