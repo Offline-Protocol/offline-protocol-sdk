@@ -215,6 +215,10 @@ jobs:
               - *ffi
               - 'bindings/csharp/**'
               - 'bindings/c/include/**'
+              # The generated local API: its generator and the guard that runs it.
+              - 'tools/gen_csharp_local_api.py'
+              - 'scripts/check-binding-generators.sh'
+              - 'docs/bridges/csharp.md'
 
             web:
               - *engine

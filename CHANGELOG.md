@@ -46,6 +46,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `PollEventAsync`. `EnableTelemetryAsync` lets the library fill `os` and the
   binding fill `os_major`, and the lifecycle calls follow C12
   ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
+- **C# typed config and generated local API (PR3).** `ProtocolConfig` and
+  `ProtocolConfigJson` for C6; UDL-driven `ProtocolEngine`/`Services`/`Data`/
+  `LocalApi` wrappers from `tools/gen_csharp_local_api.py`; `LocalApiParams` and
+  typed helpers such as `GetStateAsync`; a Rust guard keeps the generated C#
+  current with the UDL ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
 
 ### Fixed
 

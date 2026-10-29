@@ -13,8 +13,12 @@ It uses the [local API](../spec/local-api.md) JSON shape: methods named as the
 method table names them, parameters as JSON objects, results and events as JSON
 strings. It is **not** part of the UniFFI five-language artifact set ([C1](README.md#c1-regenerate-every-binding-together)).
 
-A new engine method in the UDL is callable through `ProtocolEngine.CallAsync`
-without regenerating C#, because dispatch stays in the Rust C API.
+Most engine methods are **generated** from the UDL local API table
+(`tools/gen_csharp_local_api.py`) as `ProtocolEngine.*Async`, `engine.Services.*`,
+`engine.Data.*`, and namespace `LocalApi.*Async`. Hand-maintained entry points
+(construct, MLS init, telemetry, transports, storage conformance) stay on
+`ProtocolEngine` directly. Regenerate after a UDL change and run
+`python3 tools/gen_csharp_local_api.py --check` in CI via the Rust guard.
 
 ## Which shared rules apply
 
@@ -23,7 +27,7 @@ without regenerating C#, because dispatch stays in the Rust C API.
 | [C2](README.md#c2-the-error-enum-is-append-only) | Engine refusals surface as `ProtocolEngineException` with `Variant` and `Code` from the C error |
 | [C3](README.md#c3-events-cross-as-opaque-json) | Events are JSON text via callback and `PollEventAsync` |
 | [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language) | `OfflineProtocolStatus` copies the C status values; `the_csharp_status_enum_is_the_c_apis` pins it to the Rust enum |
-| [C6](README.md#c6-config-parsers-must-not-default-to-literals) | The SDK carries no `ProtocolConfig`: the host passes its own JSON and omitted fields take the definition's defaults. The consumer check's configuration is an example program's, as in the C quick start |
+| [C6](README.md#c6-config-parsers-must-not-default-to-literals) | `ProtocolConfig` + `ProtocolConfigJson.Serialize`; optional UDL fields omitted unless set |
 | [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | The `C# Binding` CI job builds it, runs its tests and runs `consumer-check` on Linux, macOS and Windows; `cargo test` does not cover this binding |
 | [C11](README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified) | `IProtocolStorage` + `NativeStorageProvider`; `RunStorageConformanceAsync` |
 | [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform) | `TelemetryConfig` + `TelemetryPlatform.OsMajor`; lifecycle via `NotifyAppStateAsync` |
@@ -161,6 +165,25 @@ the engine thread for up to the deadline and returns whether the uploader finish
 it is `false` while telemetry is off. Call it from a background-transition handler,
 never from a UI thread.
 
+## CS6. Typed config and local API
+
+- **`ProtocolConfig`** holds required UDL fields; nullable properties carry
+  optional engine defaults. **`ProtocolConfigJson.Serialize`** emits snake_case
+  JSON and never injects literals for unset optionals ([C6](README.md#c6-config-parsers-must-not-default-to-literals)).
+- **`ProtocolEngine.CreateAsync(ProtocolConfig)`** is the preferred constructor;
+  raw JSON remains for advanced hosts.
+- **`LocalApiParams`** builds JSON for common calls (`FileStores`, `SendMessage`
+  with typed **`MessagePriority`**). **`LocalApiTyped`** parses selected results
+  (for example `GetStateAsync` → **`ProtocolState`** in `OfflineProtocol.Sdk.Model`).
+  High-volume senders can call **`LocalApiTyped.SendMessageAsync(engine, json)`**
+  with pre-serialized params to skip builder allocation.
+- Nested UDL config (`mesh_relay`, `custody`) is not fully typed yet: set
+  **`ProtocolConfig.MeshRelay`** / **`Custody`** as **`JsonElement`** objects
+  when needed, or pass raw JSON to **`CreateAsync(string)`**.
+- Wire names, method count, and manifest live in
+  `bindings/csharp/local_api_methods.txt` and `local_api_method_count.txt`
+  (regenerated with the generator).
+
 ## What CI runs
 
 The `C# Binding` job, on Linux, macOS and Windows, whenever the binding, the C
@@ -170,8 +193,10 @@ header or the FFI crate changes:
 |------|----------------|
 | `dotnet build` | The SDK, the tests and the consumer check compile with warnings as errors |
 | `dotnet test` | The engine facade against the library built from the same tree: each status, the queue under backpressure, dispose after unawaited calls, cancellation; events on the delivery thread, a throwing handler contained, a cleared callback; conformance of the memory store, single-use providers, MLS over two providers; the telemetry refusal reached past the `os` fill, and the lifecycle calls with telemetry off |
-| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | Static calls, storage conformance, create, MLS over custom providers, events, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, close (CS3 step 1) |
+| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | Static calls, storage conformance, create from a typed `ProtocolConfig`, `get_state` parsed as `Stopped`, MLS over custom providers, events, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, close (CS3 step 1) |
 | `consumer-check`, library beside it | The same run with the variable unset (CS3 step 2) |
 
 `the_csharp_binding_has_a_ci_job_the_result_waits_on` holds the job, its
 change filter and its place in the aggregate check.
+`csharp_generated_local_api_is_current`, in `cargo test`, runs the generator
+with `--check` so the generated C# cannot drift from the UDL.

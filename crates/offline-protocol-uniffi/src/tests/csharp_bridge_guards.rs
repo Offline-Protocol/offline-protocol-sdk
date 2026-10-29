@@ -200,3 +200,120 @@ fn no_csharp_gchandle_is_held_in_a_readonly_field() {
         }
     }
 }
+
+// The typed config and the local API wrappers build their JSON through
+// System.Text.Json and the source-generated contexts, and the engine hands
+// each generated client out exactly once.
+#[test]
+fn csharp_typed_config_and_local_api_use_generated_json() {
+    let config = read("bindings/csharp/src/OfflineProtocol.Sdk/Config/ProtocolConfigJson.cs");
+    assert!(
+        config.contains("JsonSerializer.Serialize") && config.contains("MinimalConsumer"),
+        "ProtocolConfigJson must serialize typed ProtocolConfig (C6)"
+    );
+    let params = read("bindings/csharp/src/OfflineProtocol.Sdk/LocalApi/LocalApiParams.cs");
+    assert!(
+        params.contains("LocalApiJsonContext.Default")
+            && params.contains("SendMessagePayload")
+            && params.contains("ArrayBufferWriter"),
+        "LocalApiParams must serialize via source-generated JSON contexts"
+    );
+    let state_codec =
+        read("bindings/csharp/src/OfflineProtocol.Sdk/LocalApi/LocalApiStateCodec.cs");
+    assert!(
+        state_codec.contains("ProtocolEngineException")
+            && state_codec.contains("JsonValueKind.String")
+            && state_codec.contains("InvalidResponse"),
+        "get_state parsing must require a JSON string ProtocolState and surface InvalidResponse"
+    );
+    let engine = read("bindings/csharp/src/OfflineProtocol.Sdk/ProtocolEngine.cs");
+    assert!(
+        engine.contains("partial class ProtocolEngine")
+            && engine.contains("MeshServicesClient Services")
+            && engine.contains("DataStoreClient Data")
+            && engine.contains("LazyThreadSafetyMode.ExecutionAndPublication"),
+        "ProtocolEngine must be partial, expose generated Services/Data clients, \
+         and publish each client exactly once via Lazy<T>"
+    );
+    let generated = "bindings/csharp/src/OfflineProtocol.Sdk/Generated";
+    assert!(
+        repo()
+            .join(generated)
+            .join("LocalApiClients.g.cs")
+            .is_file(),
+        "Generated local API clients must live in LocalApiClients.g.cs (single compilation unit)"
+    );
+    for legacy in [
+        "ProtocolEngine.LocalApi.g.cs",
+        "MeshServicesClient.g.cs",
+        "DataStoreClient.g.cs",
+        "LocalApiStatic.g.cs",
+    ] {
+        assert!(
+            !repo().join(generated).join(legacy).is_file(),
+            "{generated}/{legacy} must not exist: generated C# uses LocalApiClients.g.cs \
+             and ProtocolEngine.LocalApi.part*.g.cs"
+        );
+    }
+    let priority = read("bindings/csharp/src/OfflineProtocol.Sdk/Model/MessagePriority.cs");
+    assert!(
+        priority.contains("Medium") && priority.contains("Critical"),
+        "MessagePriority must mirror the UDL enum"
+    );
+}
+
+#[test]
+fn csharp_generated_local_api_is_current() {
+    let status = std::process::Command::new("python3")
+        .arg("tools/gen_csharp_local_api.py")
+        .arg("--check")
+        .current_dir(repo())
+        .status()
+        .unwrap_or_else(|e| panic!("cannot run gen_csharp_local_api.py --check: {e}"));
+    assert!(
+        status.success(),
+        "bindings/csharp Generated/*.g.cs or local_api_methods.txt is stale; \
+         run tools/gen_csharp_local_api.py"
+    );
+    let pinned = |rel: &str| -> usize {
+        read(rel)
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("{rel} must be an integer: {e}"))
+    };
+    let manifest = read("bindings/csharp/local_api_methods.txt");
+    let line_count = manifest.lines().filter(|l| !l.is_empty()).count();
+    assert_eq!(
+        line_count,
+        pinned("bindings/csharp/local_api_method_count.txt"),
+        "local_api_methods.txt line count must match tools/gen_csharp_local_api.py output"
+    );
+    let generated = repo().join("bindings/csharp/src/OfflineProtocol.Sdk/Generated");
+    let part_count = std::fs::read_dir(&generated)
+        .unwrap_or_else(|e| panic!("cannot read Generated/: {e}"))
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("ProtocolEngine.LocalApi.part"))
+        })
+        .count();
+    assert_eq!(
+        part_count,
+        pinned("bindings/csharp/local_api_engine_part_count.txt"),
+        "ProtocolEngine.LocalApi.part*.g.cs count must match the generator pin"
+    );
+    let clients = read("bindings/csharp/src/OfflineProtocol.Sdk/Generated/LocalApiClients.g.cs");
+    assert!(
+        clients.contains("UDL_SHA256 =") && clients.contains("gen_csharp_local_api.py"),
+        "LocalApiClients.g.cs must carry the UDL digest header from the generator"
+    );
+    let part_one = read(
+        "bindings/csharp/src/OfflineProtocol.Sdk/Generated/ProtocolEngine.LocalApi.part01.g.cs",
+    );
+    assert!(
+        part_one.contains("UDL_SHA256 =") && part_one.contains("partial class ProtocolEngine"),
+        "engine part files must carry the UDL digest and extend ProtocolEngine"
+    );
+}

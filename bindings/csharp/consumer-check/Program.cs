@@ -1,30 +1,9 @@
 using OfflineProtocol.Sdk;
+using OfflineProtocol.Sdk.Config;
+using OfflineProtocol.Sdk.LocalApi;
+using OfflineProtocol.Sdk.Model;
 using OfflineProtocol.Sdk.Storage;
 using OfflineProtocol.Sdk.Telemetry;
-
-// Every ProtocolConfig field without a default in the interface definition; the rest take the
-// definition's defaults. An example program's values, as in bindings/c/README.md, never the SDK's.
-const string Config =
-    """
-    {
-      "app_id": "com.offlineprotocol.csharp.consumer",
-      "profile": "csharp-consumer",
-      "ble_enabled": false,
-      "wifi_direct_enabled": false,
-      "internet_enabled": true,
-      "reticulum_enabled": false,
-      "nostr_enabled": false,
-      "prefer_online": false,
-      "initial_ttl": 8,
-      "encryption_enabled": true,
-      "auto_key_exchange": true,
-      "store_pending": true,
-      "max_pending_per_peer": 64,
-      "max_pending_global": 4096,
-      "pending_ttl_ms": 60000,
-      "overflow_policy": "DropOldest"
-    }
-    """;
 
 // A fixed placeholder key for a throwaway store; a real host keeps its key out of the source.
 const string StoreKeyBase64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -57,7 +36,13 @@ Directory.CreateDirectory(stateRoot);
 
 try
 {
-    await using var engine = await ProtocolEngine.CreateAsync(Config);
+    await using var engine = await ProtocolEngine.CreateAsync(ProtocolConfigJson.MinimalConsumer);
+    var state = await LocalApiTyped.GetStateAsync(engine);
+    if (state != ProtocolState.Stopped)
+    {
+        Console.Error.WriteLine($"FAIL: expected Stopped before start, got {state}");
+        return 1;
+    }
 
     var secureStorage = new MemoryProtocolStorage();
     var secureProvider = new NativeStorageProvider(secureStorage);

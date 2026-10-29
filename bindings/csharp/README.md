@@ -49,10 +49,26 @@ dotnet run --project consumer-check/ConsumerCheck.csproj -c Release
 
 | Path | Role |
 |------|------|
-| `src/OfflineProtocol.Sdk/` | Hand-written .NET SDK: lifecycle, `offline_protocol_call`, storage, telemetry, events |
+| `src/OfflineProtocol.Sdk/` | Hand-written SDK (engine thread, storage, telemetry, events, typed config) |
+| `src/OfflineProtocol.Sdk/Generated/` | UDL-generated local API (`LocalApiClients.g.cs` and the engine partials below) |
+| `local_api_methods.txt` | Wire-method manifest (checked by Rust guards) |
+| `local_api_method_count.txt` | Method count pin (written by the generator) |
+| `local_api_engine_part_count.txt` | Engine partial file count pin |
+| `Generated/ProtocolEngine.LocalApi.part*.g.cs` | UDL engine methods (split partials; no monolith) |
 | `tests/OfflineProtocol.Sdk.Tests/` | The engine facade against the native library |
 | `consumer-check/` | CI-style smoke program |
 | `../c/include/offline_protocol.h` | Stable C ABI (do not fork) |
 
-Not wired yet: a typed local API and transports. Every engine method is already
-callable through `CallAsync`.
+Regenerate after a UDL change:
+
+```bash
+python3 tools/gen_csharp_local_api.py
+```
+
+Transports land in a follow-up PR.
+
+## Merging the PR3 stack
+
+When landing on `main`, squash fix-up commits into one or two logical commits
+(for example: typed config + generated local API, then CI/consumer-check). The
+GitHub merge queue does not require this, but it keeps `main` history readable.
