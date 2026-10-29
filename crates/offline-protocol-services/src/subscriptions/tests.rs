@@ -1359,3 +1359,61 @@ fn a_log_gap_given_up_on_is_reported_as_history_lost() {
         "a gap the consumer stops waiting for is never a silent hole"
     );
 }
+
+/// On a pattern subscription the provider names the topic, and the consumer
+/// keeps a track under it. A name no provider may publish to is refused, so a
+/// hostile provider cannot make the consumer hold names the size of a frame.
+#[test]
+fn a_pattern_frame_naming_an_invalid_topic_is_dropped() {
+    let mut link = Link::new(Admission::Accept);
+    let sub_id = link.subscribe_with("sensors/*", SubscribeOptions::new(SubscriptionMode::Log));
+    for topic in [
+        format!(
+            "sensors/{}",
+            "x".repeat(crate::payloads::MAX_SUBSCRIPTION_TOPIC_LEN)
+        ),
+        "sensors/has space".to_string(),
+    ] {
+        let update = crate::payloads::UpdatePayload {
+            v: 1,
+            sub_id: sub_id.clone(),
+            topic: Some(topic.clone()),
+            stream: "s".into(),
+            seq: 1,
+            key: None,
+            body: "b".into(),
+            snapshot: false,
+        };
+        let out = link.to_consumer(&super::encode(SVC_UPDATE, &update).unwrap());
+        assert!(out.events.is_empty(), "an update on {topic:?} was taken");
+        let reply = SubscribeReplyPayload {
+            v: 1,
+            sub_id: sub_id.clone(),
+            status: SubscribeStatus::Accepted,
+            reason: None,
+            lease_ms: 60_000,
+            stream: String::new(),
+            seq: 0,
+            history_lost: false,
+            topics: vec![crate::payloads::TopicReply {
+                topic,
+                stream: "s".into(),
+                seq: 5,
+                history_lost: true,
+            }],
+            pattern_full: false,
+            notice: false,
+        };
+        let out = link.to_consumer(&super::encode(SVC_SUBSCRIBE_REPLY, &reply).unwrap());
+        assert!(!out.events.iter().any(|e| matches!(
+            e,
+            ServiceEvent::ServiceSubscriptionChanged { reason, .. } if reason == "history_lost"
+        )));
+    }
+    let info = link.consumer.subscriptions();
+    assert!(
+        info[0].topics.is_empty(),
+        "no track was kept: {:?}",
+        info[0].topics
+    );
+}

@@ -6,9 +6,9 @@ use tracing::{debug, warn};
 use super::provider::unsubscribe_frame;
 use super::{
     changed, clamp_reason, decode, digest, encode, is_topic_pattern, key_matches, topic_matches,
-    validate_key, validate_key_filter, validate_subscription_topic, SubscribeOptions,
-    SubscriptionDelivery, SubscriptionFrame, SubscriptionOutput, SubscriptionRole,
-    SubscriptionState,
+    validate_key, validate_key_filter, validate_subscription_topic, validate_topic,
+    SubscribeOptions, SubscriptionDelivery, SubscriptionFrame, SubscriptionOutput,
+    SubscriptionRole, SubscriptionState,
 };
 use crate::error::ServiceError;
 use crate::events::ServiceEvent;
@@ -223,9 +223,19 @@ impl Sub {
     }
 
     /// The track for `topic`, made when there is room. `None` for a topic
-    /// this subscription does not cover, or one past the cap.
+    /// this subscription does not cover, one no provider may publish to, or
+    /// one past the cap.
+    ///
+    /// On a pattern subscription the name comes from the provider, and a
+    /// track is kept under it: unchecked, a hostile provider could make this
+    /// device hold [`MAX_PATTERN_TOPICS`] names the size of a whole frame
+    /// each, per subscription. A provider publishes only to a valid topic, so
+    /// a name that is not one is refused here, for updates and replies alike.
     fn track(&mut self, topic: &str) -> Option<&mut Track> {
-        if !topic_matches(&self.topic, topic) || is_topic_pattern(topic) {
+        if !topic_matches(&self.topic, topic)
+            || is_topic_pattern(topic)
+            || validate_topic(topic).is_err()
+        {
             return None;
         }
         if !self.tracks.contains_key(topic) && self.tracks.len() >= MAX_PATTERN_TOPICS {
