@@ -147,6 +147,12 @@ struct Sub {
     /// supersedes the queued resync does not withdraw the application's
     /// request with it.
     resync_pending: bool,
+    /// Where the subscription stood when the resync was asked for. Every
+    /// frame carries it while the resync is unanswered: the tracks are
+    /// forgotten at once, so a renewal that read them would claim position
+    /// 0, and a `log` topic would be replayed from its start, or reported
+    /// `history_lost` once its buffer had moved on.
+    resync_resume: Option<ResumePosition>,
     /// A pattern subscription was told it follows as many topics as it may,
     /// and the application has been told; once per subscription.
     pattern_full_reported: bool,
@@ -155,6 +161,16 @@ struct Sub {
 impl Sub {
     fn is_pattern(&self) -> bool {
         is_topic_pattern(&self.topic)
+    }
+
+    /// What a renewal says it holds: the position from before an unanswered
+    /// resync, or where the subscription stands now.
+    fn renewal_resume(&self) -> Option<ResumePosition> {
+        if self.resync_pending {
+            self.resync_resume.clone()
+        } else {
+            self.resume()
+        }
     }
 
     /// Where this subscription stands, for a renewal or a resync. A pattern
@@ -344,6 +360,7 @@ impl Consumer {
             unanswered: 0,
             paused_since: None,
             resync_pending: false,
+            resync_resume: None,
             pattern_full_reported: false,
         };
         let frame = subscribe_frame(&sub_id, &sub, None)?;
@@ -408,8 +425,13 @@ impl Consumer {
             .filter(|sub| sub.sent && sub.state != SubscriptionState::Ended)
             .ok_or_else(|| ServiceError::UnknownSubscription(sub_id.to_string()))?;
         sub.renewal_outstanding = true;
-        sub.resync_pending = true;
-        let resume = sub.resume();
+        // A second resync before the first is answered asks from the same
+        // place: the tracks were forgotten by the first.
+        if !sub.resync_pending {
+            sub.resync_pending = true;
+            sub.resync_resume = sub.resume();
+        }
+        let resume = sub.resync_resume.clone();
         for track in sub.tracks.values_mut() {
             track.forget();
         }
@@ -473,17 +495,24 @@ impl Consumer {
                 payload.history_lost,
             )]
         };
-        // A reply naming a stream this device has left is from before the
-        // provider restarted: none of it describes the live stream.
-        let stale = positions.iter().any(|(topic, stream, _, _)| {
+        // A position naming a stream this device has left is from before the
+        // provider restarted or cleared the topic. An exact subscription's
+        // reply is then stale as a whole. A pattern's reply drops only that
+        // topic: the rest of it, and the lease it grants, still describe the
+        // live streams of the other topics.
+        let retired = |(topic, stream, _, _): &(String, String, u64, bool)| {
             sub.tracks
                 .get(topic)
                 .is_some_and(|track| track.is_retired(stream))
-        });
-        if stale {
+        };
+        if !sub.is_pattern() && positions.iter().any(retired) {
             debug!(sender = %sender, "Dropping a subscription reply naming a retired stream");
             return out;
         }
+        let positions: Vec<_> = positions
+            .into_iter()
+            .filter(|position| !retired(position))
+            .collect();
         let mode = sub.mode;
         let mut resets = Vec::new();
         let mut lost = Vec::new();
@@ -512,6 +541,24 @@ impl Consumer {
                 lost.push(topic);
             }
         }
+        // A notice answers nothing the consumer asked: a resync or renewal
+        // still waiting stays waiting, and renewals that went unanswered stay
+        // counted. Unless the subscription is still pending: the provider
+        // sends notices only to an admitted subscription, and a notice that
+        // superseded the queued answer may be the only word of it to come.
+        if payload.notice && sub.state != SubscriptionState::Pending {
+            if payload.pattern_full && sub.is_pattern() && !sub.pattern_full_reported {
+                sub.pattern_full_reported = true;
+                out.events.push(consumer_changed(
+                    &payload.sub_id,
+                    sub,
+                    sub.state,
+                    "pattern_full",
+                ));
+            }
+            push_topic_changes(&mut out, &payload.sub_id, sub, resets, lost);
+            return out;
+        }
         sub.lease = Duration::from_millis(
             payload
                 .lease_ms
@@ -520,6 +567,7 @@ impl Consumer {
         sub.next_renewal = Some(now + sub.lease / 2);
         sub.renewal_outstanding = false;
         sub.resync_pending = false;
+        sub.resync_resume = None;
         sub.unanswered = 0;
         sub.sent = true;
 
@@ -550,19 +598,7 @@ impl Consumer {
                 "pattern_full",
             ));
         }
-        for (topics, reason) in [(resets, "stream_reset"), (lost, "history_lost")] {
-            for topic in topics {
-                out.events.push(changed(
-                    &payload.sub_id,
-                    SubscriptionRole::Consumer,
-                    &sub.service_id,
-                    &topic,
-                    &sub.provider,
-                    SubscriptionState::Active,
-                    reason,
-                ));
-            }
-        }
+        push_topic_changes(&mut out, &payload.sub_id, sub, resets, lost);
         out
     }
 
@@ -800,7 +836,7 @@ impl Consumer {
                     }
                     sub.renewal_outstanding = true;
                     sub.next_renewal = Some(now + sub.lease / 2);
-                    if let Ok(frame) = subscribe_frame(sub_id, sub, sub.resume()) {
+                    if let Ok(frame) = subscribe_frame(sub_id, sub, sub.renewal_resume()) {
                         out.frames.push(frame);
                     }
                 }
@@ -830,7 +866,7 @@ impl Consumer {
             .filter(|(_, sub)| sub.provider == peer && sub.state == SubscriptionState::Paused)
         {
             sub.renewal_outstanding = true;
-            if let Ok(frame) = subscribe_frame(sub_id, sub, sub.resume()) {
+            if let Ok(frame) = subscribe_frame(sub_id, sub, sub.renewal_resume()) {
                 out.frames.push(frame);
             }
         }
@@ -862,6 +898,30 @@ fn subscribe_frame(
         content: encode(SVC_SUBSCRIBE, &payload)?,
         delivery: SubscriptionDelivery::Superseding(format!("sub:{sub_id}")),
     })
+}
+
+/// The per-topic changes a reply made: a stream that started over, and a
+/// `log` position that neither the buffer nor a checkpoint covered.
+fn push_topic_changes(
+    out: &mut SubscriptionOutput,
+    sub_id: &str,
+    sub: &Sub,
+    resets: Vec<String>,
+    lost: Vec<String>,
+) {
+    for (topics, reason) in [(resets, "stream_reset"), (lost, "history_lost")] {
+        for topic in topics {
+            out.events.push(changed(
+                sub_id,
+                SubscriptionRole::Consumer,
+                &sub.service_id,
+                &topic,
+                &sub.provider,
+                sub.state,
+                reason,
+            ));
+        }
+    }
 }
 
 fn consumer_changed(

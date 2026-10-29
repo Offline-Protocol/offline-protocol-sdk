@@ -7,8 +7,8 @@ use offline_protocol_core::time::{Duration, Instant};
 use super::*;
 use crate::error::ServiceError;
 use crate::payloads::{
-    is_subscription_frame, SubscribeStatus, SubscriptionMode, MAX_PATTERN_TOPICS, SVC_SUBSCRIBE,
-    SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
+    is_subscription_frame, SubscribeReplyPayload, SubscribeStatus, SubscriptionMode,
+    MAX_PATTERN_TOPICS, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 
 const CONSUMER: &str = "alice";
@@ -1010,6 +1010,7 @@ fn a_frame_naming_a_stream_the_consumer_left_is_dropped() {
             history_lost: false,
             topics: Vec::new(),
             pattern_full: false,
+            notice: false,
         },
     )
     .unwrap();
@@ -1043,6 +1044,201 @@ fn a_renewal_carries_an_unanswered_resync() {
         !resync_of(&renewal.frames[0].content),
         "answered, so asked no more"
     );
+}
+
+fn decoded<T: serde::de::DeserializeOwned>(content: &str, prefix: &str) -> T {
+    serde_json::from_str(content.strip_prefix(prefix).unwrap()).unwrap()
+}
+
+/// A resync forgets the tracks at once. A renewal that falls due before the
+/// answer must still say where the subscription stood, or a `log` topic
+/// whose buffer has moved on is reported `history_lost` for nothing.
+#[test]
+fn a_renewal_during_a_resync_keeps_the_position_it_had() {
+    let mut link = Link::new(Admission::Accept);
+    let sub_id = link.subscribe("ev", SubscriptionMode::Log);
+    let past_the_buffer = crate::payloads::MAX_LOG_ENTRIES as u64 + 10;
+    for i in 0..past_the_buffer {
+        link.publish("ev", None, &format!("e{i}"));
+    }
+    link.take_updates();
+    link.take_changes();
+
+    let resync = link.consumer.resync(&sub_id).unwrap();
+    let asked: crate::payloads::SubscribePayload = decoded(&resync.content, SVC_SUBSCRIBE);
+    assert_eq!(asked.resume.as_ref().map(|r| r.seq), Some(past_the_buffer));
+    link.now += Duration::from_secs(31);
+    let renewal = link.consumer.tick(link.now);
+    let renewed: crate::payloads::SubscribePayload =
+        decoded(&renewal.frames[0].content, SVC_SUBSCRIBE);
+    assert!(renewed.resync);
+    assert_eq!(
+        renewed.resume, asked.resume,
+        "the position from before the resync"
+    );
+
+    link.pump(renewal);
+    assert!(
+        !link
+            .take_changes()
+            .iter()
+            .any(|(_, _, reason)| reason == "history_lost"),
+        "nothing was lost"
+    );
+    assert!(link.take_updates().is_empty(), "nothing was missed either");
+}
+
+/// A notice (here a pattern reaching its cap) is sent by the provider on its
+/// own. It must not answer a resync still waiting, or the renewal that
+/// supersedes the queued resync goes without it.
+#[test]
+fn a_notice_does_not_answer_a_resync() {
+    let mut link = Link::new(Admission::Accept);
+    let sub_id = link.subscribe_with("t/*", SubscribeOptions::new(SubscriptionMode::Log));
+    link.consumer.resync(&sub_id).unwrap();
+    for i in 0..=MAX_PATTERN_TOPICS {
+        link.publish(&format!("t/{i:03}"), None, "x");
+    }
+    assert!(link.take_changes().contains(&(
+        "consumer".into(),
+        "active".into(),
+        "pattern_full".into()
+    )));
+    link.now += Duration::from_secs(31);
+    let renewal = link.consumer.tick(link.now);
+    let renewed: crate::payloads::SubscribePayload =
+        decoded(&renewal.frames[0].content, SVC_SUBSCRIBE);
+    assert!(renewed.resync, "the resync is still asked for");
+}
+
+/// A notice that superseded the queued answer of a pending subscription is
+/// the only word of it to come, so it activates the subscription.
+#[test]
+fn a_notice_activates_a_subscription_whose_answer_it_superseded() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("car", Some("battery"), "80");
+    let (sub_id, frame) = link
+        .consumer
+        .subscribe(
+            PROVIDER,
+            SVC,
+            "car",
+            &SubscribeOptions::new(SubscriptionMode::Latest),
+            link.now,
+        )
+        .unwrap();
+    link.consumer.mark_sent(&sub_id);
+    link.to_provider(&frame.content); // The answer, never delivered.
+    let cleared = link.provider.clear_topic(SVC, "car").unwrap();
+    let notice: SubscribeReplyPayload = decoded(&cleared.frames[0].content, SVC_SUBSCRIBE_REPLY);
+    assert!(notice.notice);
+    link.pump(cleared);
+    assert_eq!(
+        link.consumer_state(&sub_id),
+        Some(SubscriptionState::Active)
+    );
+}
+
+/// One topic of a pattern reply naming a stream the consumer left costs that
+/// topic only: the others' positions in the same reply still apply.
+#[test]
+fn a_retired_stream_in_a_pattern_reply_drops_only_that_topic() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("t/a", None, "a1");
+    link.publish("t/b", None, "b1");
+    let (sub_id, frame) = link
+        .consumer
+        .subscribe(
+            PROVIDER,
+            SVC,
+            "t/*",
+            &SubscribeOptions::new(SubscriptionMode::Log),
+            link.now,
+        )
+        .unwrap();
+    link.consumer.mark_sent(&sub_id);
+    let answer = link.to_provider(&frame.content);
+    let mut reply: SubscribeReplyPayload = decoded(&answer.frames[0].content, SVC_SUBSCRIBE_REPLY);
+    link.pump(answer);
+    let cleared = link.provider.clear_topic(SVC, "t/a").unwrap();
+    link.pump(cleared);
+    link.take_changes();
+
+    // The first answer again, from a mailbox: t/a's stream is retired now.
+    for topic in &mut reply.topics {
+        topic.history_lost = topic.topic == "t/b";
+    }
+    link.pump(SubscriptionOutput {
+        frames: vec![SubscriptionFrame {
+            recipient: CONSUMER.into(),
+            content: super::encode(SVC_SUBSCRIBE_REPLY, &reply).unwrap(),
+            delivery: SubscriptionDelivery::Reliable,
+        }],
+        events: Vec::new(),
+    });
+    let changes = link.take_changes();
+    assert!(
+        changes.contains(&("consumer".into(), "active".into(), "history_lost".into())),
+        "t/b's part of the reply applied: {changes:?}"
+    );
+    assert!(
+        !changes
+            .iter()
+            .any(|(_, _, reason)| reason == "stream_reset"),
+        "t/a was not reset back to its retired stream: {changes:?}"
+    );
+}
+
+/// One subscriber churning through topics forgets its own retired ids,
+/// never another subscriber's.
+#[test]
+fn a_churning_subscriber_cannot_push_out_anothers_retired_ids() {
+    let mut provider = Provider::new(Duration::from_millis(50), Duration::from_secs(60));
+    let now = Instant::now();
+    let frame = |sub_id: &str, topic: &str| {
+        super::encode(
+            SVC_SUBSCRIBE,
+            &crate::payloads::SubscribePayload {
+                v: 1,
+                sub_id: sub_id.into(),
+                service_id: SVC.into(),
+                topic: topic.into(),
+                mode: SubscriptionMode::Latest,
+                params: String::new(),
+                keys: Vec::new(),
+                lease_ms: 60_000,
+                resume: None,
+                resync: false,
+            },
+        )
+        .unwrap()
+    };
+    let subscribe = |provider: &mut Provider, sender: &str, sub_id: &str, topic: &str| {
+        provider.handle_subscribe(&frame(sub_id, topic), sender, now, &|id| id == SVC, &|_| {
+            Admission::Accept
+        })
+    };
+    subscribe(&mut provider, CONSUMER, "alice-old", "car");
+    subscribe(&mut provider, CONSUMER, "alice-new", "car");
+
+    for i in 0..crate::payloads::MAX_RETIRED_SUB_IDS + 10 {
+        let topic = format!("t{i}");
+        subscribe(&mut provider, "mallory", &format!("m{i}a"), &topic);
+        subscribe(&mut provider, "mallory", &format!("m{i}b"), &topic);
+        let unsubscribe = super::encode(
+            SVC_UNSUBSCRIBE,
+            &crate::payloads::UnsubscribePayload {
+                v: 1,
+                sub_id: format!("m{i}b"),
+                reason: String::new(),
+            },
+        )
+        .unwrap();
+        provider.handle_unsubscribe(&unsubscribe, "mallory");
+    }
+    let out = subscribe(&mut provider, CONSUMER, "alice-old", "car");
+    assert!(out.frames.is_empty(), "alice's retired id is still dropped");
+    assert!(provider.holds("alice-new"));
 }
 
 #[test]

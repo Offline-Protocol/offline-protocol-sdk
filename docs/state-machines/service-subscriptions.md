@@ -110,8 +110,16 @@ consumer emits `service_subscription_changed` (`active`, `pattern_full`) once.
 
 **Resync** forgets the position, so that the state that comes back is
 delivered even where it equals what was delivered before, and asks with
-`resync`. Every frame for the subscription carries `resync` until a reply
-arrives.
+`resync`. Every frame for the subscription carries `resync`, and the
+position it had when the resync was asked for, until a reply arrives that is
+not a notice (`notice: true`, sent by the provider on its own). A renewal that
+read the forgotten position would claim position 0, and a `log` topic would
+be replayed from its start, or reported `history_lost` once its buffer had
+moved on.
+
+**A pattern reply naming a retired stream** for one topic drops that topic's
+position only; the rest of the reply applies. An exact subscription's reply
+naming a retired stream is dropped whole.
 
 **A second subscribe to the same triple** (provider, service, topic) while
 the first is not `ended` fails at the call with `InvalidArgument`, naming the

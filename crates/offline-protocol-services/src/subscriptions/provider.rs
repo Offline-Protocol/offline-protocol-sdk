@@ -15,9 +15,10 @@ use crate::payloads::{
     ResumePosition, SubscribePayload, SubscribeReplyPayload, SubscribeStatus, SubscriptionMode,
     TopicReply, UnsubscribePayload, UpdatePayload, MAX_LATEST_BYTES, MAX_LATEST_KEYS,
     MAX_LOG_BYTES, MAX_LOG_ENTRIES, MAX_PATTERN_TOPICS, MAX_PROVIDER_SUBSCRIPTIONS,
-    MAX_RETIRED_PER_TOPIC, MAX_RETIRED_SUB_IDS, MAX_SERVICE_BODY_SIZE, MAX_SUBSCRIPTIONS_PER_PEER,
-    MAX_SUBSCRIPTION_LEASE_MS, MAX_SUBSCRIPTION_PARAMS_SIZE, MIN_SUBSCRIPTION_LEASE_MS,
-    SUBSCRIPTION_WIRE_VERSION, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
+    MAX_RETIRED_PER_SUBSCRIBER, MAX_RETIRED_PER_TOPIC, MAX_RETIRED_SUB_IDS, MAX_SERVICE_BODY_SIZE,
+    MAX_SUBSCRIPTIONS_PER_PEER, MAX_SUBSCRIPTION_LEASE_MS, MAX_SUBSCRIPTION_PARAMS_SIZE,
+    MIN_SUBSCRIPTION_LEASE_MS, SUBSCRIPTION_WIRE_VERSION, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY,
+    SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 
 /// Longest subscription id accepted from a consumer. Ours are UUIDs.
@@ -213,7 +214,8 @@ pub struct Provider {
     topics: HashMap<(String, String), Topic>,
     subs: HashMap<String, Sub>,
     /// Replaced subscriptions, oldest first: at most
-    /// [`MAX_RETIRED_PER_TOPIC`] per (subscriber, service, topic) and
+    /// [`MAX_RETIRED_PER_TOPIC`] per (subscriber, service, topic),
+    /// [`MAX_RETIRED_PER_SUBSCRIBER`] per subscriber and
     /// [`MAX_RETIRED_SUB_IDS`] in all.
     retired: VecDeque<Retired>,
     policies: HashMap<String, SubscriptionPolicy>,
@@ -910,17 +912,10 @@ impl Provider {
                         history_lost: false,
                     }],
                     sub.pattern_full,
+                    true,
                 )
             } else {
-                reply_content(
-                    sub_id,
-                    SubscribeStatus::Accepted,
-                    None,
-                    lease_ms,
-                    &stream,
-                    0,
-                    false,
-                )
+                exact_notice_content(sub_id, lease_ms, &stream)
             };
             // Not under the reply key: a pattern subscription can be told of
             // several topics starting over, and each must arrive.
@@ -1161,7 +1156,7 @@ impl Provider {
         }
         out.frames.push(SubscriptionFrame {
             recipient: sub.subscriber.clone(),
-            content: pattern_reply_content(sub_id, lease_ms, replies, sub.pattern_full),
+            content: pattern_reply_content(sub_id, lease_ms, replies, sub.pattern_full, false),
             delivery: SubscriptionDelivery::Superseding(reply_key(sub_id)),
         });
         out.frames.extend(catch_up);
@@ -1196,6 +1191,7 @@ impl Provider {
                         sub.lease.as_millis() as u64,
                         Vec::new(),
                         true,
+                        true,
                     ),
                     delivery: SubscriptionDelivery::Reliable,
                 });
@@ -1216,8 +1212,37 @@ impl Provider {
                 self.retired.remove(oldest);
             }
         }
+        // Over a bound, the subscriber's own oldest goes first, then, in all,
+        // the oldest of whoever holds the most: one peer churning through
+        // topics forgets its own retired ids, never another's.
+        let mine = self
+            .retired
+            .iter()
+            .filter(|r| r.subscriber == sub.subscriber)
+            .count();
+        if mine >= MAX_RETIRED_PER_SUBSCRIBER {
+            if let Some(oldest) = self
+                .retired
+                .iter()
+                .position(|r| r.subscriber == sub.subscriber)
+            {
+                self.retired.remove(oldest);
+            }
+        }
         if self.retired.len() >= MAX_RETIRED_SUB_IDS {
-            self.retired.pop_front();
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for retired in &self.retired {
+                *counts.entry(retired.subscriber.as_str()).or_default() += 1;
+            }
+            let heaviest = counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(subscriber, _)| subscriber.to_string());
+            if let Some(heaviest) = heaviest {
+                if let Some(oldest) = self.retired.iter().position(|r| r.subscriber == heaviest) {
+                    self.retired.remove(oldest);
+                }
+            }
         }
         self.retired.push_back(Retired {
             subscriber: sub.subscriber.clone(),
@@ -1425,17 +1450,39 @@ fn reply_content(
         history_lost,
         topics: Vec::new(),
         pattern_full: false,
+        notice: false,
     };
     // Serialising a struct of strings and integers cannot fail.
     encode(SVC_SUBSCRIBE_REPLY, &payload).unwrap_or_default()
 }
 
-/// An acceptance of a pattern subscription, with a position per topic.
+/// An exact subscription's topic started over under `stream`: a notice, not
+/// an answer to anything the subscriber asked.
+fn exact_notice_content(sub_id: &str, lease_ms: u64, stream: &str) -> String {
+    let payload = SubscribeReplyPayload {
+        v: SUBSCRIPTION_WIRE_VERSION,
+        sub_id: sub_id.to_string(),
+        status: SubscribeStatus::Accepted,
+        reason: None,
+        lease_ms,
+        stream: stream.to_string(),
+        seq: 0,
+        history_lost: false,
+        topics: Vec::new(),
+        pattern_full: false,
+        notice: true,
+    };
+    encode(SVC_SUBSCRIBE_REPLY, &payload).unwrap_or_default()
+}
+
+/// An acceptance of a pattern subscription, with a position per topic; with
+/// `notice`, one the provider sends on its own rather than as an answer.
 fn pattern_reply_content(
     sub_id: &str,
     lease_ms: u64,
     topics: Vec<TopicReply>,
     pattern_full: bool,
+    notice: bool,
 ) -> String {
     let payload = SubscribeReplyPayload {
         v: SUBSCRIPTION_WIRE_VERSION,
@@ -1448,6 +1495,7 @@ fn pattern_reply_content(
         history_lost: false,
         topics,
         pattern_full,
+        notice,
     };
     encode(SVC_SUBSCRIBE_REPLY, &payload).unwrap_or_default()
 }

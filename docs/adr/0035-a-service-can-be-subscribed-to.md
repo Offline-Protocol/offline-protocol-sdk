@@ -304,9 +304,19 @@ service frames, each only ever inside `__MLS_ENC__`:
 | Prefix | Direction | Body |
 |--------|-----------|------|
 | `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, keys?, lease_ms, resume?: {stream, seq, digest, topics?}, resync}` |
-| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?, pattern_full?}` |
+| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?, pattern_full?, notice?}` |
 | `__SVC_UPD__` | provider to consumer | `{v, sub_id, topic?, stream, seq, key?, body, snapshot}` |
 | `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
+
+A reply with `notice: true` is one the provider sends on its own: a topic
+started over (`clear_service_topic`), or a pattern reached its cap. Its
+positions and `pattern_full` apply, but it answers nothing the consumer
+asked, so a renewal or resync still waiting stays waiting, and renewals that
+went unanswered stay counted. Otherwise a notice landing between a resync and
+its answer would clear the resync, and the renewal that supersedes it would go
+without. A pending subscription takes a notice as its answer: the provider
+sends notices only to admitted subscriptions, and the notice may have
+superseded the queued answer.
 
 `status` is one of five values, and nothing else:
 
@@ -408,7 +418,7 @@ older key package.
 |-------|----------|
 | `latest` update | Live direct link and a confirmed session: sealed ephemeral send (the ADR 0032 path). Otherwise: a sealed reliable send that **supersedes** the previous queued update for the same subscription and key (invariant 5) |
 | `log` update | Sealed reliable send, every one |
-| `__SVC_SUB__` (subscribe, renew, resync) | Sealed reliable send, superseding the previous one for the same subscription. A resync not yet answered stays asked: every frame that supersedes it carries `resync` until a reply arrives |
+| `__SVC_SUB__` (subscribe, renew, resync) | Sealed reliable send, superseding the previous one for the same subscription. A resync not yet answered stays asked: every frame that supersedes it carries `resync`, and the position from before the resync, until a reply that is not a notice arrives |
 | `__SVC_SUB_R__` | Sealed reliable send, superseding the previous one for the same subscription |
 | `__SVC_UNSUB__` | Sealed reliable send |
 
@@ -558,6 +568,7 @@ reported rather than silent.
 | Subscriptions a provider holds, admitted or awaiting the application | 256 | `full`, never eviction (invariant 6) |
 | Subscriptions one peer holds on a provider, admitted or awaiting the application | 16 | `full` |
 | Retired streams a consumer remembers per topic; retired `sub_id`s a provider remembers per triple | 4 | The oldest is forgotten |
+| Retired `sub_id`s a provider remembers per subscriber, and in all | 64, and 1024 | The subscriber's own oldest; in all, the oldest of whoever holds the most, so one peer churning through topics never pushes out another's |
 | Subscriptions a consumer holds | 64 | `InvalidArgument` at `subscribe_service` |
 | `latest` table per topic | 256 keys, 256 KiB | `PayloadTooLarge`; `clear_service_topic` starts over |
 | `log` buffer per topic | 256 updates or 512 KiB, oldest dropped first | Resume past it: checkpoint, or `history_lost` |

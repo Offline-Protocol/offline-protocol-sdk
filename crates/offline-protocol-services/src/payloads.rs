@@ -166,8 +166,12 @@ pub(crate) const MAX_UNANSWERED_RENEWALS: u32 = 3;
 /// frame naming one is from before a restart, still in a relay mailbox or
 /// with a custodian, and is dropped.
 pub(crate) const MAX_RETIRED_PER_TOPIC: usize = 4;
-/// Retired `sub_id`s a provider remembers in all, so that a subscriber that
-/// churns through topics cannot make the provider remember without bound.
+/// Retired `sub_id`s a provider remembers for one subscriber: as many per
+/// topic as it may hold subscriptions.
+pub(crate) const MAX_RETIRED_PER_SUBSCRIBER: usize =
+    MAX_RETIRED_PER_TOPIC * MAX_SUBSCRIPTIONS_PER_PEER;
+/// Retired `sub_id`s a provider remembers in all, so that subscribers that
+/// churn through topics cannot make the provider remember without bound.
 pub(crate) const MAX_RETIRED_SUB_IDS: usize = MAX_RETIRED_PER_TOPIC * MAX_PROVIDER_SUBSCRIPTIONS;
 
 /// How a topic treats its updates.
@@ -318,6 +322,11 @@ pub(crate) struct SubscribeReplyPayload {
     /// follow no more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pattern_full: bool,
+    /// Sent by the provider on its own (a topic cleared, a pattern full)
+    /// rather than in answer to a subscribe, renewal or resync. Its positions
+    /// and `pattern_full` apply; it does not answer what the consumer asked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notice: bool,
 }
 
 /// `__SVC_UPD__`: one update.
