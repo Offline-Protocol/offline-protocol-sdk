@@ -171,6 +171,17 @@ bash bindings/web/scripts/test-browser.sh     # every page in three engines (BRO
 CHROMEDRIVER=... GECKODRIVER=... bash bindings/web/scripts/test-conformance.sh
 ```
 
+### The C# binding
+
+```bash
+# Hand-written P/Invoke over the C API (docs/bridges/csharp.md); nothing is
+# generated. Needs the .NET 8 SDK and the library built first; the tests load it.
+cargo build -p offline-protocol-uniffi
+OFFLINE_PROTOCOL_LIBRARY_DIR="$PWD/target/debug" dotnet test bindings/csharp/OfflineProtocol.sln
+OFFLINE_PROTOCOL_LIBRARY_DIR="$PWD/target/debug" \
+  dotnet run --project bindings/csharp/consumer-check/ConsumerCheck.csproj
+```
+
 ### Native packages
 
 ```bash

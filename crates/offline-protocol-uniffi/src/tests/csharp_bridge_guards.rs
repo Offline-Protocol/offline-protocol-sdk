@@ -1,7 +1,7 @@
-//! C# binding guards: the contract doc and the hand-mirrored status enum.
+//! C# binding guards: the contract doc, the hand-mirrored status enum, and the CI job.
 //!
 //! `cargo test` does not run the C# (C9). These hold the parts of the binding that
-//! drift silently, such as a value the C# copies from Rust.
+//! drift silently: a value the C# copies from Rust, and the job that does run it.
 
 use std::path::{Path, PathBuf};
 
@@ -69,5 +69,33 @@ fn the_csharp_status_enum_is_the_c_apis() {
     assert_eq!(
         csharp, rust,
         "{CSHARP} must list the C API's OfflineProtocolStatus members with the same values"
+    );
+}
+
+// The C# is compiled and run only by its CI job (C9). A filter that misses
+// the binding, or a job the aggregate check does not wait on, turns a broken
+// binding green.
+#[test]
+fn the_csharp_binding_has_a_ci_job_the_result_waits_on() {
+    let ci = read(".github/workflows/ci.yml");
+    assert!(
+        ci.contains("'bindings/csharp/**'"),
+        "ci.yml must have a change filter on bindings/csharp/**"
+    );
+    assert!(
+        ci.contains("csharp: ${{ steps.gate.outputs.csharp }}"),
+        "ci.yml must export the csharp gate output"
+    );
+    assert!(
+        ci.contains("needs.changes.outputs.csharp == 'true'"),
+        "ci.yml must have a job gated on the csharp filter"
+    );
+    assert!(
+        ci.contains("      - csharp-binding\n"),
+        "the CI Result job must list csharp-binding in its needs"
+    );
+    assert!(
+        ci.contains("dotnet run --project bindings/csharp/consumer-check"),
+        "the C# job must run the consumer check against the built library"
     );
 }

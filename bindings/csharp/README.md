@@ -14,16 +14,18 @@ Bridge contract: [docs/bridges/csharp.md](../../docs/bridges/csharp.md).
 | .NET SDK | 8.0+ |
 | Native library | `cargo build --release -p offline-protocol-uniffi` → `target/release/` |
 
-Set **`OFFLINE_PROTOCOL_LIBRARY_DIR`** to the directory containing the native
-library before running tests or the consumer check (same role as
-`OFFLINE_PROTOCOL_LIBRARY_DIR` / `java.library.path` for other bindings).
+The SDK loads the native library from **`OFFLINE_PROTOCOL_LIBRARY_DIR`** when
+it is set, and otherwise from the application directory and the system paths
+([CS3](../../docs/bridges/csharp.md#cs3-native-library-loading)). The tests and
+the consumer check load it, so build it first.
 
 ## Build
 
 ```bash
+cargo build -p offline-protocol-uniffi
 cd bindings/csharp
-dotnet build
-dotnet test --no-build   # after build; JSON/unit tests only (no native library)
+dotnet build -c Release
+OFFLINE_PROTOCOL_LIBRARY_DIR="$PWD/../../target/debug" dotnet test -c Release --no-build
 ```
 
 ## Consumer check
@@ -32,14 +34,14 @@ Proves the P/Invoke surface, engine thread, and file-store MLS path against a
 real library:
 
 ```bash
-export OFFLINE_PROTOCOL_LIBRARY_DIR="$PWD/../../target/release"   # adjust path
+export OFFLINE_PROTOCOL_LIBRARY_DIR="$PWD/../../target/debug"   # or target/release
 dotnet run --project consumer-check/ConsumerCheck.csproj -c Release
 ```
 
 On Windows (PowerShell):
 
 ```powershell
-$env:OFFLINE_PROTOCOL_LIBRARY_DIR = "..\..\target\release"
+$env:OFFLINE_PROTOCOL_LIBRARY_DIR = "..\..\target\debug"
 dotnet run --project consumer-check/ConsumerCheck.csproj -c Release
 ```
 
@@ -47,9 +49,10 @@ dotnet run --project consumer-check/ConsumerCheck.csproj -c Release
 
 | Path | Role |
 |------|------|
-| `src/OfflineProtocol.Sdk/` | Hand-written .NET SDK (PR1: lifecycle + `offline_protocol_call`) |
+| `src/OfflineProtocol.Sdk/` | Hand-written .NET SDK: lifecycle and `offline_protocol_call` |
+| `tests/OfflineProtocol.Sdk.Tests/` | The engine facade against the native library |
 | `consumer-check/` | CI-style smoke program |
 | `../c/include/offline_protocol.h` | Stable C ABI (do not fork) |
 
-Full RN parity (typed local API, events, transports, storage providers, CI) lands
-in follow-up PRs.
+Not wired yet: a typed local API, events, transports, storage providers and
+telemetry. Every engine method is already callable through `CallAsync`.

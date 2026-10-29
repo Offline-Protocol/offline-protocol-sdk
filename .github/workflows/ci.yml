@@ -72,6 +72,7 @@ jobs:
       c_binding: ${{ steps.gate.outputs.c_binding }}
       java: ${{ steps.gate.outputs.java }}
       ruby: ${{ steps.gate.outputs.ruby }}
+      csharp: ${{ steps.gate.outputs.csharp }}
       web: ${{ steps.gate.outputs.web }}
       python: ${{ steps.gate.outputs.python }}
       python_wheel: ${{ steps.gate.outputs.python_wheel }}
@@ -208,6 +209,12 @@ jobs:
               - *ffi
               - 'bindings/ruby/**'
               - 'examples/ruby-app/**'
+
+            # The C# binding calls the C API, so a change to it is a change here.
+            csharp:
+              - *ffi
+              - 'bindings/csharp/**'
+              - 'bindings/c/include/**'
 
             web:
               - *engine
@@ -384,7 +391,7 @@ jobs:
             echo "| --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
           for name in rust rust_tests manifests spec_vectors notices deps embedded \
-                      mls_interop c_binding java ruby web python python_wheel \
+                      mls_interop c_binding java ruby csharp web python python_wheel \
                       release_packaging rn_typecheck android_unit ios_unit \
                       native_scripts swift_package android_library \
                       flutter_dart flutter_native flutter_ios flutter_lock; do
@@ -989,6 +996,68 @@ jobs:
       - name: The quick start links through the import library and runs
         shell: bash
         run: bash scripts/check-c-library.sh windows-x86_64 target/debug
+
+  # The C# binding (docs/bridges/csharp.md): hand-written P/Invoke over the C
+  # API, so nothing generated proves it compiles. This builds it with warnings
+  # as errors, runs its tests and the consumer check against the library built
+  # from the same tree, then runs the check again with the library beside the
+  # application and OFFLINE_PROTOCOL_LIBRARY_DIR unset: the default load path
+  # (CS3), which a plain dlopen of the bare name breaks on macOS and Linux.
+  csharp-binding:
+    name: C# Binding (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.csharp == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-uniffi-debug
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      - name: Build the C# binding
+        run: dotnet build bindings/csharp/OfflineProtocol.sln -c Release
+
+      - name: Test the C# binding
+        shell: bash
+        env:
+          OFFLINE_PROTOCOL_LIBRARY_DIR: ${{ github.workspace }}/target/debug
+        run: dotnet test bindings/csharp/OfflineProtocol.sln -c Release --no-build
+
+      - name: Run the consumer check
+        shell: bash
+        env:
+          OFFLINE_PROTOCOL_LIBRARY_DIR: ${{ github.workspace }}/target/debug
+        run: dotnet run --project bindings/csharp/consumer-check/ConsumerCheck.csproj -c Release --no-build
+
+      - name: Run the consumer check with the library beside it
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Windows) lib=offline_protocol_uniffi.dll ;;
+            macOS) lib=liboffline_protocol_uniffi.dylib ;;
+            *) lib=liboffline_protocol_uniffi.so ;;
+          esac
+          out=bindings/csharp/consumer-check/bin/Release/net8.0
+          cp "target/debug/$lib" "$out/"
+          unset OFFLINE_PROTOCOL_LIBRARY_DIR
+          cd "$RUNNER_TEMP"
+          dotnet "$GITHUB_WORKSPACE/$out/ConsumerCheck.dll"
 
   # The Java binding (docs/bridges/java.md). Its sources are generated from the
   # UDL and their drift is gated with the other bindings (python-bindings). This
@@ -2101,6 +2170,7 @@ jobs:
       - c-binding-windows
       - java-binding
       - ruby-binding
+      - csharp-binding
       - web-binding
       - security
       - python-bindings
