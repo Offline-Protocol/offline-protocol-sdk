@@ -488,6 +488,8 @@ its key), `coalesced` (held back by the 50 ms interval; the newest value
 follows) and `failed` (no confirmed session; the next renewal catches it up).
 `end_service_subscription` ends one subscription, `clear_service_topic`
 starts a topic over, and `service_subscribers` lists who is subscribed.
+Blocking a peer (`block_user`) ends every subscription with it at once, on
+both sides, and nothing is sent to it.
 
 ### Getting the state back
 

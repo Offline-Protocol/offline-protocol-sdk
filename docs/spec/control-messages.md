@@ -241,7 +241,8 @@ session between the consumer and the provider, toward a peer that advertised
 | `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
 
 A sender MUST NOT send a subscription frame in plaintext, and a sender that
-cannot seal one (no confirmed session yet, or a fault) does not send it. A
+cannot seal one (no confirmed session yet, or a fault) does not send it. Nor
+does it send one to a peer its user blocked. A
 receiver that decrypts one from a 1:1 session slot MUST hand it to its
 subscription layer with the MLS-authenticated sender, and MUST drop one that
 arrives as plaintext whatever its signature says. It MUST accept an

@@ -60,6 +60,10 @@ impl OfflineProtocol {
             );
         }
 
+        // Subscriptions with the user end now, on both sides, rather than at
+        // the end of a lease the blocked peer can no longer renew.
+        self.end_subscriptions_with(user_id);
+
         info!(user_id = %user_id, "User blocked");
 
         if let Ok(state) = lock_shared_state(&self.shared_state) {

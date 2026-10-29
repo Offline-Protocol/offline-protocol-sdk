@@ -347,8 +347,8 @@ superseded the queued answer.
 | `replaced` | provider | A newer subscription to the same triple took its place (invariant 7) |
 | `expired` | provider | The lease ran out unrenewed |
 | `service_unregistered` | provider | The service was unregistered |
-| `revoked` | provider | `end_service_subscription` with an empty reason |
-| `unsubscribed` | consumer, provider | `unsubscribe_service`, or its frame received |
+| `revoked` | provider | `end_service_subscription` with an empty reason, or the user blocked the subscriber |
+| `unsubscribed` | consumer, provider | `unsubscribe_service`, its frame received, or the user blocked the provider |
 | `no_reply` | consumer | Pending past `pending_timeout_ms` after the frame left |
 | `session_timeout` | consumer | Pending past `pending_timeout_ms` with no confirmed session |
 | `provider_unreachable` | consumer | Paused past `max_pause_ms` |

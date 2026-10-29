@@ -1381,7 +1381,9 @@ no plaintext form, so R9's fallback does not reach it. What remains:
   most half a lease later, because every renewal goes through the policy.
   Were renewals exempt, a refused peer that keeps renewing would be streamed
   to forever. Either way the peer is cut off by the provider's word, not by
-  cryptography: it still holds its session.
+  cryptography: it still holds its session. Blocking a peer is immediate,
+  not at a renewal: every subscription with it ends on both sides, and no
+  subscription frame is sent to a blocked peer.
 - **A `latest` value that left before it was superseded can still arrive**,
   from a relay mailbox or a custodian. The consumer drops anything not newer
   than what it holds for the key, so a late value is never surfaced as

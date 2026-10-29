@@ -734,3 +734,64 @@ fn only_an_encryption_capable_sender_is_recorded_as_proved() {
         None
     );
 }
+
+/// Blocking is bidirectional, and a subscription is no exception. The
+/// provider that blocks a subscriber stops streaming to it at once, not at
+/// the end of a lease, and queues nothing for it; the consumer that blocks a
+/// provider holds nothing on it and cannot subscribe to it again.
+#[test]
+fn blocking_a_peer_ends_its_subscriptions_on_both_sides() {
+    let mut pair = Pair::new();
+    pair.bob.register(SubscriptionPolicy::AcceptAll);
+    pair.alice.register(SubscriptionPolicy::AcceptAll);
+    let alice = pair.alice.address.clone();
+    pair.subscribe("battery", SubscriptionMode::Latest);
+    let bob_on_alice = pair
+        .bob
+        .protocol
+        .subscribe_service(&alice, SVC, "battery", SubscriptionMode::Latest, "")
+        .unwrap();
+    pair.run(12);
+    assert_eq!(pair.bob.protocol.service_subscribers(Some(SVC)).len(), 1);
+    assert_eq!(
+        pair.bob.state_of(&bob_on_alice),
+        Some(SubscriptionState::Active)
+    );
+    pair.bob.take_changes();
+
+    // Out of range, so that a queued update would show in the outbox.
+    pair.unlink();
+    pair.run(2);
+    let queued_before = pair.bob.outbox_to(&alice);
+    pair.bob.protocol.block_user(&alice).unwrap();
+
+    assert!(pair.bob.protocol.service_subscribers(Some(SVC)).is_empty());
+    assert!(pair.bob.protocol.service_subscriptions().is_empty());
+    let changes = pair.bob.take_changes();
+    assert!(changes.contains(&("provider".into(), "ended".into(), "revoked".into())));
+    assert!(changes.contains(&("consumer".into(), "ended".into(), "unsubscribed".into())));
+    let report = pair
+        .bob
+        .protocol
+        .publish_service_update(SVC, "battery", Some("pct"), "81")
+        .unwrap();
+    assert_eq!(report.subscribers, 0);
+    assert!(
+        pair.bob.outbox_to(&alice) <= queued_before,
+        "a frame was queued for a blocked peer"
+    );
+    assert!(pair
+        .bob
+        .protocol
+        .outbox
+        .values()
+        .all(|entry| entry.message.recipient.as_str() != alice || !entry.subscription_frame));
+    let again =
+        pair.bob
+            .protocol
+            .subscribe_service(&alice, SVC, "battery", SubscriptionMode::Latest, "");
+    assert!(
+        matches!(again, Err(crate::Error::UserBlocked(_))),
+        "{again:?}"
+    );
+}

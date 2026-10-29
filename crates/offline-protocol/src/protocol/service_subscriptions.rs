@@ -187,10 +187,19 @@ impl OfflineProtocol {
     }
 
     /// Seals and sends one subscription frame by the delivery it asks for.
+    ///
+    /// Never to a blocked peer. Blocking is bidirectional (we neither receive
+    /// from nor send to), and the receive path already drops a blocked
+    /// sender's frames; without this the provider would keep streaming a
+    /// subscriber the user blocked, and a consumer keep renewing (and
+    /// re-establishing a session) toward a provider it blocked.
     pub(crate) fn send_subscription_frame(
         &mut self,
         frame: SubscriptionFrame,
     ) -> Result<FrameSent> {
+        if self.is_user_blocked(&frame.recipient) {
+            return Err(Error::UserBlocked(frame.recipient));
+        }
         if !self.config.service_subscriptions.enabled {
             return Err(Error::InvalidArgument(
                 "service subscriptions are switched off".to_string(),
@@ -367,6 +376,50 @@ impl OfflineProtocol {
         true
     }
 
+    /// Ends every subscription with `peer`, on both sides, because the user
+    /// blocked it. Nothing is sent to it ([`Self::send_subscription_frame`]
+    /// refuses a blocked recipient); the application is told each one
+    /// ended, as `revoked` where this device provided and `unsubscribed`
+    /// where it subscribed, both being this user's own decision.
+    pub(crate) fn end_subscriptions_with(&mut self, peer: &str) {
+        let provided: Vec<String> = self
+            .service_subscriptions
+            .provider
+            .subscribers(None)
+            .into_iter()
+            .filter(|info| info.subscriber == peer)
+            .map(|info| info.sub_id)
+            .collect();
+        for sub_id in provided {
+            if let Ok(output) = self.service_subscriptions.provider.end(&sub_id, "") {
+                self.apply_subscription_output(output);
+            }
+        }
+        let held: Vec<String> = self
+            .service_subscriptions
+            .consumer
+            .subscriptions()
+            .into_iter()
+            .filter(|info| info.provider == peer)
+            .map(|info| info.sub_id)
+            .collect();
+        for sub_id in held {
+            if let Some(output) = self.service_subscriptions.consumer.unsubscribe(&sub_id) {
+                self.apply_subscription_output(output);
+            }
+        }
+        let superseding = &mut self.service_subscriptions.superseding;
+        let withdrawn: Vec<MessageId> = superseding
+            .iter()
+            .filter(|((recipient, _), _)| recipient == peer)
+            .map(|(_, message_id)| message_id.clone())
+            .collect();
+        superseding.retain(|(recipient, _), _| recipient != peer);
+        for message_id in withdrawn {
+            self.forget_outbound_message(&message_id);
+        }
+    }
+
     /// What `service_id`'s policy says about `subscriber`.
     pub(crate) fn admission_for(&self, service_id: &str, subscriber: &str) -> Admission {
         match self.service_subscriptions.provider.policy(service_id) {
@@ -460,6 +513,9 @@ impl OfflineProtocol {
     ) -> Result<String> {
         self.ensure_subscriptions_enabled()?;
         Self::validate_outbound_recipient(provider)?;
+        if self.is_user_blocked(provider) {
+            return Err(Error::UserBlocked(provider.to_string()));
+        }
         self.ensure_running()?;
         if provider == self.local_id {
             return Err(Error::InvalidArgument(
