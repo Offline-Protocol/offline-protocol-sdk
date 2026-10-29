@@ -85,10 +85,25 @@ try
         return 1;
     }
 
-    var polled = await engine.PollEventAsync();
-    if (polled is null || lastEvent is null || polled != lastEvent)
+    // Every event is also queued for polling, and the queue already holds what came before the
+    // callback was installed (initialize_mls emits identity_ready). Drain it in order until the
+    // event the callback saw turns up.
+    var polledEvents = new List<string>();
+    var matched = false;
+    while (await engine.PollEventAsync() is { } polled)
     {
-        Console.Error.WriteLine($"FAIL: poll_event mismatch polled={polled} callback={lastEvent}");
+        polledEvents.Add(polled);
+        if (polled == lastEvent)
+        {
+            matched = true;
+            break;
+        }
+    }
+
+    if (!matched)
+    {
+        Console.Error.WriteLine(
+            $"FAIL: poll_event never returned the callback's event {lastEvent}; polled [{string.Join(", ", polledEvents)}]");
         return 1;
     }
 
