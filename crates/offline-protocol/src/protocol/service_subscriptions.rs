@@ -246,6 +246,8 @@ impl OfflineProtocol {
     /// Sealed, on the reliable ladder. With `key`, whatever is still queued
     /// to `recipient` under it is withdrawn first, once the new frame has
     /// sealed: a frame that fails to seal must not cost the one before it.
+    /// A dispatch that fails after that can only be a stopped engine, which
+    /// sends nothing queued either.
     fn send_subscription_reliable(
         &mut self,
         recipient: &str,
@@ -486,6 +488,11 @@ fn group_member(mls: Option<&Arc<RwLock<MlsManager>>>, group_id: &str, peer: &st
 // ============================================================================
 
 impl OfflineProtocol {
+    /// Refuses the calls that start something: a subscription, a publish, a
+    /// checkpoint, a resync, a cleared topic. The calls that answer or end a
+    /// subscription, set a policy or list are left open: with the switch off
+    /// there is nothing for them to act on, and refusing them would only make
+    /// an application's teardown path fail.
     fn ensure_subscriptions_enabled(&self) -> Result<()> {
         if self.config.service_subscriptions.enabled {
             Ok(())
@@ -748,6 +755,7 @@ impl OfflineProtocol {
     /// dropped, and each subscriber is told so (`stream_reset`) before it is
     /// sent anything new.
     pub fn clear_service_topic(&mut self, service_id: &str, topic: &str) -> Result<()> {
+        self.ensure_subscriptions_enabled()?;
         let output = self
             .service_subscriptions
             .provider
