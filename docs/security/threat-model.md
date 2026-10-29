@@ -1386,11 +1386,23 @@ no plaintext form, so R9's fallback does not reach it. What remains:
   from a relay mailbox or a custodian. The consumer drops anything not newer
   than what it holds for the key, so a late value is never surfaced as
   current; it still costs the frame.
+- **`renewal: true` is asserted by the subscriber.** After a restart the
+  provider holds nothing to check a renewal against, so the flag on
+  `service_subscribe_received` means only that the frame carried `resume`,
+  which any peer with a session can include. An application that admits on
+  it admits anyone who claims to be returning. It is for wording a prompt;
+  a subscriber to be admitted without asking belongs in `allow_peers`.
+- **Under `accept_all`, the first to arrive fill the caps.** Refusing rather
+  than evicting protects the subscribers a provider already holds. It does
+  not protect the ones that come after a flood: 256 fresh identities that
+  subscribe first hold every slot until their leases lapse, and they renew.
+  A provider that must stay reachable to particular peers uses `rules`.
 
 **What bounds it:** a provider holds at most 256 subscriptions and 16 from
-one peer, refusing rather than evicting at either cap, so a flood of fresh
-identities cannot push out the subscribers it already has. The default
-admission policy asks the application about every subscriber.
+one peer, counting those awaiting the application, and refuses rather than
+evicts at either cap, so a flood of fresh identities cannot push out the
+subscribers it already has. The default admission policy asks the
+application about every subscriber.
 
 ## Network egress
 
