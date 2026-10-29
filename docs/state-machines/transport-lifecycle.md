@@ -234,7 +234,15 @@ answering after that can attribute what it receives, and is holding its
 acknowledgements back for a reason of its own (a session it lacks): on two
 phones, judging such a link again tore it down every 30 to 40 seconds while
 the session healed. So a link that dies after its first answer is not caught
-by this rule. A peer whose replies come back over another carrier while Android
+by this rule, and that includes a link the peer's restart kills: Android sees
+no disconnect, so a link the old process answered keeps its answer, and the
+new process writing to our server would count as an answer anyway. The rule
+covers a link that came up and was never answered, the shape of the
+2026-10-29 log. A link answered before the restart recovers through the
+egress fallback and the duplicate-dial binding where they apply
+([K9](../bridges/kotlin.md#k9-a-bluetooth-le-link-outlives-the-app-on-the-other-end));
+past those, it needs the peripheral to handshake its restored links again,
+or delivery evidence from the core, which the transport does not see. A peer whose replies come back over another carrier while Android
 sends over this one looks silent here, because the transport cannot see them.
 And a link that is dead in one direction only is not caught: a fragment the
 peer writes to our server counts as an answer on every client link to it,

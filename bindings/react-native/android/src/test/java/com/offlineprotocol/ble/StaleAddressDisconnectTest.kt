@@ -142,6 +142,39 @@ class StaleAddressDisconnectTest {
     }
 
     @Test
+    fun `a link disconnected to redial is redialled even though the peer holds another link`() {
+        // A silent link's peer usually also writes to our server from an
+        // address its hello mapped. Dropping the silent address as stale left
+        // the redial to a fresh advertisement, which a backgrounded iPhone may
+        // never send.
+        val silent = gatt(old)
+        host.connections.registerGatt(old, silent)
+        host.connections.markClientEstablished(old)
+        host.connections.setDeviceIdentifier(old, "peerH")
+        host.connections.registerGatt(new, gatt(new))
+        host.connections.setDeviceIdentifier(new, "peerH")
+
+        client.disconnectToRedial(silent)
+        disconnect(silent)
+
+        assertEquals(listOf(old), host.dialed)
+        assertEquals(emptyList<String>(), host.staleDropped)
+    }
+
+    @Test
+    fun `fragments drained once their writer is named count as hearing the peer`() {
+        // Otherwise an answer that arrived before its sender was resolved went
+        // unseen, and a link the peer had answered was torn down as silent.
+        host.pendingInbound.enqueue(old, byteArrayOf(1))
+        host.pendingInbound.enqueue(old, byteArrayOf(2))
+
+        client.drainPendingInboundFor(old, "peerI")
+        client.drainPendingInboundFor(new, "peerJ")
+
+        assertEquals(listOf("peerI"), host.heard)
+    }
+
+    @Test
     fun `a stale address's gatt is closed even though it is not redialled`() {
         val oldGatt = gatt(old)
         host.connections.registerGatt(old, oldGatt)
@@ -174,6 +207,7 @@ class StaleAddressDisconnectTest {
         val linkDropped = mutableListOf<String>()
         val dialed = mutableListOf<String>()
         val staleDropped = mutableListOf<String>()
+        val heard = mutableListOf<String>()
 
         // `finalizeGivenUpPeer` catches what this throws, so the test records
         // peer loss through `onPeerGivenUp`, which runs right after it.
@@ -197,6 +231,7 @@ class StaleAddressDisconnectTest {
         override fun drainAndSendFragments() {}
         override fun onWriteCompleted(address: String) {}
         override fun handleInboundFragment(address: String, data: ByteArray) {}
+        override fun onPeerHeard(deviceId: String) { heard += deviceId }
         override fun onPeerMtuNegotiated(address: String, maxPayload: Int) {}
         override fun onDeviceIdResolved(address: String, deviceId: String) {}
         override fun onPeerGivenUp(address: String, peerId: String) { givenUp += peerId }

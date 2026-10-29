@@ -85,8 +85,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   before it closes. And a client link that keeps taking writes and has never
   had an answer is dropped and redialled, which writes the hello again,
   about 20 to 25 seconds after its first write, even when the peer holds
-  another link. A link the peer has answered once is never dropped for
-  silence, and a peer is redialled once until it is heard from again, so one
+  another link. A link the peer has answered once, even before it
+  restarted, is never dropped for silence, and a peer is redialled once until it is heard from again, so one
   that only receives frames asking for no acknowledgement is not redialled
   over and over. On two phones, the first iPhone restart
   beside a linked Android phone failed before, as did one in ten restarts of

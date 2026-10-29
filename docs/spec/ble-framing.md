@@ -142,9 +142,12 @@ A hello names a link for the life of the peripheral process that verified
 it, which can be shorter than the life of the link. An iPhone restores its
 links when its app restarts, and the new process has no binding for a
 central that said hello to the old one, while nothing changes for the
-central. The shipped Android central drops a link that takes its writes and
-returns nothing ([transport lifecycle](../state-machines/transport-lifecycle.md#per-transport-constraints)),
-and the redial writes the hello again. That is local policy, not wire format.
+central. The shipped Android central drops a client link that takes its
+writes and has never been answered
+([transport lifecycle](../state-machines/transport-lifecycle.md#per-transport-constraints)),
+and the redial writes the hello again. A link the old process answered keeps
+its answer, so that rule does not reach it; a peripheral that restores its
+links is the side that can tell. That is local policy, not wire format.
 
 The shipped iOS, Android and Python peripherals serve Hello. A central that
 can never be dialled back (a browser over Web Bluetooth, which serves no

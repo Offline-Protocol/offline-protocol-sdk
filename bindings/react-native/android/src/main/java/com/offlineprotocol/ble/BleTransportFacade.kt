@@ -546,6 +546,7 @@ class BleTransportFacade(
                     this@BleTransportFacade.onWriteCompleted(address)
                 override fun handleInboundFragment(address: String, data: ByteArray) =
                     this@BleTransportFacade.handleReceivedData(data, address)
+                override fun onPeerHeard(deviceId: String) = noteHeardFrom(deviceId)
                 override fun connectToDevice(device: BluetoothDevice) =
                     this@BleTransportFacade.connectToDevice(device)
 

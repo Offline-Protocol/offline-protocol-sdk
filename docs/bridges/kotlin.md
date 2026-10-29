@@ -252,7 +252,8 @@ nothing, in at least one direction, until the Android app restarted.
   advertisement. A link is judged only until the peer first answers on it,
   and a peer is redialled once until it is heard from again. A link dead in
   one direction only, while the peer still writes to our server, is not
-  caught. The rule, its bounds and that gap are in
+  caught, and neither is a link the peer answered before it restarted. The
+  rule, its bounds and those gaps are in
   [the transport lifecycle](../state-machines/transport-lifecycle.md#per-transport-constraints).
 
 ## Testing
