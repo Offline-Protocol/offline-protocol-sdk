@@ -3,12 +3,14 @@
 // UDL_SHA256 = 78ab75bbcb8be43e8685cf83a22c0bfbce9c88b512b9250c86634354a58f7463
 // Do not edit.
 
+#nullable enable
+
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace OfflineProtocol.Sdk;
 
-
+/// <summary><c>services.*</c> methods of the engine.</summary>
 public sealed class MeshServicesClient
 {
     private readonly ProtocolEngine _engine;
@@ -29,10 +31,9 @@ public sealed class MeshServicesClient
 
     public Task<string> UnregisterServiceAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
         _engine.CallWithResultAsync("services.unregister_service", parametersJson, cancellationToken);
-
 }
 
-
+/// <summary><c>data.*</c> methods of the engine.</summary>
 public sealed class DataStoreClient
 {
     private readonly ProtocolEngine _engine;
@@ -125,19 +126,4 @@ public sealed class DataStoreClient
 
     public Task WipeAllAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
         _engine.CallAsync("data.wipe_all", parametersJson, cancellationToken);
-
-}
-
-
-public static partial class LocalApi
-{
-    public static Task<string> DeriveAddressAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
-        ProtocolEngine.CallStaticAsync("derive_address", parametersJson, cancellationToken);
-
-    public static Task<string> ParseInviteAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
-        ProtocolEngine.CallStaticAsync("parse_invite", parametersJson, cancellationToken);
-
-    public static Task<string> VerifyIdentityAssertionAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
-        ProtocolEngine.CallStaticAsync("verify_identity_assertion", parametersJson, cancellationToken);
-
 }

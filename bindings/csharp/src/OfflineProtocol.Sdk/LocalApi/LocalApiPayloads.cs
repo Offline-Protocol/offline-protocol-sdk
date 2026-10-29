@@ -1,21 +1,28 @@
+using System.Text.Json.Serialization;
 using OfflineProtocol.Sdk.Model;
 
 namespace OfflineProtocol.Sdk.LocalApi;
 
 internal sealed class SendMessagePayload
 {
-    public required string recipient { get; init; }
+    [JsonPropertyName("recipient")]
+    public required string Recipient { get; init; }
 
-    public required string content { get; init; }
+    [JsonPropertyName("content")]
+    public required string Content { get; init; }
 
-    public MessagePriority priority { get; init; } = MessagePriority.Medium;
+    [JsonPropertyName("priority")]
+    public required MessagePriority Priority { get; init; }
 }
 
 internal sealed class FileStoresPayload
 {
-    public required string mls_root { get; init; }
+    [JsonPropertyName("mls_root")]
+    public required string MlsRoot { get; init; }
 
-    public required string state_root { get; init; }
+    [JsonPropertyName("state_root")]
+    public required string StateRoot { get; init; }
 
-    public required string store_key { get; init; }
+    [JsonPropertyName("store_key")]
+    public required string StoreKey { get; init; }
 }

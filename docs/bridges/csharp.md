@@ -13,12 +13,15 @@ It uses the [local API](../spec/local-api.md) JSON shape: methods named as the
 method table names them, parameters as JSON objects, results and events as JSON
 strings. It is **not** part of the UniFFI five-language artifact set ([C1](README.md#c1-regenerate-every-binding-together)).
 
-Most engine methods are **generated** from the UDL local API table
-(`tools/gen_csharp_local_api.py`) as `ProtocolEngine.*Async`, `engine.Services.*`,
-`engine.Data.*`, and namespace `LocalApi.*Async`. Hand-maintained entry points
-(construct, MLS init, telemetry, transports, storage conformance) stay on
-`ProtocolEngine` directly. Regenerate after a UDL change and run
-`python3 tools/gen_csharp_local_api.py --check` in CI via the Rust guard.
+Every engine method without a hand-written entry point has a **generated**
+wrapper: an instance method on `ProtocolEngine`, a method on `engine.Services`
+or `engine.Data` for the `services.` and `data.` objects, or a static method on
+`ProtocolEngine` for a namespace function such as `DeriveAddressAsync`.
+`ProtocolConfig`, its serializer and the enums the SDK exposes are generated
+too. `tools/gen_csharp_local_api.py` writes all of them from the interface
+definition into `src/OfflineProtocol.Sdk/Generated`; rerun it after any UDL
+change. The hand-written entry points (create, MLS initialization, start, stop,
+events, telemetry, storage conformance) stay in `ProtocolEngine.cs`.
 
 ## Which shared rules apply
 
@@ -27,7 +30,7 @@ Most engine methods are **generated** from the UDL local API table
 | [C2](README.md#c2-the-error-enum-is-append-only) | Engine refusals surface as `ProtocolEngineException` with `Variant` and `Code` from the C error |
 | [C3](README.md#c3-events-cross-as-opaque-json) | Events are JSON text via callback and `PollEventAsync` |
 | [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language) | `OfflineProtocolStatus` copies the C status values; `the_csharp_status_enum_is_the_c_apis` pins it to the Rust enum |
-| [C6](README.md#c6-config-parsers-must-not-default-to-literals) | `ProtocolConfig` + `ProtocolConfigJson.Serialize`; optional UDL fields omitted unless set |
+| [C6](README.md#c6-config-parsers-must-not-default-to-literals) | A field with a default in the interface definition is nullable in `ProtocolConfig` and left out of the JSON while unset, so the engine applies its own default. The SDK carries no configuration values: the consumer check's are an example program's, as in the C quick start |
 | [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | The `C# Binding` CI job builds it, runs its tests and runs `consumer-check` on Linux, macOS and Windows; `cargo test` does not cover this binding |
 | [C11](README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified) | `IProtocolStorage` + `NativeStorageProvider`; `RunStorageConformanceAsync` |
 | [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform) | `TelemetryConfig` + `TelemetryPlatform.OsMajor`; lifecycle via `NotifyAppStateAsync` |
@@ -165,24 +168,32 @@ the engine thread for up to the deadline and returns whether the uploader finish
 it is `false` while telemetry is off. Call it from a background-transition handler,
 never from a UI thread.
 
-## CS6. Typed config and local API
+## CS6. Typed config and the generated local API
 
-- **`ProtocolConfig`** holds required UDL fields; nullable properties carry
-  optional engine defaults. **`ProtocolConfigJson.Serialize`** emits snake_case
-  JSON and never injects literals for unset optionals ([C6](README.md#c6-config-parsers-must-not-default-to-literals)).
-- **`ProtocolEngine.CreateAsync(ProtocolConfig)`** is the preferred constructor;
-  raw JSON remains for advanced hosts.
-- **`LocalApiParams`** builds JSON for common calls (`FileStores`, `SendMessage`
-  with typed **`MessagePriority`**). **`LocalApiTyped`** parses selected results
-  (for example `GetStateAsync` → **`ProtocolState`** in `OfflineProtocol.Sdk.Model`).
-  High-volume senders can call **`LocalApiTyped.SendMessageAsync(engine, json)`**
-  with pre-serialized params to skip builder allocation.
-- Nested UDL config (`mesh_relay`, `custody`) is not fully typed yet: set
-  **`ProtocolConfig.MeshRelay`** / **`Custody`** as **`JsonElement`** objects
-  when needed, or pass raw JSON to **`CreateAsync(string)`**.
-- Wire names, method count, and manifest live in
-  `bindings/csharp/local_api_methods.txt` and `local_api_method_count.txt`
-  (regenerated with the generator).
+**Invariant: the C# surface is derived from the interface definition, never
+copied from it.** A copy drifts silently: a field appended to `ProtocolConfig`
+in the UDL would be missing from a hand-written class with nothing to say so.
+
+- **`ProtocolConfig`** is a record with a `required` property for each field
+  that has no default in the definition and a nullable one for each that does.
+  **`ProtocolConfigJson.Serialize`** writes the required fields and every
+  nullable one that is set, even to the default's value, and refuses an enum
+  value the definition does not name. `ProtocolEngine.CreateAsync(ProtocolConfig)`
+  calls it; `CreateAsync(string)` takes raw JSON.
+- The nested sections (`mesh_relay`, `custody`) cross as the host's own JSON
+  objects, set as `JsonElement`; the engine parses them.
+- **A generated method never shares a name with a hand-written one.** The two
+  differ in their parameters, so both compile and a call with no arguments
+  becomes ambiguous or binds to the wrapper. `poll_event` did this: its wrapper
+  went through the JSON dispatcher and lost the `null` an empty queue returns.
+  Such a declaration goes in the generator's skip list; the generator refuses
+  to write a clash and `no_generated_csharp_method_shadows_a_hand_written_one`
+  refuses a committed one.
+- **`LocalApiParams`** builds the parameters of `initialize_mls_with_file_stores`
+  and `send_message`. **`LocalApiTyped.GetStateAsync`** parses `get_state` into
+  `ProtocolState` and refuses anything but a JSON string naming a member.
+- `bindings/csharp/local_api_methods.txt` lists every wrapped wire name, so a
+  UDL change shows up as a reviewable diff.
 
 ## What CI runs
 
@@ -191,12 +202,15 @@ header or the FFI crate changes:
 
 | Step | What it proves |
 |------|----------------|
+| `gen_csharp_local_api.py --check`, Linux only | The generated sources match the interface definition |
 | `dotnet build` | The SDK, the tests and the consumer check compile with warnings as errors |
 | `dotnet test` | The engine facade against the library built from the same tree: each status, the queue under backpressure, dispose after unawaited calls, cancellation; events on the delivery thread, a throwing handler contained, a cleared callback; conformance of the memory store, single-use providers, MLS over two providers; the telemetry refusal reached past the `os` fill, and the lifecycle calls with telemetry off |
-| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | Static calls, storage conformance, create from a typed `ProtocolConfig`, `get_state` parsed as `Stopped`, MLS over custom providers, events, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, close (CS3 step 1) |
+| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | A generated static call, storage conformance, create from a typed `ProtocolConfig`, `get_state` parsed as `Stopped`, MLS over custom providers, events, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, a document through `engine.Data`, close (CS3 step 1) |
 | `consumer-check`, library beside it | The same run with the variable unset (CS3 step 2) |
 
 `the_csharp_binding_has_a_ci_job_the_result_waits_on` holds the job, its
 change filter and its place in the aggregate check.
-`csharp_generated_local_api_is_current`, in `cargo test`, runs the generator
-with `--check` so the generated C# cannot drift from the UDL.
+`the_csharp_job_checks_the_generated_sources` holds the `--check` step and the
+generator's inputs in that filter, and
+`every_generated_csharp_method_is_dispatched_by_the_c_api` that each wrapped
+wire name is one the C API answers.

@@ -1,13 +1,10 @@
 using System.Text.Json.Serialization;
 using OfflineProtocol.Sdk.LocalApi;
-using OfflineProtocol.Sdk.Model;
 
 namespace OfflineProtocol.Sdk.Json;
 
-[JsonSerializable(typeof(ProtocolState))]
+// Wire names come from [JsonPropertyName] on each payload; enums cross as their UDL spelling.
 [JsonSerializable(typeof(SendMessagePayload))]
 [JsonSerializable(typeof(FileStoresPayload))]
-[JsonSourceGenerationOptions(
-    PropertyNamingPolicy = null,
-    UseStringEnumConverter = true)]
+[JsonSourceGenerationOptions(UseStringEnumConverter = true)]
 internal partial class LocalApiJsonContext : JsonSerializerContext;

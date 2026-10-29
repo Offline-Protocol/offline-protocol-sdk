@@ -136,7 +136,6 @@ nostr_send_failed_with_reason
 nostr_status_changed
 parse_invite
 pause
-poll_event
 process
 process_file_chunk
 protocol_lock_diagnostics

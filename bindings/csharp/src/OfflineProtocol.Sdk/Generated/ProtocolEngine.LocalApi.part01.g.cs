@@ -3,11 +3,12 @@
 // UDL_SHA256 = 78ab75bbcb8be43e8685cf83a22c0bfbce9c88b512b9250c86634354a58f7463
 // Do not edit.
 
+#nullable enable
+
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace OfflineProtocol.Sdk;
-
 
 public sealed partial class ProtocolEngine
 {
@@ -250,5 +251,4 @@ public sealed partial class ProtocolEngine
 
     public Task<string> MlsCreateSessionAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
         CallWithResultAsync("mls_create_session", parametersJson, cancellationToken);
-
 }

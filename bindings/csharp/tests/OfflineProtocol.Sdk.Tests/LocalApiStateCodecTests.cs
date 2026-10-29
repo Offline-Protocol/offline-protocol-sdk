@@ -8,7 +8,6 @@ public sealed class LocalApiStateCodecTests
 {
     [Theory]
     [InlineData("\"Stopped\"", ProtocolState.Stopped)]
-    [InlineData("Stopped", ProtocolState.Stopped)]
     [InlineData("\"Running\"", ProtocolState.Running)]
     [InlineData("\"Paused\"", ProtocolState.Paused)]
     public void ParseGetStateResponse_accepts_udl_enum_json(string json, ProtocolState expected) =>
@@ -20,6 +19,9 @@ public sealed class LocalApiStateCodecTests
     [InlineData("[]")]
     [InlineData("0")]
     [InlineData("")]
+    [InlineData("Stopped")]
+    [InlineData("\"1\"")]
+    [InlineData("\"stopped\"")]
     [InlineData("   ")]
     public void ParseGetStateResponse_rejects_unexpected_shapes(string json)
     {

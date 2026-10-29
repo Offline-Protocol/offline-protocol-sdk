@@ -3,17 +3,15 @@
 // UDL_SHA256 = 78ab75bbcb8be43e8685cf83a22c0bfbce9c88b512b9250c86634354a58f7463
 // Do not edit.
 
+#nullable enable
+
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace OfflineProtocol.Sdk;
 
-
 public sealed partial class ProtocolEngine
 {
-    public Task UpdateTransportMetricsAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
-        CallAsync("update_transport_metrics", parametersJson, cancellationToken);
-
     public Task<string> VerifySignatureAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
         CallWithResultAsync("verify_signature", parametersJson, cancellationToken);
 
@@ -34,5 +32,4 @@ public sealed partial class ProtocolEngine
 
     public Task WifiDirectStatusChangedAsync(string? parametersJson = null, CancellationToken cancellationToken = default) =>
         CallAsync("wifi_direct_status_changed", parametersJson, cancellationToken);
-
 }
