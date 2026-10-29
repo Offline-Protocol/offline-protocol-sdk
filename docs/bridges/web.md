@@ -607,7 +607,10 @@ the mesh push, a message between two pages that were never linked to each
 other would wait for a session that never forms, because discovery names
 only the device a frame arrived from. A BlueZ peripheral notifies every
 subscribed central, so each page behind it also receives the other's
-frames and drops them, undecryptable: the cost is airtime, not delivery.
+frames. It cannot read them, and it does not send them on: the forwarder
+counts the device a frame arrived from as holding it, and the page's only
+neighbour is that device. The cost is airtime on the device's side, not
+delivery.
 The three-engine tests in `ble_tests.rs` cover this on the host, and the
 [two-device checklist](web-devices.md#bluetooth-through-a-phone) records
 a run on real devices.
@@ -722,7 +725,7 @@ works.
 | [C3](README.md#c3-events-cross-as-opaque-json) | Applies unchanged: `pollEvent` returns the engine's JSON, and the client dispatches it as a DOM event named by its `type` |
 | [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language) | The resolution-query completion deadline is the one mirrored constant here, pinned in `nostr-relays.js` beside the two mobile trackers (W12) |
 | [C7](README.md#c7-ordering-constraints-across-the-boundary) | `initialize` before `start`: the address replaces the placeholder the transport was built on |
-| [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | The browser test page is the binding's own test; the Rust tests in the crate run two engines over links on the host |
+| [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | The browser test page is the binding's own test; the Rust tests in the crate run two or three engines over links on the host |
 | [C11](README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified) | The durable log store passes both conformance suites on the host, and so does the in-memory protocol-state store (W8) |
 | [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform) | Not built: the pipe's uploader is a thread and a blocking client. A browser build has no telemetry until it has a `fetch` seam |
 
