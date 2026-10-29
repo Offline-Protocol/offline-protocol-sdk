@@ -81,19 +81,20 @@ implementation written against these documents should interoperate.
 
 | Document | Governs |
 |----------|---------|
-| [Overview](state-machines/README.md) | The invariant that spans all six |
+| [Overview](state-machines/README.md) | The invariant that spans all seven |
 | [Delivery and acknowledgements](state-machines/delivery-and-acks.md) | What happens to an inbound frame, and when a receiver acknowledges |
 | [Outbox and retries](state-machines/outbox-and-retries.md) | An outbound message from send to terminal state |
 | [Session lifecycle](state-machines/session-lifecycle.md) | 1:1 MLS establishment, confirmation, desync, and heal |
 | [Group message lifecycle](state-machines/group-message-lifecycle.md) | A group message through fan-out, buffering, and drain |
 | [Transport lifecycle](state-machines/transport-lifecycle.md) | Transport availability, scoring, switching, escalation |
 | [Document replication](state-machines/data-replication.md) | A document from edit to durable record, a space from offer to convergence, an attachment fetch |
+| [Service subscriptions](state-machines/service-subscriptions.md) | A subscription from subscribe to end on both sides, and an update from publish to delivery |
 
 ## Decisions
 
 | Document | Scope |
 |----------|-------|
-| [ADR index](adr/README.md) | Thirty-four decisions that are expensive to reverse or easy to undo by accident |
+| [ADR index](adr/README.md) | Thirty-five decisions that are expensive to reverse or easy to undo by accident |
 
 If something in the codebase looks redundant or over-engineered, check here
 before simplifying it.

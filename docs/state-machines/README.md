@@ -1,6 +1,6 @@
 # State machines
 
-Six state machines govern the protocol's runtime behaviour. Each is documented
+Seven state machines govern the protocol's runtime behaviour. Each is documented
 with its states, its transitions, the invariants that hold across them, and the
 failure modes that the current shape exists to prevent.
 
@@ -12,6 +12,7 @@ failure modes that the current shape exists to prevent.
 | [Group message lifecycle](group-message-lifecycle.md) | A group message from send through fan-out, buffering, and drain |
 | [Transport lifecycle](transport-lifecycle.md) | Transport availability, scoring, switching, and escalation |
 | [Document replication](data-replication.md) | A document from edit to durable record, a space from offer to convergence, an attachment fetch to one of six ends |
+| [Service subscriptions](service-subscriptions.md) | A subscription from subscribe to end on both sides, and an update from publish to delivery |
 
 ## How to read these
 
@@ -23,7 +24,7 @@ Several of these shapes look over-engineered until you know which bug they close
 and the surrounding prose is there so a future change does not undo one by
 accident.
 
-## The one invariant that spans all six
+## The one invariant that spans all seven
 
 **Custody of an undelivered message stays with the sender until a receiver
 positively confirms it.**
@@ -40,3 +41,11 @@ acknowledgement is not proof of non-delivery.**
 Document replication inherits it rather than restating it: a sync frame is an
 ordinary message on the same ladder, which is why that layer needed no delivery
 machinery of its own.
+
+Service subscriptions make the one stated exception. A `latest` value waiting
+for its subscriber is withdrawn when a newer value for the same key is queued,
+and the newer value takes custody in its place
+([invariant 5](service-subscriptions.md#invariants)); a subscription frame
+is never written to the outbox's store, so a restart, after which the stream
+or `sub_id` it names no longer exists, discards it. Neither gives up a value
+the receiver still needs.
