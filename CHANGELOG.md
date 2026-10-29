@@ -36,6 +36,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Two devices that meet only through a third can invite each other to a
+  group.** When the packages of such a pair crossed, so that each built a
+  session from the other's before either Welcome arrived, the side the
+  tiebreak made adopt had spent the other side's only package on the group
+  it gave up, and every group invite it made after that failed with no key
+  package. A device in between makes the crossing common, since it forwards
+  each frame after its own jitter: two browsers linked to one phone hit it
+  in about one run in three on the host. The side that keeps its group now
+  sends a fresh package for each session Welcome it does not adopt
+  ([both-create convergence](docs/state-machines/session-lifecycle.md#both-create-convergence)).
+
 - **`sendReadReceipt` works again from React Native on Android.** Since the
   shared engine bridge (0.31.0), every array argument crossed the Android
   adapter as integers, so the message ids, which are strings, threw on every

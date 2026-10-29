@@ -117,6 +117,11 @@ struct Line {
     carried: Vec<(usize, usize, Message)>,
     /// A one-way link that is down: frames put on it are lost.
     cut: Option<(usize, usize)>,
+    /// A one-way link that holds back each Welcome on it for one round, so
+    /// a frame sent after it overtakes it, as a carrier's jitter can.
+    slow_welcomes: Option<(usize, usize)>,
+    /// Welcomes held back by `slow_welcomes`, as `(to, sender, frame)`.
+    held: Vec<(usize, String, Message)>,
 }
 
 const ALICE: usize = 0;
@@ -139,6 +144,8 @@ impl Line {
             ],
             carried: Vec::new(),
             cut: None,
+            slow_welcomes: None,
+            held: Vec::new(),
         };
         if relay {
             for (from, to) in [(ALICE, CAROL), (CAROL, ALICE)] {
@@ -189,6 +196,10 @@ impl Line {
             node.protocol.process().expect("process");
         }
         let mut moved = 0;
+        for (to, sender, frame) in std::mem::take(&mut self.held) {
+            self.nodes[to].transport.queue_message_from(frame, sender);
+            moved += 1;
+        }
         for from in 0..self.nodes.len() {
             let mut handed: Vec<(String, Message)> = self.nodes[from]
                 .transport
@@ -211,6 +222,12 @@ impl Line {
                 }
                 self.carried.push((from, to, frame.clone()));
                 let sender = self.nodes[from].address.clone();
+                if self.slow_welcomes == Some((from, to))
+                    && frame.content.starts_with(internal_prefixes::WELCOME)
+                {
+                    self.held.push((to, sender, frame));
+                    continue;
+                }
                 self.nodes[to].transport.queue_message_from(frame, sender);
                 moved += 1;
             }
@@ -439,4 +456,84 @@ fn a_welcome_lost_while_the_path_was_down_is_sent_again_on_the_next_package() {
         "alice's re-push re-armed carol's Welcome, and the message arrived"
     );
     assert_eq!(line.nodes[ALICE].delivered(&message_id), Some(1));
+}
+
+/// A responder's fresh package that overtakes its Welcome makes the
+/// initiator build a session of its own from that package, and the tiebreak
+/// then keeps one of the two groups. When the initiator is the side that
+/// adopts, it spent the responder's only package on the group it gave up, so
+/// the responder, which keeps its group, owes it a fresh one. Without that
+/// the initiator could never invite the responder to a group: reciprocation
+/// on a package is gated on reaching its sender directly, so nothing else
+/// sent one. A device in between makes the overtaking common, because it
+/// forwards each frame after its own jitter.
+#[test]
+fn the_side_that_adopts_can_still_invite_after_a_package_overtakes_a_welcome() {
+    let mut line = Line::new(strict_config("bob"));
+    // The side the tiebreak makes adopt starts the session, and the other
+    // side's Welcome to it runs late.
+    let carol = line.nodes[CAROL].address.clone();
+    let (initiator, responder) = if line.nodes[ALICE].protocol.gives_way_to(&carol) {
+        (ALICE, CAROL)
+    } else {
+        (CAROL, ALICE)
+    };
+    line.slow_welcomes = Some((BOB, initiator));
+    let (initiator_address, responder_address) = (
+        line.nodes[initiator].address.clone(),
+        line.nodes[responder].address.clone(),
+    );
+    line.nodes[initiator]
+        .protocol
+        .send_message(&responder_address, "first", None, None::<String>)
+        .expect("queued");
+    line.run(40);
+    assert!(
+        line.nodes[responder]
+            .inbox
+            .iter()
+            .any(|content| content == "first"),
+        "the session formed and the message arrived"
+    );
+    let both_built_a_group = [initiator, responder].iter().all(|&end| {
+        let address = &line.nodes[end].address;
+        line.carried.iter().any(|(_, _, frame)| {
+            frame.sender.as_str() == address
+                && frame.content.starts_with(internal_prefixes::WELCOME)
+        })
+    });
+    assert!(
+        both_built_a_group,
+        "both ends sent a Welcome, which is the case under test"
+    );
+
+    line.slow_welcomes = None;
+    for (inviter, invitee) in [
+        (initiator, &responder_address),
+        (responder, &initiator_address),
+    ] {
+        let group_id = line.nodes[inviter]
+            .protocol
+            .create_group("through bob")
+            .expect("group")
+            .group_id
+            .as_str()
+            .to_string();
+        let invited = (0..40).any(|_| {
+            if line.nodes[inviter]
+                .protocol
+                .invite_to_group(&group_id, invitee)
+                .is_ok()
+            {
+                return true;
+            }
+            line.step();
+            false
+        });
+        assert!(
+            invited,
+            "{} holds a package of the other end's to invite it with",
+            line.nodes[inviter].address
+        );
+    }
 }
