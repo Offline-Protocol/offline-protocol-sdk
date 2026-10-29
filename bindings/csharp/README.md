@@ -61,5 +61,3 @@ Regenerate after a UDL change:
 ```bash
 python3 tools/gen_csharp_local_api.py
 ```
-
-Not wired yet: transports.

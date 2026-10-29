@@ -100,6 +100,12 @@ and the managed release runs first. The C API calls `drop` on every refused
 install as well as on replacement, so freeing on both paths would free a handle
 twice and could release another object's.
 
+### Transport notifies
+
+Transport callbacks are empty signals (no JSON). See [CS7](#cs7-transport-callbacks)
+for install and teardown, coalesced delivery, and draining through the generated
+transport local API methods.
+
 ## CS2. String ownership
 
 Strings returned from the library are freed with `offline_protocol_string_free`
@@ -195,6 +201,37 @@ in the UDL would be missing from a hand-written class with nothing to say so.
 - `bindings/csharp/local_api_methods.txt` lists every wrapped wire name, so a
   UDL change shows up as a reviewable diff.
 
+## CS7. Transport callbacks
+
+`SetBleTransportCallbackAsync`, `SetWifiDirectTransportCallbackAsync`,
+`SetReticulumTransportCallbackAsync`, and `SetNostrTransportCallbackAsync`
+install `offline_protocol_set_transport_callback` for the matching
+`OfflineProtocolTransport` value ([C K5](c.md#k5-what-offline_protocol_call-does-not-reach)).
+The native notify runs on the engine thread; the binding posts an empty signal to
+app code on **one shared delivery thread per engine** (`TransportNotifyHub`, started
+when the first transport callback is registered). Each carrier has its own
+bounded queue (**256** slots by default); one delivery thread drains all of
+them. Watch **`DroppedTransportNotifyCount`** under burst load on a carrier.
+Generation stamps follow the same semantics as events. Bursts of notifies
+**coalesce** to one handler invocation per carrier per drain pass. Replacing a
+callback deactivates the previous bridge before the new registration is
+activated; native `OnDrop` on the replaced registration does not clear the hub.
+If native registration fails after a replace, the binding clears the native
+callback for that carrier before surfacing the error so stale pointers are not
+left installed. As with events, each bridge's context handle is freed once.
+
+Handlers must not call back into the same `ProtocolEngine` synchronously; drain
+outbound work through the generated transport local API methods on the app thread
+after each notify (each invocation should drain until the transport queue is
+empty). Clearing a callback or disposing the engine deactivates the bridge and
+clears native registration. **`InitializeMlsWithFileStoresAsync`** does not
+register transports: hosts that drive BLE, Wi-Fi Direct, Reticulum, or Nostr
+must install the matching callback before `StartAsync`.
+
+`the_csharp_transport_enum_is_the_c_apis` holds `OfflineProtocolTransport` to
+the C API's values (C5): a renumbered member installs one carrier's callback on
+another.
+
 ## What CI runs
 
 The `C# Binding` job, on Linux, macOS and Windows, whenever the binding, the C
@@ -205,7 +242,7 @@ header or the FFI crate changes:
 | `gen_csharp_local_api.py --check`, Linux only | The generated sources match the interface definition |
 | `dotnet build` | The SDK, the tests and the consumer check compile with warnings as errors |
 | `dotnet test` | The engine facade against the library built from the same tree: each status, the queue under backpressure, dispose after unawaited calls, cancellation; events on the delivery thread, a throwing handler contained, a cleared callback; conformance of the memory store, single-use providers, MLS over two providers; the telemetry refusal reached past the `os` fill, and the lifecycle calls with telemetry off |
-| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | A generated static call, storage conformance, create from a typed `ProtocolConfig`, `get_state` parsed as `Stopped`, MLS over custom providers, events, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, a document through `engine.Data`, close (CS3 step 1) |
+| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | A generated static call, storage conformance, create from a typed `ProtocolConfig`, `get_state` parsed as `Stopped`, MLS over custom providers, events, transport callbacks installed, swapped and cleared, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, a document through `engine.Data`, close (CS3 step 1) |
 | `consumer-check`, library beside it | The same run with the variable unset (CS3 step 2) |
 
 `the_csharp_binding_has_a_ci_job_the_result_waits_on` holds the job, its

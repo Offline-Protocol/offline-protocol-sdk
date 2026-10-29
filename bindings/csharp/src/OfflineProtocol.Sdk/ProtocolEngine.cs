@@ -30,6 +30,10 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
     private int _outboundWork;
     private readonly List<NativeStorageProvider> _attachedStorageProviders = [];
     private EventCallbackBridge? _eventBridge;
+    private const int TransportCarrierCount = 4;
+
+    private TransportNotifyHub? _transportNotifyHub;
+    private readonly TransportNotifyBridge?[] _transportBridges = new TransportNotifyBridge?[TransportCarrierCount];
     private readonly Lazy<MeshServicesClient> _meshServices;
     private readonly Lazy<DataStoreClient> _dataStore;
 
@@ -285,6 +289,95 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
             },
             cancellationToken);
 
+    private Task SetTransportCallbackAsync(
+        OfflineProtocolTransport transport,
+        Action? handler,
+        CancellationToken cancellationToken) =>
+        EnqueueAsync<object?>(
+            () =>
+            {
+                if (!IsKnownTransportCarrier(transport))
+                {
+                    throw new ArgumentOutOfRangeException(nameof(transport), transport, "Unknown OfflineProtocolTransport value.");
+                }
+
+                var index = (int)transport;
+                var err = default(OfflineProtocolError);
+                if (handler is null)
+                {
+                    var previous = _transportBridges[index];
+                    _transportBridges[index] = null;
+                    previous?.Deactivate();
+                    var status = OfflineProtocolNative.offline_protocol_set_transport_callback(
+                        _handle,
+                        index,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        ref err);
+                    if (status != OfflineProtocolStatus.Ok)
+                    {
+                        throw FromError(status, ref err);
+                    }
+
+                    return null;
+                }
+
+                var previousBridge = _transportBridges[index];
+                _transportBridges[index] = null;
+                previousBridge?.Deactivate();
+
+                var bridge = new TransportNotifyBridge(handler, transport, TransportNotifyHub);
+                var install = OfflineProtocolNative.offline_protocol_set_transport_callback(
+                    _handle,
+                    index,
+                    bridge.NotifyPointer,
+                    bridge.DropPointer,
+                    bridge.Context,
+                    ref err);
+                if (install != OfflineProtocolStatus.Ok)
+                {
+                    bridge.ReleaseLocal();
+                    ClearNativeTransportCallback(index, ref err);
+                    throw FromError(install, ref err);
+                }
+
+                _transportBridges[index] = bridge;
+                return null;
+            },
+            cancellationToken);
+
+    private void ClearNativeTransportCallback(int index, ref OfflineProtocolError err)
+    {
+        if (_handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var status = OfflineProtocolNative.offline_protocol_set_transport_callback(
+            _handle,
+            index,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            ref err);
+        if (status != OfflineProtocolStatus.Ok)
+        {
+            throw FromError(status, ref err);
+        }
+    }
+
+    private void ClearTransportCallbacks(ref OfflineProtocolError err)
+    {
+        for (var i = 0; i < _transportBridges.Length; i++)
+        {
+            var previous = _transportBridges[i];
+            _transportBridges[i] = null;
+            previous?.Deactivate();
+            ClearNativeTransportCallback(i, ref err);
+        }
+    }
+
     /// <summary>
     /// Events dropped because the delivery queue was full since the current callback was installed.
     /// Use <see cref="PollEventAsync"/> if the app must not miss events under burst load.
@@ -296,6 +389,47 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
     /// never stops delivery and never reaches the process: the bridge contains it and counts it.
     /// </summary>
     public long EventHandlerFailureCount => _eventBridge?.HandlerFailureCount ?? 0;
+
+    /// <summary>Installs a BLE transport driver signal. The handler runs off the engine thread; drain via generated BLE local API methods.</summary>
+    public Task SetBleTransportCallbackAsync(Action? handler, CancellationToken cancellationToken = default) =>
+        SetTransportCallbackAsync(OfflineProtocolTransport.Ble, handler, cancellationToken);
+
+    /// <summary>Installs a Wi-Fi Direct transport driver signal.</summary>
+    public Task SetWifiDirectTransportCallbackAsync(Action? handler, CancellationToken cancellationToken = default) =>
+        SetTransportCallbackAsync(OfflineProtocolTransport.WifiDirect, handler, cancellationToken);
+
+    /// <summary>Installs a Reticulum transport driver signal.</summary>
+    public Task SetReticulumTransportCallbackAsync(Action? handler, CancellationToken cancellationToken = default) =>
+        SetTransportCallbackAsync(OfflineProtocolTransport.Reticulum, handler, cancellationToken);
+
+    /// <summary>Installs a Nostr transport driver signal.</summary>
+    public Task SetNostrTransportCallbackAsync(Action? handler, CancellationToken cancellationToken = default) =>
+        SetTransportCallbackAsync(OfflineProtocolTransport.Nostr, handler, cancellationToken);
+
+    /// <summary>Transport notify signals dropped because the delivery queue was full for the given carrier.</summary>
+    public long DroppedTransportNotifyCount(OfflineProtocolTransport transport)
+    {
+        if (!IsKnownTransportCarrier(transport))
+        {
+            return 0;
+        }
+
+        var index = (int)transport;
+        return _transportBridges[index]?.DroppedNotifyCount ?? _transportNotifyHub?.DroppedNotifyCount(index) ?? 0;
+    }
+
+    private TransportNotifyHub TransportNotifyHub => _transportNotifyHub ??= new TransportNotifyHub();
+
+    internal static bool IsKnownTransportCarrier(OfflineProtocolTransport transport)
+    {
+        if (!Enum.IsDefined(transport))
+        {
+            return false;
+        }
+
+        var index = (int)transport;
+        return (uint)index < (uint)TransportCarrierCount;
+    }
 
     public Task<string?> PollEventAsync(CancellationToken cancellationToken = default) =>
         EnqueueAsync<string?>(
@@ -382,6 +516,7 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
                     if (_handle != IntPtr.Zero)
                     {
                         var err = default(OfflineProtocolError);
+                        ClearTransportCallbacks(ref err);
                         var previous = _eventBridge;
                         _eventBridge = null;
                         previous?.Deactivate();
@@ -403,6 +538,7 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
             await _writer.WriteAsync(free, CancellationToken.None).ConfigureAwait(false);
             await free.Completion.ConfigureAwait(false);
 
+            _transportNotifyHub?.Deactivate();
             _writer.TryComplete();
             await _engineThreadExited.Task.ConfigureAwait(false);
             done.TrySetResult();
