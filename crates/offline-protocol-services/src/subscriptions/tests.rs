@@ -634,7 +634,7 @@ fn a_key_filter_on_a_log_subscription_is_refused_on_both_sides() {
     let frame = super::encode(
         SVC_SUBSCRIBE,
         &crate::payloads::SubscribePayload {
-            v: 2,
+            v: 1,
             sub_id: "s1".into(),
             service_id: SVC.into(),
             topic: "ev".into(),
@@ -809,7 +809,7 @@ fn a_pattern_update_for_a_topic_it_does_not_cover_is_dropped() {
     let mut link = Link::new(Admission::Accept);
     let sub_id = link.subscribe_with("sensors/*", SubscribeOptions::new(SubscriptionMode::Log));
     let mut frame = crate::payloads::UpdatePayload {
-        v: 2,
+        v: 1,
         sub_id: sub_id.clone(),
         topic: Some("other/x".into()),
         stream: "s".into(),
@@ -859,23 +859,144 @@ fn a_pattern_is_refused_where_a_star_is_not_last() {
     }
 }
 
-/// A provider that predates patterns answers with version 1 and would treat
-/// `sensors/*` as a literal topic. The consumer ends it rather than wait on
-/// a topic nobody publishes to.
+fn subscribe_frame(sub_id: &str, resume: Option<crate::payloads::ResumePosition>) -> String {
+    super::encode(
+        SVC_SUBSCRIBE,
+        &crate::payloads::SubscribePayload {
+            v: 1,
+            sub_id: sub_id.into(),
+            service_id: SVC.into(),
+            topic: "car".into(),
+            mode: SubscriptionMode::Latest,
+            params: String::new(),
+            keys: Vec::new(),
+            lease_ms: 60_000,
+            resume,
+            resync: false,
+        },
+    )
+    .unwrap()
+}
+
+fn held_nothing() -> Option<crate::payloads::ResumePosition> {
+    Some(crate::payloads::ResumePosition {
+        stream: String::new(),
+        seq: 0,
+        digest: 0,
+        topics: Vec::new(),
+    })
+}
+
+/// Invariant 7. After both sides restart, a renewal still in a mailbox
+/// under the consumer's old id must not take the place of the subscription
+/// it made since; and a replaced id never comes back.
 #[test]
-fn a_provider_without_patterns_ends_a_pattern_subscription() {
+fn only_a_first_subscribe_replaces_and_a_replaced_id_never_returns() {
     let mut link = Link::new(Admission::Accept);
-    let (sub_id, _) = link
+    link.publish("car", Some("battery"), "80");
+    assert!(!link
+        .to_provider(&subscribe_frame("old", None))
+        .frames
+        .is_empty());
+    // The consumer restarted and subscribed again: the first subscribe wins.
+    let out = link.to_provider(&subscribe_frame("new", None));
+    assert!(link.provider.holds("new") && !link.provider.holds("old"));
+    assert!(out.events.iter().any(|event| matches!(
+        event,
+        ServiceEvent::ServiceSubscriptionChanged { sub_id, reason, .. }
+            if sub_id == "old" && reason == "replaced"
+    )));
+
+    // The old id, renewing or subscribing, is dropped without a reply.
+    for frame in [
+        subscribe_frame("old", held_nothing()),
+        subscribe_frame("old", None),
+    ] {
+        let out = link.to_provider(&frame);
+        assert!(out.frames.is_empty() && out.events.is_empty());
+        assert!(link.provider.holds("new") && !link.provider.holds("old"));
+    }
+    // So is a renewal under an id the provider never saw (it restarted
+    // since that one was made): the triple is held under another.
+    let out = link.to_provider(&subscribe_frame("before-restart", held_nothing()));
+    assert!(out.frames.is_empty() && out.events.is_empty());
+    assert!(link.provider.holds("new") && !link.provider.holds("before-restart"));
+}
+
+#[test]
+fn a_provider_remembers_a_bounded_number_of_replaced_ids_per_topic() {
+    let mut link = Link::new(Admission::Accept);
+    let ids: Vec<String> = (0..=crate::payloads::MAX_RETIRED_PER_TOPIC + 1)
+        .map(|i| format!("id{i}"))
+        .collect();
+    for id in &ids {
+        link.to_provider(&subscribe_frame(id, None));
+    }
+    // The newest is held, the next four are retired, the oldest forgotten.
+    let out = link.to_provider(&subscribe_frame(&ids[1], None));
+    assert!(out.frames.is_empty(), "a retired id is dropped");
+    let out = link.to_provider(&subscribe_frame(&ids[0], None));
+    assert!(
+        !out.frames.is_empty(),
+        "a forgotten id is a first subscribe again"
+    );
+    assert!(link.provider.holds(&ids[0]));
+}
+
+/// The reliable ladder keeps no order between entries: a reply resent after
+/// a loss lands after the catch-up frames that followed it. The position is
+/// never taken from an update, so none of them is mistaken for the baseline.
+#[test]
+fn catch_up_frames_that_overtake_their_reply_are_all_delivered() {
+    let mut link = Link::new(Admission::Accept);
+    link.publish("ev", None, "e1");
+    link.publish("ev", None, "e2");
+    link.provider
+        .set_checkpoint(SVC, "ev", "state at 2")
+        .unwrap();
+    link.publish("ev", None, "e3");
+    let (sub_id, frame) = link
         .consumer
         .subscribe(
             PROVIDER,
             SVC,
-            "sensors/*",
-            &SubscribeOptions::new(SubscriptionMode::Latest),
+            "ev",
+            &SubscribeOptions::new(SubscriptionMode::Log),
             link.now,
         )
         .unwrap();
     link.consumer.mark_sent(&sub_id);
+    let answer = link.to_provider(&frame.content);
+    // The reply, the checkpoint at 2, then e3; delivered backwards.
+    assert_eq!(answer.frames.len(), 3);
+    for frame in answer.frames.iter().rev() {
+        let out = link.to_consumer(&frame.content);
+        link.events.extend(out.events);
+    }
+    assert_eq!(
+        link.take_updates(),
+        vec![
+            (None, "e3".into(), false),
+            (None, "state at 2".into(), true),
+        ]
+    );
+    link.publish("ev", None, "e4");
+    assert_eq!(link.take_updates(), vec![(None, "e4".into(), false)]);
+}
+
+/// A frame from before a provider restart can still arrive from a mailbox.
+/// Taken, it would reset the consumer to the dead stream, and the live
+/// stream's next frame would reset it back.
+#[test]
+fn a_frame_naming_a_stream_the_consumer_left_is_dropped() {
+    let mut link = Link::new(Admission::Accept);
+    let sub_id = link.subscribe("car", SubscriptionMode::Latest);
+    link.to_consumer(&update(&sub_id, "before", 1, Some("battery"), "70"));
+    let out = link.to_consumer(&update(&sub_id, "after", 1, Some("battery"), "80"));
+    assert_eq!(out.events.len(), 2, "a stream_reset and the value");
+
+    let out = link.to_consumer(&update(&sub_id, "before", 9, Some("battery"), "stale"));
+    assert!(out.events.is_empty());
     let reply = super::encode(
         SVC_SUBSCRIBE_REPLY,
         &crate::payloads::SubscribeReplyPayload {
@@ -884,20 +1005,129 @@ fn a_provider_without_patterns_ends_a_pattern_subscription() {
             status: SubscribeStatus::Accepted,
             reason: None,
             lease_ms: 60_000,
-            stream: "s".into(),
-            seq: 0,
+            stream: "before".into(),
+            seq: 9,
             history_lost: false,
             topics: Vec::new(),
+            pattern_full: false,
         },
     )
     .unwrap();
-    let out = link.to_consumer(&reply);
-    assert!(!link.consumer.holds(&sub_id));
-    assert!(out.frames[0].content.starts_with(SVC_UNSUBSCRIBE));
-    assert!(out.events.iter().any(|event| matches!(
-        event,
-        ServiceEvent::ServiceSubscriptionChanged { reason, .. } if reason == "unsupported"
-    )));
+    assert!(link.to_consumer(&reply).events.is_empty());
+    let out = link.to_consumer(&update(&sub_id, "after", 2, Some("battery"), "81"));
+    assert_eq!(out.events.len(), 1, "still on the live stream, no reset");
+}
+
+/// A renewal that falls due while a resync is queued supersedes it. It must
+/// carry `resync` itself, or the application's request is withdrawn.
+#[test]
+fn a_renewal_carries_an_unanswered_resync() {
+    let mut link = Link::new(Admission::Accept);
+    let sub_id = link.subscribe("car", SubscriptionMode::Latest);
+    let resync_of = |content: &str| {
+        serde_json::from_str::<crate::payloads::SubscribePayload>(
+            content.strip_prefix(SVC_SUBSCRIBE).unwrap(),
+        )
+        .unwrap()
+        .resync
+    };
+    assert!(resync_of(&link.consumer.resync(&sub_id).unwrap().content));
+    link.now += Duration::from_secs(31);
+    let renewal = link.consumer.tick(link.now);
+    assert!(resync_of(&renewal.frames[0].content));
+
+    link.pump(renewal);
+    link.now += Duration::from_secs(31);
+    let renewal = link.consumer.tick(link.now);
+    assert!(
+        !resync_of(&renewal.frames[0].content),
+        "answered, so asked no more"
+    );
+}
+
+#[test]
+fn a_full_pattern_is_reported_to_the_consumer_on_a_reply() {
+    // Full when it subscribes: the reply that answers it says so.
+    let mut link = Link::new(Admission::Accept);
+    for i in 0..=MAX_PATTERN_TOPICS {
+        link.publish(&format!("t/{i:03}"), Some("k"), "x");
+    }
+    link.subscribe_with("t/*", SubscribeOptions::new(SubscriptionMode::Latest));
+    let changes = link.take_changes();
+    for role in ["provider", "consumer"] {
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|(r, state, reason)| r == role
+                    && state == "active"
+                    && reason == "pattern_full")
+                .count(),
+            1,
+            "{role}: {changes:?}"
+        );
+    }
+
+    // Full later: a reply of its own when the cap is reached, and only once.
+    let mut link = Link::new(Admission::Accept);
+    link.subscribe_with("t/*", SubscribeOptions::new(SubscriptionMode::Log));
+    for i in 0..=MAX_PATTERN_TOPICS + 1 {
+        link.publish(&format!("t/{i:03}"), None, "x");
+    }
+    link.now += Duration::from_secs(31);
+    let renewal = link.consumer.tick(link.now);
+    link.pump(renewal);
+    let changes: Vec<_> = link
+        .take_changes()
+        .into_iter()
+        .filter(|(_, _, reason)| reason == "pattern_full")
+        .collect();
+    assert_eq!(
+        changes,
+        vec![
+            ("provider".into(), "active".into(), "pattern_full".into()),
+            ("consumer".into(), "active".into(), "pattern_full".into()),
+        ]
+    );
+}
+
+/// The zero byte separates a key from its seq in the digest.
+#[test]
+fn a_key_with_a_zero_byte_is_refused_everywhere() {
+    let mut link = Link::new(Admission::Accept);
+    assert!(matches!(
+        link.provider
+            .publish(SVC, "car", Some("a\0b"), "x", link.now),
+        Err(ServiceError::InvalidArgument(_))
+    ));
+    assert!(link
+        .consumer
+        .subscribe(PROVIDER, SVC, "car", &keyed(&["a\0*"]), link.now)
+        .is_err());
+    let sub_id = link.subscribe("car", SubscriptionMode::Latest);
+    let out = link.to_consumer(&update(&sub_id, "s", 1, Some("a\0b"), "x"));
+    assert!(out.events.is_empty());
+}
+
+#[test]
+fn every_frame_goes_out_as_version_1() {
+    let mut link = Link::new(Admission::Accept);
+    let (_, frame) = link
+        .consumer
+        .subscribe(
+            PROVIDER,
+            SVC,
+            "car",
+            &SubscribeOptions::new(SubscriptionMode::Latest),
+            link.now,
+        )
+        .unwrap();
+    link.provider
+        .publish(SVC, "car", Some("k"), "x", link.now)
+        .unwrap();
+    let answer = link.to_provider(&frame.content);
+    for content in std::iter::once(&frame.content).chain(answer.frames.iter().map(|f| &f.content)) {
+        assert!(content.contains("\"v\":1"), "{content}");
+    }
 }
 
 #[test]

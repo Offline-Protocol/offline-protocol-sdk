@@ -194,9 +194,12 @@ pub enum Admission {
     Reject,
 }
 
-/// FNV-1a over `(key, seq)` pairs, which the caller supplies in key order.
-/// Both sides compute it the same way, so a renewal can say "this is what I
-/// hold" in eight bytes and the provider can tell whether anything is missing.
+/// 64-bit FNV-1a over `(key, seq)` pairs, which the caller supplies in byte
+/// order of the key: for each, the key's UTF-8 bytes, one zero byte, and the
+/// seq as eight big-endian bytes. A key holds no zero byte
+/// ([`validate_key`]), so no two tables encode alike. Both sides compute it
+/// the same way, so a renewal can say "this is what I hold" in eight bytes
+/// and the provider can tell whether anything is missing.
 pub(crate) fn digest<'a>(pairs: impl Iterator<Item = (&'a str, u64)>) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -287,7 +290,7 @@ pub(crate) fn validate_key_filter(
                     "a key filter entry has at most one `*`, at its end".to_string(),
                 ))
             }
-            Some(_) if entry.len() <= MAX_SUBSCRIPTION_KEY_LEN => {}
+            Some(prefix) if entry.len() <= MAX_SUBSCRIPTION_KEY_LEN && !prefix.contains('\0') => {}
             _ => validate_key(entry)?,
         }
     }
@@ -303,11 +306,12 @@ pub(crate) fn key_matches(filter: &[String], key: &str) -> bool {
         })
 }
 
-/// A key of a `latest` topic: 1 to [`MAX_SUBSCRIPTION_KEY_LEN`] bytes.
+/// A key of a `latest` topic: 1 to [`MAX_SUBSCRIPTION_KEY_LEN`] bytes, and
+/// no zero byte, which separates a key from its seq in the [`digest`].
 pub(crate) fn validate_key(key: &str) -> Result<(), ServiceError> {
-    if key.is_empty() || key.len() > MAX_SUBSCRIPTION_KEY_LEN {
+    if key.is_empty() || key.len() > MAX_SUBSCRIPTION_KEY_LEN || key.contains('\0') {
         return Err(ServiceError::InvalidArgument(format!(
-            "key must be 1 to {MAX_SUBSCRIPTION_KEY_LEN} bytes"
+            "key must be 1 to {MAX_SUBSCRIPTION_KEY_LEN} bytes with no zero byte"
         )));
     }
     Ok(())

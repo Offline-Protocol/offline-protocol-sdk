@@ -15,9 +15,9 @@ use crate::payloads::{
     ResumePosition, SubscribePayload, SubscribeReplyPayload, SubscribeStatus, SubscriptionMode,
     TopicReply, UnsubscribePayload, UpdatePayload, MAX_LATEST_BYTES, MAX_LATEST_KEYS,
     MAX_LOG_BYTES, MAX_LOG_ENTRIES, MAX_PATTERN_TOPICS, MAX_PROVIDER_SUBSCRIPTIONS,
-    MAX_SERVICE_BODY_SIZE, MAX_SUBSCRIPTIONS_PER_PEER, MAX_SUBSCRIPTION_LEASE_MS,
-    MAX_SUBSCRIPTION_PARAMS_SIZE, MIN_SUBSCRIPTION_LEASE_MS, SUBSCRIPTION_WIRE_VERSION,
-    SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
+    MAX_RETIRED_PER_TOPIC, MAX_RETIRED_SUB_IDS, MAX_SERVICE_BODY_SIZE, MAX_SUBSCRIPTIONS_PER_PEER,
+    MAX_SUBSCRIPTION_LEASE_MS, MAX_SUBSCRIPTION_PARAMS_SIZE, MIN_SUBSCRIPTION_LEASE_MS,
+    SUBSCRIPTION_WIRE_VERSION, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 
 /// Longest subscription id accepted from a consumer. Ours are UUIDs.
@@ -198,11 +198,24 @@ impl Sub {
     }
 }
 
+/// A subscription another one replaced (invariant 7). Only its id and whose
+/// it was are kept: enough to drop a frame that names it.
+struct Retired {
+    subscriber: String,
+    service_id: String,
+    topic: String,
+    sub_id: String,
+}
+
 /// The provider half of subscriptions: who is subscribed to this device's
 /// services, and the per-topic state that catches them up.
 pub struct Provider {
     topics: HashMap<(String, String), Topic>,
     subs: HashMap<String, Sub>,
+    /// Replaced subscriptions, oldest first: at most
+    /// [`MAX_RETIRED_PER_TOPIC`] per (subscriber, service, topic) and
+    /// [`MAX_RETIRED_SUB_IDS`] in all.
+    retired: VecDeque<Retired>,
     policies: HashMap<String, SubscriptionPolicy>,
     min_update_interval: Duration,
     approval_timeout: Duration,
@@ -216,6 +229,7 @@ impl Provider {
         Self {
             topics: HashMap::new(),
             subs: HashMap::new(),
+            retired: VecDeque::new(),
             policies: HashMap::new(),
             min_update_interval,
             approval_timeout,
@@ -293,6 +307,14 @@ impl Provider {
         let mut out = SubscriptionOutput::default();
         if payload.sub_id.is_empty() || payload.sub_id.len() > MAX_SUB_ID_LEN {
             warn!(sender = %sender, "Dropping a subscribe frame with an unusable id");
+            return out;
+        }
+        // A replaced subscription never comes back. A frame naming one was
+        // sent before the subscriber moved on, and is still arriving from a
+        // relay mailbox or a custodian; answered, it would stand beside the
+        // live one, or replace it.
+        if self.is_retired(sender, &payload.sub_id) {
+            debug!(sender = %sender, "Dropping a subscribe frame naming a replaced subscription");
             return out;
         }
         let refuse = |status: SubscribeStatus, reason: &str| SubscriptionFrame {
@@ -381,8 +403,13 @@ impl Provider {
             }
         }
 
-        // One subscription per (subscriber, service, topic): the newest wins,
-        // so a consumer that restarted is not streamed to twice.
+        // One subscription per (subscriber, service, topic), and only a first
+        // subscribe replaces the one held, so a consumer that restarted is
+        // not streamed to twice. A renewal under another id never does: a
+        // consumer renews only the id it holds, so one naming another id was
+        // sent before it restarted. Were it to replace, a stale renewal from
+        // a mailbox would take the place of the subscription the consumer
+        // made since, whose renewals would then be dropped as retired.
         let replaced: Vec<String> = self
             .subs
             .iter()
@@ -393,8 +420,13 @@ impl Provider {
             })
             .map(|(id, _)| id.clone())
             .collect();
+        if !replaced.is_empty() && renewal {
+            debug!(sender = %sender, "Dropping a renewal for a topic held under another subscription");
+            return out;
+        }
         for old in replaced {
             if let Some(sub) = self.subs.remove(&old) {
+                self.retire(&old, &sub);
                 out.events.push(provider_changed(
                     &old,
                     &sub,
@@ -753,7 +785,7 @@ impl Provider {
                 )),
             }
         }
-        self.report_pattern_full(&mut out);
+        self.report_pattern_full(None, &mut out);
         Ok((out, outcome))
     }
 
@@ -877,6 +909,7 @@ impl Provider {
                         seq: 0,
                         history_lost: false,
                     }],
+                    sub.pattern_full,
                 )
             } else {
                 reply_content(
@@ -1128,29 +1161,77 @@ impl Provider {
         }
         out.frames.push(SubscriptionFrame {
             recipient: sub.subscriber.clone(),
-            content: pattern_reply_content(sub_id, lease_ms, replies),
+            content: pattern_reply_content(sub_id, lease_ms, replies, sub.pattern_full),
             delivery: SubscriptionDelivery::Superseding(reply_key(sub_id)),
         });
         out.frames.extend(catch_up);
-        self.report_pattern_full(out);
+        self.report_pattern_full(Some(sub_id), out);
     }
 
-    /// Tells the application, once per subscription, that a pattern
+    /// Tells both sides, once per subscription, that an admitted pattern
     /// subscription has passed over a matching topic because it already
     /// follows [`MAX_PATTERN_TOPICS`]. Without it the subscriber is silently
-    /// sent only part of what its pattern names.
-    fn report_pattern_full(&mut self, out: &mut SubscriptionOutput) {
+    /// sent only part of what its pattern names. The application gets an
+    /// event; the subscriber gets `pattern_full` on a reply: the one just
+    /// sent for `answered`, or for any other a reply of its own now.
+    fn report_pattern_full(&mut self, answered: Option<&str>, out: &mut SubscriptionOutput) {
         for (sub_id, sub) in self.subs.iter_mut() {
-            if sub.pattern_full && !sub.pattern_full_reported {
-                sub.pattern_full_reported = true;
-                out.events.push(provider_changed(
-                    sub_id,
-                    sub,
-                    SubscriptionState::Active,
-                    "pattern_full",
-                ));
+            if !sub.admitted || !sub.pattern_full || sub.pattern_full_reported {
+                continue;
+            }
+            sub.pattern_full_reported = true;
+            out.events.push(provider_changed(
+                sub_id,
+                sub,
+                SubscriptionState::Active,
+                "pattern_full",
+            ));
+            if answered != Some(sub_id.as_str()) {
+                // Not under the reply key: it must not withdraw an answer
+                // still queued, which carries the positions.
+                out.frames.push(SubscriptionFrame {
+                    recipient: sub.subscriber.clone(),
+                    content: pattern_reply_content(
+                        sub_id,
+                        sub.lease.as_millis() as u64,
+                        Vec::new(),
+                        true,
+                    ),
+                    delivery: SubscriptionDelivery::Reliable,
+                });
             }
         }
+    }
+
+    /// Remembers `sub_id`, which a newer subscription replaced, so that a
+    /// frame naming it is dropped.
+    fn retire(&mut self, sub_id: &str, sub: &Sub) {
+        let same_triple = |retired: &Retired| {
+            retired.subscriber == sub.subscriber
+                && retired.service_id == sub.service_id
+                && retired.topic == sub.topic
+        };
+        if self.retired.iter().filter(|r| same_triple(r)).count() >= MAX_RETIRED_PER_TOPIC {
+            if let Some(oldest) = self.retired.iter().position(same_triple) {
+                self.retired.remove(oldest);
+            }
+        }
+        if self.retired.len() >= MAX_RETIRED_SUB_IDS {
+            self.retired.pop_front();
+        }
+        self.retired.push_back(Retired {
+            subscriber: sub.subscriber.clone(),
+            service_id: sub.service_id.clone(),
+            topic: sub.topic.clone(),
+            sub_id: sub_id.to_string(),
+        });
+    }
+
+    /// Whether `sub_id` is one of `subscriber`'s that was replaced.
+    fn is_retired(&self, subscriber: &str, sub_id: &str) -> bool {
+        self.retired
+            .iter()
+            .any(|retired| retired.subscriber == subscriber && retired.sub_id == sub_id)
     }
 }
 
@@ -1343,13 +1424,19 @@ fn reply_content(
         seq,
         history_lost,
         topics: Vec::new(),
+        pattern_full: false,
     };
     // Serialising a struct of strings and integers cannot fail.
     encode(SVC_SUBSCRIBE_REPLY, &payload).unwrap_or_default()
 }
 
 /// An acceptance of a pattern subscription, with a position per topic.
-fn pattern_reply_content(sub_id: &str, lease_ms: u64, topics: Vec<TopicReply>) -> String {
+fn pattern_reply_content(
+    sub_id: &str,
+    lease_ms: u64,
+    topics: Vec<TopicReply>,
+    pattern_full: bool,
+) -> String {
     let payload = SubscribeReplyPayload {
         v: SUBSCRIPTION_WIRE_VERSION,
         sub_id: sub_id.to_string(),
@@ -1360,6 +1447,7 @@ fn pattern_reply_content(sub_id: &str, lease_ms: u64, topics: Vec<TopicReply>) -
         seq: 0,
         history_lost: false,
         topics,
+        pattern_full,
     };
     encode(SVC_SUBSCRIBE_REPLY, &payload).unwrap_or_default()
 }

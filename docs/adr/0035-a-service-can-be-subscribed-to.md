@@ -339,6 +339,10 @@ service frames, each only ever inside `__MLS_ENC__`:
 | `history_lost` | consumer | A `log` gap that no checkpoint covers |
 | `pattern_full` | both | A pattern reached 64 topics |
 | `unsupported` | consumer | The provider answered at a `v` below a field the consumer used |
+| `accepted` | consumer, provider | A pending subscription became active |
+| `renewal_unanswered` | consumer | Three renewals in a row went unanswered, and the subscription paused |
+| `rejected` | provider | `reject_service_subscription` with an empty reason |
+| `not_found`, `mode_mismatch`, `full` | provider | A refusing reply with that `status` carries it as its reason too |
 
 `reject_service_subscription` and `end_service_subscription` also take an
 application reason, which travels as given (clamped in length) and which the

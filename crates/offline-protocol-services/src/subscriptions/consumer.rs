@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use offline_protocol_core::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -6,17 +6,18 @@ use tracing::{debug, warn};
 use super::provider::unsubscribe_frame;
 use super::{
     changed, clamp_reason, decode, digest, encode, is_topic_pattern, key_matches, topic_matches,
-    validate_key_filter, validate_subscription_topic, SubscribeOptions, SubscriptionDelivery,
-    SubscriptionFrame, SubscriptionOutput, SubscriptionRole, SubscriptionState,
+    validate_key, validate_key_filter, validate_subscription_topic, SubscribeOptions,
+    SubscriptionDelivery, SubscriptionFrame, SubscriptionOutput, SubscriptionRole,
+    SubscriptionState,
 };
 use crate::error::ServiceError;
 use crate::events::ServiceEvent;
 use crate::payloads::{
     ResumePosition, SubscribePayload, SubscribeReplyPayload, SubscribeStatus, SubscriptionMode,
     TopicPosition, UnsubscribePayload, UpdatePayload, MAX_CONSUMER_SUBSCRIPTIONS,
-    MAX_CONSUMER_TRACKED_KEYS, MAX_LOG_SEEN_AHEAD, MAX_PATTERN_TOPICS, MAX_SUBSCRIPTION_LEASE_MS,
-    MAX_SUBSCRIPTION_PARAMS_SIZE, MAX_UNANSWERED_RENEWALS, MIN_SUBSCRIPTION_LEASE_MS,
-    SUBSCRIPTION_FILTERS_VERSION, SUBSCRIPTION_WIRE_VERSION, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY,
+    MAX_CONSUMER_TRACKED_KEYS, MAX_LOG_SEEN_AHEAD, MAX_PATTERN_TOPICS, MAX_RETIRED_PER_TOPIC,
+    MAX_SUBSCRIPTION_LEASE_MS, MAX_SUBSCRIPTION_PARAMS_SIZE, MAX_UNANSWERED_RENEWALS,
+    MIN_SUBSCRIPTION_LEASE_MS, SUBSCRIPTION_WIRE_VERSION, SVC_SUBSCRIBE, SVC_SUBSCRIBE_REPLY,
     SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 
@@ -51,12 +52,23 @@ struct Track {
     stream: Option<String>,
     /// `latest`: the seq of the value held for each key.
     keys: BTreeMap<String, u64>,
-    /// `log`: every seq up to here has been delivered. `None` until the
-    /// provider says where to start.
-    contiguous: Option<u64>,
+    /// `log`: every seq up to here has been delivered or summarised. Starts
+    /// at 0, "nothing of this stream yet" (seqs start at 1), and is raised by
+    /// a reply's baseline, a checkpoint, or the next seq in turn; never set
+    /// from an arbitrary update. The reliable ladder keeps no order between
+    /// entries, so a resent reply can land after the catch-up frames that
+    /// followed it: were the first update to set the position, everything
+    /// between the baseline and it would be dropped as already seen.
+    contiguous: u64,
     /// `log`: seqs delivered above `contiguous`, waiting for the gap below
     /// them to fill.
     seen_ahead: BTreeSet<u64>,
+    /// Streams this topic has moved away from, newest last, at most
+    /// [`MAX_RETIRED_PER_TOPIC`]. A frame naming one is from before a
+    /// provider restart, still in a relay mailbox or with a custodian; taken,
+    /// it would reset the consumer to the dead stream, and the live stream's
+    /// next frame would reset it back.
+    retired: VecDeque<String>,
 }
 
 impl Track {
@@ -69,32 +81,41 @@ impl Track {
                 self.keys.values().copied().max().unwrap_or(0),
                 digest(self.keys.iter().map(|(key, seq)| (key.as_str(), *seq))),
             ),
-            SubscriptionMode::Log => (stream, self.contiguous.unwrap_or(0), 0),
+            SubscriptionMode::Log => (stream, self.contiguous, 0),
         })
     }
 
-    /// Forgets everything held for the provider's previous stream.
+    /// Forgets everything held for the provider's previous stream, and
+    /// retires that stream.
     fn reset_stream(&mut self, stream: &str) {
-        self.stream = Some(stream.to_string());
+        if let Some(previous) = self.stream.replace(stream.to_string()) {
+            self.retired.retain(|retired| *retired != previous);
+            self.retired.push_back(previous);
+            if self.retired.len() > MAX_RETIRED_PER_TOPIC {
+                self.retired.pop_front();
+            }
+        }
         self.forget();
+    }
+
+    /// Whether `stream` is one this topic has moved away from.
+    fn is_retired(&self, stream: &str) -> bool {
+        self.retired.iter().any(|retired| retired == stream)
     }
 
     /// Forgets what is held, keeping the stream.
     fn forget(&mut self) {
         self.keys.clear();
-        self.contiguous = None;
+        self.contiguous = 0;
         self.seen_ahead.clear();
     }
 
     /// Moves `contiguous` up through every seq already seen above it.
     fn advance(&mut self) {
-        let Some(mut position) = self.contiguous else {
-            return;
-        };
-        while self.seen_ahead.remove(&(position + 1)) {
-            position += 1;
+        while self.seen_ahead.remove(&(self.contiguous + 1)) {
+            self.contiguous += 1;
         }
-        self.contiguous = Some(position);
+        let position = self.contiguous;
         self.seen_ahead.retain(|seq| *seq > position);
     }
 }
@@ -121,6 +142,14 @@ struct Sub {
     renewal_outstanding: bool,
     unanswered: u32,
     paused_since: Option<Instant>,
+    /// A resync the provider has not answered yet. Every frame for the
+    /// subscription carries `resync` until a reply arrives, so a renewal that
+    /// supersedes the queued resync does not withdraw the application's
+    /// request with it.
+    resync_pending: bool,
+    /// A pattern subscription was told it follows as many topics as it may,
+    /// and the application has been told; once per subscription.
+    pattern_full_reported: bool,
 }
 
 impl Sub {
@@ -314,8 +343,10 @@ impl Consumer {
             renewal_outstanding: false,
             unanswered: 0,
             paused_since: None,
+            resync_pending: false,
+            pattern_full_reported: false,
         };
-        let frame = subscribe_frame(&sub_id, &sub, None, false)?;
+        let frame = subscribe_frame(&sub_id, &sub, None)?;
         self.subs.insert(sub_id.clone(), sub);
         Ok((sub_id, frame))
     }
@@ -336,7 +367,7 @@ impl Consumer {
                 sub.provider == provider && !sub.sent && sub.state == SubscriptionState::Pending
             })
             .filter_map(|(sub_id, sub)| {
-                subscribe_frame(sub_id, sub, None, false)
+                subscribe_frame(sub_id, sub, None)
                     .ok()
                     .map(|frame| (sub_id.clone(), frame))
             })
@@ -377,11 +408,12 @@ impl Consumer {
             .filter(|sub| sub.sent && sub.state != SubscriptionState::Ended)
             .ok_or_else(|| ServiceError::UnknownSubscription(sub_id.to_string()))?;
         sub.renewal_outstanding = true;
+        sub.resync_pending = true;
         let resume = sub.resume();
         for track in sub.tracks.values_mut() {
             track.forget();
         }
-        subscribe_frame(sub_id, sub, resume, true)
+        subscribe_frame(sub_id, sub, resume)
     }
 
     // ------------------------------------------------------------------
@@ -425,26 +457,6 @@ impl Consumer {
             return out;
         }
 
-        // A provider that predates patterns and filters accepts them as a
-        // literal topic and sends every key. Neither is what was asked for.
-        if payload.v < SUBSCRIPTION_FILTERS_VERSION && (sub.is_pattern() || !sub.filter.is_empty())
-        {
-            if let Some(sub) = self.subs.remove(&payload.sub_id) {
-                out.frames.push(unsubscribe_frame(
-                    &sub.provider,
-                    &payload.sub_id,
-                    "unsupported",
-                ));
-                out.events.push(consumer_changed(
-                    &payload.sub_id,
-                    &sub,
-                    SubscriptionState::Ended,
-                    "unsupported",
-                ));
-            }
-            return out;
-        }
-
         // Each topic the reply positions: the subscription's own, or for a
         // pattern each topic it follows.
         let positions: Vec<(String, String, u64, bool)> = if sub.is_pattern() {
@@ -461,6 +473,17 @@ impl Consumer {
                 payload.history_lost,
             )]
         };
+        // A reply naming a stream this device has left is from before the
+        // provider restarted: none of it describes the live stream.
+        let stale = positions.iter().any(|(topic, stream, _, _)| {
+            sub.tracks
+                .get(topic)
+                .is_some_and(|track| track.is_retired(stream))
+        });
+        if stale {
+            debug!(sender = %sender, "Dropping a subscription reply naming a retired stream");
+            return out;
+        }
         let mode = sub.mode;
         let mut resets = Vec::new();
         let mut lost = Vec::new();
@@ -478,7 +501,8 @@ impl Consumer {
                 track.reset_stream(&stream);
             }
             if mode == SubscriptionMode::Log {
-                track.contiguous = Some(track.contiguous.map_or(seq, |c| c.max(seq)));
+                // A baseline only ever raises the position.
+                track.contiguous = track.contiguous.max(seq);
                 track.advance();
             }
             if reset {
@@ -495,6 +519,7 @@ impl Consumer {
         );
         sub.next_renewal = Some(now + sub.lease / 2);
         sub.renewal_outstanding = false;
+        sub.resync_pending = false;
         sub.unanswered = 0;
         sub.sent = true;
 
@@ -515,6 +540,15 @@ impl Consumer {
                 "resumed",
             )),
             _ => {}
+        }
+        if payload.pattern_full && sub.is_pattern() && !sub.pattern_full_reported {
+            sub.pattern_full_reported = true;
+            out.events.push(consumer_changed(
+                &payload.sub_id,
+                sub,
+                SubscriptionState::Active,
+                "pattern_full",
+            ));
         }
         for (topics, reason) in [(resets, "stream_reset"), (lost, "history_lost")] {
             for topic in topics {
@@ -563,6 +597,10 @@ impl Consumer {
             sub.topic.clone()
         };
         if let Some(key) = payload.key.as_deref() {
+            if validate_key(key).is_err() {
+                warn!("Dropping an update whose key no provider may publish");
+                return out;
+            }
             // The provider applies the filter. One that does not is not
             // believed: the application asked not to be sent this.
             if !key_matches(&sub.filter, key) {
@@ -576,6 +614,10 @@ impl Consumer {
             debug!("Dropping an update for a topic the subscription does not cover");
             return out;
         };
+        if track.is_retired(&payload.stream) {
+            debug!("Dropping an update for a stream this subscription has left");
+            return out;
+        }
         let mut reset = false;
         let mut gap_given_up = false;
         match track.stream.as_deref() {
@@ -608,42 +650,37 @@ impl Consumer {
             SubscriptionMode::Log => {
                 if payload.snapshot {
                     // A checkpoint: everything up to its seq is summarised.
-                    // Stale only once this device is past it; the reply that
-                    // precedes it sets the position to exactly its seq.
-                    if track.contiguous.is_some_and(|c| c > payload.seq) {
+                    // Stale only once this device is past it.
+                    if track.contiguous > payload.seq {
                         false
                     } else {
-                        track.contiguous = Some(payload.seq);
+                        track.contiguous = payload.seq;
                         track.advance();
                         true
                     }
+                } else if track.contiguous >= payload.seq || track.seen_ahead.contains(&payload.seq)
+                {
+                    false
                 } else {
-                    match track.contiguous {
-                        Some(c) if c >= payload.seq => false,
-                        _ if track.seen_ahead.contains(&payload.seq) => false,
-                        None => {
-                            track.contiguous = Some(payload.seq);
-                            track.advance();
-                            true
-                        }
-                        Some(_) => {
-                            track.seen_ahead.insert(payload.seq);
-                            if track.seen_ahead.len() > MAX_LOG_SEEN_AHEAD {
-                                // The gap below will not fill in time. Give it
-                                // up rather than remember without bound. The
-                                // position moves past it, so no renewal asks
-                                // for it again: the application is told that
-                                // history was lost, never left with a silent
-                                // hole in a log that promises every event.
-                                if let Some(lowest) = track.seen_ahead.pop_first() {
-                                    track.contiguous = Some(lowest);
-                                    gap_given_up = true;
-                                }
-                            }
-                            track.advance();
-                            true
+                    // Held above the position until the gap below fills, by
+                    // the next seq in turn or by a reply's baseline that
+                    // overtook it. Delivered now, so a `log` topic arrives in
+                    // arrival order, not seq order.
+                    track.seen_ahead.insert(payload.seq);
+                    if track.seen_ahead.len() > MAX_LOG_SEEN_AHEAD {
+                        // The gap below will not fill in time. Give it up
+                        // rather than remember without bound. The position
+                        // moves past it, so no renewal asks for it again: the
+                        // application is told that history was lost, never
+                        // left with a silent hole in a log that promises
+                        // every event.
+                        if let Some(lowest) = track.seen_ahead.pop_first() {
+                            track.contiguous = lowest;
+                            gap_given_up = true;
                         }
                     }
+                    track.advance();
+                    true
                 }
             }
         };
@@ -763,7 +800,7 @@ impl Consumer {
                     }
                     sub.renewal_outstanding = true;
                     sub.next_renewal = Some(now + sub.lease / 2);
-                    if let Ok(frame) = subscribe_frame(sub_id, sub, sub.resume(), false) {
+                    if let Ok(frame) = subscribe_frame(sub_id, sub, sub.resume()) {
                         out.frames.push(frame);
                     }
                 }
@@ -793,7 +830,7 @@ impl Consumer {
             .filter(|(_, sub)| sub.provider == peer && sub.state == SubscriptionState::Paused)
         {
             sub.renewal_outstanding = true;
-            if let Ok(frame) = subscribe_frame(sub_id, sub, sub.resume(), false) {
+            if let Ok(frame) = subscribe_frame(sub_id, sub, sub.resume()) {
                 out.frames.push(frame);
             }
         }
@@ -802,12 +839,11 @@ impl Consumer {
 }
 
 /// `__SVC_SUB__` for `sub`: a subscribe without `resume`, a renewal with it,
-/// or a resync. One waits per subscription.
+/// and `resync` while one is unanswered. One waits per subscription.
 fn subscribe_frame(
     sub_id: &str,
     sub: &Sub,
     resume: Option<ResumePosition>,
-    resync: bool,
 ) -> Result<SubscriptionFrame, ServiceError> {
     let payload = SubscribePayload {
         v: SUBSCRIPTION_WIRE_VERSION,
@@ -819,7 +855,7 @@ fn subscribe_frame(
         keys: sub.filter.clone(),
         lease_ms: sub.lease.as_millis() as u64,
         resume,
-        resync,
+        resync: sub.resync_pending,
     };
     Ok(SubscriptionFrame {
         recipient: sub.provider.clone(),

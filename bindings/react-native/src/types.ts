@@ -2371,7 +2371,12 @@ export interface ServiceSubscribeReceivedEvent extends BaseEvent {
   mode: 'latest' | 'log';
   params: string;
   sender: string;
-  /** A renewal of a subscription this device no longer held. */
+  /**
+   * The subscriber says it held this subscription before (this device
+   * restarted, or the lease lapsed). Its claim, which any peer can make: use
+   * it to word a prompt, never to accept without asking. A subscriber to be
+   * accepted without asking belongs in the policy's `allowPeers`.
+   */
   renewal: boolean;
 }
 
@@ -2391,9 +2396,11 @@ export interface ServiceSubscriptionChangedEvent extends BaseEvent {
    * Why: `accepted`, `resumed`, `stream_reset`, `history_lost`,
    * `renewal_unanswered`, `provider_unreachable`, `no_reply`,
    * `session_timeout`, `unsubscribed`, `revoked`, `replaced`, `expired`,
-   * `approval_timeout`, `service_unregistered`, `pattern_full` (provider
-   * side: a pattern passed over a topic for want of room, reported once), or
-   * a reason the provider gave when it rejected or ended the subscription.
+   * `approval_timeout`, `service_unregistered`, `policy`,
+   * `invalid_subscription`, `rejected`, `not_found`, `mode_mismatch`,
+   * `full`, `pattern_full` (both sides: a pattern follows as many topics as
+   * it may, reported once), or a reason the provider's application gave
+   * when it rejected or ended the subscription.
    */
   reason: string;
 }

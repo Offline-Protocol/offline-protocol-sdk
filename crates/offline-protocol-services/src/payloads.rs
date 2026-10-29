@@ -110,13 +110,14 @@ pub fn is_subscription_frame(content: &str) -> bool {
         .any(|prefix| content.starts_with(prefix))
 }
 
-/// Version written into every subscription payload. 2 adds topic patterns
-/// and key filters: a provider that answers with 1 applied neither, so a
-/// consumer that asked for one ends the subscription rather than receive
-/// what it did not ask for.
-pub(crate) const SUBSCRIPTION_WIRE_VERSION: u8 = 2;
-/// The first version that applies topic patterns and key filters.
-pub(crate) const SUBSCRIPTION_FILTERS_VERSION: u8 = 2;
+/// Version written into every subscription payload. No earlier form of
+/// these frames was released, so there is nothing below it to be compatible
+/// with. A frame with a higher `v` is read by the fields this build knows. A
+/// later version that adds a field narrowing what the provider sends raises
+/// `v`, and a consumer that used such a field and is answered at a `v` that
+/// predates it ends the subscription with `unsupported`; a change to what an
+/// existing field means takes a new `svc_versions` entry instead.
+pub(crate) const SUBSCRIPTION_WIRE_VERSION: u8 = 1;
 
 /// Longest topic name, in bytes.
 pub const MAX_SUBSCRIPTION_TOPIC_LEN: usize = 128;
@@ -160,6 +161,14 @@ pub const MAX_SUBSCRIPTION_LEASE_MS: u64 = 600_000;
 pub const DEFAULT_SUBSCRIPTION_LEASE_MS: u64 = 120_000;
 /// Renewals in a row without an answer before a subscription is paused.
 pub(crate) const MAX_UNANSWERED_RENEWALS: u32 = 3;
+/// Streams a consumer remembers having left, per topic, and `sub_id`s a
+/// provider remembers having replaced, per (subscriber, service, topic). A
+/// frame naming one is from before a restart, still in a relay mailbox or
+/// with a custodian, and is dropped.
+pub(crate) const MAX_RETIRED_PER_TOPIC: usize = 4;
+/// Retired `sub_id`s a provider remembers in all, so that a subscriber that
+/// churns through topics cannot make the provider remember without bound.
+pub(crate) const MAX_RETIRED_SUB_IDS: usize = MAX_RETIRED_PER_TOPIC * MAX_PROVIDER_SUBSCRIPTIONS;
 
 /// How a topic treats its updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -305,6 +314,10 @@ pub(crate) struct SubscribeReplyPayload {
     /// place of `stream`, `seq` and `history_lost`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topics: Vec<TopicReply>,
+    /// A pattern subscription follows [`MAX_PATTERN_TOPICS`] topics and will
+    /// follow no more.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pattern_full: bool,
 }
 
 /// `__SVC_UPD__`: one update.
@@ -388,7 +401,7 @@ mod tests {
         let reply: SubscribeReplyPayload =
             serde_json::from_str(r#"{"sub_id":"s","status":"mode_mismatch"}"#).unwrap();
         assert_eq!(reply.status, SubscribeStatus::ModeMismatch);
-        assert!(!reply.history_lost && reply.topics.is_empty());
+        assert!(!reply.history_lost && reply.topics.is_empty() && !reply.pattern_full);
 
         let update: UpdatePayload =
             serde_json::from_str(r#"{"sub_id":"s","stream":"x","seq":3,"body":"b"}"#).unwrap();
