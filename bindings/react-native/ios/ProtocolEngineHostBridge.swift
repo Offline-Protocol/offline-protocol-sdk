@@ -477,7 +477,11 @@ enum ProtocolEngineHostBridge {
             throw HostError.illegalState("Internet transport not initialized")
         }
         let userId = try A.requireString(m, "userId")
-        let force = A.optionalBool(m, "force") ?? false
+        // React Native nests `force` in `options`; Flutter sends it beside
+        // `userId`. Reading only the top level dropped every forced check
+        // from React Native in 0.31.0.
+        let options = m["options"] as? [String: Any] ?? [:]
+        let force = A.optionalBool(m, "force") ?? A.optionalBool(options, "force") ?? false
         return awaitCompletion { done in
             manager.checkPresence(userId: userId, force: force, completion: done)
         }

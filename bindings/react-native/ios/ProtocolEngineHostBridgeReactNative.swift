@@ -81,9 +81,9 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
-    static func createInvite(_ module: OfflineProtocolModule, _ petname: String?, sign: NSNumber, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+    static func createInvite(_ module: OfflineProtocolModule, _ petname: String?, sign signed: NSNumber, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.createInvite(host: host, env: env, arguments: ["petname": petname, "sign": sign])
+            try ProtocolEngineHostBridge.createInvite(host: host, env: env, arguments: ["petname": petname, "signed": signed])
         }
     }
 
