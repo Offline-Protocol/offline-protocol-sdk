@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use offline_protocol_core::{Message, ServiceDescriptor, ServiceId};
 use offline_protocol_services::{
     RulesFallback, SubscribeOptions, SubscriptionMode, SubscriptionPolicy, SubscriptionState,
-    SVC_MESSAGE_PREFIX,
+    SVC_DISCOVER_QUERY, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE, SVC_SUBSCRIBE,
+    SVC_SUBSCRIBE_REPLY, SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
@@ -389,6 +390,12 @@ fn rules_admit_a_listed_peer_and_refuse_the_rest() {
 
 /// Invariant 1: a subscription frame that arrives as plaintext is dropped,
 /// even signed by the provider itself.
+///
+/// This pins the invariant (no plaintext update surfaces), not the gate in
+/// `handle_service_message` alone: without it the frame would still reach
+/// `MeshServices`, which consumes a prefix it does not know. The gate's
+/// predicate is pinned below, so that a later `MeshServices` that learns the
+/// prefixes cannot open the door.
 #[test]
 fn a_plaintext_update_is_dropped() {
     let mut pair = Pair::new();
@@ -404,6 +411,31 @@ fn a_plaintext_update_is_dropped() {
         .queue_message_from(frame, pair.bob.address.clone());
     while pair.alice.protocol.receive_message().is_some() {}
     assert!(pair.alice.take_updates().is_empty());
+}
+
+/// The plaintext gate takes each of the four subscription frames, and no
+/// other service frame: requests and responses keep their signed-plaintext
+/// floor.
+#[test]
+fn the_plaintext_gate_names_the_four_subscription_frames_only() {
+    let node = Node::new("alice");
+    for prefix in [
+        SVC_SUBSCRIBE,
+        SVC_SUBSCRIBE_REPLY,
+        SVC_UPDATE,
+        SVC_UNSUBSCRIBE,
+    ] {
+        assert!(
+            node.protocol
+                .drop_plaintext_subscription_frame("bob", &format!("{prefix}{{}}")),
+            "{prefix} passed the plaintext gate"
+        );
+    }
+    for other in [SVC_REQUEST, SVC_RESPONSE, SVC_DISCOVER_QUERY] {
+        assert!(!node
+            .protocol
+            .drop_plaintext_subscription_frame("bob", &format!("{other}{{}}")));
+    }
 }
 
 /// Invariant 5, and multi-hop `latest`: with the subscriber out of range,
@@ -883,5 +915,28 @@ fn blocking_a_peer_ends_its_subscriptions_on_both_sides() {
     assert!(
         matches!(again, Err(crate::Error::UserBlocked(_))),
         "{again:?}"
+    );
+}
+
+/// A peer that has sealed a subscription frame to this device routes them,
+/// whatever a key package replayed afterwards says: the advertisement can
+/// only make subscribing fail at the call, and a proof outranks it.
+#[test]
+fn a_peer_proved_by_a_sealed_frame_stays_subscribable_through_a_stale_advertisement() {
+    let mut pair = Pair::new();
+    pair.bob.register(SubscriptionPolicy::AcceptAll);
+    pair.subscribe("battery", SubscriptionMode::Latest);
+    let bob = pair.bob.address.clone();
+    pair.alice
+        .protocol
+        .record_svc_sub_advertisement(&bob, false);
+    assert_eq!(
+        pair.alice.protocol.peer_routes_subscriptions(&bob),
+        Some(true)
+    );
+    let position = pair.subscribe("position", SubscriptionMode::Latest);
+    assert_eq!(
+        pair.alice.state_of(&position),
+        Some(SubscriptionState::Active)
     );
 }
