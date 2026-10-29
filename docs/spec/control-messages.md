@@ -217,7 +217,8 @@ with that peer is confirmed. The sealed form is unsigned, as every 1:1
 envelope is: MLS authenticates its sender. A receiver that decrypts a plaintext
 beginning `__SVC_REQ__` or `__SVC_RESP__` from a 1:1 session slot MUST hand
 it to its service layer with the MLS-authenticated sender. It MUST NOT surface
-any decrypted `__SVC_` plaintext as a message, and it drops any other service
+any decrypted `__SVC_` plaintext as a message, and, the four subscription
+frames excepted ([below](#subscription-frames)), it drops any other service
 frame found there: discovery is never sealed, and a receiver that routed a
 sealed query would forward it onward as plaintext gossip. It
 routes the frame whatever its own configuration says, because parsing is never
@@ -236,13 +237,16 @@ session between the consumer and the provider, toward a peer that advertised
 | Prefix | Direction | Body (JSON) |
 |--------|-----------|-------------|
 | `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, keys?, lease_ms, resume?: {stream, seq, digest, topics?}, resync}`. Subscribe, renew (with `resume`) or resync |
-| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?}`. `status` is `accepted`, `rejected`, `not_found`, `mode_mismatch` or `full` |
+| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?, pattern_full?, notice?}`. `status` is `accepted`, `rejected`, `not_found`, `mode_mismatch` or `full` |
 | `__SVC_UPD__` | provider to consumer | `{v, sub_id, topic?, stream, seq, key?, body, snapshot}` |
 | `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
 
 A sender MUST NOT send a subscription frame in plaintext, and a sender that
 cannot seal one (no confirmed session yet, or a fault) does not send it. Nor
-does it send one to a peer its user blocked. A
+does it send one to a peer its user blocked. A reply with `notice: true` is
+one the provider sends on its own (a topic started over, or a pattern at its
+cap): its positions and `pattern_full` apply, but it answers nothing the
+consumer asked, so a renewal or resync still waiting stays waiting. A
 receiver that decrypts one from a 1:1 session slot MUST hand it to its
 subscription layer with the MLS-authenticated sender, and MUST drop one that
 arrives as plaintext whatever its signature says. It MUST accept an

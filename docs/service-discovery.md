@@ -541,6 +541,7 @@ application gave.
 | `params` | 4 KiB |
 | Subscriptions a provider holds, admitted or awaiting the application | 256, and 16 from one peer; refused, never evicted, at either |
 | Subscriptions a consumer holds | 64 |
+| Queued frames | Share the outbox with messages: a `latest` value waits as one entry per subscriber and key, a `log` update as one entry each |
 | `latest` topic | 256 keys, 256 KiB |
 | `log` buffer | 256 updates or 512 KiB |
 | Lease | 30 s to 600 s, default 120 s (`service_subscriptions.lease_ms`) |
