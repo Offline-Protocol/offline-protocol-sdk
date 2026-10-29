@@ -10,9 +10,14 @@ import Foundation
 /// object, and the generated adapter calls it only for methods the manifest marks
 /// `parseJsonResult`. Mirrors android/ BridgeResults.kt.
 enum BridgeResults {
-    static func arrayFromNSNumberList(_ list: [Any]?) -> [Int]? {
-        guard let list else { return nil }
-        return list.compactMap { ($0 as? NSNumber)?.intValue }
+    /// A JavaScript number array as a shared-bridge argument, and an omitted
+    /// one as `NSNull`, which every argument reader takes as absent. A nil
+    /// `[Int]?` boxed `as Any` is neither `NSNull` nor a list, so in 0.31.0
+    /// `byteList` refused an omitted `keyPackage` and an iPhone could not
+    /// accept or send a connection request without one.
+    static func byteListArgument(_ list: [NSNumber]?) -> Any {
+        guard let list else { return NSNull() }
+        return list.map { $0.intValue }
     }
 
     static func argumentMap(from dict: [String: Any]?) -> [String: Any] {

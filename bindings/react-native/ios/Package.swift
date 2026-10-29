@@ -119,6 +119,7 @@ let package = Package(
             // them against the real module (bindings/swift/README.md).
             exclude: [
                 "BleDiscoveryBootstrapPolicyTests.swift",
+                "ConnectionRequestKeyPackageTests.swift",
                 "MeshControllerTests.swift",
                 "ProtocolErrorBridgeTests.swift"
             ],

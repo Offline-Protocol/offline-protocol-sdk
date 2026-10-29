@@ -84,6 +84,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   parameter of the adapter to that conversion, and JVM tests pin what it
   returns.
 
+- **An iPhone accepts and sends connection requests without a key package
+  again from React Native.** Since the shared engine bridge (0.31.0), the iOS
+  adapter passed an omitted `keyPackage` as a boxed nil that the argument
+  reader refused, so `acceptConnectionRequest` and `sendConnectionRequest`
+  rejected with "'keyPackage' must be a byte list" unless the app passed one.
+  Apps that catch the promise saw two phones that never connected. An omitted
+  list now reaches the engine as absent, as it always did on Android, and an
+  empty list is still read as none on both platforms. A Swift package suite
+  sends and accepts through the shared bridge with the key package omitted.
+
 ## [0.31.0] — 2026-10-27
 
 > **The engine runs in a browser (experimental).** `offline-protocol-web` and
