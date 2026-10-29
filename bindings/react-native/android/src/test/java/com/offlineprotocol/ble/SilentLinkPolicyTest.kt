@@ -112,6 +112,21 @@ class SilentLinkPolicyTest {
     }
 
     @Test
+    fun `a transport stop re-arms a redialled peer`() {
+        // Kept across a stop and start, the bound left a peer redialled
+        // before it unrecoverable after it until it spoke.
+        val peerOf = { _: String -> "peer" }
+        policy.noteWrite("first", 0L)
+        policy.noteWrite("first", 10_000L)
+        assertEquals(listOf("first"), policy.linksToRedial(20_000L, peerOf))
+
+        policy.clear()
+        policy.noteWrite("after", 30_000L)
+        policy.noteWrite("after", 40_000L)
+        assertEquals(listOf("after"), policy.linksToRedial(50_000L, peerOf))
+    }
+
+    @Test
     fun `the redial bound is per peer`() {
         policy.noteWrite("a", 0L)
         policy.noteWrite("a", 10_000L)

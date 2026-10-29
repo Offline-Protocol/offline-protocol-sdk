@@ -1499,6 +1499,7 @@ class BleTransportFacade(
         // cross-session reasoning burden.
         writeInFlight.clear()
         centralClient.clearAll()
+        silentLinks.clear()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
         unknownBootstrapAttempts.clear()
@@ -1915,6 +1916,7 @@ class BleTransportFacade(
         peripheralPayloadByDevice.clear()
         writeInFlight.clear()
         centralClient.clearAll()
+        silentLinks.clear()
         lastSeenMeshAdvertisements.clear()
         // A peer probed while its radio was coming back serves no mesh
         // service yet; cached as non-mesh, it was skipped for five minutes.

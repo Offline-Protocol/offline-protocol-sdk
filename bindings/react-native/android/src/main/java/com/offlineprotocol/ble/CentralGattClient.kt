@@ -391,6 +391,7 @@ internal class CentralGattClient(
         cancelMtuWatchdog(address)
         cancelHelloWatchdog(address, null)
         clearServiceInstanceSelection(address)
+        redialOnDisconnect.remove(address)
     }
 
     /** Drop all per-address state. Used by transport stop. */
@@ -408,6 +409,7 @@ internal class CentralGattClient(
         helloInFlight.values.forEach { bleHandler.removeCallbacks(it.second) }
         helloInFlight.clear()
         boundServiceInstanceIds.clear()
+        redialOnDisconnect.clear()
     }
 
     /**

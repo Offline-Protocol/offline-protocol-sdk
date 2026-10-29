@@ -67,6 +67,13 @@ internal class SilentLinkPolicy<K : Any, P : Any>(private val ackWaitMs: Long = 
         answered.remove(link)
     }
 
+    /** Forgets everything, redialled peers included. Used by transport stop. */
+    fun clear() {
+        windows.clear()
+        answered.clear()
+        redialled.clear()
+    }
+
     /** Drops every link [keep] rejects, so closed links do not accumulate. */
     fun retainAll(keep: (K) -> Boolean) {
         windows.keys.retainAll(keep)
