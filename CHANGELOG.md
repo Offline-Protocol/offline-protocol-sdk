@@ -96,10 +96,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 - **`createInvite(name, true)` signs the invite again from React Native on
   iOS**, and **`checkInternetPresence(id, { force: true })` forces the check
-  again on both platforms.** Since the shared engine bridge (0.31.0), the
-  adapters keyed the first argument `sign` where the bridge reads `signed`, and
-  nested `force` in an `options` map the bridge never opened, so both were
-  silently dropped. `tools/check_rn_adapter_argument_keys.py` now fails the
+  again on both platforms.** Since the shared engine bridge (0.31.0), the iOS
+  adapter keyed the signed flag `sign` where the bridge reads `signed`, and
+  both adapters nested `force` in an `options` map the bridges never opened,
+  so both were silently dropped. `tools/check_rn_adapter_argument_keys.py` now fails the
   generator gate on any key an adapter sends that its bridge never reads.
 
 ## [0.31.0] — 2026-10-27
