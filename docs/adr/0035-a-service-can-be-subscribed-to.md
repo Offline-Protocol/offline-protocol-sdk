@@ -199,7 +199,7 @@ Each registered service has a subscription policy, set with
 |--------|----------------------|
 | `restricted` (the default) | Held, and the application is asked with `service_subscribe_received`. It calls `accept_service_subscription` or `reject_service_subscription`. Unanswered after `approval_timeout_ms`, it is rejected with `approval_timeout` |
 | `accept_all` | Accepted by the engine. Any peer with a confirmed session can watch the service |
-| `rules` | Accepted when the subscriber is in `allow_peers` or a member of one of `allow_groups`; otherwise either asked (`fallback: ask`) or rejected (`fallback: reject`) |
+| `rules` | Accepted when the subscriber is in `allow_peers` or a member of one of `allow_groups`; otherwise either asked (`fallback: ask`) or rejected (`fallback: reject`). A member is one in the group's MLS roster on the provider, which lists only members whose credential is proved; not one with a role, since roles name the creator and anyone given one explicitly |
 
 The default is `restricted` because "who can watch this device" should be a
 decision, not a default. A subscription to a service the provider has not
@@ -347,8 +347,8 @@ superseded the queued answer.
 | `replaced` | provider | A newer subscription to the same triple took its place (invariant 7) |
 | `expired` | provider | The lease ran out unrenewed |
 | `service_unregistered` | provider | The service was unregistered |
-| `revoked` | provider | `end_service_subscription` with an empty reason |
-| `unsubscribed` | consumer, provider | `unsubscribe_service`, or its frame received |
+| `revoked` | provider | `end_service_subscription` with an empty reason, or the user blocked the subscriber |
+| `unsubscribed` | consumer, provider | `unsubscribe_service`, its frame received, or the user blocked the provider |
 | `no_reply` | consumer | Pending past `pending_timeout_ms` after the frame left |
 | `session_timeout` | consumer | Pending past `pending_timeout_ms` with no confirmed session |
 | `provider_unreachable` | consumer | Paused past `max_pause_ms` |
@@ -477,7 +477,12 @@ the seqs seen above it (`log`), the granted lease and the renewal schedule.
   minutes), it ends with `provider_unreachable`.
 - **Pending.** A subscription with no reply after `pending_timeout_ms`
   (default 120 s) ends with `no_reply`, or `session_timeout` if the session
-  never confirmed.
+  never confirmed. A subscribe that left goes again every quarter of that
+  timeout until it is answered, superseding the one still queued. A pending
+  subscription has no renewal, and a provider that admitted it but could not
+  seal its reply drops the reply: without the re-send the consumer times out
+  while the provider holds it admitted. A provider that holds it reads the
+  frame as a renewal and answers it.
 - **Resync is not lost to a renewal.** A renewal that falls due while a
   resync is queued supersedes it and carries `resync` itself. Otherwise the
   application's explicit request vanishes, and a `latest` renewal whose

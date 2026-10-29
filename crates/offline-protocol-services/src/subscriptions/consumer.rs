@@ -21,6 +21,10 @@ use crate::payloads::{
     SVC_UNSUBSCRIBE, SVC_UPDATE,
 };
 
+/// How many times a sent subscribe goes inside the pending timeout, the
+/// first send included.
+const PENDING_SENDS: u32 = 4;
+
 /// One subscription this device holds, for the application to list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionInfo {
@@ -134,6 +138,12 @@ struct Sub {
     /// waits for the session with the provider to confirm.
     sent: bool,
     created_at: Instant,
+    /// When a sent, unanswered subscribe goes again. The engine sends a frame
+    /// that cannot be sealed nowhere, and a pending subscription has no
+    /// renewal to recover it: without this, a reply the provider could not
+    /// seal left the subscription to time out as `no_reply` while the
+    /// provider held it admitted.
+    resend_at: Option<Instant>,
     /// What is held of each topic, by topic name. At most
     /// [`MAX_PATTERN_TOPICS`] entries.
     tracks: BTreeMap<String, Track>,
@@ -363,6 +373,7 @@ impl Consumer {
             state: SubscriptionState::Pending,
             sent: false,
             created_at: now,
+            resend_at: None,
             tracks: BTreeMap::new(),
             lease: self.lease,
             next_renewal: None,
@@ -816,6 +827,26 @@ impl Consumer {
                                 "session_timeout"
                             },
                         ));
+                        continue;
+                    }
+                    if !sub.sent {
+                        continue;
+                    }
+                    // Four tries inside the pending timeout. The frame
+                    // supersedes the one still queued, so a provider that is
+                    // only slow costs one outbox entry, and one that holds
+                    // the subscription answers it as the renewal it reads.
+                    let interval = self.pending_timeout / PENDING_SENDS;
+                    match sub.resend_at {
+                        None => sub.resend_at = Some(now + interval),
+                        Some(at) if now >= at => {
+                            sub.resend_at = Some(now + interval);
+                            let resume = sub.resync_pending.then(|| sub.resync_resume.clone());
+                            if let Ok(frame) = subscribe_frame(sub_id, sub, resume.flatten()) {
+                                out.frames.push(frame);
+                            }
+                        }
+                        Some(_) => {}
                     }
                 }
                 SubscriptionState::Paused

@@ -3455,6 +3455,7 @@ impl OfflineProtocol {
         // (non-media) entry here (the failure/retry path); later calls find the
         // entry already present and leave its `reseal` intact.
         let staged_reseal = self.take_staged_reseal(message, is_media);
+        let subscription_frame = Self::is_subscription_reseal(staged_reseal.as_ref());
         let app_send = !is_media && self.is_staged_app_send(message);
         let outbox = if is_media {
             &mut self.media_outbox
@@ -3473,6 +3474,7 @@ impl OfflineProtocol {
                 reseal: staged_reseal,
                 relay_pushed: false,
                 app_send,
+                subscription_frame,
             });
         // Persist newly-created main-outbox entries so they survive a restart.
         // media entries are intentionally not persisted.
@@ -3509,6 +3511,7 @@ impl OfflineProtocol {
         // (non-media) outbox entry; on later attempts the entry already carries
         // it. Staging for media is never populated.
         let staged_reseal = self.take_staged_reseal(message, is_media);
+        let subscription_frame = Self::is_subscription_reseal(staged_reseal.as_ref());
         let app_send = !is_media && self.is_staged_app_send(message);
         let outbox = if is_media {
             &mut self.media_outbox
@@ -3527,6 +3530,7 @@ impl OfflineProtocol {
                 reseal: staged_reseal,
                 relay_pushed: false,
                 app_send,
+                subscription_frame,
             });
 
         entry.message = message.clone();
@@ -4028,6 +4032,29 @@ impl OfflineProtocol {
         message
             .content
             .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+    }
+
+    /// A service subscription frame lives in memory only (ADR 0035,
+    /// *Restart*). The outbox replays a restored entry verbatim, and after a
+    /// restart the stream or `sub_id` the frame names no longer exists: a
+    /// restored update or reply would reset the subscriber to a dead stream,
+    /// and a restored renewal would name a subscription its sender no longer
+    /// holds.
+    ///
+    /// Marked when the entry is created, from the re-seal provenance staged
+    /// as the frame was queued (`send_subscription_reliable` stages it for
+    /// every one), because that is the only place its plaintext is: the
+    /// stored message is the `__MLS_ENC__` envelope, so a restored
+    /// subscription frame cannot be told from a restored direct message, and
+    /// a test at restore would find nothing.
+    pub(super) fn is_subscription_outbox_entry(entry: &OutboxEntry) -> bool {
+        entry.subscription_frame
+    }
+
+    /// Whether staged re-seal provenance is a subscription frame's.
+    fn is_subscription_reseal(reseal: Option<&OutboxReseal>) -> bool {
+        reseal
+            .is_some_and(|reseal| offline_protocol_services::is_subscription_frame(&reseal.content))
     }
 
     // ========================================================================
@@ -6765,10 +6792,17 @@ impl OfflineProtocol {
             // sealed form seals toward us, and with the switch off we still
             // route it (parsing is unconditional), so this gates only whether
             // peers are invited to.
-            svc_versions: if self.config.encryption.encrypt_service_messages {
-                vec![offline_protocol_sealed::SVC_SEALED_V1]
-            } else {
-                Vec::new()
+            // Entry 2 under the subscription switch: subscription frames are
+            // always sealed, so they do not depend on the service-sealing one.
+            svc_versions: {
+                let mut versions = Vec::new();
+                if self.config.encryption.encrypt_service_messages {
+                    versions.push(offline_protocol_sealed::SVC_SEALED_V1);
+                }
+                if self.config.service_subscriptions.enabled {
+                    versions.push(offline_protocol_sealed::SVC_SUB_V1);
+                }
+                versions
             },
             // Present only when the Nostr transport is installed. Advertised
             // regardless of the sealing kill switch, which gates what *we*

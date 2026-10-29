@@ -205,7 +205,7 @@ impl OfflineProtocol {
         }
     }
 
-    fn direct_link_to(&self, recipient: &str) -> Result<TransportType> {
+    pub(super) fn direct_link_to(&self, recipient: &str) -> Result<TransportType> {
         self.transport_manager
             .mesh_transport_for(recipient)
             .ok_or_else(|| {

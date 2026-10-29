@@ -193,8 +193,10 @@ explicit trackers and bounded attempts.
 ### Service discovery
 
 Service messages use their own prefix family: `__SVC_DISC_Q__`,
-`__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__`, plus the generic service
-message prefix `__SVC_`. They are reserved on the same terms.
+`__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__`, the four subscription frames
+`__SVC_SUB__`, `__SVC_SUB_R__`, `__SVC_UPD__` and `__SVC_UNSUB__` (below),
+plus the generic service message prefix `__SVC_`. They are reserved on the
+same terms.
 
 `__SVC_` is a prefix of the other four rather than a sibling of them, which is
 deliberate and is the one entry in this registry that MUST NOT be read as a
@@ -202,7 +204,8 @@ frame type. It reserves the whole family, so a service frame added later is
 refused as application content before it is specified. A conformance check that
 treats the registry as a set of mutually non-prefixing frame tags fails on this
 entry alone; the correct reading is that `__SVC_` bounds a namespace and the
-four spellings above name the frames currently in it.
+eight spellings above name the frames currently in it. None of the eight is a
+prefix of another, so a `starts_with` test names exactly one frame.
 
 They are signature-gated like any control frame, and they are **exempt from the
 encryption requirement**. Discovery gossip is always sent in cleartext.
@@ -214,7 +217,8 @@ with that peer is confirmed. The sealed form is unsigned, as every 1:1
 envelope is: MLS authenticates its sender. A receiver that decrypts a plaintext
 beginning `__SVC_REQ__` or `__SVC_RESP__` from a 1:1 session slot MUST hand
 it to its service layer with the MLS-authenticated sender. It MUST NOT surface
-any decrypted `__SVC_` plaintext as a message, and it drops any other service
+any decrypted `__SVC_` plaintext as a message, and, the four subscription
+frames excepted ([below](#subscription-frames)), it drops any other service
 frame found there: discovery is never sealed, and a receiver that routed a
 sealed query would forward it onward as plaintext gossip. It
 routes the frame whatever its own configuration says, because parsing is never
@@ -222,6 +226,58 @@ gated. The signed plaintext form remains the floor. Neither form changes the
 exemption classes in this chapter, since the sealed form is `__MLS_ENC__`. See
 [residual risk R9](../security/threat-model.md#r9-service-bodies-are-sealed-only-toward-capable-peers-discovery-is-signed-not-encrypted) for what the
 fallback leaves exposed.
+
+#### Subscription frames
+
+The four subscription frames ([ADR 0035](../adr/0035-a-service-can-be-subscribed-to.md))
+have **no plaintext form**. Each travels only inside `__MLS_ENC__`, in the 1:1
+session between the consumer and the provider, toward a peer that advertised
+`svc_versions` entry 2 or has not yet said otherwise.
+
+| Prefix | Direction | Body (JSON) |
+|--------|-----------|-------------|
+| `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, keys?, lease_ms, resume?: {stream, seq, digest, topics?}, resync}`. Subscribe, renew (with `resume`) or resync |
+| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?, pattern_full?, notice?}`. `status` is `accepted`, `rejected`, `not_found`, `mode_mismatch` or `full` |
+| `__SVC_UPD__` | provider to consumer | `{v, sub_id, topic?, stream, seq, key?, body, snapshot}` |
+| `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
+
+A sender MUST NOT send a subscription frame in plaintext, and a sender that
+cannot seal one (no confirmed session yet, or a fault) does not send it. Nor
+does it send one to a peer its user blocked. A reply with `notice: true` is
+one the provider sends on its own (a topic started over, or a pattern at its
+cap): its positions and `pattern_full` apply, but it answers nothing the
+consumer asked, so a renewal or resync still waiting stays waiting. A
+receiver that decrypts one from a 1:1 session slot MUST hand it to its
+subscription layer with the MLS-authenticated sender, and MUST drop one that
+arrives as plaintext whatever its signature says. It MUST accept an
+`__SVC_UPD__` or `__SVC_SUB_R__` only from the provider the subscription
+names, and an `__SVC_UNSUB__` only from the other side of it.
+
+`v` is 2. A `topic` that ends in `*` is a pattern: the provider follows
+every topic in the subscription's mode that starts with what precedes the
+`*`, up to 64, and positions each separately. For a pattern,
+`resume.topics` is a list of `{topic, stream, seq, digest}`, the reply's
+`topics` a list of `{topic, stream, seq, history_lost}`, and every update
+carries `topic`; a topic absent from a renewal's `resume.topics` is caught up
+from position zero. A subscription MUST NOT create a topic: only a publish (or
+a checkpoint) on the provider does. An exact subscription to a topic not yet
+published is accepted with an empty `stream`, which the consumer reads as
+nothing held; its renewals carry `resume` with an empty `stream`, which the
+provider catches up from position zero on the topic's stream once there is
+one. When the topic is created in the other mode, the provider answers
+`mode_mismatch` and ends the subscription. `keys`, on a `latest` subscription only, lists the keys
+to send, each exact or a prefix ending in `*` (at most 32); the provider
+sends no other key and computes the renewal digest over these keys only, and
+the consumer drops an update for any other key. A provider MUST answer
+`rejected` with reason `invalid_subscription` to `keys` on a `log`
+subscription, or a `*` anywhere but the end of `topic`. A consumer that used
+either and is accepted by a reply with `v` below 2 MUST end the subscription
+with `__SVC_UNSUB__` and reason `unsupported`: that provider applied neither.
+
+A `latest` update to a subscriber with no live link is queued so that it
+supersedes the one queued before it for the same subscription and key; one
+that has already left can still arrive late, so the receiver drops an update
+whose `seq` is not above the one it holds for that key.
 
 ### Custody
 

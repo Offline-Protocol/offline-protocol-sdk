@@ -814,6 +814,47 @@ impl Default for CustodyConfig {
     }
 }
 
+/// Service subscriptions (ADR 0035): a consumer's lease on a provider's
+/// topic, and the updates sent to it.
+///
+/// Every subscription frame is sealed in the 1:1 MLS session or not sent, so
+/// subscriptions need MLS whatever this says. Switched off, the device neither
+/// advertises them nor answers them, and the public calls fail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServiceSubscriptionConfig {
+    /// Whether this device subscribes and can be subscribed to.
+    pub enabled: bool,
+    /// The lease a consumer asks for, in milliseconds. It renews at half of
+    /// what the provider grants. Between 30 000 and 600 000.
+    pub lease_ms: u64,
+    /// The least time between two `latest` updates to one subscriber, in
+    /// milliseconds. Faster publishes coalesce to the newest value per key.
+    pub min_update_interval_ms: u64,
+    /// How long a provider holds a subscription its application has not
+    /// answered before rejecting it, in milliseconds.
+    pub approval_timeout_ms: u64,
+    /// How long a consumer waits for a session and an answer before giving a
+    /// subscription up, in milliseconds.
+    pub pending_timeout_ms: u64,
+    /// How long a consumer keeps a subscription whose renewals go unanswered
+    /// before ending it, in milliseconds.
+    pub max_pause_ms: u64,
+}
+
+impl Default for ServiceSubscriptionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            lease_ms: offline_protocol_services::DEFAULT_SUBSCRIPTION_LEASE_MS,
+            min_update_interval_ms: 50,
+            approval_timeout_ms: 60_000,
+            pending_timeout_ms: 120_000,
+            max_pause_ms: 600_000,
+        }
+    }
+}
+
 /// Main configuration for the Offline Protocol.
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
@@ -901,6 +942,9 @@ pub struct ProtocolConfig {
     /// Custody: holding a neighbour's replication frames for hours. Off by
     /// default; see [`CustodyConfig`].
     pub custody: CustodyConfig,
+
+    /// Service subscriptions; see [`ServiceSubscriptionConfig`].
+    pub service_subscriptions: ServiceSubscriptionConfig,
 }
 
 impl ProtocolConfig {
@@ -925,6 +969,7 @@ impl ProtocolConfig {
             security: SecurityConfig::default(),
             data: DataConfig::default(),
             custody: CustodyConfig::default(),
+            service_subscriptions: ServiceSubscriptionConfig::default(),
         }
     }
 
@@ -1264,6 +1309,26 @@ impl ProtocolConfig {
         }
 
         self.validate_custody()?;
+
+        let subscriptions = &self.service_subscriptions;
+        if !(offline_protocol_services::MIN_SUBSCRIPTION_LEASE_MS
+            ..=offline_protocol_services::MAX_SUBSCRIPTION_LEASE_MS)
+            .contains(&subscriptions.lease_ms)
+        {
+            return Err(crate::Error::InvalidConfiguration(format!(
+                "service_subscriptions.lease_ms must be between {} and {}",
+                offline_protocol_services::MIN_SUBSCRIPTION_LEASE_MS,
+                offline_protocol_services::MAX_SUBSCRIPTION_LEASE_MS
+            )));
+        }
+        if subscriptions.approval_timeout_ms == 0
+            || subscriptions.pending_timeout_ms == 0
+            || subscriptions.max_pause_ms == 0
+        {
+            return Err(crate::Error::InvalidConfiguration(
+                "service_subscriptions timeouts must be greater than 0".to_string(),
+            ));
+        }
 
         Ok(())
     }

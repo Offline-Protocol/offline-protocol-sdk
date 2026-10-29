@@ -13,6 +13,7 @@ mod mesh_session;
 mod nostr_cold_contact;
 mod per_send_app_id;
 mod service_seal;
+mod service_subscriptions;
 
 use super::*;
 use crate::constants::{
@@ -8974,6 +8975,7 @@ fn test_unreachable_media_chunk_resolves_file_id() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
     protocol
@@ -10338,6 +10340,7 @@ fn test_unreachable_media_chunk_is_not_parked() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
     protocol
@@ -10817,6 +10820,7 @@ fn test_unreachable_media_chunk_is_offered_to_the_mesh() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
     protocol
@@ -11239,6 +11243,7 @@ fn test_unpark_cancel_spares_connection_request_ack() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
     protocol
@@ -11419,6 +11424,7 @@ fn test_unpark_cancel_spares_welcome_ack() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
     protocol
@@ -11631,6 +11637,7 @@ fn test_cleanup_outbox_absolute_lifetime_cap_is_terminal_in_process() {
                 reseal: None,
                 relay_pushed: false,
                 app_send: false,
+                subscription_frame: false,
             },
         )
     };
@@ -22690,6 +22697,7 @@ fn test_outbox_capacity_prune_stays_inside_the_launch_budget() {
                 reseal: None,
                 relay_pushed: false,
                 app_send: false,
+                subscription_frame: false,
             },
         );
     }
@@ -22771,6 +22779,7 @@ fn test_outbox_absolute_expiry_prune_stays_inside_the_launch_budget() {
                 reseal: None,
                 relay_pushed: false,
                 app_send: false,
+                subscription_frame: false,
             },
         );
     }
@@ -26589,6 +26598,7 @@ fn test_restored_outbox_settlements_reach_telemetry_only_for_app_sends() {
         reseal: None,
         relay_pushed: false,
         app_send,
+        subscription_frame: false,
     };
     let app = expired("app message", true);
     let internal = expired("internal frame", false);
@@ -26762,6 +26772,7 @@ fn test_a_legacy_outbox_record_restores_as_not_an_app_send() {
         reseal: None,
         relay_pushed: false,
         app_send: true,
+        subscription_frame: false,
     };
     let mut legacy = serde_json::to_value(&entry).unwrap();
     assert!(legacy.as_object_mut().unwrap().remove("app_send").is_some());
@@ -26854,6 +26865,7 @@ fn test_restore_outbox_skips_corrupted_entries() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
     storage
@@ -26903,6 +26915,7 @@ fn test_restore_outbox_prunes_overflow() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         };
         if i == 0 {
             oldest_id = Some(entry.message.id.as_str());
@@ -26949,6 +26962,7 @@ fn test_restore_outbox_refreshes_expired_ttl_carrier_relative() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
 
@@ -27101,6 +27115,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
                 reseal: None,
                 relay_pushed: false,
                 app_send: false,
+                subscription_frame: false,
             },
         );
     }
@@ -27116,6 +27131,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         };
         lapsed_ids.push(entry.message.id.as_str().to_string());
         store_outbox_entry(&storage, &entry);
@@ -27955,6 +27971,7 @@ fn test_cleanup_outbox_media_expiry_does_not_emit_message_failed() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
 
@@ -27993,6 +28010,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
 
@@ -28009,6 +28027,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
 
@@ -28115,6 +28134,7 @@ fn test_flush_outbox_for_peer_includes_media_outbox() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
 
@@ -28182,6 +28202,7 @@ fn test_flush_outbox_all_includes_media_outbox() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
 
@@ -39684,6 +39705,7 @@ fn test_relay_unreachable_reason_is_classified_and_still_parks_the_dm() {
             reseal: None,
             relay_pushed: false,
             app_send: false,
+            subscription_frame: false,
         },
     );
 
@@ -42550,6 +42572,7 @@ fn a_persisted_confirmation_probe_is_not_restored() {
         reseal: None,
         relay_pushed: false,
         app_send: false,
+        subscription_frame: false,
     };
     let probe = test_message("bob", internal_prefixes::SESSION_CONFIRM_PROBE);
     let real = test_message("bob", "hello");
@@ -42592,6 +42615,7 @@ fn an_outbox_full_of_legacy_probes_clears_in_one_launch() {
         reseal: None,
         relay_pushed: false,
         app_send: false,
+        subscription_frame: false,
     };
     for _ in 0..crate::constants::MAX_OUTBOX_ENTRIES {
         store_outbox_entry(
@@ -43120,6 +43144,7 @@ fn outbox_entry_at(
         reseal: None,
         relay_pushed,
         app_send: false,
+        subscription_frame: false,
     }
 }
 

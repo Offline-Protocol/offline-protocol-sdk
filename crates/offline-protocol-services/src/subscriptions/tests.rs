@@ -401,6 +401,55 @@ fn a_pending_subscription_times_out_with_the_reason_it_waited_for() {
     assert!(!link.consumer.holds(&never_sent) && !link.consumer.holds(&unanswered));
 }
 
+/// A sent subscribe goes again while it is unanswered, a quarter of the
+/// pending timeout apart. The engine drops a frame it cannot seal, and a
+/// pending subscription has no renewal to recover a lost reply: here the
+/// provider admitted it and its reply never arrived. One never sent waits
+/// for the session instead, and an answered one stops.
+#[test]
+fn an_unanswered_subscribe_goes_again_until_it_is_answered() {
+    let mut link = Link::new(Admission::Accept);
+    let now = link.now;
+    link.drop_provider_frames = true;
+    let sent = link.subscribe("a", SubscriptionMode::Latest);
+    link.consumer
+        .subscribe(
+            PROVIDER,
+            SVC,
+            "b",
+            &SubscribeOptions::new(SubscriptionMode::Latest),
+            now,
+        )
+        .unwrap();
+    assert_eq!(link.provider.subscribers(Some(SVC)).len(), 1);
+    assert_eq!(link.consumer_state(&sent), Some(SubscriptionState::Pending));
+
+    assert!(link.consumer.tick(now).frames.is_empty());
+    assert!(link
+        .consumer
+        .tick(now + Duration::from_secs(29))
+        .frames
+        .is_empty());
+    let again = link.consumer.tick(now + Duration::from_secs(30)).frames;
+    assert_eq!(again.len(), 1, "only the sent subscription goes again");
+    assert_eq!(
+        again[0].delivery,
+        SubscriptionDelivery::Superseding(format!("sub:{sent}"))
+    );
+    assert!(link
+        .consumer
+        .tick(now + Duration::from_secs(31))
+        .frames
+        .is_empty());
+
+    link.drop_provider_frames = false;
+    link.pump(SubscriptionOutput {
+        frames: again,
+        events: Vec::new(),
+    });
+    assert_eq!(link.consumer_state(&sent), Some(SubscriptionState::Active));
+}
+
 /// Invariant 8, first path: a `latest` value lost on the way is recovered by
 /// the next renewal, whose digest no longer matches the provider's.
 #[test]

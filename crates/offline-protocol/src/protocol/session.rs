@@ -223,6 +223,9 @@ impl OfflineProtocol {
         // lifecycle event does not fire on the probe and ack paths.
         #[cfg(feature = "data")]
         self.kick_data_sync(peer_id, source_event);
+        // Subscriptions waiting for this session, for the same reason as
+        // replication: every confirmation path reaches here, and only here.
+        self.kick_service_subscriptions(peer_id);
 
         Ok(true)
     }

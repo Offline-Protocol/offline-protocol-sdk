@@ -54,6 +54,11 @@ macro_rules! define_internal_prefixes {
             offline_protocol_services::SVC_DISCOVER_RESPONSE,
             offline_protocol_services::SVC_REQUEST,
             offline_protocol_services::SVC_RESPONSE,
+            // Subscription frames (ADR 0035), sealed-only.
+            offline_protocol_services::SVC_SUBSCRIBE,
+            offline_protocol_services::SVC_SUBSCRIBE_REPLY,
+            offline_protocol_services::SVC_UPDATE,
+            offline_protocol_services::SVC_UNSUBSCRIBE,
         ];
     };
 }

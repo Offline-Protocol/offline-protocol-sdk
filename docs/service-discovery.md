@@ -385,6 +385,171 @@ Service discovery is built on top of existing protocol infrastructure:
 - **Routing**: Discovery queries use the existing gossip and message forwarding infrastructure with the same deduplication and hop-counting as other mesh messages.
 - **Events**: Integrated with the existing `EventCallback` system — no separate event subscription needed.
 
+## Subscriptions
+
+A request gets one answer. A **subscription** gets every change as it happens:
+a consumer holds a lease on one topic of a provider's service, and the
+provider sends it updates until the lease ends. The decision record is
+[ADR 0035](adr/0035-a-service-can-be-subscribed-to.md) and the runtime
+behaviour is the [service subscriptions](state-machines/service-subscriptions.md)
+state machine.
+
+**Every subscription frame is sealed** in the 1:1 MLS session between the two
+devices, with no plaintext fallback: a subscription made before a session
+exists waits for it, and starts it. This is unlike requests and responses
+(see [Encryption Interaction](#encryption-interaction)).
+
+### Topics and modes
+
+A topic is a name under a service, 1 to 128 bytes of `A-Z a-z 0-9 . _ - /`.
+Its mode is fixed by its first publish. Only the application creates a
+topic: a subscription to one not yet published waits for it, and ends with
+`mode_mismatch` if the first publish is in the other mode.
+
+| Mode | For | Publish | A consumer that was away gets |
+|------|-----|---------|------------------------------|
+| `latest` | State: a battery level, a position, who is leading | With a key. Only the newest value per key matters | The current value of every key |
+| `log` | Events: a door opened, an alarm fired | Without a key. Every update matters, and each carries its `seq` | What it missed from the last 256 updates, or the checkpoint and what follows it |
+
+### Consumer
+
+```rust
+use offline_protocol::{SubscriptionMode};
+
+let sub_id = protocol.subscribe_service(&provider, "fleet.v1", "battery", SubscriptionMode::Latest, "")?;
+// ... service_subscription_changed { state: "active", reason: "accepted" }
+// ... service_update_received { key: Some("pct"), body: "81", snapshot: true }
+protocol.resync_service_subscription(&sub_id)?;   // the whole state again, now
+protocol.unsubscribe_service(&sub_id)?;
+```
+
+One subscription per (provider, service, topic): subscribing again to a
+topic this device already subscribes to fails with `InvalidArgument`, naming
+the existing `sub_id`.
+
+A subscription can be narrowed, and the provider applies both narrowings, so
+what was not asked for never leaves its device:
+
+```rust
+use offline_protocol::SubscribeOptions;
+
+// Every room, including rooms first published after this call; each update
+// names its topic ("rooms/kitchen"), and each topic is recovered on its own.
+protocol.subscribe_service(&provider, "home.v1", "rooms/*", SubscriptionMode::Latest, "")?;
+
+// Only these keys of a `latest` topic: exact, or a prefix ending in `*`.
+protocol.subscribe_service_with(&provider, "fleet.v1", "car", SubscribeOptions {
+    keys: vec!["battery".into(), "tyres.*".into()],
+    ..SubscribeOptions::new(SubscriptionMode::Latest)
+})?;
+```
+
+A pattern is a prefix and one final `*` (`*` alone is every topic), and
+follows at most 64 topics. A key filter applies to `latest` only: a `log`
+consumer tracks a contiguous position that a withheld update would leave a
+permanent gap in.
+
+### Provider
+
+```rust
+use offline_protocol::{SubscriptionPolicy, RulesFallback};
+
+protocol.register_service(descriptor)?;
+protocol.set_service_subscription_policy("fleet.v1", SubscriptionPolicy::Rules {
+    allow_peers: vec![],
+    allow_groups: vec![fleet_group_id],
+    fallback: RulesFallback::Ask,
+})?;
+let report = protocol.publish_service_update("fleet.v1", "battery", Some("pct"), "81")?;
+protocol.publish_service_update("fleet.v1", "doors", None, r#"{"door":"front","open":true}"#)?;
+protocol.set_service_topic_checkpoint("fleet.v1", "doors", r#"{"front":true,"back":false}"#)?;
+```
+
+Who may subscribe is the service's **policy**:
+
+| Policy | A new subscriber is |
+|--------|--------------------|
+| `Restricted` (the default) | Held, and the application is asked with `service_subscribe_received`; it calls `accept_service_subscription` or `reject_service_subscription`. Unanswered for 60 seconds, it is rejected |
+| `AcceptAll` | Admitted. Any peer with a session can watch the service |
+| `Rules` | Admitted when listed in `allow_peers` or a member of a group in `allow_groups` (in this device's roster of that group); anyone else is asked (`Ask`) or refused (`Reject`) |
+
+`renewal` on `service_subscribe_received` means the subscriber says it held
+the subscription before this device restarted or its lease lapsed. It is the
+subscriber's claim, which any peer can make: use it to word a prompt, never
+to admit without one. A subscriber to be admitted without asking belongs in
+`allow_peers`. Under `AcceptAll` the first to arrive fill the caps, and hold
+them for as long as they renew; a service that must stay reachable to
+particular peers uses `Rules`.
+
+`publish_service_update` returns how each subscriber was reached:
+`sent_live` (once, over a live direct link), `queued` (on the reliable
+ladder, across hops; a `latest` value replaces the one queued before it for
+its key), `coalesced` (held back by the 50 ms interval; the newest value
+follows) and `failed` (no confirmed session; the next renewal catches it up).
+`end_service_subscription` ends one subscription, `clear_service_topic`
+starts a topic over, and `service_subscribers` lists who is subscribed.
+Blocking a peer (`block_user`) ends every subscription with it at once, on
+both sides, and nothing is sent to it.
+
+### Getting the state back
+
+A consumer gets the state back without asking: each renewal (every minute by
+default) carries what it holds, and the provider sends what is missing. A
+provider that restarted or cleared the topic is noticed (`stream_reset`), and
+the new state follows. `resync_service_subscription` asks for it at once. A
+`log` consumer whose position has fallen out of the buffer gets the
+checkpoint and what follows it; with no checkpoint it is told
+`history_lost`, so set one whenever the state is worth summarising.
+
+A `log` topic is delivered in arrival order, not `seq` order: an update that
+arrives ahead of one still missing is delivered at once, and the gap is
+filled when the missing one arrives or at the next renewal. An application
+that needs order sorts by `seq`.
+
+Nothing of a subscription survives a restart on either side, its frames
+waiting to be sent included: they are never written to the outbox's store.
+A consumer that restarts holds no subscriptions and subscribes again. A
+provider that restarts holds no subscribers and no topics, and every stream
+is new; an application whose `latest` state matters republishes it at
+start-up. A frame that had already left, to a relay mailbox or a custodian,
+still arrives, and is dropped: each side remembers the streams and
+subscriptions it moved away from.
+
+### Events
+
+| Event | Side | Fields |
+|-------|------|--------|
+| `service_subscribe_received` | provider | `sub_id`, `service_id`, `topic`, `mode`, `params`, `sender`, `renewal` |
+| `service_subscription_changed` | both | `sub_id`, `role`, `service_id`, `topic`, `peer`, `state`, `reason` |
+| `service_update_received` | consumer | `sub_id`, `service_id`, `topic`, `key`, `seq`, `body`, `snapshot`, `provider_peer_id` |
+
+`state` is `pending`, `active`, `paused` or `ended`. `reason` is one of
+`accepted`, `resumed`, `stream_reset`, `history_lost`, `renewal_unanswered`,
+`provider_unreachable`, `no_reply`, `session_timeout`, `unsubscribed`,
+`revoked`, `replaced`, `expired`, `approval_timeout`, `service_unregistered`,
+`policy`, `invalid_subscription`, `rejected`, `not_found`, `mode_mismatch`,
+`full`, `pattern_full` (both sides: a pattern subscription follows 64 topics
+and will follow no more, reported once), or a reason the provider's
+application gave.
+
+### Limits
+
+| Limit | Value |
+|-------|-------|
+| Update or checkpoint body | 64 KiB |
+| Key | 1 to 256 bytes, no zero byte |
+| `params` | 4 KiB |
+| Subscriptions a provider holds, admitted or awaiting the application | 256, and 16 from one peer; refused, never evicted, at either |
+| Subscriptions a consumer holds | 64 |
+| Queued frames | Share the outbox with messages: a `latest` value waits as one entry per subscriber and key, a `log` update as one entry each |
+| `latest` topic | 256 keys, 256 KiB |
+| `log` buffer | 256 updates or 512 KiB |
+| Lease | 30 s to 600 s, default 120 s (`service_subscriptions.lease_ms`) |
+
+Subscriptions are switched by `ProtocolConfig::service_subscriptions` (on by
+default) and need MLS. The bindings do not carry that section yet, so a device
+on a binding runs the defaults.
+
 ## Example: MeshWiki
 
 The `examples/mesh-wiki/` directory contains a full React Native app demonstrating service discovery in a real-world scenario: a decentralized offline knowledge base.
