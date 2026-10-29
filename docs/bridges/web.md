@@ -9,7 +9,8 @@ node the application gives relays also carries the Nostr transport, which
 reaches any device by its address and resolves usernames, mobile ones
 included (W12), and browsers behind one network address find each other in
 a nearby room (W13). In Chromium a page can also link to a phone or a board
-over Bluetooth LE, as a central the person points at a device (W14).
+over Bluetooth LE, as a central the person points at a device, and through
+that device reach another page linked to it (W14).
 
 Read [the shared contract](README.md) first. This document covers what is
 specific to a page that runs the engine.
@@ -593,6 +594,27 @@ devices the origin was granted, in range or not, and the browser's
 connect to one out of range may wait on its own timeout. An application
 that reconnects on load should bound the wait itself.
 
+**Two browsers meet through a device both are linked to.** Neither page can
+find the other or accept its connection, but the device in between is a
+full node, and so is each page. A message for an address no carrier
+reaches goes to the mesh neighbours, the key package and the Welcome
+included ([a peer only the mesh reaches](../state-machines/session-lifecycle.md#a-peer-only-the-mesh-reaches-is-pushed-to-from-the-tick)),
+so two pages linked to one phone or board form an MLS session through it
+and exchange messages and groups it carries and cannot read. Neither page
+announces the other as a neighbour: each knows the other only by its
+address, which it has to learn some other way, such as an invite. Without
+the mesh push, a message between two pages that were never linked to each
+other would wait for a session that never forms, because discovery names
+only the device a frame arrived from. A BlueZ peripheral notifies every
+subscribed central, so each page behind it also receives the other's
+frames. It cannot read them, and it does not send them on: the forwarder
+counts the device a frame arrived from as holding it, and the page's only
+neighbour is that device. The cost is airtime on the device's side, not
+delivery.
+The three-engine tests in `ble_tests.rs` cover this on the host, and the
+[two-device checklist](web-devices.md#bluetooth-through-a-phone) records
+a run on real devices.
+
 ### W15. A page that loads offline caches one build whole
 
 A node that links over a local network with no internet is no use if its
@@ -703,7 +725,7 @@ works.
 | [C3](README.md#c3-events-cross-as-opaque-json) | Applies unchanged: `pollEvent` returns the engine's JSON, and the client dispatches it as a DOM event named by its `type` |
 | [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language) | The resolution-query completion deadline is the one mirrored constant here, pinned in `nostr-relays.js` beside the two mobile trackers (W12) |
 | [C7](README.md#c7-ordering-constraints-across-the-boundary) | `initialize` before `start`: the address replaces the placeholder the transport was built on |
-| [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | The browser test page is the binding's own test; the Rust tests in the crate run two engines over links on the host |
+| [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | The browser test page is the binding's own test; the Rust tests in the crate run two or three engines over links on the host |
 | [C11](README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified) | The durable log store passes both conformance suites on the host, and so does the in-memory protocol-state store (W8) |
 | [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform) | Not built: the pipe's uploader is a thread and a blocking client. A browser build has no telemetry until it has a `fetch` seam |
 
@@ -739,7 +761,7 @@ works.
 
 ```bash
 cargo install wasm-bindgen-cli --version 0.2.105 --locked   # once
-cargo test -p offline-protocol-web                          # two engines on the host
+cargo test -p offline-protocol-web                          # two or three engines on the host
 bash bindings/web/scripts/build.sh                          # module + glue in bindings/web/pkg
 (cd bindings/web && npm ci && npx playwright install chromium firefox webkit)   # once
 bash bindings/web/scripts/test-browser.sh                   # every page, three engines
@@ -902,10 +924,12 @@ two-player game between devices over WebRTC with durable nodes.
   ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
 - **Bluetooth from a real browser to a real device.** No engine runs Web
   Bluetooth without a person at the chooser, so CI drives the carrier
-  through a stand-in. Chrome on Android, macOS and Linux against an
-  Android phone and a board is a manual check, and so is the ATT MTU Chrome
-  negotiates on each (W14). Reaching an iPhone needs its peripheral to serve
-  Hello, which iOS releases before this one do not.
+  through a stand-in. Chrome on Android and Chromium on macOS have linked to
+  an iPhone once, by hand ([the checklist](web-devices.md#bluetooth-through-a-phone));
+  an Android phone or a board as the peripheral, Chrome on Linux, and the
+  ATT MTU Chrome negotiates on each are not run yet (W14). Reaching an
+  iPhone needs its peripheral to serve Hello, which iOS releases before
+  this one do not.
 - **The lobby offline and installed on a phone.** `offline.mjs` reloads it
   offline in three engines on one machine, which installs nothing and is
   not Safari. Opening it offline on two phones and installing it is step 9

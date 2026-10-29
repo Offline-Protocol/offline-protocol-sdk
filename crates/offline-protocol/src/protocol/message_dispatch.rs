@@ -1273,6 +1273,28 @@ impl OfflineProtocol {
             if resend_confirm_on_retransmit && is_session && self.config.encryption.enabled {
                 self.send_session_confirm_encrypted(&sender_owned);
             }
+
+            // A session Welcome we kept our own session over was built on a
+            // package of ours, so the peer spent it and holds none of ours for
+            // a later group invite. A side that adopts or joins sends a fresh
+            // package (above); the side that keeps must too, whether it is
+            // still awaiting the peer's proof or has already confirmed.
+            // Without this, a pair whose packages crossed (each built a
+            // session from the other's before either Welcome arrived, which a
+            // device carrying both directions makes common, since it forwards
+            // each frame after its own jitter) left the adopter with no
+            // package for the keeper: its invites failed with no key package
+            // for as long as the session lived, because our reciprocation on
+            // its packages is gated on reaching it directly. The pool hands
+            // the peer its live package again, so a repeat on a retransmitted
+            // Welcome mints no key material, and the peer holds a session, so
+            // the package builds no rival group there.
+            if (owner_keep || resend_confirm_on_retransmit)
+                && is_session
+                && self.config.encryption.enabled
+            {
+                let _ = self.send_key_package_to(&sender_owned, false);
+            }
         }
     }
 

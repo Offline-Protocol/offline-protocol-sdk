@@ -230,6 +230,20 @@ alone.
 The drain is downstream of the confirmation **transition**, not of decryption as
 such: a decrypt on a session that is already confirmed does not re-run it.
 
+**The owner sends a fresh key package for every session Welcome it does not
+adopt.** That Welcome was built on a package of the owner's, which the adopter
+spent on the group it gives up, so the adopter holds none of the owner's for a
+later group invite. The adopter sends one after adopting, as every side that
+joins does; the owner sends one whether it is still waiting for the adopter's
+proof or has already confirmed, since the adopter's proof can overtake its own
+rival Welcome. Without it a pair whose packages crossed left the adopter's
+invites failing with no key package for as long as the session lived. Packages
+cross most often through a device in between, which forwards each frame after
+its own jitter, and there the owner's reciprocation on the adopter's packages is
+gated on reaching it directly, so nothing else sent one. The pool hands the
+adopter its live package again, so the push repeated on a retransmitted Welcome
+mints no key material.
+
 Anything else that has to happen exactly once when a session becomes usable
 hangs off that same transition rather than off the four call sites that reach
 it. Document replication's version exchange is the current example. Wiring such

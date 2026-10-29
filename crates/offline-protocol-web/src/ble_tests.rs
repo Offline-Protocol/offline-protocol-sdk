@@ -335,3 +335,164 @@ fn stopping_reports_every_bluetooth_peer_lost() {
     assert_eq!(count(&a, "neighbor_lost", &b_addr), 1);
     assert!(a.node.ble_fragment_received(&b_addr, b"OP").is_err());
 }
+
+/// Moves every queued fragment among `sides` to the side it names, then
+/// ticks each, so any number of nodes share one simulated radio. A side at
+/// `broadcaster` reaches every other side with each fragment, whoever it
+/// names, as a BlueZ peripheral does: it has no per-central notification.
+fn pump_all(sides: &mut [&mut Side], broadcaster: Option<usize>) {
+    let addresses: Vec<String> = sides.iter().map(|s| s.address.clone()).collect();
+    let mut moved = Vec::new();
+    for (from, s) in sides.iter_mut().enumerate() {
+        while let Some((peer, fragment)) = s.node.ble_next_fragment() {
+            moved.push((from, peer, fragment));
+        }
+    }
+    for (from, peer, fragment) in moved {
+        let to: Vec<usize> = if broadcaster == Some(from) {
+            (0..sides.len()).filter(|&i| i != from).collect()
+        } else {
+            let named = addresses.iter().position(|a| *a == peer);
+            vec![named.expect("a fragment for a node on the radio")]
+        };
+        for to in to {
+            sides[to]
+                .node
+                .ble_fragment_received(&addresses[from], &fragment)
+                .expect("fragment");
+        }
+    }
+    for s in sides.iter_mut() {
+        s.node.process().expect("process");
+        drain(s);
+    }
+}
+
+fn run_all(
+    sides: &mut [&mut Side],
+    broadcaster: Option<usize>,
+    mut done: impl FnMut(&mut [&mut Side]) -> bool,
+) -> bool {
+    for _ in 0..800 {
+        pump_all(sides, broadcaster);
+        if done(sides) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+fn received(s: &Side, content: &str) -> bool {
+    s.events.iter().any(|e| {
+        e["type"] == "message_received" && e["content"] == content && e["encrypted"] == true
+    })
+}
+
+/// Two pages that can never link to each other (a browser is a central
+/// only) reach each other through the one peripheral both are linked to.
+/// No discovery names a peer two hops away, so this rests on the tick's
+/// mesh push of the key package and the Welcome.
+#[test]
+fn two_browsers_reach_each_other_through_one_peripheral() {
+    let (mut a, mut hub, mut c) = (side("browser-a"), side("phone"), side("browser-c"));
+    link(&mut a, &mut hub, 244);
+    link(&mut c, &mut hub, 244);
+    let (a_addr, c_addr) = (a.address.clone(), c.address.clone());
+
+    a.node.send_message(&c_addr, "a to c", false).expect("send");
+    assert!(
+        run_all(&mut [&mut a, &mut hub, &mut c], None, |s| received(
+            s[2], "a to c"
+        )),
+        "c never read a's message through the hub"
+    );
+    c.node.send_message(&a_addr, "c to a", false).expect("send");
+    assert!(
+        run_all(&mut [&mut a, &mut hub, &mut c], None, |s| received(
+            s[0], "c to a"
+        )),
+        "a never read c's reply through the hub"
+    );
+    assert_eq!(count(&a, "neighbor_discovered", &c_addr), 0);
+    assert!(count(&a, "secure_session_established", &c_addr) > 0);
+    assert!(!hub
+        .events
+        .iter()
+        .any(|e| e["type"] == "message_received" && e["content"] == "a to c"));
+
+    // A group of the two browsers, the hub not in it, carried by the hub.
+    let group: Value =
+        serde_json::from_str(&a.node.create_group("over the hub").expect("group")).expect("json");
+    let group_id = group["group_id"].as_str().expect("group id").to_string();
+    // The invite needs the key package c sends after the session forms,
+    // which crosses the hub a tick or two behind it.
+    assert!(
+        run_all(&mut [&mut a, &mut hub, &mut c], None, |s| s[0]
+            .node
+            .invite_to_group(&group_id, &c_addr)
+            .is_ok()),
+        "c's key package never crossed the hub"
+    );
+    assert!(
+        run_all(&mut [&mut a, &mut hub, &mut c], None, |s| s[2]
+            .events
+            .iter()
+            .any(
+                |e| e["type"] == "group_member_added" && e["group_id"] == group_id.as_str()
+            )),
+        "c never joined a's group through the hub"
+    );
+    c.node
+        .send_group_message(&group_id, "to the group", false)
+        .expect("group send");
+    assert!(
+        run_all(&mut [&mut a, &mut hub, &mut c], None, |s| s[0]
+            .events
+            .iter()
+            .any(
+                |e| e["type"] == "group_message_received" && e["content"] == "to the group"
+            )),
+        "a never read c's group message through the hub"
+    );
+}
+
+#[test]
+fn a_message_sent_before_the_other_browser_arrives_crosses_the_hub_later() {
+    let (mut a, mut hub, mut c) = (side("browser-a"), side("phone"), side("browser-c"));
+    link(&mut a, &mut hub, 244);
+    let c_addr = c.address.clone();
+    a.node.send_message(&c_addr, "early", false).expect("send");
+    // Two seconds with c out of range.
+    for _ in 0..80 {
+        pump_all(&mut [&mut a, &mut hub], None);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    link(&mut c, &mut hub, 244);
+    assert!(
+        run_all(&mut [&mut a, &mut hub, &mut c], None, |s| received(
+            s[2], "early"
+        )),
+        "a message queued while c was away never reached it"
+    );
+}
+
+/// Each page behind a BlueZ peripheral also receives the other's frames.
+/// It cannot decrypt them, so they cost airtime and nothing else.
+#[test]
+fn two_browsers_reach_each_other_through_a_peripheral_that_notifies_everyone() {
+    let (mut a, mut hub, mut c) = (side("browser-a"), side("pi"), side("browser-c"));
+    link(&mut a, &mut hub, 244);
+    link(&mut c, &mut hub, 244);
+    let (a_addr, c_addr) = (a.address.clone(), c.address.clone());
+    a.node.send_message(&c_addr, "a to c", false).expect("send");
+    c.node.send_message(&a_addr, "c to a", false).expect("send");
+    assert!(
+        run_all(&mut [&mut a, &mut hub, &mut c], Some(1), |s| received(
+            s[2], "a to c"
+        ) && received(
+            s[0], "c to a"
+        )),
+        "a broadcasting peripheral stopped delivery"
+    );
+}

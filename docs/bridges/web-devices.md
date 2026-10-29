@@ -151,6 +151,31 @@ Open the page on both devices. Each step names what to record.
    browser's offline page, "starting…" that never ends, a different address
    after an offline reload, or a generic icon.
 
+## Bluetooth through a phone
+
+Two browsers on separate devices, each linked over Web Bluetooth only to
+one phone running the SDK as the peripheral, must reach each other through
+it ([W14](web.md#w14-bluetooth-is-a-central-the-person-points-at-a-device)).
+The lobby has no Bluetooth carrier, so this runs on a page that starts a
+node with `ble: true`, links through `BluetoothCarrier.request()`, and
+sends by address. It needs two Chromium browsers on separate devices: two
+pages on one machine reach the phone through one radio, and the peripheral
+attributes writes per central, by the hello it wrote.
+
+1. Both pages link to the phone. Fails as: an empty chooser, or a link
+   that rejects (a phone whose peripheral serves no Hello).
+2. Each page sends a direct message to the other's address. Pass: it
+   arrives `encrypted`, with the sender's address, and neither page lists
+   the other as a neighbour.
+3. One page creates a group and invites the other, which sends to it.
+   Pass: the invite finds the member's key package and the message
+   arrives.
+4. The phone's app shows none of the plaintext.
+
+| Date | Commit | Devices | Notes |
+|------|--------|---------|-------|
+| 2026-10-28 | e07b88be | iPhone 16, iOS 26.6.2, the SDK example app in the foreground (the peripheral); Samsung Galaxy M17 5G (SM-M176B), Android 16, Chrome 156.0.8078.47; MacBook, macOS 26.6.2, Chrome for Testing from Playwright's `chromium-1248`. Pages over `adb reverse` and `localhost`, driven over the DevTools protocol, the chooser answered with its `DeviceAccess` domain | 1: both linked to the iPhone's verified address; Chrome on Android listed it as an unknown device, Chromium on macOS by its name. 2: Mac to Samsung under 5 s, Samsung to Mac under 3 s, both encrypted; each page's only neighbour was the iPhone. 3: the invite found the key package on its first try, the Samsung joined within 3 s and its message reached the Mac within 3 s. 4: the app read "2 nearby • 0 unread". Chrome for Testing ships no `NSBluetoothAlwaysUsageDescription`, so macOS ends it at its first Bluetooth call: the run used a copy with the key added, re-signed ad hoc and started with `open`. Not run: an Android phone or a board as the peripheral, the app in the background, a link that drops and comes back |
+
 ## What this does not show
 
 - **Safari's storage eviction.** Safari may delete a site's script-writable
