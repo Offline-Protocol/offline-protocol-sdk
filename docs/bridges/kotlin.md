@@ -244,10 +244,14 @@ nothing, in at least one direction, until the Android app restarted.
   dial repeated every 60 seconds. `bindUnmappedServerLink` maps that server
   link first, never rebinding one already mapped (`DuplicateClientLinkTest`).
 - **A client link that only takes writes is redialled.** `SilentLinkPolicy`
-  (`SilentLinkPolicyTest`) and the connection monitor disconnect it, so the
-  ordinary reconnect runs the handshake again, hello included. A link is
-  judged only until the peer first answers on it. The rule and its bound are
-  in
+  (`SilentLinkPolicyTest`) and the connection monitor disconnect it and redial
+  the same address, so the handshake runs again, hello included. The redial
+  is explicit (`disconnectToRedial`): the peer usually also holds a link to
+  our server, and the ordinary disconnect path drops the address of a peer
+  linked elsewhere instead of redialling it, which left the redial to a fresh
+  advertisement. A link is judged only until the peer first answers on it,
+  and a peer is redialled once until it is heard from again. The rule and
+  its bounds are in
   [the transport lifecycle](../state-machines/transport-lifecycle.md#per-transport-constraints).
 
 ## Testing

@@ -11,7 +11,7 @@ import org.junit.Test
  * came back, and only restarting the Android app ended it.
  */
 class SilentLinkPolicyTest {
-    private val policy = SilentLinkPolicy<String>(ackWaitMs = 10_000L)
+    private val policy = SilentLinkPolicy<String, String>(ackWaitMs = 10_000L)
 
     @Test
     fun `a link that keeps taking writes and returns nothing is silent`() {
@@ -85,6 +85,39 @@ class SilentLinkPolicyTest {
         policy.noteWrite("live", 40_000L)
         policy.noteWrite("live", 50_000L)
         assertEquals(listOf("live"), policy.silentLinks(60_000L))
+    }
+
+    @Test
+    fun `a peer is redialled for silence once until it is heard from`() {
+        // A peer that only receives frames asking for no acknowledgement never
+        // answers a link that works. Judged per link alone, every redial would
+        // be torn down again 25 to 30 seconds later, for as long as it lasts.
+        val peerOf = { _: String -> "peer" }
+        policy.noteWrite("first", 0L)
+        policy.noteWrite("first", 10_000L)
+        assertEquals(listOf("first"), policy.linksToRedial(20_000L, peerOf))
+
+        policy.noteWrite("redial", 25_000L)
+        policy.noteWrite("redial", 35_000L)
+        assertEquals(emptyList<String>(), policy.linksToRedial(45_000L, peerOf))
+        // No longer judged, however long it stays silent.
+        policy.noteWrite("redial", 100_000L)
+        assertEquals(emptyList<String>(), policy.linksToRedial(600_000L, peerOf))
+
+        // Heard from again, the peer may be redialled on its next silence.
+        policy.notePeerHeard("peer")
+        policy.noteWrite("later", 600_000L)
+        policy.noteWrite("later", 610_000L)
+        assertEquals(listOf("later"), policy.linksToRedial(620_000L, peerOf))
+    }
+
+    @Test
+    fun `the redial bound is per peer`() {
+        policy.noteWrite("a", 0L)
+        policy.noteWrite("a", 10_000L)
+        policy.noteWrite("b", 0L)
+        policy.noteWrite("b", 10_000L)
+        assertEquals(listOf("a", "b"), policy.linksToRedial(20_000L) { it }.sorted())
     }
 
     @Test

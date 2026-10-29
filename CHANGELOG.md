@@ -84,8 +84,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   its server, and is then refused as a duplicate link, now maps that writer
   before it closes. And a client link that keeps taking writes and has never
   had an answer is dropped and redialled, which writes the hello again,
-  about 20 to 25 seconds after its first write. A link the peer has answered
-  once is never dropped for silence. On two phones, the first iPhone restart
+  about 20 to 25 seconds after its first write, even when the peer holds
+  another link. A link the peer has answered once is never dropped for
+  silence, and a peer is redialled once until it is heard from again, so one
+  that only receives frames asking for no acknowledgement is not redialled
+  over and over. On two phones, the first iPhone restart
   beside a linked Android phone failed before, as did one in ten restarts of
   both apps; after, 62 of 62 restarts and connects carried messages
   ([kotlin-devices.md](docs/bridges/kotlin-devices.md),

@@ -208,17 +208,26 @@ write without response reports success whether or not the peer can use it,
 and a link outlives the app on the other end while what it meant does not: an
 iPhone whose app restarts keeps its links through state restoration, but the
 new process never heard the hello that named the central, so it cannot
-attribute what that central writes. On Android, a client link is disconnected,
-and so redialled by the ordinary reconnect with its hello, once nothing from
-the peer has arrived on any link since the link came up, and a write at least
+attribute what that central writes. On Android, a client link is disconnected
+and redialled at the same address, which writes its hello again, once nothing
+from the peer has arrived on any link since the link came up, and a write at least
 10 seconds after its first one (the acknowledgement timeout, so the core's
 resend or another message) has itself gone 10 seconds unanswered. That is 20
 to 25 seconds after the first write (the check runs every 5 seconds), and the
-redial follows within about 5 seconds; on two phones the first message crossed
+redial follows within the 5 second reconnect backoff, whether or not the peer
+holds another link; on two phones the first message crossed
 26 seconds after the dead link came up. One unanswered write never counts,
 because the last frame of an exchange is often an acknowledgement. Only a
 fragment counts as hearing the peer: a hello or a subscription shows the peer
 is up, not that it can use what this side writes.
+
+A peer is redialled for silence once until it is heard from again. Not every
+frame asks for an acknowledgement (ephemeral frames and relay hints do not),
+so a peer that only receives those, and sends nothing of its own, never
+answers a link that works. Judged per link alone, each redial would start
+unjudged and be torn down 25 to 30 seconds later for as long as the stream
+lasted. So a peer whose first redial stays silent is left on that link, and
+the failure this rule exists for comes back for it until it speaks.
 
 A link the peer has answered once is never judged again. A peer that stops
 answering after that can attribute what it receives, and is holding its

@@ -1251,7 +1251,7 @@ class BleTransportFacade(
     // Client links that keep taking Message writes with nothing coming back
     // from the peer ([SilentLinkPolicy]). Checked by the connection monitor,
     // which disconnects a silent link so it is redialled. BLE-thread only.
-    private val silentLinks = SilentLinkPolicy<BluetoothGatt>()
+    private val silentLinks = SilentLinkPolicy<BluetoothGatt, String>()
 
     // MARK: - TransportManager Implementation
     
@@ -3627,15 +3627,16 @@ class BleTransportFacade(
 
     /** A fragment from [peerId] arrived: every client link to it is delivering. */
     private fun noteHeardFrom(peerId: String) {
+        silentLinks.notePeerHeard(peerId)
         for (address in connections.addressesForDevice(peerId)) {
             connections.getGatt(address)?.let(silentLinks::noteHeard)
         }
     }
 
     /**
-     * Disconnects every client link [SilentLinkPolicy] finds silent, so the
-     * ordinary disconnect path redials it and the handshake (hello included)
-     * runs again. A link that takes writes and returns nothing is otherwise
+     * Disconnects every client link [SilentLinkPolicy] says to redial, and
+     * redials it at the same address, so the handshake (hello included) runs
+     * again. A link that takes writes and returns nothing is otherwise
      * never torn down, and only an app restart here ended one: an iPhone whose
      * app restarted holds its links through state restoration but not the
      * hello that named us, and a peripheral that cannot name a central drops
@@ -3643,8 +3644,8 @@ class BleTransportFacade(
      */
     private fun closeSilentClientLinks() {
         silentLinks.retainAll { gatt -> connections.getGatt(gatt.device.address) === gatt }
-        for (gatt in silentLinks.silentLinks(android.os.SystemClock.elapsedRealtime())) {
-            silentLinks.forget(gatt)
+        val now = android.os.SystemClock.elapsedRealtime()
+        for (gatt in silentLinks.linksToRedial(now) { connections.deviceIdForAddress(it.device.address) }) {
             val address = gatt.device.address
             val peerId = connections.deviceIdForAddress(address)
             Log.w(TAG, "Client link to $peerId at $address takes writes and returns nothing; disconnecting to redial")
@@ -3652,11 +3653,7 @@ class BleTransportFacade(
                 "address" to address,
                 "peerId" to (peerId ?: "unknown"),
             ))
-            try {
-                gatt.disconnect()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error disconnecting silent link $address", e)
-            }
+            centralClient.disconnectToRedial(gatt)
         }
     }
 

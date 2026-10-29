@@ -267,6 +267,9 @@ internal class CentralGattClient(
 
     private val connectionRetryCount = ConcurrentHashMap<String, Int>()
 
+    /** Addresses disconnected by [disconnectToRedial] whose disconnect has not landed yet. */
+    private val redialOnDisconnect: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     // Payload negotiated on each client link (MTU minus the ATT header),
     // so the hello is written only where it fits in one write.
     private val negotiatedPayload = ConcurrentHashMap<String, Int>()
@@ -354,6 +357,25 @@ internal class CentralGattClient(
 
     /** True if a successful CCCD write has been observed for [address]. */
     fun isLinkReady(address: String): Boolean = linkReady.contains(address)
+
+    /**
+     * Disconnects [gatt] and redials its address through the reconnect
+     * backoff, even when the peer holds another link. A silent link's peer
+     * usually also writes to our server from an address its hello mapped, and
+     * the stale-address branch of [handleDisconnected] would otherwise drop
+     * this address instead of redialling it, leaving the redial to a fresh
+     * advertisement that a backgrounded iPhone may never send.
+     */
+    fun disconnectToRedial(gatt: BluetoothGatt) {
+        val address = gatt.device.address
+        redialOnDisconnect.add(address)
+        try {
+            gatt.disconnect()
+        } catch (e: Exception) {
+            redialOnDisconnect.remove(address)
+            Log.w(TAG, "Error disconnecting silent link $address", e)
+        }
+    }
 
     /** Drop link-ready, retry, and device-id state for [address]. */
     fun forgetLink(address: String) {
@@ -1032,8 +1054,9 @@ internal class CentralGattClient(
         // The peer already reconnected from another address: this one is
         // stale, so drop it instead of redialling it and later reporting the
         // (live) peer as lost.
+        val redial = redialOnDisconnect.remove(address)
         val stalePeerId = host.connections.deviceIdForAddress(address)
-        if (stalePeerId != null && host.connections.hasOtherLiveLink(stalePeerId, address)) {
+        if (!redial && stalePeerId != null && host.connections.hasOtherLiveLink(stalePeerId, address)) {
             connectionRetryCount.remove(address)
             bleHandler.post { finalizeGivenUpPeer(address, stalePeerId) }
             return
