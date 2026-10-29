@@ -1066,10 +1066,16 @@ internal class CentralGattClient(
 
         // The peer already reconnected from another address: this one is
         // stale, so drop it instead of redialling it and later reporting the
-        // (live) peer as lost.
+        // (live) peer as lost. Only a link that can carry our sends makes it
+        // stale (a client link, or the peer's subscribed link to our server).
+        // An unsubscribed server link cannot, and a restarted iPhone's
+        // restored one is never subscribed again: counted, it left the peer
+        // with nothing to send over until a fresh advertisement.
         val redial = redialOnDisconnect.remove(address)
         val stalePeerId = host.connections.deviceIdForAddress(address)
-        if (!redial && stalePeerId != null && host.connections.hasOtherLiveLink(stalePeerId, address)) {
+        if (!redial && stalePeerId != null &&
+            host.connections.hasOtherUsableLink(stalePeerId, address, host::isCentralSubscribed)
+        ) {
             connectionRetryCount.remove(address)
             bleHandler.post { finalizeGivenUpPeer(address, stalePeerId) }
             return

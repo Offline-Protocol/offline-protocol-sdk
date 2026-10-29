@@ -247,7 +247,9 @@ nothing, in at least one direction, until the Android app restarted.
   server too, so a server connection alone proves nothing. Like a hello's
   mapping, it then flushes the per-peer MTU, leaving out the payload the
   refused dial staged (`DuplicateClientLinkTest`,
-  `StaleAddressDisconnectTest`).
+  `StaleAddressDisconnectTest`). Such a server link is never subscribed
+  again, so it cannot carry our sends: a client link that drops while it is
+  the peer's only other link is redialled, not dropped as stale.
 - **A client link that only takes writes is redialled.** `SilentLinkPolicy`
   (`SilentLinkPolicyTest`) and the connection monitor disconnect it and redial
   the same address, so the handshake runs again, hello included. The redial
