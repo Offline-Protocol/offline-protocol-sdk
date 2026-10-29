@@ -1,6 +1,6 @@
 # Bridge contracts
 
-The Rust core is exposed to Swift, Kotlin, Python, TypeScript, C, Java, Ruby
+The Rust core is exposed to Swift, Kotlin, Python, TypeScript, C, C#, Java, Ruby
 and the browser. This directory states what each binding owes the core and
 what the core owes each binding.
 
@@ -14,6 +14,7 @@ what the core owes each binding.
 | [TypeScript](typescript.md) | The React Native JavaScript surface |
 | [Local API](local-api.md) | A server fronting one engine for several local clients over a socket, and the reference server |
 | [C](c.md) | The C API in `bindings/c`: the local API called in process |
+| [C#](csharp.md) | The .NET binding in `bindings/csharp` (P/Invoke over the C API) |
 | [Java](java.md) | The generated Java binding in `bindings/java` |
 | [Ruby](ruby.md) | The generated Ruby binding in `bindings/ruby` |
 | [Web](web.md) | The engine in a browser worker: `crates/offline-protocol-web` and `bindings/web` |
@@ -758,6 +759,7 @@ found by the first application to update.
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
 | Flutter | Shared bridge sources compiled less a named list of React-only ones (F1); engine-thread UniFFI with main-thread channel callbacks (F2); method-channel names pinned to Dart (F3); event seq/replay parity with React Native (F4); config via shared parsers (F5); secure storage via shared Kotlin/Swift adapters (F6) |
 | C | Nothing the library can do for it: the transports, storage and lifecycle are all the host's; callbacks callable from any thread that never call back into the engine and never unwind; every string the library hands out freed with `offline_protocol_string_free`; `os_major` supplied for telemetry, `os` never (K1 to K3 in [c.md](c.md)) |
+| C# | Everything C owes (K1 to K3 in [c.md](c.md)), with every native call of an engine on its one engine thread and `DisposeAsync` awaited before the application shuts down (CS1 to CS3 in [csharp.md](csharp.md)) |
 | Web | One dedicated worker per engine, nothing that calls back into the page, carriers that move bytes and never interpret them, and one durable node per account per origin (W1 to W3, W8 in [web.md](web.md)) |
 
 A storage adapter written in any of them owes the same thing: a green
