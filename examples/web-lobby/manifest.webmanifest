@@ -1,0 +1,14 @@
+{
+  "name": "Pong Lobby",
+  "short_name": "Pong",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#161615",
+  "theme_color": "#161615",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

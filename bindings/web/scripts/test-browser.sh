@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Runs every browser test page in Chromium, Firefox and WebKit, headless,
 # through Playwright. Builds the module first only when bindings/web/pkg is
-# missing: after a Rust change, run scripts/build.sh (CI always does, in the
+# incomplete: after a Rust change, run scripts/build.sh (CI always does, in the
 # step before this one).
 #
 # BROWSERS narrows the engines (default: chromium firefox webkit). The
 # browsers are Playwright's own builds, pinned by the playwright version in
 # package-lock.json; `npx playwright install` fetches them. A static server
-# on PORT serves this directory, which is all a page, its worker and the
-# module need.
+# on PORT serves the repository root, the pages under bindings/web/test and
+# the lobby example the offline check loads, with every response no-store so
+# that offline only a service worker's cache answers (test/serve.py).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -18,10 +19,12 @@ RELAY_PORT="${RELAY_PORT:-8766}"
 # The local STUN server the nearby page learns its network's address from.
 STUN_PORT="${STUN_PORT:-8767}"
 
-[ -f pkg/offline_protocol_web.js ] || bash scripts/build.sh
+# build-id.js is written last, and the lobby's service worker cannot start
+# without it, so a pkg/ built before it existed is built again.
+[ -f pkg/build-id.js ] || bash scripts/build.sh
 [ -d node_modules/playwright ] || npm ci
 
-python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
+python3 test/serve.py "$PORT" ../.. >/dev/null 2>&1 &
 server=$!
 node test/nostr-relay.mjs "$RELAY_PORT" >/dev/null 2>&1 &
 relay=$!
@@ -41,4 +44,6 @@ done
 pages=()
 for page in test/*.html; do pages+=("$page"); done
 STUN_URL="stun:127.0.0.1:$STUN_PORT" \
-  node test/run.mjs "http://127.0.0.1:$PORT" "ws://127.0.0.1:$RELAY_PORT" 90000 "${pages[@]}"
+  node test/run.mjs "http://127.0.0.1:$PORT/bindings/web" "ws://127.0.0.1:$RELAY_PORT" 90000 "${pages[@]}"
+# The lobby, opened once, reloads offline as the same device (W15).
+node test/offline.mjs "http://127.0.0.1:$PORT" 90000

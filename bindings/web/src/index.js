@@ -57,6 +57,11 @@ export class OfflineNode extends EventTarget {
   ///
   /// `ble: true` adds the Bluetooth LE slot, which a BluetoothCarrier on this
   /// page drives over Web Bluetooth (W14): Chromium only, as a central.
+  ///
+  /// `signal` aborts a start that has not finished: its worker ends, and with
+  /// it the account's lock or its place in the queue for one (W8), and the
+  /// start rejects with the signal's reason. A start left to finish would
+  /// hold the account at least until it had replayed the logs.
   static async start({
     appId,
     profile = "default",
@@ -66,8 +71,10 @@ export class OfflineNode extends EventTarget {
     ble = false,
     workerUrl,
     wasm,
+    signal,
   } = {}) {
     if (!appId) throw new Error("appId is required");
+    signal?.throwIfAborted();
     if (nostr !== undefined) checkRelays(nostr?.relays);
     if (storage === "durable") {
       // Best effort: without it the browser may evict the origin's files
@@ -80,6 +87,8 @@ export class OfflineNode extends EventTarget {
     const url = workerUrl ?? new URL("./worker.js", import.meta.url);
     const instance = crypto.randomUUID();
     const node = new OfflineNode(new Worker(url, { type: "module" }), { appId, instance, tabs });
+    const abort = () => node.#fail("the start was aborted");
+    signal?.addEventListener("abort", abort, { once: true });
     try {
       node.address = await node.#call("start", {
         appId,
@@ -103,7 +112,9 @@ export class OfflineNode extends EventTarget {
       // The worker kept nothing (no engine, lock or handle), but it is still
       // a running worker with a module in it.
       node.#worker.terminate();
-      throw error;
+      throw signal?.aborted ? signal.reason : error;
+    } finally {
+      signal?.removeEventListener("abort", abort);
     }
     addEventListener("pagehide", node.#onPageHide);
     addEventListener("pageshow", node.#onPageShow);

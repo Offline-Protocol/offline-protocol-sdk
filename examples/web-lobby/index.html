@@ -3,6 +3,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pong Lobby</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
   :root { --bg: #fafaf7; --fg: #1c1c1a; --muted: #6b6b66; --line: #ddddd6; --accent: #2457c5; --court: #10100f; }
   @media (prefers-color-scheme: dark) {
@@ -17,9 +20,10 @@
   code { font-size: 13px; word-break: break-all; }
   section { border-top: 1px solid var(--line); padding: 14px 0; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  input { width: 100%; font: 13px/1.4 ui-monospace, monospace; padding: 6px 8px; margin-bottom: 6px;
+  /* 16px: Safari zooms the page in on a field smaller than that, and stays zoomed. */
+  input { width: 100%; font: 16px/1.4 ui-monospace, monospace; padding: 6px 8px; margin-bottom: 6px;
           border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
-  textarea { width: 100%; min-height: 64px; font: 12px/1.4 ui-monospace, monospace; padding: 8px;
+  textarea { width: 100%; min-height: 64px; font: 16px/1.4 ui-monospace, monospace; padding: 8px;
              border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
   button { font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
            border: 1px solid var(--accent); background: var(--accent); color: #fff; }
@@ -36,6 +40,7 @@
   <div class="meta">This device</div>
   <code id="me">starting…</code>
   <div class="meta" id="role"></div>
+  <div class="row" id="update" hidden><span class="meta">A new version is ready.</span> <button id="reload" class="quiet">Update</button></div>
 </section>
 
 <section>
@@ -95,7 +100,61 @@ const status = (text) => ($("status").textContent = text);
 // One durable node per account per origin: a second tab of this browser
 // needs its own profile (?profile=b).
 const profile = new URLSearchParams(location.search).get("profile") ?? "player";
-const node = await OfflineNode.start({ appId: "web-pong-lobby", profile });
+// Offline once opened online (W15). Registered before the node starts, so a build whose node cannot start
+// (a bad deploy, a store that refuses to open) can still be replaced: a
+// page that threw before this would be served that build from the cache
+// with no way to update. Never awaited: the wait is a network fetch (on an
+// update, the whole new build), and the module must not yield between start
+// and the node's listeners below, or the events in between are lost.
+// "none": the update check fetches build-id.js past the HTTP cache, which
+// could otherwise hide a new build for hours. A new build takes over every
+// page of the scope at once, so each one, not only the one whose button was
+// pressed, stops its node and reloads: a page left running would drive the
+// old build's engine over the new build's cache. A first install never
+// fires this, as the service worker claims no page.
+//
+// A page with no running node, its start refused or not yet finished, does
+// not reload: reloading at once, it would queue for the account's lock (W8)
+// ahead of the tab still stopping the node it plays on, which would come
+// back refused. It asks its person to reload instead, and aborts a start
+// still under way, which gives up the lock or its place in the queue: left
+// to finish, it would hold the account while it replayed the logs, longer
+// on a phone than the other tab's reload waits for it.
+let started = false;
+const superseded = new AbortController();
+navigator.serviceWorker?.addEventListener("controllerchange", async () => {
+  if (!started) {
+    superseded.abort(new Error("this tab's start was abandoned for a new version"));
+    status("A new version of this page is running: reload this tab to use it.");
+    return;
+  }
+  await node.stop().catch(() => {});
+  location.reload();
+}, { once: true });
+navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((registration) => {
+  const offerUpdate = () => {
+    if (registration.waiting && navigator.serviceWorker.controller) $("update").hidden = false;
+  };
+  // The browser checks for a new build on every navigation, without waiting
+  // for this: by now it may be installing one whose updatefound has fired.
+  const watch = () => registration.installing?.addEventListener("statechange", offerUpdate);
+  offerUpdate();
+  watch();
+  registration.addEventListener("updatefound", watch);
+  $("reload").onclick = () => {
+    $("reload").disabled = true;
+    registration.waiting?.postMessage("activate");
+  };
+}, () => {});
+
+// From inside the service worker's scope, so the engine loads offline too,
+// but only under a page the service worker serves. A page it does not (a
+// hard reload, the first visit) came from the network, while a worker in
+// the scope would still come from the cache: a new page driving an old
+// engine. Out of the scope, the worker comes from the network with it.
+const workerUrl = navigator.serviceWorker?.controller ? new URL("./engine-worker.js", import.meta.url) : undefined;
+const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl, signal: superseded.signal });
+started = true;
 const rtc = new WebRtcCarrier(node);
 $("me").textContent = node.address;
 node.addEventListener("fatal", ({ detail }) => status(`the node ended: ${detail}. Reload to start it again.`));
@@ -612,4 +671,5 @@ setInterval(async () => {
     `store flushes ${perSecond}/s, log ${stats ? stats.mls.log_bytes + stats.protocol_state.log_bytes : 0} bytes`;
   counters.statesOut = counters.statesIn = 0;
 }, 1000);
+
 </script>

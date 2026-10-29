@@ -593,6 +593,107 @@ devices the origin was granted, in range or not, and the browser's
 connect to one out of range may wait on its own timeout. An application
 that reconnects on load should bound the wait itself.
 
+### W15. A page that loads offline caches one build whole
+
+A node that links over a local network with no internet is no use if its
+page cannot load without one. A service worker makes it load: the lobby
+(`examples/web-lobby/sw.js`) is the worked example, and the SDK ships none,
+because the scope, the files and the update policy are the application's.
+
+**One build serves the page and the worker.** `index.js` on the page and
+`worker.js` speak a message protocol of their own, and the wasm-bindgen glue
+loads only the module it was built with, so a page and a worker from two
+builds fail in ways no test covers. The cache is named for a build id that
+`scripts/build-id.sh` derives from every file it holds (`build.sh` runs it;
+a change to a served file that needs no Rust build must run it before it is
+served, or the change reaches no device that has the page). A deploy
+publishes `pkg/build-id.js` last, or swaps the whole tree at once: an update
+check that reads a new id while other files are still the old build's caches
+a mixed set under that id, and keeps it until the next one. The cache is
+filled with `addAll`, which keeps a cache complete or absent; it skips the
+HTTP cache, which could hand back the last build's glue beside this build's
+module. Only the current build's cache answers, a navigation to the page by
+any of its URLs (the directory, `index.html`, any query) is the cached page,
+and the update check fetches the build id past the HTTP cache too
+(`updateViaCache: "none"`): the service worker's own script is the same in
+every build, so a stale build id hides a new build for as long as the HTTP
+cache calls it fresh, hours on a server that sends only `Last-Modified`. A
+new build never runs under a page of the old one: a worker the page starts
+again after a trap (W5) would load the new build under the old page. It
+waits until every page of the scope has closed, or until one page asks it to
+take over. Taking over moves every page of the scope at once and deletes the
+old build's cache, so every page, not only the one that asked, stops its
+node and reloads on `controllerchange`. A page with no running node, its
+start refused or not yet finished, does not: reloading at once, it would
+queue for the account's lock (W8) ahead of the tab still stopping the node
+it plays on, which would then come back refused. It asks its person to
+reload instead. A start still waiting for the lock would take it the moment
+that tab released it, reload or not, and hold it while it replayed the logs,
+which on a phone can outlast the two seconds the other tab's reload waits;
+so the page aborts it (`start({ signal })`), which ends its worker and with
+it the lock or its place in the queue.
+
+**Registering comes before the node and never waits.** A page that throws
+before it registers, because its node could not start (a bad deploy, a
+store that refuses to open), is served that build from the cache with no
+way to be offered the next one, so the lobby registers before `start`.
+Registration waits on the network, and on an update on the whole new
+build, so it is never awaited: awaited between `start` and the listeners,
+it let the engine's first events, a tab carrier's `neighbor_discovered`
+among them, go to a target nobody listened on yet.
+
+**The engine's worker must be inside the scope, under a page the scope
+serves.** A dedicated worker is matched to a service worker by its own URL,
+not by the page that started it. The lobby's scope is its own directory, so
+it starts the engine through a one-line module there (`engine-worker.js`,
+through `start({ workerUrl })`) that imports `worker.js`; the worker's
+imports and its module fetch are then its own requests, which the scope
+covers. Started from `bindings/web/src/worker.js` the worker loads online
+and fails offline, which is what `test/offline.mjs` was checked against. It
+does so only when the service worker controls the page: a page it does not
+control (a hard reload, the first visit) came from the network, and an
+in-scope worker under it would still come from the cache, the old build's
+engine under the new build's page. That page starts the worker from its
+default URL, out of the scope, so it comes from the network with the page.
+An application that serves the SDK under its own scope needs no such module.
+
+**The cache is not the node.** OPFS, IndexedDB and Web Locks are apart from
+the cache, so an update, which replaces only the cache, leaves the identity
+as it was. A browser that evicts storage takes the origin's whole, the
+identity included unless `persist()` was granted, and clearing a site's data
+clears both; only the cache comes back with the next visit online. The first
+visit must be online. On iOS a page added to the home screen has storage
+apart from Safari's, its service worker and cache included: it is a second
+device with its own identity, and it loads offline only once it has itself
+been opened online, whatever Safari has cached (seen on iOS 26.6).
+
+**Retiring it is a served file, not a deleted one.** A browser keeps a
+registration whose update check fails, so a `sw.js` (or a `build-id.js` it
+imports) that now answers 404 leaves every device that opened the page on
+the build it cached, online included, for good: a checkout of a branch
+without the service worker, on a machine that opened the lobby from one
+with it, never shows an edit to the page. Retiring it means serving, at the
+same URL, one that takes over, deletes the caches and unregisters, and that
+imports nothing, as `build-id.js` may be gone with it:
+
+```js
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => event.waitUntil((async () => {
+  for (const key of await caches.keys()) if (key.startsWith("web-lobby-")) await caches.delete(key);
+  await self.registration.unregister();
+})()));
+```
+
+With no fetch handler it answers nothing, so the pages it takes over reload
+from the network, and the next visit to a page that no longer registers is
+uncontrolled, with no cache left; checked in all three engines. On one
+machine, the developer tools' **Unregister** (or clearing the site's data,
+identity included) does the same.
+
+`the_lobby_caches_every_sdk_file` holds the cached list to every file in
+`bindings/web/src`: a file left out still loads online, where everyone
+works.
+
 ## Which shared rules apply
 
 | Rule | How it reaches the web binding |
@@ -628,6 +729,9 @@ that reconnects on load should bound the wait itself.
   handed to `OfflineNode.start({ wasm })` by a host whose worker starts from
   a Blob URL (an editor plugin, an extension), where a relative fetch has
   nothing to resolve against.
+- A service worker that caches the page, the SDK and the module as one
+  build, with the engine's worker inside its scope, if the page is to load
+  offline (W15).
 - Nothing about framing, identity, encryption or storage: those are the
   engine's. The client posts `stop` to the worker on `pagehide` itself.
 
@@ -660,10 +764,15 @@ start there, because Firefox answers it by asking the user.
 - `restart.html`: a durable node in a group is terminated mid-session and
   started again. It must come back with the same address, read the group's
   next message with no decryption failure, and a second node for the running
-  account must be refused (W5, W8). With its wrapping key taken out of
+  account must be refused (W5, W8). A start aborted through its `signal`
+  once the origin's lock manager shows it queued for the running account's
+  lock must leave the queue and reject within a second, well before its own
+  two-second wait would have dropped it; a check that awaited the rejection
+  first passed with the abort disabled, as that start still rejects with the
+  signal's reason once its wait runs out. With its wrapping key taken out of
   IndexedDB the node must refuse to start and leave its files as they were,
-  and with the key put back it must start as the same device. Restarting it in memory instead makes
-  the page fail, which is how the page was checked.
+  and with the key put back it must start as the same device. Restarting it
+  in memory instead makes the page fail, which is how the page was checked.
 - `webrtc.html`: two nodes with no tab carrier, linked only by a data channel
   set up from two codes. A session, an encrypted direct message, a 100 KiB
   message that crosses in chunks, a group at 10 Hz sent acknowledged and
@@ -739,6 +848,25 @@ start there, because Firefox answers it by asking the user.
   as the transport's key packages and directory records need; it verifies
   nothing, so the engine's own checks are what refuse a forged event.
 
+- `offline.mjs`, after the pages: the lobby example opened once online, then
+  reloaded with the browser offline. It must come back controlled by its
+  service worker and as the same address, and a second profile's page (a URL
+  the cache was not filled with) must start a node too, and so must the page
+  opened by `index.html`, answered by the same cached page. Then, online, a
+  new build with two tabs open: Update in one must bring both onto the new
+  build as the same addresses, with only the new build's cache left, and a
+  third tab whose node was refused (its account open in the second, W8) must
+  be offered the update too, and must not reload on it, nor must a fourth
+  tab on that account still in its lock wait when Update is pressed (W15).
+  Reloading only the tab that pressed Update makes it fail, so does
+  registering after `start`, and so does reloading either of those tabs,
+  whose reload takes the second tab's account. Starting the worker from
+  `bindings/web/src/worker.js` instead makes it fail in all three engines,
+  which is how it was checked. The server (`test/serve.py`) serves the
+  repository root and marks every response `no-store`: with Python's plain
+  server, Chromium and Firefox answered the out-of-scope worker from their
+  HTTP cache and passed it.
+
 `scripts/test-conformance.sh` runs
 `crates/offline-protocol-web/tests/browser_conformance.rs` in a dedicated
 worker of Chrome and Firefox, through wasm-bindgen's test runner and each
@@ -778,6 +906,10 @@ two-player game between devices over WebRTC with durable nodes.
   Android phone and a board is a manual check, and so is the ATT MTU Chrome
   negotiates on each (W14). Reaching an iPhone needs its peripheral to serve
   Hello, which iOS releases before this one do not.
+- **The lobby offline and installed on a phone.** `offline.mjs` reloads it
+  offline in three engines on one machine, which installs nothing and is
+  not Safari. Opening it offline on two phones and installing it is step 9
+  of the [two-device checklist](web-devices.md), not run yet (W15).
 - **A published package.** `bindings/web` is private on npm and the
   `offline-protocol-web` crate has not been released; build both from
   source.

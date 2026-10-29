@@ -390,6 +390,8 @@ fn the_browser_tests_run_in_ci() {
         "bash bindings/web/scripts/test-browser.sh",
         "npx playwright install --with-deps chromium firefox webkit",
         "bash bindings/web/scripts/test-conformance.sh",
+        // A lobby-only change must run the job that reloads it offline (W15).
+        "- 'examples/web-lobby/**'",
     ] {
         assert!(
             ci.contains(needle),
@@ -397,6 +399,113 @@ fn the_browser_tests_run_in_ci() {
             needle.trim()
         );
     }
+    // The only check of W15's behaviour runs after the page loop, where a
+    // tidy-up that kept only the loop would drop it with every job green.
+    let script = read_repo_file(&root.join("bindings/web/scripts/test-browser.sh"))
+        .expect("bindings/web/scripts/test-browser.sh");
+    assert!(
+        script.contains("node test/offline.mjs"),
+        "test-browser.sh no longer runs test/offline.mjs"
+    );
+}
+
+/// The lobby's service worker caches every file the page loads (W15): the
+/// SDK's, and every file beside the page. A file left out still loads
+/// online, where everyone works, and fails only offline. The build id covers
+/// the whole directory, so a file beside the page is never left out of it.
+#[test]
+fn the_lobby_caches_every_sdk_file() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if read_repo_file(&root.join("Cargo.lock")).is_none() {
+        // A published .crate archive has no workspace around it.
+        return;
+    }
+    // Inside the workspace a missing file fails: a guard that skipped a
+    // moved sw.js would pass while checking nothing.
+    let lobby = root.join("examples/web-lobby");
+    let sw = read_repo_file(&lobby.join("sw.js")).expect("examples/web-lobby/sw.js");
+    let assets = sw
+        .split_once("const ASSETS = [")
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .map(|(list, _)| list)
+        .expect("sw.js has an ASSETS list");
+    let quoted: Vec<&str> = assets.split('"').skip(1).step_by(2).collect();
+
+    let entries = std::fs::read_dir(root.join("bindings/web/src")).expect("bindings/web/src");
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // A dotfile (Finder's .DS_Store, an editor's swap file) is no one's
+        // asset, and build.sh's globs skip it too.
+        if name.starts_with('.') {
+            continue;
+        }
+        let Some(stem) = name.strip_suffix(".js") else {
+            continue;
+        };
+        assert!(
+            quoted.contains(&stem),
+            "examples/web-lobby/sw.js does not cache bindings/web/src/{name}"
+        );
+    }
+    for needle in [
+        "pkg/offline_protocol_web.js",
+        "pkg/offline_protocol_web_bg.wasm",
+    ] {
+        assert!(
+            assets.contains(needle),
+            "examples/web-lobby/sw.js does not cache `{needle}`"
+        );
+    }
+    assert!(
+        sw.contains("pkg/build-id.js"),
+        "examples/web-lobby/sw.js no longer imports the build id"
+    );
+
+    // The page itself is cached as `./`. The README is not loaded, and the
+    // service worker is not one of its own assets.
+    assert!(
+        quoted.contains(&"./"),
+        "examples/web-lobby/sw.js does not cache the page"
+    );
+    let entries = std::fs::read_dir(&lobby).expect("examples/web-lobby");
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || ["index.html", "sw.js", "README.md"].contains(&name.as_str()) {
+            continue;
+        }
+        assert!(
+            quoted.contains(&format!("./{name}").as_str()),
+            "examples/web-lobby/sw.js does not cache examples/web-lobby/{name}"
+        );
+    }
+    // And the other way: an entry with no file fails the install whole, so
+    // every device keeps the build it has and a first visit caches nothing.
+    for asset in &quoted {
+        match asset.strip_prefix("./") {
+            Some("") => {}
+            Some(file) => assert!(
+                lobby.join(file).is_file(),
+                "examples/web-lobby/sw.js caches ./{file}, which does not exist"
+            ),
+            None => assert!(
+                root.join(format!("bindings/web/src/{asset}.js")).is_file(),
+                "examples/web-lobby/sw.js caches bindings/web/src/{asset}.js, which does not exist"
+            ),
+        }
+    }
+
+    let id = read_repo_file(&root.join("bindings/web/scripts/build-id.sh")).expect("build-id.sh");
+    for needle in ["pkg/build-id.js", "examples/web-lobby/*"] {
+        assert!(
+            id.contains(needle),
+            "build-id.sh no longer has `{needle}`: the build id names the lobby's cache"
+        );
+    }
+    let build = read_repo_file(&root.join("bindings/web/scripts/build.sh")).expect("build.sh");
+    assert!(
+        build.contains("bash bindings/web/scripts/build-id.sh"),
+        "build.sh no longer writes the build id after the module"
+    );
 }
 
 /// A file named as a test fixture: a `test` or `tests` word in its name

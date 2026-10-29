@@ -31,6 +31,9 @@ dir="$PROFILE"
 wasm-bindgen --target web --out-dir bindings/web/pkg \
   "target/wasm32-unknown-unknown/$dir/offline_protocol_web.wasm"
 
+# The id the lobby's cache is named by, over the module just written (W15).
+bash bindings/web/scripts/build-id.sh
+
 size="$(wc -c < bindings/web/pkg/offline_protocol_web_bg.wasm | tr -d ' ')"
 gz="$(gzip -9 -c bindings/web/pkg/offline_protocol_web_bg.wasm | wc -c | tr -d ' ')"
 echo "bindings/web/pkg: module $size bytes, $gz gzipped"

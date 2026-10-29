@@ -13,6 +13,27 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Added
+
+- **A browser node's start can be aborted.** `OfflineNode.start({ signal })`
+  ends the worker of a start that has not finished, and with it the
+  account's lock or its place in the queue for one, and rejects with the
+  signal's reason. A page that gives up on a start no longer holds the
+  account while that start replays the logs
+  ([W15](docs/bridges/web.md#w15-a-page-that-loads-offline-caches-one-build-whole)).
+
+- **The lobby loads with no network.** Opened once online, the `web-lobby`
+  example loads offline, and carries a manifest to install it as an app
+  (not yet run on a phone, which is step 9 of the two-device checklist): a
+  service worker caches the page, the SDK and the engine module as one
+  build, named by an id `scripts/build-id.sh` writes, and a new build
+  takes over only when a page asks, whereupon every page with a running
+  node stops it and reloads. The engine's worker starts from inside the
+  service worker's scope, or offline its script comes from the network.
+  The SDK ships no service worker; the lobby's is the worked example, and
+  the browser run reloads it offline in three engines
+  ([W15](docs/bridges/web.md#w15-a-page-that-loads-offline-caches-one-build-whole)).
+
 ### Fixed
 
 - **`sendReadReceipt` works again from React Native on Android.** Since the

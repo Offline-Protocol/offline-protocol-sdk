@@ -32,6 +32,37 @@ await run(async (step) => {
   }
   log("a second node for the account was refused");
 
+  step.name = "an aborted start gives up its place in the lock's queue";
+  // Aborted once it is queued for the running account's lock, which the
+  // origin's lock manager shows, and gone from the queue well before its own
+  // two-second wait would have dropped it. That a terminated worker lets go
+  // of a lock it holds is the restart below.
+  const lock = `offline-protocol/${await accountNamespace(appId, "player")}`;
+  const queued = async () => (await navigator.locks.query()).pending.some((l) => l.name === lock);
+  const abort = new AbortController();
+  const pending = OfflineNode.start({ appId, profile: "player", signal: abort.signal }).then(
+    () => new Error("a start for a running account resolved"),
+    (error) => error,
+  );
+  const deadline = performance.now() + 10000;
+  while (!(await queued())) {
+    if (performance.now() > deadline) throw new Error("the start never queued for the account's lock");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  // Timed from the abort and read before the rejection is awaited: a start
+  // the abort did not end still rejects with the signal's reason, two
+  // seconds later, once its lock wait runs out and its queue entry with it.
+  const abortedAt = performance.now();
+  abort.abort();
+  while (await queued()) {
+    if (performance.now() - abortedAt > 1000) throw new Error("the aborted start stayed queued for the lock");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const error = await pending;
+  if (error?.name !== "AbortError") throw error;
+  if (performance.now() - abortedAt > 1000) throw new Error("the aborted start rejected only once its lock wait ran out");
+  log("a start aborted in the lock's queue rejected and left it");
+
   step.name = "session";
   await session;
 

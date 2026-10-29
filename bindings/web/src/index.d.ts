@@ -28,6 +28,12 @@ export interface StartOptions {
    * its bytes or a compiled module. By default the worker fetches it.
    */
   wasm?: BufferSource | WebAssembly.Module;
+  /**
+   * Aborts a start that has not finished: its worker ends, and with it the
+   * account's lock or its place in the queue for one (W8). The start rejects
+   * with the signal's reason. No effect once the start has resolved.
+   */
+  signal?: AbortSignal;
 }
 
 export interface NostrOptions {
