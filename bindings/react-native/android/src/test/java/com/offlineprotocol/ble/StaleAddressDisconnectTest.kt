@@ -175,6 +175,32 @@ class StaleAddressDisconnectTest {
     }
 
     @Test
+    fun `a refused dial maps the server link a hello-less writer uses, as a hello would`() {
+        // The binding skipped the per-peer MTU flush every other mapping runs,
+        // so a notify over that link could be sized for another one.
+        host.connections.trackServerConnection(old)
+        host.pendingInbound.enqueue(old, byteArrayOf(1))
+
+        client.bindRefusedDialServerLink(old, "peerK")
+
+        assertEquals("peerK", host.connections.deviceIdForAddress(old))
+        assertEquals(listOf(old to "peerK"), host.bound)
+        assertEquals(listOf("peerK"), host.heard)
+    }
+
+    @Test
+    fun `a refused dial's own echo on our server is not mapped`() {
+        // Android reports our own dial to the server too; with nothing written
+        // from that address there is no proof of who is there.
+        host.connections.trackServerConnection(old)
+
+        client.bindRefusedDialServerLink(old, "peerL")
+
+        assertNull(host.connections.deviceIdForAddress(old))
+        assertEquals(emptyList<Pair<String, String>>(), host.bound)
+    }
+
+    @Test
     fun `a stale address's gatt is closed even though it is not redialled`() {
         val oldGatt = gatt(old)
         host.connections.registerGatt(old, oldGatt)
@@ -208,6 +234,7 @@ class StaleAddressDisconnectTest {
         val dialed = mutableListOf<String>()
         val staleDropped = mutableListOf<String>()
         val heard = mutableListOf<String>()
+        val bound = mutableListOf<Pair<String, String>>()
 
         // `finalizeGivenUpPeer` catches what this throws, so the test records
         // peer loss through `onPeerGivenUp`, which runs right after it.
@@ -232,6 +259,7 @@ class StaleAddressDisconnectTest {
         override fun onWriteCompleted(address: String) {}
         override fun handleInboundFragment(address: String, data: ByteArray) {}
         override fun onPeerHeard(deviceId: String) { heard += deviceId }
+        override fun onServerLinkBound(address: String, deviceId: String) { bound += address to deviceId }
         override fun onPeerMtuNegotiated(address: String, maxPayload: Int) {}
         override fun onDeviceIdResolved(address: String, deviceId: String) {}
         override fun onPeerGivenUp(address: String, peerId: String) { givenUp += peerId }

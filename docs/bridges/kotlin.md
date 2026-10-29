@@ -244,8 +244,10 @@ nothing, in at least one direction, until the Android app restarted.
   dial repeated every 60 seconds. `bindUnmappedServerLink` maps that server
   link first, never rebinding one already mapped, and only while fragments
   written from it wait for a sender: Android reports our own dial to the
-  server too, so a server connection alone proves nothing
-  (`DuplicateClientLinkTest`).
+  server too, so a server connection alone proves nothing. Like a hello's
+  mapping, it then flushes the per-peer MTU, leaving out the payload the
+  refused dial staged (`DuplicateClientLinkTest`,
+  `StaleAddressDisconnectTest`).
 - **A client link that only takes writes is redialled.** `SilentLinkPolicy`
   (`SilentLinkPolicyTest`) and the connection monitor disconnect it and redial
   the same address, so the handshake runs again, hello included. The redial

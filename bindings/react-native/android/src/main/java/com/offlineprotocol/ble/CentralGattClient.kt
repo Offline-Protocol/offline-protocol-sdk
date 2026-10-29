@@ -133,6 +133,12 @@ internal class CentralGattClient(
          *  through [handleInboundFragment]. Called on the BLE thread. */
         fun onPeerHeard(deviceId: String) {}
 
+        /** A refused duplicate dial just mapped the server link at [address]
+         *  to [deviceId] ([bindRefusedDialServerLink]). The facade does what
+         *  a hello's mapping does for the per-peer MTU and the lost grace.
+         *  Called on the BLE thread. */
+        fun onServerLinkBound(address: String, deviceId: String) {}
+
         /** Notify the facade that a remote peripheral's ATT MTU negotiation
          *  has completed. [maxPayload] is the already header-adjusted max
          *  fragment size (ATT MTU minus the 3-byte header). Called from the
@@ -1421,16 +1427,25 @@ internal class CentralGattClient(
             SystemClock.elapsedRealtime() + DUPLICATE_LINK_SUPPRESS_MS,
         )
         host.connections.consumePendingRole(address)
-        // The peer may also write to our server from this address with no
-        // hello (an iPhone whose app restarted keeps the link but not the
-        // hello), and this read is then the only proof of who is writing.
-        // Without the binding its writes queued unattributed for good, and the
-        // dial that should resolve them was refused every 60 s.
-        if (host.connections.bindUnmappedServerLink(address, peerId, host.pendingInbound.hasPending(address))) {
-            Log.i(TAG, "Mapped the server link at $address to $peerId")
-            drainPendingInboundFor(address, peerId)
-        }
+        bindRefusedDialServerLink(address, peerId)
         closeGattClient(gatt, "duplicate_identity")
+    }
+
+    /**
+     * Maps the server link at [address] to [peerId] after a dial there
+     * verified the peer and was refused as a duplicate, when fragments from
+     * that address wait for a sender, then delivers them. The peer may write
+     * to our server from this address with no hello (an iPhone whose app
+     * restarted keeps the link but not the hello), and the refused dial's read
+     * is then the only proof of who is writing. Without the binding its writes
+     * queued unattributed for good, and the dial that should resolve them was
+     * refused every 60 s. BLE thread only.
+     */
+    internal fun bindRefusedDialServerLink(address: String, peerId: String) {
+        if (!host.connections.bindUnmappedServerLink(address, peerId, host.pendingInbound.hasPending(address))) return
+        Log.i(TAG, "Mapped the server link at $address to $peerId")
+        host.onServerLinkBound(address, peerId)
+        drainPendingInboundFor(address, peerId)
     }
 
     /**

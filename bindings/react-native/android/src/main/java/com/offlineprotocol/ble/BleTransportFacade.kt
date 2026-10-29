@@ -547,6 +547,14 @@ class BleTransportFacade(
                 override fun handleInboundFragment(address: String, data: ByteArray) =
                     this@BleTransportFacade.handleReceivedData(data, address)
                 override fun onPeerHeard(deviceId: String) = noteHeardFrom(deviceId)
+                override fun onServerLinkBound(address: String, deviceId: String) {
+                    // The refused client link at this address staged its own
+                    // central payload; promoted, it would size the core's
+                    // fragments for the link being closed, not the one kept.
+                    peerMaxPayloads.remove(address)
+                    cancelPeerLostGrace(deviceId)
+                    flushPeerMtu(address, deviceId)
+                }
                 override fun connectToDevice(device: BluetoothDevice) =
                     this@BleTransportFacade.connectToDevice(device)
 
