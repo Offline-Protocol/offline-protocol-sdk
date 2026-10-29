@@ -7,8 +7,9 @@
 //! one superseding entry per key, so the subscriber comes back to the newest
 //! value only; a resync hands the state back; a peer whose key package omits
 //! entry 2 is refused at the call; unregistering a service ends what was
-//! subscribed to it; and a key filter and a topic pattern hold across the
-//! link, with nothing they carry readable on it.
+//! subscribed to it; a key filter and a topic pattern hold across the link,
+//! with nothing they carry readable on it; and a queued subscription frame is
+//! never written to the outbox's store.
 
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +21,8 @@ use offline_protocol_services::{
 use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
 use super::{create_test_config_for_user, signed_frame};
-use crate::mls::InMemoryStorage;
+use crate::mls::{InMemoryStorage, MlsStorage};
+use crate::protocol::types::storage_keys;
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 use crate::test_identity::id;
 use crate::{Event, ProtocolConfig};
@@ -32,6 +34,8 @@ struct Node {
     transport: MockTransport,
     address: String,
     events: Arc<Mutex<Vec<Event>>>,
+    /// Where the protocol state, the outbox included, is persisted.
+    state: Arc<InMemoryStorage>,
 }
 
 impl Node {
@@ -41,11 +45,12 @@ impl Node {
         config.encryption.auto_key_exchange = true;
         config.encryption.store_pending = true;
         let mut protocol = OfflineProtocol::new(config).expect("protocol");
+        let state = Arc::new(InMemoryStorage::new());
         protocol
             .initialize_mls(
                 crate::test_identity::seeded_storage(label),
                 Arc::new(TestProtocolStateStorage {
-                    storage: Arc::new(InMemoryStorage::new()),
+                    storage: state.clone(),
                 }),
             )
             .expect("initialize_mls");
@@ -65,6 +70,7 @@ impl Node {
             transport,
             address: id(label),
             events,
+            state,
         }
     }
 
@@ -440,6 +446,51 @@ fn a_latest_value_for_an_absent_subscriber_supersedes_the_one_queued() {
     assert!(!received
         .iter()
         .any(|(_, body, _)| body == "pos-1" || body == "pos-2"));
+}
+
+/// Nothing of a subscription outlives the process (ADR 0035, *Restart*). A
+/// restored frame would name a stream or a `sub_id` that no longer exists,
+/// and stored sealed it cannot be found at start-up, so it is never written:
+/// the update waiting for an absent subscriber is in the outbox and not in
+/// its store, while a direct message queued beside it is in both.
+#[test]
+fn a_queued_subscription_frame_is_never_written_to_the_outbox_store() {
+    let mut pair = Pair::new();
+    pair.bob.register(SubscriptionPolicy::AcceptAll);
+    pair.subscribe("position", SubscriptionMode::Latest);
+    let alice = pair.alice.address.clone();
+
+    pair.unlink();
+    pair.run(2);
+    let report = pair
+        .bob
+        .protocol
+        .publish_service_update(SVC, "position", Some("xy"), "pos")
+        .unwrap();
+    assert_eq!(report.queued, 1);
+    let message = pair
+        .bob
+        .protocol
+        .send_message(alice.clone(), "hello", None, None::<String>)
+        .unwrap();
+
+    let stored = pair.bob.state.list_keys(storage_keys::OUTBOX).unwrap();
+    assert!(
+        stored.contains(&message.as_str().to_string()),
+        "the outbox is persisted, so its absence below is the rule"
+    );
+    let queued: Vec<String> = pair
+        .bob
+        .protocol
+        .outbox
+        .values()
+        .filter(|entry| OfflineProtocol::is_subscription_outbox_entry(entry))
+        .map(|entry| entry.message.id.as_str().to_string())
+        .collect();
+    assert!(!queued.is_empty(), "the update waits in the outbox");
+    for id in &queued {
+        assert!(!stored.contains(id), "a subscription frame was persisted");
+    }
 }
 
 #[test]

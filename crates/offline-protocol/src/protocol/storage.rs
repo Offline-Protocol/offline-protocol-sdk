@@ -3828,13 +3828,16 @@ impl OfflineProtocol {
     /// lives in the in-memory outbox and will retry; it just won't survive a
     /// restart). No-ops when persistence is not configured or when the entry
     /// belongs to the media outbox — file transfers are not persisted and
-    /// resurrected chunks could never complete, so we never write them.
+    /// resurrected chunks could never complete, so we never write them. Nor
+    /// is a confirmation probe or a service subscription frame: both live in
+    /// memory only (see [`Self::is_subscription_outbox_entry`]).
     pub(crate) fn persist_outbox_entry(&self, entry: &OutboxEntry) {
         let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if Self::is_media_outbox_message(&entry.message)
             || Self::is_confirmation_probe(&entry.message)
+            || Self::is_subscription_outbox_entry(entry)
         {
             return;
         }

@@ -4030,6 +4030,27 @@ impl OfflineProtocol {
             .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
     }
 
+    /// A service subscription frame lives in memory only (ADR 0035,
+    /// *Restart*). The outbox replays a restored entry verbatim, and after a
+    /// restart the stream or `sub_id` the frame names no longer exists: a
+    /// restored update or reply would reset the subscriber to a dead stream,
+    /// and a restored renewal would name a subscription its sender no longer
+    /// holds.
+    ///
+    /// Told apart by the re-seal provenance staged when the frame was queued
+    /// (`send_subscription_reliable` stages it for every one), because that
+    /// is the only place its plaintext is: the stored message is the
+    /// `__MLS_ENC__` envelope, so a restored subscription frame cannot be told
+    /// from a restored direct message, and a test at restore would find
+    /// nothing. The provenance is never persisted, and nothing clears it from
+    /// a live entry.
+    pub(super) fn is_subscription_outbox_entry(entry: &OutboxEntry) -> bool {
+        entry
+            .reseal
+            .as_ref()
+            .is_some_and(|reseal| offline_protocol_services::is_subscription_frame(&reseal.content))
+    }
+
     // ========================================================================
     // DELIVERY TRACKING
     // ========================================================================
