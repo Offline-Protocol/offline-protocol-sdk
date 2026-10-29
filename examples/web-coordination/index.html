@@ -4,83 +4,160 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Device coordination</title>
 <style>
-  :root { --bg: #fafaf7; --fg: #1c1c1a; --muted: #6b6b66; --line: #ddddd6; --accent: #2457c5; --warn: #b4441c; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --accent: #7aa2ff; --warn: #ff8a5c; }
+  :root {
+    --bg: #f6f6f2; --card: #ffffff; --fg: #1c1c1a; --muted: #6b6b66; --line: #e2e2da;
+    --accent: #2457c5; --accent-soft: #e6edfb; --on-accent: #ffffff;
+    --ok: #1f7a4d; --ok-soft: #e3f3ea; --busy: #9a5b00; --busy-soft: #fbefd9;
+    --warn: #b4441c; --warn-soft: #fbe6dd; --idle-soft: #ecece6;
   }
-  body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg);
-         font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin-inline: auto; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 15px; margin: 0 0 8px; }
-  p { color: var(--muted); margin: 0 0 16px; }
-  code { font-size: 13px; word-break: break-all; }
-  section { border-top: 1px solid var(--line); padding: 16px 0; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
-  label { display: flex; gap: 6px; align-items: center; }
-  select, input, button { font: inherit; padding: 6px 10px; border: 1px solid var(--line);
-                          border-radius: 6px; background: transparent; color: inherit; }
-  input[type=text] { flex: 1 1 160px; }
-  button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121211; --card: #1c1c1a; --fg: #ecece8; --muted: #9a9a94; --line: #2f2f2b;
+      --accent: #7aa2ff; --accent-soft: #1f2a44; --on-accent: #0d1424;
+      --ok: #5fd39a; --ok-soft: #173326; --busy: #f2b45a; --busy-soft: #3a2c14;
+      --warn: #ff8a5c; --warn-soft: #3d1f14; --idle-soft: #2a2a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 820px; margin-inline: auto; display: grid; gap: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 13px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  p { margin: 0; }
+  .lede { color: var(--muted); margin-top: 4px; }
+  code { font-size: 12px; word-break: break-all; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .stack { display: grid; gap: 10px; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  label.inline { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 14px; }
+  select, input[type=text], button {
+    font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--fg); min-width: 0;
+  }
+  input[type=text] { width: 100%; }
+  input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+  .slider { display: flex; gap: 10px; align-items: center; color: var(--fg); }
+  .slider b { width: 3ch; text-align: right; font-variant-numeric: tabular-nums; }
+  button { background: var(--accent); color: var(--on-accent); border-color: var(--accent); cursor: pointer; font-weight: 500; }
+  button:hover { filter: brightness(1.08); }
   button.quiet { background: transparent; color: var(--accent); }
-  ul { list-style: none; padding: 0; margin: 0; }
-  li { padding: 6px 0; border-bottom: 1px solid var(--line); }
-  li:last-child { border-bottom: 0; }
+  button.small { padding: 3px 10px; font-size: 13px; }
   .meta { color: var(--muted); font-size: 13px; }
-  .alert { color: var(--warn); }
-  .peer-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0 0; }
-  dt { color: var(--muted); font-size: 13px; }
-  dd { margin: 0; }
+
+  /* This device */
+  .me { display: flex; gap: 14px; align-items: center; }
+  .avatar { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
+            font-weight: 700; color: #fff; font-size: 18px; }
+  .me-text { min-width: 0; flex: 1; }
+  .me-name { font-weight: 600; font-size: 17px; }
+
+  /* Pills and badges */
+  .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.idle, .pill.active { background: var(--ok-soft); color: var(--ok); }
+  .pill.busy, .pill.pending { background: var(--busy-soft); color: var(--busy); }
+  .pill.away, .pill.paused, .pill.ended { background: var(--idle-soft); color: var(--muted); }
+  .pill.urgent { background: var(--warn-soft); color: var(--warn); }
+  .pill.info { background: var(--accent-soft); color: var(--accent); }
+
+  .counters { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+  .counter { border: 1px solid var(--line); border-radius: 8px; padding: 2px 8px; font-size: 12px; color: var(--muted); }
+  .counter b { color: var(--fg); font-variant-numeric: tabular-nums; }
+
+  /* Other devices */
+  .peers { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .peer { border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: grid; gap: 8px; }
+  .peer-head { display: flex; gap: 10px; align-items: center; }
+  .peer-head .avatar { width: 32px; height: 32px; font-size: 14px; }
+  .peer-title { min-width: 0; flex: 1; }
+  .peer-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--accent); transition: width .15s; }
+  .kv { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+  .kv span:first-child { color: var(--muted); }
+  .empty { border: 1px dashed var(--line); border-radius: 10px; padding: 20px; text-align: center; color: var(--muted); }
+
+  /* Lists */
+  ul { list-style: none; padding: 0; margin: 0; }
+  .alerts li, .asks li { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .alerts li:last-child, .asks li:last-child { border-bottom: 0; }
+  .alerts .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .alerts .summary { color: var(--muted); font-style: italic; }
+  .asks li { align-items: center; }
+  .asks .who { flex: 1; min-width: 0; }
+  #asks-section { border-color: var(--busy); }
 </style>
 
-<h1>Device coordination</h1>
-<p>Open this page in two or more tabs. Each tab is a device: it publishes its own state, and subscribes to every other device it finds. Updates arrive as they happen, sealed end to end in the 1:1 session between the two devices; a device that missed some gets the state back at its next renewal, or when you press <em>Resync</em>.</p>
+<main>
+  <header>
+    <h1>Device coordination</h1>
+    <p class="lede">Open this page in two or more tabs. Each tab is a device: it publishes its own state, and subscribes to every other device it finds. Updates arrive as they happen, sealed end to end in the 1:1 session between the two devices. A device that missed some gets the state back at its next renewal, or when you press <em>Resync</em>.</p>
+  </header>
 
-<section>
-  <div class="meta">This device</div>
-  <code id="me">starting…</code>
-  <div class="row" style="margin-top: 12px">
-    <label>Name <input id="name" type="text" autocomplete="off"></label>
-    <label>Status
-      <select id="status">
-        <option>idle</option><option>busy</option><option>away</option>
-      </select>
-    </label>
-    <label>Load <input id="load" type="range" min="0" max="100" value="0"></label>
+  <section class="card">
+    <div class="me">
+      <div class="avatar" id="me-avatar">·</div>
+      <div class="me-text">
+        <div class="me-name"><span id="me-name">starting…</span> <span class="pill idle" id="me-status">idle</span></div>
+        <code id="me">starting…</code>
+      </div>
+    </div>
+    <div class="counters" id="report"><span class="counter">nothing published yet</span></div>
+  </section>
+
+  <div class="grid">
+    <section class="card stack">
+      <h2>Your state</h2>
+      <label>Name <input id="name" type="text" autocomplete="off"></label>
+      <label>Status
+        <select id="status">
+          <option>idle</option><option>busy</option><option>away</option>
+        </select>
+      </label>
+      <label>Load <span class="slider"><input id="load" type="range" min="0" max="100" value="0"><b id="load-value">0</b></span></label>
+    </section>
+
+    <section class="card stack">
+      <h2>Raise an alert</h2>
+      <label>Text <input id="alert-text" type="text" placeholder="attention" autocomplete="off"></label>
+      <label>Level
+        <select id="alert-level">
+          <option>info</option><option>urgent</option>
+        </select>
+      </label>
+      <div><button id="raise">Raise alert</button></div>
+    </section>
+
+    <section class="card stack">
+      <h2>Settings</h2>
+      <label>Who may watch this device
+        <select id="policy">
+          <option value="accept_all">anyone with a session</option>
+          <option value="restricted">ask me</option>
+        </select>
+      </label>
+      <label class="inline"><input id="watch-load" type="checkbox" checked> Watch other devices' load</label>
+      <p class="meta">Off, the other devices filter load out themselves: the slider's updates never leave them.</p>
+    </section>
   </div>
-  <div class="row">
-    <input id="alert-text" type="text" placeholder="Alert text" autocomplete="off">
-    <select id="alert-level" aria-label="Alert level">
-      <option>info</option><option>urgent</option>
-    </select>
-    <button id="raise">Raise alert</button>
-    <label>Who may watch
-      <select id="policy">
-        <option value="accept_all">anyone with a session</option>
-        <option value="restricted">ask me</option>
-      </select>
-    </label>
-  </div>
-  <div class="row">
-    <label><input id="watch-load" type="checkbox" checked> Watch other devices' load</label>
-  </div>
-  <div class="meta" id="report">nothing published yet</div>
-</section>
 
-<section id="asks-section" hidden>
-  <h2>Waiting for your answer</h2>
-  <ul id="asks"></ul>
-</section>
+  <section class="card" id="asks-section" hidden>
+    <h2>Waiting for your answer</h2>
+    <ul class="asks" id="asks"></ul>
+  </section>
 
-<section>
-  <h2>Other devices</h2>
-  <ul id="peers"><li class="meta">none yet</li></ul>
-</section>
+  <section class="card">
+    <h2>Other devices</h2>
+    <div class="peers" id="peers"></div>
+  </section>
 
-<section>
-  <h2>Alerts</h2>
-  <ul id="alerts"><li class="meta">none yet</li></ul>
-</section>
+  <section class="card">
+    <h2>Alerts</h2>
+    <ul class="alerts" id="alerts"></ul>
+  </section>
+</main>
 
 <script type="module">
 import { OfflineNode } from "../../bindings/web/src/index.js";
@@ -88,8 +165,21 @@ import { OfflineNode } from "../../bindings/web/src/index.js";
 const SERVICE = "coord.v1";
 const $ = (id) => document.getElementById(id);
 const short = (address) => `${address.slice(0, 10)}…${address.slice(-6)}`;
+const el = (tag, className, text) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+// A colour per device, from its address, so a device looks the same in every tab.
+const hue = (address) => [...address].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+function avatar(address, name, target = el("div", "avatar")) {
+  target.style.background = `hsl(${hue(address)} 55% 45%)`;
+  target.textContent = (name || "?").trim().charAt(0).toUpperCase() || "?";
+  return target;
+}
 
-// address -> { state: { key: value }, subs: { status, alerts }, subState }.
+// address -> { state: { key: value }, subs: { status, alerts }, sub: { state, reason } }.
 // `alerts` is one subscription to the pattern `alerts/*`: every alert level
 // is its own topic, and a level created later is followed without asking.
 const peers = new Map();
@@ -112,12 +202,30 @@ await node.setServiceSubscriptionPolicy(SERVICE, { kind: "accept_all" });
 // ---------------------------------------------------------------------------
 
 function showReport(what, report) {
-  $("report").textContent =
-    `${what}: ${report.subscribers} subscriber(s), ${report.sentLive} live, ` +
-    `${report.queued} queued, ${report.coalesced} coalesced`;
+  const counter = (label, value) => {
+    const span = el("span", "counter", `${label} `);
+    span.append(el("b", "", String(value)));
+    return span;
+  };
+  $("report").replaceChildren(
+    el("span", "counter", `last publish: ${what}`),
+    counter("subscribers", report.subscribers),
+    counter("live", report.sentLive),
+    counter("queued", report.queued),
+    counter("coalesced", report.coalesced),
+  );
+}
+
+function renderMe() {
+  $("me-name").textContent = $("name").value;
+  $("me-status").textContent = $("status").value;
+  $("me-status").className = `pill ${$("status").value}`;
+  $("load-value").textContent = $("load").value;
+  avatar(node.address, $("name").value, $("me-avatar"));
 }
 
 async function publishState(key, value) {
+  renderMe();
   showReport(key, await node.publishServiceUpdate(SERVICE, "status", value, { key }));
 }
 
@@ -128,14 +236,16 @@ for (const [key, value] of [["name", $("name").value], ["status", $("status").va
   await publishState(key, value);
 }
 
-$("raise").addEventListener("click", async () => {
+async function raise() {
   const text = $("alert-text").value.trim() || "attention";
   const topic = `alerts/${$("alert-level").value}`;
   alertCount += 1;
   showReport("alert", await node.publishServiceUpdate(SERVICE, topic, text));
   await node.setServiceTopicCheckpoint(SERVICE, topic, `${alertCount} alert(s) so far, last: ${text}`);
   $("alert-text").value = "";
-});
+}
+$("raise").addEventListener("click", raise);
+$("alert-text").addEventListener("keydown", (event) => { if (event.key === "Enter") raise(); });
 
 $("policy").addEventListener("change", () =>
   node.setServiceSubscriptionPolicy(SERVICE, { kind: $("policy").value }));
@@ -155,13 +265,13 @@ async function subscribeTo(address, topic, options) {
     peer.subs[topic] = subId;
     subscriptions.set(subId, { address, topic });
   } catch (error) {
-    peer.subState = `could not subscribe: ${error.message ?? error}`;
+    peer.sub = { state: "ended", reason: `could not subscribe: ${error.message ?? error}` };
   }
 }
 
 async function watch(address) {
   if (peers.has(address)) return;
-  const peer = { state: {}, subState: "pending", subs: {} };
+  const peer = { state: {}, sub: { state: "pending", reason: "waiting for a session" }, subs: {} };
   peers.set(address, peer);
   render();
   await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
@@ -193,9 +303,12 @@ node.addEventListener("service_update_received", ({ detail }) => {
     peer.state[detail.key] = detail.body;
   } else {
     alerts.unshift({
+      address: sub.address,
       from: peer.state.name ?? short(sub.address),
       level: detail.topic.slice("alerts/".length),
-      text: detail.snapshot ? `(summary) ${detail.body}` : detail.body,
+      text: detail.body,
+      summary: detail.snapshot,
+      at: new Date(),
     });
   }
   render();
@@ -206,7 +319,7 @@ node.addEventListener("service_subscription_changed", ({ detail }) => {
     const sub = subscriptions.get(detail.sub_id);
     if (!sub) return;
     const peer = peers.get(sub.address);
-    peer.subState = `${detail.state} (${detail.reason})`;
+    peer.sub = { state: detail.state, reason: detail.reason };
     // A provider that started over: what was held belongs to its old life.
     if (detail.reason === "stream_reset" && sub.topic === "status") peer.state = {};
     if (detail.state === "ended") {
@@ -228,7 +341,7 @@ node.addEventListener("service_subscribe_received", ({ detail }) => {
 
 node.addEventListener("neighbor_lost", ({ detail }) => {
   const peer = peers.get(detail.peer_id);
-  if (peer) peer.subState = "out of range; queued updates wait for it";
+  if (peer) peer.sub = { state: "paused", reason: "out of range; queued updates wait for it" };
   render();
 });
 
@@ -236,51 +349,68 @@ node.addEventListener("neighbor_lost", ({ detail }) => {
 // Rendering
 // ---------------------------------------------------------------------------
 
-function button(text, onClick, quiet = false) {
-  const b = document.createElement("button");
-  b.textContent = text;
-  if (quiet) b.className = "quiet";
+function button(text, onClick, className = "") {
+  const b = el("button", className, text);
   b.addEventListener("click", onClick);
   return b;
+}
+
+function renderPeer(address, peer) {
+  const card = el("div", "peer");
+  const name = peer.state.name ?? short(address);
+
+  const head = el("div", "peer-head");
+  const title = el("div", "peer-title");
+  title.append(el("strong", "", name), el("code", "", short(address)));
+  head.append(avatar(address, name), title);
+  if (peer.state.status) head.append(el("span", `pill ${peer.state.status}`, peer.state.status));
+  card.append(head);
+
+  const load = el("div", "stack");
+  load.style.gap = "4px";
+  const loadRow = el("div", "kv");
+  const watched = $("watch-load").checked;
+  loadRow.append(el("span", "", "load"), el("span", "", watched ? (peer.state.load ?? "…") : "not watched"));
+  const bar = el("div", "bar");
+  const fill = el("span");
+  fill.style.width = `${watched ? Number(peer.state.load ?? 0) : 0}%`;
+  bar.append(fill);
+  load.append(loadRow, bar);
+  card.append(load);
+
+  const foot = el("div", "kv");
+  const state = el("span");
+  state.append(el("span", `pill ${peer.sub.state}`, peer.sub.state), document.createTextNode(` ${peer.sub.reason}`));
+  state.className = "meta";
+  foot.append(state);
+  if (peer.subs.status) {
+    foot.append(button("Resync", () => node.resyncServiceSubscription(peer.subs.status), "quiet small"));
+  }
+  card.append(foot);
+  return card;
 }
 
 function render() {
   const list = $("peers");
   list.replaceChildren();
-  if (peers.size === 0) list.innerHTML = '<li class="meta">none yet</li>';
-  for (const [address, peer] of peers) {
-    const item = document.createElement("li");
-    const head = document.createElement("div");
-    head.className = "peer-head";
-    const title = document.createElement("strong");
-    title.textContent = peer.state.name ?? short(address);
-    const actions = document.createElement("span");
-    if (peer.subs.status) {
-      actions.append(button("Resync", () => node.resyncServiceSubscription(peer.subs.status), true));
-    }
-    head.append(title, actions);
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `${short(address)} · ${peer.subState}`;
-    const values = document.createElement("dl");
-    for (const key of ["status", "load"]) {
-      const dt = document.createElement("dt");
-      dt.textContent = key;
-      const dd = document.createElement("dd");
-      dd.textContent = peer.state[key] ?? (key === "load" && !$("watch-load").checked ? "not watched" : "…");
-      values.append(dt, dd);
-    }
-    item.append(head, meta, values);
-    list.append(item);
+  if (peers.size === 0) {
+    list.append(el("div", "empty", "No other devices yet. Open this page in another tab and it appears here."));
   }
+  for (const [address, peer] of peers) list.append(renderPeer(address, peer));
 
   const alertList = $("alerts");
   alertList.replaceChildren();
-  if (alerts.length === 0) alertList.innerHTML = '<li class="meta">none yet</li>';
-  for (const { from, level, text } of alerts.slice(0, 20)) {
-    const item = document.createElement("li");
-    item.className = "alert";
-    item.textContent = `${from} [${level}]: ${text}`;
+  if (alerts.length === 0) alertList.append(el("li", "meta", "None yet. Raise one from another tab."));
+  for (const { address, from, level, text, summary, at } of alerts.slice(0, 20)) {
+    const item = el("li");
+    const body = el("span", "text");
+    const who = el("strong", "", `${peers.get(address)?.state.name ?? from} `);
+    body.append(who, summary ? el("span", "summary", `summary: ${text}`) : document.createTextNode(text));
+    item.append(
+      el("span", `pill ${level}`, level),
+      body,
+      el("span", "meta", at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })),
+    );
     alertList.append(item);
   }
 
@@ -288,12 +418,14 @@ function render() {
   const askList = $("asks");
   askList.replaceChildren();
   for (const [subId, ask] of asks) {
-    const item = document.createElement("li");
-    item.textContent = `${short(ask.sender)} wants to watch ${ask.topic} `;
+    const item = el("li");
+    const who = el("span", "who");
+    who.append(el("strong", "", short(ask.sender)), document.createTextNode(` wants to watch ${ask.topic}`));
+    if (ask.renewal) who.append(el("span", "meta", " (says it was watching before)"));
     item.append(
-      button("Accept", async () => { await node.acceptServiceSubscription(subId); asks.delete(subId); render(); }),
-      document.createTextNode(" "),
-      button("Reject", async () => { await node.rejectServiceSubscription(subId, "not now"); asks.delete(subId); render(); }, true),
+      who,
+      button("Accept", async () => { await node.acceptServiceSubscription(subId); asks.delete(subId); render(); }, "small"),
+      button("Reject", async () => { await node.rejectServiceSubscription(subId, "not now"); asks.delete(subId); render(); }, "quiet small"),
     );
     askList.append(item);
   }
