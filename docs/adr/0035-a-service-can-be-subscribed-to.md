@@ -218,7 +218,15 @@ returning subscribers admitted without asking puts them in `allow_peers`.
 A renewal of a subscription the provider holds goes through it too, and one
 the policy now refuses ends with `policy`. Otherwise a peer removed from an
 allowed group, which renews every half lease and so never lapses, would be
-streamed to for as long as it kept renewing.
+streamed to for as long as it kept renewing. One the policy admitted on its
+own and now answers with "ask" (`rules` with `fallback: ask`, the group
+member since removed) goes back to the application with `renewal: true`, and
+nothing is sent to it until the application decides; refused or unanswered,
+it ends as a newcomer would. One the application admitted is not asked
+again. A renewal is read for its `sub_id` only: one whose service, topic or
+mode differs from the subscription it names is dropped, because the policy
+looked up for the frame's service would let a peer refused on one service
+renew under another that admits it, and keep being streamed the first.
 
 ### Getting the state back
 
@@ -304,9 +312,19 @@ service frames, each only ever inside `__MLS_ENC__`:
 | Prefix | Direction | Body |
 |--------|-----------|------|
 | `__SVC_SUB__` | consumer to provider | `{v, sub_id, service_id, topic, mode, params, keys?, lease_ms, resume?: {stream, seq, digest, topics?}, resync}` |
-| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?, pattern_full?}` |
+| `__SVC_SUB_R__` | provider to consumer | `{v, sub_id, status, reason?, lease_ms, stream, seq, history_lost, topics?, pattern_full?, notice?}` |
 | `__SVC_UPD__` | provider to consumer | `{v, sub_id, topic?, stream, seq, key?, body, snapshot}` |
 | `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
+
+A reply with `notice: true` is one the provider sends on its own: a topic
+started over (`clear_service_topic`), or a pattern reached its cap. Its
+positions and `pattern_full` apply, but it answers nothing the consumer
+asked, so a renewal or resync still waiting stays waiting, and renewals that
+went unanswered stay counted. Otherwise a notice landing between a resync and
+its answer would clear the resync, and the renewal that supersedes it would go
+without. A pending subscription takes a notice as its answer: the provider
+sends notices only to admitted subscriptions, and the notice may have
+superseded the queued answer.
 
 `status` is one of five values, and nothing else:
 
@@ -339,6 +357,10 @@ service frames, each only ever inside `__MLS_ENC__`:
 | `history_lost` | consumer | A `log` gap that no checkpoint covers |
 | `pattern_full` | both | A pattern reached 64 topics |
 | `unsupported` | consumer | The provider answered at a `v` below a field the consumer used |
+| `accepted` | consumer, provider | A pending subscription became active |
+| `renewal_unanswered` | consumer | Three renewals in a row went unanswered, and the subscription paused |
+| `rejected` | provider | `reject_service_subscription` with an empty reason |
+| `not_found`, `mode_mismatch`, `full` | provider | A refusing reply with that `status` carries it as its reason too |
 
 `reject_service_subscription` and `end_service_subscription` also take an
 application reason, which travels as given (clamped in length) and which the
@@ -404,7 +426,7 @@ older key package.
 |-------|----------|
 | `latest` update | Live direct link and a confirmed session: sealed ephemeral send (the ADR 0032 path). Otherwise: a sealed reliable send that **supersedes** the previous queued update for the same subscription and key (invariant 5) |
 | `log` update | Sealed reliable send, every one |
-| `__SVC_SUB__` (subscribe, renew, resync) | Sealed reliable send, superseding the previous one for the same subscription. A resync not yet answered stays asked: every frame that supersedes it carries `resync` until a reply arrives |
+| `__SVC_SUB__` (subscribe, renew, resync) | Sealed reliable send, superseding the previous one for the same subscription. A resync not yet answered stays asked: every frame that supersedes it carries `resync`, and the position from before the resync, until a reply that is not a notice arrives |
 | `__SVC_SUB_R__` | Sealed reliable send, superseding the previous one for the same subscription |
 | `__SVC_UNSUB__` | Sealed reliable send |
 
@@ -490,7 +512,15 @@ admission state, last send time and dirty keys.
   renews only the `sub_id` it holds, so such a frame is always one from
   before the consumer restarted. A replaced subscription is retired: the
   provider remembers the last 4 retired `sub_id`s per triple and drops a
-  frame naming one, without a reply.
+  frame naming one, without a reply. So is every subscription that ends in a
+  way its subscriber was told of, or told the provider of: unsubscribed,
+  ended, refused (by the application, the policy or the approval timeout),
+  `mode_mismatch`, or the service unregistered. A renewal of one of those,
+  still in a mailbox, would otherwise subscribe again a subscriber that is
+  done with it: a lease of updates nobody reads, or a prompt for a
+  subscription that ended. An expired lease is the one end that is not
+  retired, since the renewal of a subscriber still there is how it
+  subscribes again.
 
   Both rules are needed, because neither survives the other's gap. Retired
   ids alone are lost when the provider restarts: a renewal under the old
@@ -554,6 +584,7 @@ reported rather than silent.
 | Subscriptions a provider holds, admitted or awaiting the application | 256 | `full`, never eviction (invariant 6) |
 | Subscriptions one peer holds on a provider, admitted or awaiting the application | 16 | `full` |
 | Retired streams a consumer remembers per topic; retired `sub_id`s a provider remembers per triple | 4 | The oldest is forgotten |
+| Retired `sub_id`s a provider remembers per subscriber, and in all | 64, and 1024 | The subscriber's own oldest; in all, the oldest of whoever holds the most, so one peer churning through topics never pushes out another's |
 | Subscriptions a consumer holds | 64 | `InvalidArgument` at `subscribe_service` |
 | `latest` table per topic | 256 keys, 256 KiB | `PayloadTooLarge`; `clear_service_topic` starts over |
 | `log` buffer per topic | 256 updates or 512 KiB, oldest dropped first | Resume past it: checkpoint, or `history_lost` |

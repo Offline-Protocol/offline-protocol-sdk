@@ -1712,6 +1712,73 @@ pub enum Event {
         encrypted: bool,
     },
 
+    /// Provider side: a subscription waits for the application to call
+    /// `accept_service_subscription` or `reject_service_subscription`
+    /// (ADR 0035). Emitted under the `restricted` policy, and under `rules`
+    /// when the subscriber matches no rule and the fallback is `ask`.
+    ServiceSubscribeReceived {
+        /// Subscription identifier.
+        sub_id: String,
+        /// Subscribed service.
+        service_id: String,
+        /// Subscribed topic.
+        topic: String,
+        /// `"latest"` or `"log"`.
+        mode: String,
+        /// Application-defined parameters from the subscriber.
+        params: String,
+        /// The subscriber, authenticated by the 1:1 MLS session: every
+        /// subscription frame is sealed.
+        sender: String,
+        /// The frame carried `resume`: the subscriber says it held this
+        /// subscription before (this device restarted, or the lease lapsed),
+        /// or a subscription the policy admitted is back for a decision
+        /// because the policy now asks. Its claim, not this device's
+        /// knowledge, which any peer can make: for wording a prompt, never
+        /// for admitting without one.
+        renewal: bool,
+    },
+
+    /// A subscription changed state, on either side (ADR 0035).
+    ServiceSubscriptionChanged {
+        /// Subscription identifier.
+        sub_id: String,
+        /// `"consumer"` or `"provider"`.
+        role: String,
+        /// Subscribed service.
+        service_id: String,
+        /// Subscribed topic.
+        topic: String,
+        /// The provider (consumer side) or the subscriber (provider side).
+        peer: String,
+        /// `"pending"`, `"active"`, `"paused"` or `"ended"`.
+        state: String,
+        /// Why, from a fixed vocabulary; see the service discovery guide.
+        reason: String,
+    },
+
+    /// Consumer side: an update on a subscribed topic (ADR 0035). Never
+    /// older than one already delivered for the same key.
+    ServiceUpdateReceived {
+        /// Subscription identifier.
+        sub_id: String,
+        /// Subscribed service.
+        service_id: String,
+        /// Subscribed topic.
+        topic: String,
+        /// The key, on a `latest` topic.
+        key: Option<String>,
+        /// Position in the provider's stream.
+        seq: u64,
+        /// Update body.
+        body: String,
+        /// A catch-up value (a `latest` key's current value, or a `log`
+        /// checkpoint) rather than a fresh publish.
+        snapshot: bool,
+        /// The provider, authenticated by the 1:1 MLS session.
+        provider_peer_id: String,
+    },
+
     // --- Presence, typing, and read receipts ---
     /// A peer's presence status was updated.
     PresenceUpdated {
@@ -3022,6 +3089,9 @@ impl Event {
             Self::ServiceDiscovered { .. } => "protocol.service.discovered",
             Self::ServiceRequestReceived { .. } => "protocol.service.request_received",
             Self::ServiceResponseReceived { .. } => "protocol.service.response_received",
+            Self::ServiceSubscribeReceived { .. } => "protocol.service.subscribe_received",
+            Self::ServiceSubscriptionChanged { .. } => "protocol.service.subscription_changed",
+            Self::ServiceUpdateReceived { .. } => "protocol.service.update_received",
             Self::PresenceUpdated { .. } => "protocol.presence.updated",
             Self::TypingIndicatorReceived { .. } => "protocol.typing.received",
             Self::ReadReceiptReceived { .. } => "protocol.read_receipt.received",
@@ -3091,6 +3161,59 @@ impl From<ServiceEvent> for Event {
                 body,
                 provider_peer_id,
                 encrypted: false,
+            },
+            ServiceEvent::ServiceSubscribeReceived {
+                sub_id,
+                service_id,
+                topic,
+                mode,
+                params,
+                sender,
+                renewal,
+            } => Self::ServiceSubscribeReceived {
+                sub_id,
+                service_id,
+                topic,
+                mode,
+                params,
+                sender,
+                renewal,
+            },
+            ServiceEvent::ServiceSubscriptionChanged {
+                sub_id,
+                role,
+                service_id,
+                topic,
+                peer,
+                state,
+                reason,
+            } => Self::ServiceSubscriptionChanged {
+                sub_id,
+                role,
+                service_id,
+                topic,
+                peer,
+                state,
+                reason,
+            },
+            ServiceEvent::ServiceUpdateReceived {
+                sub_id,
+                service_id,
+                topic,
+                key,
+                seq,
+                body,
+                snapshot,
+                provider_peer_id,
+            } => Self::ServiceUpdateReceived {
+                sub_id,
+                service_id,
+                topic,
+                key,
+                seq,
+                body,
+                snapshot,
+                provider_peer_id,
             },
         }
     }
@@ -3581,6 +3704,62 @@ impl fmt::Debug for Event {
                 .field("body", &format!("[REDACTED {} bytes]", body.len()))
                 .field("provider_peer_id", &"[REDACTED]")
                 .field("encrypted", encrypted)
+                .finish(),
+            Self::ServiceSubscribeReceived {
+                sub_id,
+                service_id,
+                topic,
+                mode,
+                params,
+                sender: _,
+                renewal,
+            } => f
+                .debug_struct("ServiceSubscribeReceived")
+                .field("sub_id", sub_id)
+                .field("service_id", service_id)
+                .field("topic", topic)
+                .field("mode", mode)
+                .field("params", &format!("[REDACTED {} bytes]", params.len()))
+                .field("sender", &"[REDACTED]")
+                .field("renewal", renewal)
+                .finish(),
+            Self::ServiceSubscriptionChanged {
+                sub_id,
+                role,
+                service_id,
+                topic,
+                peer: _,
+                state,
+                reason,
+            } => f
+                .debug_struct("ServiceSubscriptionChanged")
+                .field("sub_id", sub_id)
+                .field("role", role)
+                .field("service_id", service_id)
+                .field("topic", topic)
+                .field("peer", &"[REDACTED]")
+                .field("state", state)
+                .field("reason", reason)
+                .finish(),
+            Self::ServiceUpdateReceived {
+                sub_id,
+                service_id,
+                topic,
+                key,
+                seq,
+                body,
+                snapshot,
+                provider_peer_id: _,
+            } => f
+                .debug_struct("ServiceUpdateReceived")
+                .field("sub_id", sub_id)
+                .field("service_id", service_id)
+                .field("topic", topic)
+                .field("key", key)
+                .field("seq", seq)
+                .field("body", &format!("[REDACTED {} bytes]", body.len()))
+                .field("snapshot", snapshot)
+                .field("provider_peer_id", &"[REDACTED]")
                 .finish(),
             Self::GroupCreated { group_id, name } => f
                 .debug_struct("GroupCreated")

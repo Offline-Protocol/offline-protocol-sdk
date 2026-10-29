@@ -165,6 +165,9 @@ pub(crate) mod tests {
         "protocol.service.discovered",
         "protocol.service.request_received",
         "protocol.service.response_received",
+        "protocol.service.subscribe_received",
+        "protocol.service.subscription_changed",
+        "protocol.service.update_received",
         "protocol.presence.updated",
         "protocol.typing.received",
         "protocol.read_receipt.received",
@@ -354,6 +357,9 @@ pub(crate) mod tests {
             | Event::ServiceDiscovered { .. }
             | Event::ServiceRequestReceived { .. }
             | Event::ServiceResponseReceived { .. }
+            | Event::ServiceSubscribeReceived { .. }
+            | Event::ServiceSubscriptionChanged { .. }
+            | Event::ServiceUpdateReceived { .. }
             | Event::PresenceUpdated { .. }
             | Event::TypingIndicatorReceived { .. }
             | Event::ReadReceiptReceived { .. }
@@ -745,6 +751,34 @@ pub(crate) mod tests {
                 body: String::new(),
                 provider_peer_id: String::new(),
                 encrypted: false,
+            },
+            Event::ServiceSubscribeReceived {
+                sub_id: String::new(),
+                service_id: String::new(),
+                topic: String::new(),
+                mode: String::new(),
+                params: String::new(),
+                sender: String::new(),
+                renewal: false,
+            },
+            Event::ServiceSubscriptionChanged {
+                sub_id: String::new(),
+                role: String::new(),
+                service_id: String::new(),
+                topic: String::new(),
+                peer: String::new(),
+                state: String::new(),
+                reason: String::new(),
+            },
+            Event::ServiceUpdateReceived {
+                sub_id: String::new(),
+                service_id: String::new(),
+                topic: String::new(),
+                key: None,
+                seq: 0,
+                body: String::new(),
+                snapshot: false,
+                provider_peer_id: String::new(),
             },
             Event::PresenceUpdated {
                 peer_id: String::new(),

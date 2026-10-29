@@ -16,6 +16,18 @@ pub enum ServiceError {
     #[error("invalid status: {0} (expected one of: ok, not_found, error)")]
     InvalidStatus(String),
 
+    /// An argument is outside what the call accepts.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
+    /// No subscription with this id exists on this side.
+    #[error("unknown subscription: {0}")]
+    UnknownSubscription(String),
+
+    /// The peer does not support what was asked of it.
+    #[error("unsupported by peer: {0}")]
+    Unsupported(String),
+
     /// Other service error.
     #[error("{0}")]
     Other(String),

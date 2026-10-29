@@ -25,7 +25,7 @@ what each shape prevents.
    subscription awaiting the application counts against the caps.
 7. **A provider holds one subscription per (subscriber, service, topic)**;
    a first subscribe replaces the one before it, a renewal never replaces,
-   and a replaced one never returns. The consumer refuses a second
+   and a replaced or ended one never returns. The consumer refuses a second
    subscription to a triple it already holds.
 8. **A consumer that missed updates gets the state back, or an event saying
    it cannot.**
@@ -110,8 +110,16 @@ consumer emits `service_subscription_changed` (`active`, `pattern_full`) once.
 
 **Resync** forgets the position, so that the state that comes back is
 delivered even where it equals what was delivered before, and asks with
-`resync`. Every frame for the subscription carries `resync` until a reply
-arrives.
+`resync`. Every frame for the subscription carries `resync`, and the
+position it had when the resync was asked for, until a reply arrives that is
+not a notice (`notice: true`, sent by the provider on its own). A renewal that
+read the forgotten position would claim position 0, and a `log` topic would
+be replayed from its start, or reported `history_lost` once its buffer had
+moved on.
+
+**A pattern reply naming a retired stream** for one topic drops that topic's
+position only; the rest of the reply applies. An exact subscription's reply
+naming a retired stream is dropped whole.
 
 **A second subscribe to the same triple** (provider, service, topic) while
 the first is not `ended` fails at the call with `InvalidArgument`, naming the
@@ -124,7 +132,7 @@ renewals would then be dropped until it ended as `provider_unreachable`.
 |-------|-------|-----------|
 | awaiting the application | Subscriber, lease, the subscriber's `resume`; counts against both caps | `accept_service_subscription` (admitted), `reject_service_subscription` or `approval_timeout_ms` (gone, `rejected` sent) |
 | admitted | Lease, last send time, keys held back by the interval | Lease expiry (gone, no frame), `__SVC_UNSUB__` from the subscriber, `end_service_subscription` (`__SVC_UNSUB__` sent), the service unregistered, or replacement by a first subscribe (no `resume`) to the same topic under a new `sub_id` (retired). A renewal (`resume`) naming another `sub_id` is dropped with no reply and replaces nothing |
-| retired | Only its `sub_id`, the last 4 per (subscriber, service, topic) | Forgotten when a fifth is retired. A frame naming it is dropped with no reply, so a renewal sent before the subscriber restarted cannot replace the subscription it made since |
+| retired | Only its `sub_id`, the last 4 per (subscriber, service, topic). Entered on replacement and on every end either side is told of (unsubscribed, ended, refused, `mode_mismatch`, service unregistered); never on lease expiry | Forgotten when a fifth is retired. A frame naming it is dropped with no reply, so a renewal sent before the subscriber restarted cannot replace the subscription it made since, and one sent before an end cannot subscribe again |
 
 **Admission** is the service's policy: `restricted` (the default) asks the
 application, `accept_all` admits, and `rules` admits listed peers and members
@@ -132,7 +140,13 @@ of listed groups and asks or refuses the rest. It is applied to every
 renewal, not only the first subscribe: a subscriber renews every half lease,
 so a policy checked once would keep streaming to a peer it now refuses, such
 as one removed from an allowed group, for as long as that peer renews. A
-renewal the policy refuses ends the subscription with `policy`. A renewal for a
+renewal the policy refuses ends the subscription with `policy`. One the policy
+admitted on its own and now asks about (`rules`, `fallback: ask`) goes back to
+awaiting the application, with `renewal: true` and nothing sent until it
+decides; one the application admitted is not asked again. A renewal whose
+service, topic or mode differs from the subscription it names is dropped: the
+policy read for the frame's service would let a peer refused on one service
+renew under another that admits it. A renewal for a
 triple the provider holds nothing for is asked about with `renewal: true`
 (one for a triple it holds under another `sub_id` is dropped), which says only
 that the frame carried `resume`: any peer can set it, so it words a prompt
