@@ -1,38 +1,38 @@
 using OfflineProtocol.Sdk;
+using OfflineProtocol.Sdk.Config;
+using OfflineProtocol.Sdk.LocalApi;
+using OfflineProtocol.Sdk.Model;
 using OfflineProtocol.Sdk.Storage;
 using OfflineProtocol.Sdk.Telemetry;
 
 // Every ProtocolConfig field without a default in the interface definition; the rest take the
 // definition's defaults. An example program's values, as in bindings/c/README.md, never the SDK's.
-const string Config =
-    """
-    {
-      "app_id": "com.offlineprotocol.csharp.consumer",
-      "profile": "csharp-consumer",
-      "ble_enabled": false,
-      "wifi_direct_enabled": false,
-      "internet_enabled": true,
-      "reticulum_enabled": false,
-      "nostr_enabled": false,
-      "prefer_online": false,
-      "initial_ttl": 8,
-      "encryption_enabled": true,
-      "auto_key_exchange": true,
-      "store_pending": true,
-      "max_pending_per_peer": 64,
-      "max_pending_global": 4096,
-      "pending_ttl_ms": 60000,
-      "overflow_policy": "DropOldest"
-    }
-    """;
+var config = new ProtocolConfig
+{
+    AppId = "com.offlineprotocol.csharp.consumer",
+    Profile = "csharp-consumer",
+    BleEnabled = false,
+    WifiDirectEnabled = false,
+    InternetEnabled = true,
+    ReticulumEnabled = false,
+    NostrEnabled = false,
+    PreferOnline = false,
+    InitialTtl = 8,
+    EncryptionEnabled = true,
+    AutoKeyExchange = true,
+    StorePending = true,
+    MaxPendingPerPeer = 64,
+    MaxPendingGlobal = 4096,
+    PendingTtlMs = 60_000,
+    OverflowPolicy = OverflowPolicy.DropOldest,
+};
 
 // A fixed placeholder key for a throwaway store; a real host keeps its key out of the source.
 const string StoreKeyBase64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
 Console.WriteLine($"library version: {ProtocolEngine.LibraryVersion}");
 
-var derive = await ProtocolEngine.CallStaticAsync(
-    "derive_address",
+var derive = await ProtocolEngine.DeriveAddressAsync(
     """{"public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}""");
 if (!derive.StartsWith("\"off1", StringComparison.Ordinal))
 {
@@ -57,7 +57,13 @@ Directory.CreateDirectory(stateRoot);
 
 try
 {
-    await using var engine = await ProtocolEngine.CreateAsync(Config);
+    await using var engine = await ProtocolEngine.CreateAsync(config);
+    var state = await LocalApiTyped.GetStateAsync(engine);
+    if (state != ProtocolState.Stopped)
+    {
+        Console.Error.WriteLine($"FAIL: expected Stopped before start, got {state}");
+        return 1;
+    }
 
     var secureStorage = new MemoryProtocolStorage();
     var secureProvider = new NativeStorageProvider(secureStorage);
@@ -78,7 +84,7 @@ try
         lastEvent = json;
         eventGate.Set();
     });
-    await engine.CallAsync("emit_test_event");
+    await engine.EmitTestEventAsync();
     if (!eventGate.Wait(TimeSpan.FromSeconds(5)))
     {
         Console.Error.WriteLine("FAIL: event callback timeout");
@@ -139,7 +145,7 @@ try
     await engine.StartAsync();
     await engine.StopAsync();
 
-    await using var fileEngine = await ProtocolEngine.CreateAsync(Config);
+    await using var fileEngine = await ProtocolEngine.CreateAsync(config);
     await fileEngine.InitializeMlsWithFileStoresAsync(mlsRoot, stateRoot, StoreKeyBase64);
     var fileAddress = await fileEngine.LocalAddressAsync();
     if (!fileAddress.StartsWith("\"off1", StringComparison.Ordinal))
@@ -148,7 +154,16 @@ try
         return 1;
     }
 
-    await fileEngine.CallAsync("close_file_stores");
+    // The generated data.* client, through the prefix the C API dispatches on.
+    await fileEngine.Data.CreateDocAsync("""{"space_id":"consumer","doc_id":"notes"}""");
+    var docs = await fileEngine.Data.ListDocsAsync("""{"space_id":"consumer"}""");
+    if (!docs.Contains("\"notes\"", StringComparison.Ordinal))
+    {
+        Console.Error.WriteLine($"FAIL: data.list_docs {docs}");
+        return 1;
+    }
+
+    await fileEngine.CloseFileStoresAsync();
     Console.WriteLine("csharp consumer check: ok");
     return 0;
 }

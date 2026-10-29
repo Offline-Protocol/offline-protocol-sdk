@@ -200,3 +200,128 @@ fn no_csharp_gchandle_is_held_in_a_readonly_field() {
         }
     }
 }
+
+const GENERATED: &str = "bindings/csharp/src/OfflineProtocol.Sdk/Generated";
+
+/// Names of the `public` members declared in `source`: the identifier before the first `(`.
+fn public_member_names(source: &str) -> std::collections::BTreeSet<String> {
+    source
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("public "))
+        .filter_map(|line| {
+            let head = line.split_once('(')?.0;
+            if head.contains('=') {
+                return None;
+            }
+            head.split_whitespace().last().map(str::to_string)
+        })
+        .collect()
+}
+
+fn generated_engine_sources() -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = std::fs::read_dir(repo().join(GENERATED))
+        .unwrap_or_else(|e| panic!("cannot read {GENERATED}: {e}"))
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("ProtocolEngine.") && name.ends_with(".g.cs"))
+        .map(|name| {
+            let text = read(&format!("{GENERATED}/{name}"));
+            (name, text)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+// A generated wrapper beside a hand-written method of the same name differs only in its
+// parameters, so the compiler accepts both and a zero-argument call becomes ambiguous or
+// binds to the wrapper. poll_event did this: the wrapper went through the JSON dispatcher
+// and lost the null an empty queue returns. tools/gen_csharp_local_api.py refuses it too;
+// this holds the committed files on every platform `cargo test` runs on.
+#[test]
+fn no_generated_csharp_method_shadows_a_hand_written_one() {
+    let hand = public_member_names(&read(
+        "bindings/csharp/src/OfflineProtocol.Sdk/ProtocolEngine.cs",
+    ));
+    assert!(
+        hand.contains("PollEventAsync") && hand.contains("CreateAsync"),
+        "the member scan must find the hand-written engine methods: {hand:?}"
+    );
+    let generated = generated_engine_sources();
+    assert!(
+        generated.len() >= 2,
+        "{GENERATED} must hold the generated ProtocolEngine partials"
+    );
+    for (name, text) in generated {
+        let clash: Vec<_> = public_member_names(&text)
+            .intersection(&hand)
+            .cloned()
+            .collect();
+        assert!(
+            clash.is_empty(),
+            "{name} shadows hand-written ProtocolEngine members {clash:?}; \
+             add them to SKIP_DECLARATIONS in tools/gen_csharp_local_api.py"
+        );
+    }
+}
+
+// Every wire name the C# binding generates a wrapper for must be one the C API dispatches,
+// or the wrapper compiles and fails at runtime with MethodNotFound.
+#[test]
+fn every_generated_csharp_method_is_dispatched_by_the_c_api() {
+    let dispatch = read("crates/offline-protocol-uniffi/src/capi/generated.rs");
+    let manifest = read("bindings/csharp/local_api_methods.txt");
+    let names: Vec<&str> = manifest.lines().filter(|l| !l.is_empty()).collect();
+    assert!(names.len() > 100, "local_api_methods.txt looks truncated");
+    for wire in names {
+        // A prefixed name is matched without its prefix, inside the object's own arm.
+        let method = wire.rsplit('.').next().unwrap_or(wire);
+        assert!(
+            dispatch.contains(&format!("\"{method}\" =>")),
+            "the C# binding wraps {wire}, which the C API does not dispatch"
+        );
+    }
+}
+
+// C6: the SDK ships no configuration values of its own. A literal here becomes a default
+// the interface definition can change underneath; the consumer check owns its example.
+#[test]
+fn the_csharp_sdk_carries_no_protocol_config_values() {
+    let root = repo().join("bindings/csharp/src/OfflineProtocol.Sdk");
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{dir:?}: {e}")) {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "cs") {
+                let text = std::fs::read_to_string(&path).expect("read C# source");
+                assert!(
+                    !text.contains("new ProtocolConfig") && !text.contains("AppId = \""),
+                    "{path:?} constructs a ProtocolConfig; the SDK must not ship one (C6)"
+                );
+            }
+        }
+    }
+}
+
+// The generator's --check runs in the C# job, which every change to the binding, the UDL
+// or the generator triggers.
+#[test]
+fn the_csharp_job_checks_the_generated_sources() {
+    let ci = read(".github/workflows/ci.yml");
+    assert!(
+        ci.contains("python3 tools/gen_csharp_local_api.py --check"),
+        "the C# job must run the generator with --check"
+    );
+    for input in [
+        "'tools/gen_csharp_local_api.py'",
+        "'bindings/python/scripts/generate_local_api_table.py'",
+    ] {
+        assert!(
+            ci.contains(input),
+            "the csharp change filter must include the generator input {input}"
+        );
+    }
+}

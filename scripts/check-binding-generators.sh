@@ -28,6 +28,7 @@ check tools/gen_mesh_sdk_dart.py --check
 check tools/gen_engine_method_handlers.py --check
 check tools/gen_flutter_engine_bridge.py --check
 check tools/gen_flutter_swift_bridge.py --check
+check tools/gen_csharp_local_api.py --check
 if [[ ! -f tools/rn_engine_bridge_error_manifest.json ]]; then
   echo "missing tools/rn_engine_bridge_error_manifest.json; run tools/extract_rn_bridge_error_manifest.py" >&2
   failures=$((failures + 1))

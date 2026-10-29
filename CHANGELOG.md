@@ -46,6 +46,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `PollEventAsync`. `EnableTelemetryAsync` lets the library fill `os` and the
   binding fill `os_major`, and the lifecycle calls follow C12
   ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
+- **C# typed config and generated local API.** Every engine method has a
+  typed wrapper on `ProtocolEngine`, `engine.Services` or `engine.Data`, and
+  `ProtocolEngine.CreateAsync` takes a `ProtocolConfig` record that leaves an
+  unset optional field to the engine's own default. Both are generated from the
+  interface definition, so a new method or config field reaches C# when the
+  generator is rerun ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
 
 ### Fixed
 

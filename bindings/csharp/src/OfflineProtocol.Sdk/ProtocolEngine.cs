@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
+using OfflineProtocol.Sdk.Config;
+using OfflineProtocol.Sdk.LocalApi;
 using OfflineProtocol.Sdk.Native;
 using OfflineProtocol.Sdk.Storage;
 using OfflineProtocol.Sdk.Telemetry;
@@ -9,7 +11,7 @@ namespace OfflineProtocol.Sdk;
 /// <summary>
 /// Host for one in-process engine. All native calls run on a dedicated engine thread (CS1 / C K2).
 /// </summary>
-public sealed class ProtocolEngine : IAsyncDisposable
+public sealed partial class ProtocolEngine : IAsyncDisposable
 {
     /// <summary>Pending engine calls; backpressure when the app outruns the native thread.</summary>
     public const int DefaultQueueCapacity = 512;
@@ -28,6 +30,14 @@ public sealed class ProtocolEngine : IAsyncDisposable
     private int _outboundWork;
     private readonly List<NativeStorageProvider> _attachedStorageProviders = [];
     private EventCallbackBridge? _eventBridge;
+    private readonly Lazy<MeshServicesClient> _meshServices;
+    private readonly Lazy<DataStoreClient> _dataStore;
+
+    /// <summary><c>services.*</c> local API methods (generated from the UDL).</summary>
+    public MeshServicesClient Services => _meshServices.Value;
+
+    /// <summary><c>data.*</c> local API methods (generated from the UDL).</summary>
+    public DataStoreClient Data => _dataStore.Value;
 
     private ProtocolEngine(int queueCapacity)
     {
@@ -47,11 +57,24 @@ public sealed class ProtocolEngine : IAsyncDisposable
             // call DisposeAsync before shutdown (see docs/bridges/csharp.md).
             IsBackground = true,
         };
+        _meshServices = new Lazy<MeshServicesClient>(
+            () => new MeshServicesClient(this),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+        _dataStore = new Lazy<DataStoreClient>(
+            () => new DataStoreClient(this),
+            LazyThreadSafetyMode.ExecutionAndPublication);
         engineThread.Start();
     }
 
     /// <summary>The native library's version, such as <c>"0.31.0"</c>. Needs no engine.</summary>
     public static string LibraryVersion => OfflineProtocolNative.Version();
+
+    /// <summary>Creates an engine from a typed <see cref="ProtocolConfig"/>.</summary>
+    public static Task<ProtocolEngine> CreateAsync(
+        ProtocolConfig config,
+        CancellationToken cancellationToken = default,
+        int queueCapacity = DefaultQueueCapacity) =>
+        CreateAsync(ProtocolConfigJson.Serialize(config), cancellationToken, queueCapacity);
 
     /// <summary>Creates an engine from a <c>ProtocolConfig</c> JSON object.</summary>
     /// <remarks>
@@ -120,7 +143,7 @@ public sealed class ProtocolEngine : IAsyncDisposable
         CancellationToken cancellationToken = default) =>
         CallAsync(
             "initialize_mls_with_file_stores",
-            ProtocolConfigJson.FileStores(mlsRoot, stateRoot, storeKeyBase64),
+            LocalApiParams.FileStores(mlsRoot, stateRoot, storeKeyBase64),
             cancellationToken);
 
     public Task StartAsync(CancellationToken cancellationToken = default) =>

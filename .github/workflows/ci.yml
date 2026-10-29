@@ -215,6 +215,10 @@ jobs:
               - *ffi
               - 'bindings/csharp/**'
               - 'bindings/c/include/**'
+              # The generated sources: the generator and the table parser it reads the UDL with.
+              - 'tools/gen_csharp_local_api.py'
+              - 'bindings/python/scripts/generate_local_api_table.py'
+              - 'docs/bridges/csharp.md'
 
             web:
               - *engine
@@ -1028,6 +1032,11 @@ jobs:
 
       - name: Build the library
         run: cargo build --locked --package offline-protocol-uniffi
+
+      # Once is enough: the output does not depend on the runner.
+      - name: Check the generated C# is current
+        if: runner.os == 'Linux'
+        run: python3 tools/gen_csharp_local_api.py --check
 
       - name: Build the C# binding
         run: dotnet build bindings/csharp/OfflineProtocol.sln -c Release
