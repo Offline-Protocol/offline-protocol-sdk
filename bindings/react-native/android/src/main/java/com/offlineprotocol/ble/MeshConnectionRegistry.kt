@@ -214,6 +214,23 @@ class MeshConnectionRegistry {
 
     fun hasServerConnection(address: String): Boolean = serverConnections.contains(address)
 
+    /**
+     * Maps [address] to [deviceId], as a hello would, when a central is
+     * connected to our server from it and nothing maps it yet. Returns whether
+     * it did. A mapped address is never rebound.
+     *
+     * For a dial that verified the peer at an address it also writes to our
+     * server from: an iPhone whose app restarted keeps that link (state
+     * restoration) and never writes its hello again, so the dial is the only
+     * proof of who is writing, even when the client link itself is then
+     * refused as a duplicate.
+     */
+    fun bindUnmappedServerLink(address: String, deviceId: String): Boolean {
+        if (!serverConnections.contains(address) || addressToDevice.containsKey(address)) return false
+        setDeviceIdentifier(address, deviceId)
+        return true
+    }
+
     fun untrackServerConnection(address: String) {
         serverConnections.remove(address)
     }

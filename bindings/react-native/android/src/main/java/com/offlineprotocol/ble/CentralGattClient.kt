@@ -1391,6 +1391,15 @@ internal class CentralGattClient(
             SystemClock.elapsedRealtime() + DUPLICATE_LINK_SUPPRESS_MS,
         )
         host.connections.consumePendingRole(address)
+        // The peer may also write to our server from this address with no
+        // hello (an iPhone whose app restarted keeps the link but not the
+        // hello), and this read is then the only proof of who is writing.
+        // Without the binding its writes queued unattributed for good, and the
+        // dial that should resolve them was refused every 60 s.
+        if (host.connections.bindUnmappedServerLink(address, peerId)) {
+            Log.i(TAG, "Mapped the server link at $address to $peerId")
+            drainPendingInboundFor(address, peerId)
+        }
         closeGattClient(gatt, "duplicate_identity")
     }
 

@@ -203,6 +203,34 @@ its periodic refresh restarts the advertisement only while no link is up,
 because each restart gives the advertisement a new random address
 ([ADR 0030](../adr/0030-one-bluetooth-le-link-per-peer-pair.md)).
 
+**A Bluetooth LE link that only takes writes is redialled within a bound.** A
+write without response reports success whether or not the peer can use it,
+and a link outlives the app on the other end while what it meant does not: an
+iPhone whose app restarts keeps its links through state restoration, but the
+new process never heard the hello that named the central, so it cannot
+attribute what that central writes. On Android, a client link is disconnected,
+and so redialled by the ordinary reconnect with its hello, once nothing from
+the peer has arrived on any link since the link came up, and a write at least
+10 seconds after its first one (the acknowledgement timeout, so the core's
+resend or another message) has itself gone 10 seconds unanswered. That is 20
+to 25 seconds after the first write (the check runs every 5 seconds), and the
+redial follows within about 5 seconds; on two phones the first message crossed
+26 seconds after the dead link came up. One unanswered write never counts,
+because the last frame of an exchange is often an acknowledgement. Only a
+fragment counts as hearing the peer: a hello or a subscription shows the peer
+is up, not that it can use what this side writes.
+
+A link the peer has answered once is never judged again. A peer that stops
+answering after that can attribute what it receives, and is holding its
+acknowledgements back for a reason of its own (a session it lacks): on two
+phones, judging such a link again tore it down every 30 to 40 seconds while
+the session healed. So a link that dies after its first answer is not caught
+by this rule. A peer whose replies come back over another carrier while Android
+sends over this one looks silent here, because the transport cannot see them.
+Without the bound, on 2026-10-29, an Android phone wrote to a restarted
+iPhone for more than 90 seconds, and the pair carried nothing until the
+Android app was restarted.
+
 ## What "sent" means at each layer
 
 This is a recurring source of confusion for application teams:

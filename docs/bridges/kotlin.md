@@ -219,6 +219,37 @@ configuration keeps the current setting rather than turning formation off.
 replaying the chapter's vectors. The group handling itself is not covered in
 CI (C9).
 
+## K9. A Bluetooth LE link outlives the app on the other end
+
+Both platforms keep a link up across an app restart: Android because the link
+belongs to the Bluetooth process, an iPhone through CoreBluetooth state
+restoration. What the link meant does not survive. The new process never
+received the hello that named the central, and a subscription the old one
+held is gone. Three things in the Android central follow, all found by
+restarting the iPhone app beside a linked Android phone
+([device runs](kotlin-devices.md)). Each one missing left the pair carrying
+nothing, in at least one direction, until the Android app restarted.
+
+- **A send goes over any ready client link to the peer.** A hello maps the
+  peer at the address it connected to our server from, where this side holds
+  no client link. Sends used to go to that address, and once its central
+  stopped being subscribed every one was deferred as "not yet ready" for good,
+  beside a ready client link to the same peer. `resolveClientEgressAddress`
+  falls back to that link (`ClientEgressAddressTest`).
+- **A dial refused as a duplicate still names the server link it proved.**
+  The restarted iPhone writes to our server over its restored link with no
+  hello. The dial that resolves such writes verifies it, and is then refused
+  under ADR 0030 because another link to the iPhone is held. It used to throw
+  the proof away with the link, so the writes queued unattributed and the
+  dial repeated every 60 seconds. `bindUnmappedServerLink` maps that server
+  link first, never rebinding one already mapped (`DuplicateClientLinkTest`).
+- **A client link that only takes writes is redialled.** `SilentLinkPolicy`
+  (`SilentLinkPolicyTest`) and the connection monitor disconnect it, so the
+  ordinary reconnect runs the handshake again, hello included. A link is
+  judged only until the peer first answers on it. The rule and its bound are
+  in
+  [the transport lifecycle](../state-machines/transport-lifecycle.md#per-transport-constraints).
+
 ## Testing
 
 Unit tests live in

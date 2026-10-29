@@ -1,5 +1,6 @@
 package com.offlineprotocol.ble
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -181,6 +182,41 @@ class DuplicateClientLinkTest {
         assertTrue(registry.isSuppressedDuplicate("4A:2A:C8:EB:B3:4D", nowMs = 0L) { subscribed })
         subscribed = false
         assertFalse(registry.isSuppressedDuplicate("4A:2A:C8:EB:B3:4D", nowMs = 0L) { subscribed })
+    }
+
+    /**
+     * 2026-10-29: an iPhone whose app restarted kept its link to our server
+     * and wrote over it with no hello. The dial that resolves such writes
+     * verified it and was refused as a duplicate of the link we already held,
+     * and nothing mapped the server link, so every frame it wrote was lost.
+     */
+    @Test
+    fun `a duplicate dial binds the unmapped server link it proved`() {
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("4A:A7:D1:56:B4:F8", "off1iphone")
+        registry.trackServerConnection("4A:A7:D1:56:B4:F8")
+        registry.trackServerConnection("73:57:D7:16:EF:A7")
+
+        assertTrue(registry.bindUnmappedServerLink("73:57:D7:16:EF:A7", "off1iphone"))
+        assertEquals("off1iphone", registry.deviceIdForAddress("73:57:D7:16:EF:A7"))
+    }
+
+    @Test
+    fun `a server link already mapped is never rebound`() {
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("73:57:D7:16:EF:A7", "off1other")
+        registry.trackServerConnection("73:57:D7:16:EF:A7")
+
+        assertFalse(registry.bindUnmappedServerLink("73:57:D7:16:EF:A7", "off1iphone"))
+        assertEquals("off1other", registry.deviceIdForAddress("73:57:D7:16:EF:A7"))
+    }
+
+    @Test
+    fun `an address with no server link is not bound`() {
+        val registry = MeshConnectionRegistry()
+
+        assertFalse(registry.bindUnmappedServerLink("73:57:D7:16:EF:A7", "off1iphone"))
+        assertEquals(null, registry.deviceIdForAddress("73:57:D7:16:EF:A7"))
     }
 
     @Test

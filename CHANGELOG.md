@@ -74,6 +74,23 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   sends a fresh package for each session Welcome it does not adopt
   ([both-create convergence](docs/state-machines/session-lifecycle.md#both-create-convergence)).
 
+- **An Android phone keeps talking to an iPhone whose app restarted.** An
+  iPhone keeps its Bluetooth LE links across an app restart, and its new
+  process knows nothing about them: not the hello that named the Android
+  phone, and not where it was subscribed. Android saw no disconnect and
+  carried nothing more, in one direction or both, until its own app
+  restarted. Android now sends over any ready client link to the peer, not
+  only the address the peer's hello mapped. A dial that proves who writes to
+  its server, and is then refused as a duplicate link, now maps that writer
+  before it closes. And a client link that keeps taking writes and has never
+  had an answer is dropped and redialled, which writes the hello again,
+  about 20 to 25 seconds after its first write. A link the peer has answered
+  once is never dropped for silence. On two phones, the first iPhone restart
+  beside a linked Android phone failed before, as did one in ten restarts of
+  both apps; after, 62 of 62 restarts and connects carried messages
+  ([kotlin-devices.md](docs/bridges/kotlin-devices.md),
+  [K9](docs/bridges/kotlin.md#k9-a-bluetooth-le-link-outlives-the-app-on-the-other-end)).
+
 - **`sendReadReceipt` works again from React Native on Android.** Since the
   shared engine bridge (0.31.0), every array argument crossed the Android
   adapter as integers, so the message ids, which are strings, threw on every
