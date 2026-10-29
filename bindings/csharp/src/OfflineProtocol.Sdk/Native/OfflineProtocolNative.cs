@@ -11,7 +11,7 @@ internal static partial class OfflineProtocolNative
         : OperatingSystem.IsMacOS() ? "liboffline_protocol_uniffi.dylib"
         : "liboffline_protocol_uniffi.so";
 
-    [LibraryImport(LibraryName, EntryPoint = "offline_protocol_version", StringMarshalling = StringMarshalling.Utf8)]
+    [LibraryImport(LibraryName, EntryPoint = "offline_protocol_version")]
     internal static partial IntPtr offline_protocol_version_raw();
 
     [LibraryImport(LibraryName, EntryPoint = "offline_protocol_create", StringMarshalling = StringMarshalling.Utf8)]

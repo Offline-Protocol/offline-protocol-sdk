@@ -2,32 +2,16 @@ using System.Text.Json;
 
 namespace OfflineProtocol.Sdk;
 
-/// <summary>Minimal <c>ProtocolConfig</c> JSON for scaffold and consumer-check (PR1).</summary>
+/// <summary>
+/// JSON parameter builders for the calls the SDK wraps.
+/// </summary>
+/// <remarks>
+/// The SDK carries no <c>ProtocolConfig</c> of its own: a value written here would be a default
+/// the interface definition can change underneath it (C6). Hosts pass their configuration to
+/// <see cref="ProtocolEngine.CreateAsync"/>; the consumer check shows the required fields.
+/// </remarks>
 public static class ProtocolConfigJson
 {
-    /// <summary>Fields without a UDL default, with definition defaults for the rest (see bindings/c/README.md).</summary>
-    public const string MinimalConsumer =
-        """
-        {
-          "app_id": "com.offlineprotocol.csharp.consumer",
-          "profile": "csharp-consumer",
-          "ble_enabled": false,
-          "wifi_direct_enabled": false,
-          "internet_enabled": true,
-          "reticulum_enabled": false,
-          "nostr_enabled": false,
-          "prefer_online": false,
-          "initial_ttl": 8,
-          "encryption_enabled": true,
-          "auto_key_exchange": true,
-          "store_pending": true,
-          "max_pending_per_peer": 64,
-          "max_pending_global": 4096,
-          "pending_ttl_ms": 60000,
-          "overflow_policy": "DropOldest"
-        }
-        """;
-
     public static string FileStores(string mlsRoot, string stateRoot, string storeKeyBase64) =>
         JsonSerializer.Serialize(
             new Dictionary<string, string>

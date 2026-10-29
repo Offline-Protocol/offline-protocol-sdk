@@ -4,5 +4,10 @@
     <RootNamespace>OfflineProtocol.Sdk</RootNamespace>
     <AssemblyName>OfflineProtocol.Sdk</AssemblyName>
     <Description>Offline Protocol SDK for .NET (P/Invoke over the C API)</Description>
+    <!-- The LibraryImport source generator emits pointer code (SYSLIB1062 without this). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="OfflineProtocol.Sdk.Tests" />
+  </ItemGroup>
 </Project>

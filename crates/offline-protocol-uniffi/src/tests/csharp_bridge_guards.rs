@@ -1,47 +1,73 @@
-//! C# binding layout and docs (PR1 scaffold). Windows CI guards land in a later PR.
+//! C# binding guards: the contract doc and the hand-mirrored status enum.
+//!
+//! `cargo test` does not run the C# (C9). These hold the parts of the binding that
+//! drift silently, such as a value the C# copies from Rust.
+
+use std::path::{Path, PathBuf};
+
+fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn read(rel: &str) -> String {
+    // A Windows checkout may carry CRLF; the guards read lines, not bytes.
+    std::fs::read_to_string(repo().join(rel))
+        .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+        .replace("\r\n", "\n")
+}
+
+/// `Name = N,` members of the enum whose declaration starts with `header`, in order.
+fn enum_members(source: &str, header: &str, file: &str) -> Vec<(String, i64)> {
+    let body = source
+        .split_once(header)
+        .unwrap_or_else(|| panic!("`{header}` not found in {file}"))
+        .1;
+    let body = body
+        .split_once('{')
+        .unwrap_or_else(|| panic!("`{header}` has no body in {file}"))
+        .1
+        .split_once('}')
+        .unwrap_or_else(|| panic!("`{header}` body not terminated in {file}"))
+        .0;
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//") && !line.starts_with('['))
+        .filter_map(|line| {
+            let (name, value) = line.trim_end_matches(',').split_once('=')?;
+            let value = value.trim().parse().ok()?;
+            Some((name.trim().to_string(), value))
+        })
+        .collect()
+}
 
 #[test]
 fn csharp_bridges_doc_is_linked_from_the_bridge_index() {
-    let readme = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/README.md"),
-    )
-    .unwrap_or_else(|e| panic!("cannot read docs/bridges/README.md: {e}"));
-    let csharp_doc =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/csharp.md");
     assert!(
-        csharp_doc.is_file(),
+        repo().join("docs/bridges/csharp.md").is_file(),
         "docs/bridges/csharp.md must exist: it is the C# bridge contract"
     );
     assert!(
-        readme.contains("csharp.md"),
+        read("docs/bridges/README.md").contains("(csharp.md)"),
         "docs/bridges/README.md must link docs/bridges/csharp.md"
     );
 }
 
+// The C# enum is a copy of the C status values (C5). A host switches on the
+// number, so a renumbered or missing member reads one status as another with
+// no build failing.
 #[test]
-fn csharp_engine_runs_native_calls_on_a_dedicated_thread() {
-    let engine = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../bindings/csharp/src/OfflineProtocol.Sdk/ProtocolEngine.cs"),
-    )
-    .unwrap_or_else(|e| panic!("cannot read ProtocolEngine.cs: {e}"));
+fn the_csharp_status_enum_is_the_c_apis() {
+    const RUST: &str = "crates/offline-protocol-uniffi/src/capi/ffi.rs";
+    const CSHARP: &str = "bindings/csharp/src/OfflineProtocol.Sdk/Native/OfflineProtocolStatus.cs";
+    let rust = enum_members(&read(RUST), "pub enum OfflineProtocolStatus", RUST);
+    let csharp = enum_members(&read(CSHARP), "public enum OfflineProtocolStatus", CSHARP);
     assert!(
-        engine.contains("offline-protocol-engine")
-            && engine.contains("Channel.CreateBounded")
-            && engine.contains("RunEngineLoop")
-            && engine.contains("ShutdownEngineLoopAfterFailedCreate")
-            && engine.contains("WaitForNoOutboundWork")
-            && engine.contains("TryBeginOutboundWork"),
-        "ProtocolEngine must serialize native calls on a dedicated thread (CS1) and \
-         free the native handle only after outbound work drains"
+        rust.len() >= 6,
+        "parsed only {} members from {RUST}; the parser is broken, not the enum: {rust:?}",
+        rust.len()
     );
-    let config = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../bindings/csharp/src/OfflineProtocol.Sdk/ProtocolConfigJson.cs"),
-    )
-    .unwrap_or_else(|e| panic!("cannot read ProtocolConfigJson.cs: {e}"));
-    assert!(
-        config.contains("JsonSerializer.Serialize"),
-        "FileStores must build JSON with System.Text.Json, not manual escaping"
+    assert_eq!(
+        csharp, rust,
+        "{CSHARP} must list the C API's OfflineProtocolStatus members with the same values"
     );
 }
