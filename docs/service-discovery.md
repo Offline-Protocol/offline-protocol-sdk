@@ -409,7 +409,7 @@ topic: a subscription to one not yet published waits for it, and ends with
 | Mode | For | Publish | A consumer that was away gets |
 |------|-----|---------|------------------------------|
 | `latest` | State: a battery level, a position, who is leading | With a key. Only the newest value per key matters | The current value of every key |
-| `log` | Events: a door opened, an alarm fired | Without a key. Every update matters, in order | What it missed from the last 256 updates, or the checkpoint and what follows it |
+| `log` | Events: a door opened, an alarm fired | Without a key. Every update matters, and each carries its `seq` | What it missed from the last 256 updates, or the checkpoint and what follows it |
 
 ### Consumer
 
@@ -422,6 +422,10 @@ let sub_id = protocol.subscribe_service(&provider, "fleet.v1", "battery", Subscr
 protocol.resync_service_subscription(&sub_id)?;   // the whole state again, now
 protocol.unsubscribe_service(&sub_id)?;
 ```
+
+One subscription per (provider, service, topic): subscribing again to a
+topic this device already subscribes to fails with `InvalidArgument`, naming
+the existing `sub_id`.
 
 A subscription can be narrowed, and the provider applies both narrowings, so
 what was not asked for never leaves its device:
@@ -443,8 +447,7 @@ protocol.subscribe_service_with(&provider, "fleet.v1", "car", SubscribeOptions {
 A pattern is a prefix and one final `*` (`*` alone is every topic), and
 follows at most 64 topics. A key filter applies to `latest` only: a `log`
 consumer tracks a contiguous position that a withheld update would leave a
-permanent gap in. A provider on a build without either ends the subscription
-with the reason `unsupported`.
+permanent gap in.
 
 ### Provider
 
@@ -470,6 +473,14 @@ Who may subscribe is the service's **policy**:
 | `AcceptAll` | Admitted. Any peer with a session can watch the service |
 | `Rules` | Admitted when listed in `allow_peers` or a member of a group in `allow_groups`; anyone else is asked (`Ask`) or refused (`Reject`) |
 
+`renewal` on `service_subscribe_received` means the subscriber says it held
+the subscription before this device restarted or its lease lapsed. It is the
+subscriber's claim, which any peer can make: use it to word a prompt, never
+to admit without one. A subscriber to be admitted without asking belongs in
+`allow_peers`. Under `AcceptAll` the first to arrive fill the caps, and hold
+them for as long as they renew; a service that must stay reachable to
+particular peers uses `Rules`.
+
 `publish_service_update` returns how each subscriber was reached:
 `sent_live` (once, over a live direct link), `queued` (on the reliable
 ladder, across hops; a `latest` value replaces the one queued before it for
@@ -488,6 +499,20 @@ the new state follows. `resync_service_subscription` asks for it at once. A
 checkpoint and what follows it; with no checkpoint it is told
 `history_lost`, so set one whenever the state is worth summarising.
 
+A `log` topic is delivered in arrival order, not `seq` order: an update that
+arrives ahead of one still missing is delivered at once, and the gap is
+filled when the missing one arrives or at the next renewal. An application
+that needs order sorts by `seq`.
+
+Nothing of a subscription survives a restart on either side, its frames
+waiting to be sent included: they are never written to the outbox's store.
+A consumer that restarts holds no subscriptions and subscribes again. A
+provider that restarts holds no subscribers and no topics, and every stream
+is new; an application whose `latest` state matters republishes it at
+start-up. A frame that had already left, to a relay mailbox or a custodian,
+still arrives, and is dropped: each side remembers the streams and
+subscriptions it moved away from.
+
 ### Events
 
 | Event | Side | Fields |
@@ -500,18 +525,19 @@ checkpoint and what follows it; with no checkpoint it is told
 `accepted`, `resumed`, `stream_reset`, `history_lost`, `renewal_unanswered`,
 `provider_unreachable`, `no_reply`, `session_timeout`, `unsubscribed`,
 `revoked`, `replaced`, `expired`, `approval_timeout`, `service_unregistered`,
-`policy`, `not_found`, `mode_mismatch`, `full`, `pattern_full` (provider
-side: a pattern subscription passed over a matching topic because it already
-follows 64, reported once), or a reason the provider gave.
+`policy`, `invalid_subscription`, `rejected`, `not_found`, `mode_mismatch`,
+`full`, `pattern_full` (both sides: a pattern subscription follows 64 topics
+and will follow no more, reported once), or a reason the provider's
+application gave.
 
 ### Limits
 
 | Limit | Value |
 |-------|-------|
 | Update or checkpoint body | 64 KiB |
-| Key | 1 to 256 bytes |
+| Key | 1 to 256 bytes, no zero byte |
 | `params` | 4 KiB |
-| Subscriptions a provider holds | 256, and 16 from one peer; refused, never evicted, at either |
+| Subscriptions a provider holds, admitted or awaiting the application | 256, and 16 from one peer; refused, never evicted, at either |
 | Subscriptions a consumer holds | 64 |
 | `latest` topic | 256 keys, 256 KiB |
 | `log` buffer | 256 updates or 512 KiB |
