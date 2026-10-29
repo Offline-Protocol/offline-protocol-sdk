@@ -30,10 +30,8 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
     private int _outboundWork;
     private readonly List<NativeStorageProvider> _attachedStorageProviders = [];
     private EventCallbackBridge? _eventBridge;
-    private const int TransportCarrierCount = 4;
-
     private TransportNotifyHub? _transportNotifyHub;
-    private readonly TransportNotifyBridge?[] _transportBridges = new TransportNotifyBridge?[TransportCarrierCount];
+    private readonly TransportNotifyBridge?[] _transportBridges = new TransportNotifyBridge?[TransportNotifyHub.CarrierCount];
     private readonly Lazy<MeshServicesClient> _meshServices;
     private readonly Lazy<DataStoreClient> _dataStore;
 
@@ -303,18 +301,16 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
 
                 var index = (int)transport;
                 var err = default(OfflineProtocolError);
+
+                // Deactivated before the native call, so nothing the old registration queued
+                // reaches app code once this call has started.
+                var previous = _transportBridges[index];
+                _transportBridges[index] = null;
+                previous?.Deactivate();
+
                 if (handler is null)
                 {
-                    var previous = _transportBridges[index];
-                    _transportBridges[index] = null;
-                    previous?.Deactivate();
-                    var status = OfflineProtocolNative.offline_protocol_set_transport_callback(
-                        _handle,
-                        index,
-                        IntPtr.Zero,
-                        IntPtr.Zero,
-                        IntPtr.Zero,
-                        ref err);
+                    var status = ClearNativeTransportCallback(index, ref err);
                     if (status != OfflineProtocolStatus.Ok)
                     {
                         throw FromError(status, ref err);
@@ -322,10 +318,6 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
 
                     return null;
                 }
-
-                var previousBridge = _transportBridges[index];
-                _transportBridges[index] = null;
-                previousBridge?.Deactivate();
 
                 var bridge = new TransportNotifyBridge(handler, transport, TransportNotifyHub);
                 var install = OfflineProtocolNative.offline_protocol_set_transport_callback(
@@ -338,7 +330,11 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
                 if (install != OfflineProtocolStatus.Ok)
                 {
                     bridge.ReleaseLocal();
-                    ClearNativeTransportCallback(index, ref err);
+
+                    // The refusal is what the caller sees; the clear only makes sure the previous
+                    // registration's pointers are not left installed behind a deactivated bridge.
+                    var ignored = default(OfflineProtocolError);
+                    ClearNativeTransportCallback(index, ref ignored);
                     throw FromError(install, ref err);
                 }
 
@@ -347,33 +343,35 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
             },
             cancellationToken);
 
-    private void ClearNativeTransportCallback(int index, ref OfflineProtocolError err)
+    private OfflineProtocolStatus ClearNativeTransportCallback(int index, ref OfflineProtocolError err)
     {
         if (_handle == IntPtr.Zero)
         {
-            return;
+            return OfflineProtocolStatus.Ok;
         }
 
-        var status = OfflineProtocolNative.offline_protocol_set_transport_callback(
+        return OfflineProtocolNative.offline_protocol_set_transport_callback(
             _handle,
             index,
             IntPtr.Zero,
             IntPtr.Zero,
             IntPtr.Zero,
             ref err);
-        if (status != OfflineProtocolStatus.Ok)
-        {
-            throw FromError(status, ref err);
-        }
     }
 
-    private void ClearTransportCallbacks(ref OfflineProtocolError err)
+    /// <summary>
+    /// Dispose's clear. Never throws: it runs inside the free work item, and a throw there would
+    /// skip <c>offline_protocol_free</c> and leave the native engine and the engine thread alive.
+    /// The free drops every registration anyway, so a refused clear loses nothing.
+    /// </summary>
+    private void ClearTransportCallbacks()
     {
         for (var i = 0; i < _transportBridges.Length; i++)
         {
             var previous = _transportBridges[i];
             _transportBridges[i] = null;
             previous?.Deactivate();
+            var err = default(OfflineProtocolError);
             ClearNativeTransportCallback(i, ref err);
         }
     }
@@ -407,16 +405,19 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
         SetTransportCallbackAsync(OfflineProtocolTransport.Nostr, handler, cancellationToken);
 
     /// <summary>Transport notify signals dropped because the delivery queue was full for the given carrier.</summary>
-    public long DroppedTransportNotifyCount(OfflineProtocolTransport transport)
-    {
-        if (!IsKnownTransportCarrier(transport))
-        {
-            return 0;
-        }
+    public long DroppedTransportNotifyCount(OfflineProtocolTransport transport) =>
+        IsKnownTransportCarrier(transport)
+            ? _transportNotifyHub?.DroppedNotifyCount((int)transport) ?? 0
+            : 0;
 
-        var index = (int)transport;
-        return _transportBridges[index]?.DroppedNotifyCount ?? _transportNotifyHub?.DroppedNotifyCount(index) ?? 0;
-    }
+    /// <summary>
+    /// Transport handler runs for the given carrier that threw. Delivery continues after a throw,
+    /// as it does for <see cref="EventHandlerFailureCount"/>.
+    /// </summary>
+    public long TransportHandlerFailureCount(OfflineProtocolTransport transport) =>
+        IsKnownTransportCarrier(transport)
+            ? _transportNotifyHub?.HandlerFailureCount((int)transport) ?? 0
+            : 0;
 
     private TransportNotifyHub TransportNotifyHub => _transportNotifyHub ??= new TransportNotifyHub();
 
@@ -428,7 +429,7 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
         }
 
         var index = (int)transport;
-        return (uint)index < (uint)TransportCarrierCount;
+        return (uint)index < (uint)TransportNotifyHub.CarrierCount;
     }
 
     public Task<string?> PollEventAsync(CancellationToken cancellationToken = default) =>
@@ -516,7 +517,7 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
                     if (_handle != IntPtr.Zero)
                     {
                         var err = default(OfflineProtocolError);
-                        ClearTransportCallbacks(ref err);
+                        ClearTransportCallbacks();
                         var previous = _eventBridge;
                         _eventBridge = null;
                         previous?.Deactivate();

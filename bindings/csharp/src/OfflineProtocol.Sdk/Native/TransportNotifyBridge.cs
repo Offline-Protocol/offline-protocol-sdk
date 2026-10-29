@@ -43,8 +43,6 @@ internal sealed class TransportNotifyBridge
 
     public IntPtr DropPointer => _dropPointer;
 
-    internal long DroppedNotifyCount => _hub.DroppedNotifyCount(_transportIndex);
-
     /// <summary>Engine-initiated removal; clears the hub slot for this carrier.</summary>
     internal void Deactivate()
     {
@@ -62,14 +60,11 @@ internal sealed class TransportNotifyBridge
         FreeHandleOnce();
     }
 
-    internal static string DeliveryThreadName(OfflineProtocolTransport transport) =>
-        TransportNotifyHub.DeliveryThreadName;
-
     /// <summary>Invokes the native notify entry point without cross-assembly delegate marshaling (tests only).</summary>
-    internal void SimulateNativeNotifyForTests() => OnNotify(Context);
+    internal void SimulateNativeNotifyForTests(IntPtr? ctx = null) => OnNotify(ctx ?? Context);
 
     /// <summary>Invokes the native drop entry point without cross-assembly delegate marshaling (tests only).</summary>
-    internal void SimulateNativeDropForTests() => OnDrop(Context);
+    internal void SimulateNativeDropForTests(IntPtr? ctx = null) => OnDrop(ctx ?? Context);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void NotifyFn(IntPtr ctx);
@@ -77,30 +72,46 @@ internal sealed class TransportNotifyBridge
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void DropFn(IntPtr ctx);
 
+    // Runs on the engine thread inside the native library. An exception escaping a reverse
+    // P/Invoke terminates the process, so nothing may leave this method.
     private static void OnNotify(IntPtr ctx)
     {
-        if (GCHandle.FromIntPtr(ctx).Target is not TransportNotifyBridge bridge)
+        try
         {
-            return;
-        }
+            if (GCHandle.FromIntPtr(ctx).Target is not TransportNotifyBridge bridge)
+            {
+                return;
+            }
 
-        if (Volatile.Read(ref bridge._accepting) == 0)
+            if (Volatile.Read(ref bridge._accepting) == 0)
+            {
+                return;
+            }
+
+            bridge._hub.PostNotify(bridge._transportIndex);
+        }
+        catch
         {
-            return;
+            // Dropping one signal is the only safe outcome on the engine thread.
         }
-
-        bridge._hub.PostNotify(bridge._transportIndex);
     }
 
     private static void OnDrop(IntPtr ctx)
     {
-        if (GCHandle.FromIntPtr(ctx).Target is not TransportNotifyBridge bridge)
+        try
         {
-            return;
-        }
+            if (GCHandle.FromIntPtr(ctx).Target is not TransportNotifyBridge bridge)
+            {
+                return;
+            }
 
-        // Native replaced this registration; do not touch the hub (the new bridge may own the carrier).
-        bridge.EndNativeLifetime();
+            // Native replaced this registration; do not touch the hub (the new bridge may own the carrier).
+            bridge.EndNativeLifetime();
+        }
+        catch
+        {
+            // Same reverse P/Invoke rule as OnNotify.
+        }
     }
 
     private bool BeginTeardown()

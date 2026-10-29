@@ -136,12 +136,6 @@ public sealed class TransportNotifyBridgeTests
     }
 
     [Fact]
-    public void Delivery_thread_name_is_shared_across_carriers()
-    {
-        Assert.Equal(TransportNotifyHub.DeliveryThreadName, TransportNotifyBridge.DeliveryThreadName(OfflineProtocolTransport.Nostr));
-    }
-
-    [Fact]
     public void Carrier_handler_swap_delivers_second_handler_when_previous_deactivated_first()
     {
         var first = 0;
@@ -170,6 +164,26 @@ public sealed class TransportNotifyBridgeTests
             Assert.Equal(0, first);
             Assert.Equal(1, second);
             secondBridge.ReleaseLocal();
+        }
+        finally
+        {
+            hub.Deactivate();
+        }
+    }
+
+    [Fact]
+    public void Native_entry_points_swallow_what_they_throw()
+    {
+        var hub = new TransportNotifyHub();
+        try
+        {
+            var bridge = new TransportNotifyBridge(() => { }, OfflineProtocolTransport.Ble, hub);
+
+            // GCHandle.FromIntPtr throws on a null context. Anything escaping a reverse P/Invoke
+            // ends the process, so the entry points must swallow it.
+            bridge.SimulateNativeNotifyForTests(IntPtr.Zero);
+            bridge.SimulateNativeDropForTests(IntPtr.Zero);
+            bridge.ReleaseLocal();
         }
         finally
         {

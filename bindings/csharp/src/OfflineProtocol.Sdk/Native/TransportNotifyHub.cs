@@ -7,9 +7,13 @@ namespace OfflineProtocol.Sdk.Native;
 /// </summary>
 internal sealed class TransportNotifyHub
 {
-    public const int CarrierCount = 4;
+    /// <summary>
+    /// One slot per <see cref="OfflineProtocolTransport"/> member, so a member appended to the C
+    /// API (and so to the enum, which <c>the_csharp_transport_enum_is_the_c_apis</c> holds) gets a
+    /// queue without a second number to update.
+    /// </summary>
+    public static readonly int CarrierCount = Enum.GetValues<OfflineProtocolTransport>().Length;
     public const int DefaultPerCarrierQueueCapacity = 256;
-    public const int DefaultQueueCapacity = DefaultPerCarrierQueueCapacity * CarrierCount;
     public const string DeliveryThreadName = "offline-protocol-transport-notify";
 
     private readonly Channel<int>[] _generationChannels;
@@ -22,6 +26,7 @@ internal sealed class TransportNotifyHub
     private readonly int[] _accepting = new int[CarrierCount];
     private readonly int[] _deliveryGeneration = new int[CarrierCount];
     private readonly long[] _droppedNotifyCount = new long[CarrierCount];
+    private readonly long[] _handlerFailureCount = new long[CarrierCount];
     private readonly Thread _deliveryThread;
     private int _teardownFinished;
 
@@ -63,11 +68,15 @@ internal sealed class TransportNotifyHub
         _deliveryThread.Start();
     }
 
+    /// <remarks>
+    /// The generation is left where <see cref="DeactivateCarrier"/> moved it. Resetting it here
+    /// would make a stamp the replaced registration queued match the new one, and wake the new
+    /// handler for a notify it never received.
+    /// </remarks>
     internal void ActivateCarrier(int transportIndex, Action handler)
     {
         _handlers[transportIndex] = handler;
         Volatile.Write(ref _accepting[transportIndex], 1);
-        _deliveryGeneration[transportIndex] = 1;
     }
 
     internal void DeactivateCarrier(int transportIndex)
@@ -104,6 +113,12 @@ internal sealed class TransportNotifyHub
             ? Interlocked.Read(ref _droppedNotifyCount[transportIndex])
             : 0;
 
+    /// <summary>Handler runs for this carrier that threw. Delivery continues after a throw.</summary>
+    internal long HandlerFailureCount(int transportIndex) =>
+        (uint)transportIndex < (uint)CarrierCount
+            ? Interlocked.Read(ref _handlerFailureCount[transportIndex])
+            : 0;
+
     internal void Deactivate()
     {
         if (Interlocked.CompareExchange(ref _teardownFinished, 1, 0) != 0)
@@ -118,7 +133,12 @@ internal sealed class TransportNotifyHub
         }
 
         _wakeWriter.TryComplete();
-        _deliveryThread.Join();
+
+        // A handler that disposes the engine from the delivery thread would otherwise join itself.
+        if (Thread.CurrentThread != _deliveryThread)
+        {
+            _deliveryThread.Join();
+        }
     }
 
     private void RunDeliveryLoop()
@@ -181,6 +201,21 @@ internal sealed class TransportNotifyHub
             return;
         }
 
-        _handlers[carrierIndex]?.Invoke();
+        var handler = _handlers[carrierIndex];
+        if (handler is null)
+        {
+            return;
+        }
+
+        try
+        {
+            handler();
+        }
+        catch
+        {
+            // An exception escaping a dedicated thread terminates the process. App code must not
+            // be able to do that through a transport handler, any more than through the event one.
+            Interlocked.Increment(ref _handlerFailureCount[carrierIndex]);
+        }
     }
 }
