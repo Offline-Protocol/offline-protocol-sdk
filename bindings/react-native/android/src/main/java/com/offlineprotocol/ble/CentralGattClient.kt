@@ -1056,7 +1056,7 @@ internal class CentralGattClient(
         // (live) peer as lost.
         val redial = redialOnDisconnect.remove(address)
         val stalePeerId = host.connections.deviceIdForAddress(address)
-        if (!redial && stalePeerId != null && host.connections.hasOtherLiveLink(stalePeerId, address)) {
+        if (stalePeerId != null && dropsAsStaleAddress(redial, host.connections.hasOtherLiveLink(stalePeerId, address))) {
             connectionRetryCount.remove(address)
             bleHandler.post { finalizeGivenUpPeer(address, stalePeerId) }
             return
@@ -1707,3 +1707,14 @@ internal fun clearPeerBuffers(
     outboundQueue.removeAll(peerId)
     resolutionAttempts.remove(address)
 }
+
+/**
+ * Whether a client link that dropped should lose its address instead of being
+ * redialled: its peer holds another live link, and nothing asked for this
+ * address back. [CentralGattClient.disconnectToRedial] asks, for a silent
+ * link whose peer usually also writes to our server from an address its hello
+ * mapped. Dropping that address left the redial to a fresh advertisement,
+ * which a backgrounded iPhone may never send.
+ */
+internal fun dropsAsStaleAddress(redialRequested: Boolean, peerHasOtherLiveLink: Boolean): Boolean =
+    !redialRequested && peerHasOtherLiveLink

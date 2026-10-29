@@ -236,6 +236,12 @@ phones, judging such a link again tore it down every 30 to 40 seconds while
 the session healed. So a link that dies after its first answer is not caught
 by this rule. A peer whose replies come back over another carrier while Android
 sends over this one looks silent here, because the transport cannot see them.
+And a link that is dead in one direction only is not caught: a fragment the
+peer writes to our server counts as an answer on every client link to it,
+whether or not the peer can use what Android writes on that link. Narrowing
+an answer to a fragment on the link itself would tear down healthy links,
+because an iPhone that holds its own link to our server replies over it and
+notifies on Android's link only when it holds none.
 Without the bound, on 2026-10-29, an Android phone wrote to a restarted
 iPhone for more than 90 seconds, and the pair carried nothing until the
 Android app was restarted.
