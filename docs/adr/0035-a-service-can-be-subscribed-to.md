@@ -62,8 +62,8 @@ Each names the failure it prevents.
    events and logs, not a credential.
 3. **A subscription ends unless it is renewed, and nothing of it outlives the
    process that made it.** Both sides hold a lease, neither persists the
-   subscription, and no subscription frame queued in the (persisted) outbox
-   survives a restart. Otherwise a provider that crashed, or a consumer that
+   subscription, and no subscription frame is ever written to the
+   (persisted) outbox. Otherwise a provider that crashed, or a consumer that
    walked away, leaves the other side streaming to or waiting on a ghost, and
    durable subscription state is state that is wrong after a crash. A queued
    frame is durable subscription state too: replayed after a restart, it
@@ -85,9 +85,12 @@ Each names the failure it prevents.
    undecided subscriptions under `restricted` would be the unbounded one.
 7. **One subscription per (consumer, service, topic).** A new `sub_id` for the
    same triple replaces the old one on the provider, and the replaced one
-   never comes back. Otherwise a consumer that restarted and subscribed again
-   is streamed to twice until the first lease runs out, or, when a frame
-   naming the old `sub_id` arrives late, the two replace each other in turn.
+   never comes back. Only a first subscribe replaces: a frame carrying
+   `resume` that names another `sub_id` than the one the provider holds for
+   the triple is dropped. Otherwise a consumer that restarted and subscribed
+   again is streamed to twice until the first lease runs out, or, when a
+   frame naming the old `sub_id` arrives late, the two replace each other in
+   turn, or the stale one wins and the live one is never answered again.
 8. **A consumer that missed updates can always get the state back, or is told
    in an event that it cannot.** Never a silent gap.
 
@@ -202,8 +205,10 @@ The default is `restricted` because "who can watch this device" should be a
 decision, not a default. A subscription to a service the provider has not
 registered is answered `not_found` with no event, as a request is.
 
-A renewal the provider no longer recognises (it restarted, or the lease
-lapsed) goes through the policy again, with `renewal: true` on the event.
+A renewal for a triple the provider holds nothing for, naming no retired
+`sub_id` (the provider restarted, or the lease lapsed), goes through the
+policy again, with `renewal: true` on the event.
+One for a triple it holds under another `sub_id` is dropped (invariant 7).
 **`renewal` is the subscriber's claim, not the provider's knowledge:** after a
 restart the provider holds nothing to check it against, so it means only that
 the frame carried `resume`, which any peer can include. An application may use
@@ -303,7 +308,44 @@ service frames, each only ever inside `__MLS_ENC__`:
 | `__SVC_UPD__` | provider to consumer | `{v, sub_id, topic?, stream, seq, key?, body, snapshot}` |
 | `__SVC_UNSUB__` | either | `{v, sub_id, reason}` |
 
-`status` is `accepted`, `rejected`, `not_found`, `mode_mismatch` or `full`.
+`status` is one of five values, and nothing else:
+
+| `status` | Meaning |
+|----------|---------|
+| `accepted` | Active; the catch-up frames follow |
+| `rejected` | Refused by the policy, the application, the approval timeout or validation; `reason` says which |
+| `not_found` | No such service is registered |
+| `mode_mismatch` | The topic exists, or was created, in the other mode |
+| `full` | The provider is at one of its caps (invariant 6) |
+
+`reason` appears on a refusing reply, on `__SVC_UNSUB__`, and on
+`service_subscription_changed`. The engine's own reasons are a closed set:
+
+| `reason` | Set by | When |
+|----------|--------|------|
+| `policy` | provider | The policy refused a subscribe or a renewal |
+| `approval_timeout` | provider | The application did not answer in `approval_timeout_ms` |
+| `invalid_subscription` | provider | The frame failed validation (a bad topic, pattern or key filter) |
+| `replaced` | provider | A newer subscription to the same triple took its place (invariant 7) |
+| `expired` | provider | The lease ran out unrenewed |
+| `service_unregistered` | provider | The service was unregistered |
+| `revoked` | provider | `end_service_subscription` with an empty reason |
+| `unsubscribed` | consumer, provider | `unsubscribe_service`, or its frame received |
+| `no_reply` | consumer | Pending past `pending_timeout_ms` after the frame left |
+| `session_timeout` | consumer | Pending past `pending_timeout_ms` with no confirmed session |
+| `provider_unreachable` | consumer | Paused past `max_pause_ms` |
+| `resumed` | consumer | A reply moved a paused subscription back to active |
+| `stream_reset` | consumer | A new stream replaced what was held |
+| `history_lost` | consumer | A `log` gap that no checkpoint covers |
+| `pattern_full` | both | A pattern reached 64 topics |
+| `unsupported` | consumer | The provider answered at a `v` below a field the consumer used |
+
+`reject_service_subscription` and `end_service_subscription` also take an
+application reason, which travels as given (clamped in length) and which the
+engine never reads. A classifier over `reason`, such as telemetry's
+([ADR 0013](0013-exhaustive-privacy-classifier.md)), maps the closed set and
+returns one fixed token for anything else, never the string itself.
+
 For a pattern subscription, `resume.topics` and the reply's `topics` carry
 `{topic, stream, seq, digest}` and `{topic, stream, seq, history_lost}` per
 topic in place of the single position, and `topic` on an update names the
@@ -362,7 +404,7 @@ older key package.
 |-------|----------|
 | `latest` update | Live direct link and a confirmed session: sealed ephemeral send (the ADR 0032 path). Otherwise: a sealed reliable send that **supersedes** the previous queued update for the same subscription and key (invariant 5) |
 | `log` update | Sealed reliable send, every one |
-| `__SVC_SUB__` (subscribe, renew, resync) | Sealed reliable send, superseding the previous one for the same subscription |
+| `__SVC_SUB__` (subscribe, renew, resync) | Sealed reliable send, superseding the previous one for the same subscription. A resync not yet answered stays asked: every frame that supersedes it carries `resync` until a reply arrives |
 | `__SVC_SUB_R__` | Sealed reliable send, superseding the previous one for the same subscription |
 | `__SVC_UNSUB__` | Sealed reliable send |
 
@@ -414,6 +456,16 @@ the seqs seen above it (`log`), the granted lease and the renewal schedule.
 - **Pending.** A subscription with no reply after `pending_timeout_ms`
   (default 120 s) ends with `no_reply`, or `session_timeout` if the session
   never confirmed.
+- **Resync is not lost to a renewal.** A renewal that falls due while a
+  resync is queued supersedes it and carries `resync` itself. Otherwise the
+  application's explicit request vanishes, and a `latest` renewal whose
+  digest matches is answered with nothing.
+- **One subscription per triple on the consumer too.** `subscribe_service`
+  for a (provider, service, topic) this device already subscribes to, in any
+  state but `ended`, fails with `InvalidArgument` naming the existing
+  `sub_id`. Otherwise the provider replaces the first (invariant 7), the
+  first's renewals are dropped, and it ends as `provider_unreachable`: the
+  wrong reason for a local mistake.
 
 ### Provider side
 
@@ -431,12 +483,28 @@ admission state, last send time and dirty keys.
   sending. It is a promise, not cryptography: the subscriber still holds a 1:1
   session with the provider.
 - **Unregistering a service** ends every subscription on it.
-- **Replacement (invariant 7).** A subscription that a newer `sub_id` for the
-  same (consumer, service, topic) replaced is retired: the provider remembers
-  the last 4 retired `sub_id`s per triple and drops a frame naming one,
-  without a reply. Otherwise a renewal under the old `sub_id`, sent before the
-  consumer restarted and still in a mailbox or with a custodian, replaces the
-  live subscription, and the live one's next renewal replaces it back.
+- **Replacement (invariant 7).** Only a `__SVC_SUB__` without `resume`
+  replaces a subscription the provider holds for the same (consumer,
+  service, topic) under another `sub_id`. A frame with `resume` that names
+  another `sub_id` than the held one is dropped without a reply: a consumer
+  renews only the `sub_id` it holds, so such a frame is always one from
+  before the consumer restarted. A replaced subscription is retired: the
+  provider remembers the last 4 retired `sub_id`s per triple and drops a
+  frame naming one, without a reply.
+
+  Both rules are needed, because neither survives the other's gap. Retired
+  ids alone are lost when the provider restarts: a renewal under the old
+  `sub_id`, still in a mailbox or with a custodian, would then replace the
+  live subscription the consumer made since, and the live one's renewals,
+  now naming a retired id, would be dropped until it paused and ended as
+  `provider_unreachable`. The `resume` rule alone would let a stale first
+  subscribe under a replaced `sub_id` replace the live one, and a stale
+  renewal under it re-subscribe once the live lease lapsed; the retired ids
+  stop both while the provider runs. What still gets through is a stale
+  first subscribe that reaches a provider which restarted since, one frame
+  per subscription rather than one every half lease, and it ends the way any
+  replacement does: the consumer's next renewal is dropped, it pauses, and
+  its application subscribes again.
 
 ### Restart
 
@@ -448,17 +516,24 @@ so without a rule a provider that restarted would send the updates and
 replies of streams it no longer has, and a consumer that restarted would send
 renewals for `sub_id`s it no longer holds.
 
-- **At start-up the engine withdraws every queued `__SVC_SUB__`,
-  `__SVC_SUB_R__`, `__SVC_UPD__` and `__SVC_UNSUB__`** from the outbox, the
-  retry queue and the acknowledgement tracker together, as
-  `forget_outbound_message` does for one, before the first flush. The outbox
-  holds the prefixed plaintext, so this is a prefix test on each restored
-  entry, and it settles them with no event: the application never sent them,
-  the engine did.
-- **What already left cannot be withdrawn.** A frame handed to a relay
-  mailbox or a custodian before the restart still arrives. The retired
-  streams (consumer) and retired `sub_id`s (provider) above are what make
-  such a frame harmless rather than a reset.
+- **A subscription frame is never written to the outbox's store.** The
+  engine marks the entry as a subscription frame when it queues one, and
+  `persist_outbox_entry`, the one writer of outbox records, skips a marked
+  entry as it already skips confirmation probes and media. The frame is
+  retried in memory for the life of the process, like a probe, and a restart
+  has nothing of it to restore.
+
+  The test has to be made when the entry is queued, not when it is restored.
+  A sealed entry is stored as its `__MLS_ENC__` envelope, and its plaintext
+  is held only in memory, as re-seal provenance that is never persisted
+  ([outbox and retries](../state-machines/outbox-and-retries.md#provenance-handling)).
+  A restored subscription frame is indistinguishable from a restored sealed
+  direct message, so a start-up pass that looked for the `__SVC_` prefix
+  would find nothing.
+- **What already left is not this device's to withdraw.** A frame handed to
+  a relay mailbox or a custodian before the restart still arrives. The
+  retired streams (consumer), the retired `sub_id`s and the `resume` rule
+  (provider) above are what make such a frame harmless rather than a reset.
 
 After a restart the provider's tables are empty and every stream is new; an
 application whose `latest` state matters republishes it at start-up.
@@ -473,7 +548,7 @@ reported rather than silent.
 | Update or checkpoint body | 64 KiB (`MAX_SERVICE_BODY_SIZE`) | `PayloadTooLarge` at the call; dropped on receipt |
 | Topic | 1 to 128 bytes, `A-Z a-z 0-9 . _ - /`; a subscription may end it in `*` | `InvalidArgument` |
 | Topics one pattern subscription follows | 64 | Further matching topics are not followed |
-| Key filter | 32 entries, `latest` only | `InvalidArgument`; `invalid_subscription` on the provider |
+| Key filter | 32 entries, `latest` only | `InvalidArgument`; `rejected` with `invalid_subscription` on the provider |
 | Key | 1 to 256 bytes of UTF-8, no zero byte (the digest's separator) | `InvalidArgument`; dropped on receipt |
 | `params` | 4 KiB | `PayloadTooLarge` |
 | Subscriptions a provider holds, admitted or awaiting the application | 256 | `full`, never eviction (invariant 6) |
@@ -496,8 +571,9 @@ reported rather than silent.
 - `offline-protocol-sealed`: `SVC_SUB_V1 = 2`.
 - `offline-protocol/src/protocol/service_subscriptions.rs` (new): the public
   methods, policy evaluation, the delivery choice and superseding, and the
-  hooks (session confirmed, neighbour rediscovered, `process()` tick, and the
-  start-up withdrawal of queued subscription frames).
+  hooks (session confirmed, neighbour rediscovered, `process()` tick).
+- `storage.rs`: `persist_outbox_entry` skips an entry marked as a
+  subscription frame.
 - `message_dispatch.rs`: sealed routing for the four prefixes; plaintext ones
   dropped.
 - `send.rs`: advertise entry 2; record it on receipt.
@@ -539,13 +615,17 @@ reported rather than silent.
   There is nothing older to be compatible with.
 - **Persisting subscriptions** to survive restarts. It recreates the ghost
   subscriber the lease exists to prevent.
-- **Dropping the start-up withdrawal** because "the lease handles it". The
-  lease ends a subscription nobody renews; it does nothing about a restored
-  frame that names a dead stream or a replaced `sub_id`, which resets or
-  replaces the live one on arrival.
-- **Dropping the retired streams or retired `sub_id`s** because the start-up
-  withdrawal "already clears the queue". It clears this device's queue, not a
+- **Persisting subscription frames with the rest of the outbox** because
+  "the ladder handles it" or "the lease handles it". A restored frame names
+  a dead stream or a replaced `sub_id`, which resets or replaces the live
+  one on arrival, and it cannot be found again at start-up: it is stored
+  sealed.
+- **Dropping the retired streams or retired `sub_id`s** because the outbox
+  "never holds them across a restart". That is this device's queue, not a
   relay mailbox or a custodian.
+- **Letting a renewal replace a subscription**, because "the newest frame
+  wins". After a provider restart the retired ids are gone, and the newest
+  frame to arrive can be the oldest one sent.
 - **Admitting on `renewal: true`.** Any peer can set it.
 - **Sending `latest` updates through the reliable ladder without
   superseding.** An absent subscriber's outbox fills with values nobody will

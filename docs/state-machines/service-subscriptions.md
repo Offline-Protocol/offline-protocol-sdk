@@ -15,8 +15,8 @@ what each shape prevents.
 2. **An update is accepted only from the subscription's provider**, by
    MLS-authenticated sender.
 3. **A lease that is not renewed ends the subscription**, on both sides,
-   without either side persisting anything, including a subscription frame
-   waiting in the outbox.
+   without either side persisting anything: a subscription frame waiting in
+   the outbox is never written to its store.
 4. **A consumer never delivers an older value after a newer one** for the
    same subscription and key.
 5. **At most one `latest` value per subscription and key waits in the
@@ -24,7 +24,9 @@ what each shape prevents.
 6. **A provider at a cap refuses the newcomer; it never evicts.** A
    subscription awaiting the application counts against the caps.
 7. **A provider holds one subscription per (subscriber, service, topic)**;
-   the newest replaces the one before it, and a replaced one never returns.
+   a first subscribe replaces the one before it, a renewal never replaces,
+   and a replaced one never returns. The consumer refuses a second
+   subscription to a triple it already holds.
 8. **A consumer that missed updates gets the state back, or an event saying
    it cannot.**
 
@@ -73,7 +75,9 @@ reaches that transition and only it.
 stream, and for `latest` the highest seq held and a digest of the (key, seq)
 pairs, for `log` the contiguous position. It supersedes the previous renewal
 still queued, so a provider out of range for an hour is sent one renewal on
-its return, not a hundred and twenty.
+its return, not a hundred and twenty. A renewal that supersedes a resync not
+yet answered carries `resync` itself, so the request the application made is
+never withdrawn by one the engine made.
 
 **Ordering.** In `latest` an update whose seq is not above the one held for
 its key is dropped. In `log` a duplicate is dropped and one that skips ahead
@@ -106,14 +110,20 @@ consumer emits `service_subscription_changed` (`active`, `pattern_full`) once.
 
 **Resync** forgets the position, so that the state that comes back is
 delivered even where it equals what was delivered before, and asks with
-`resync`.
+`resync`. Every frame for the subscription carries `resync` until a reply
+arrives.
+
+**A second subscribe to the same triple** (provider, service, topic) while
+the first is not `ended` fails at the call with `InvalidArgument`, naming the
+existing `sub_id`. Sent, it would replace the first on the provider, whose
+renewals would then be dropped until it ended as `provider_unreachable`.
 
 ## Provider
 
 | State | Holds | Leaves on |
 |-------|-------|-----------|
 | awaiting the application | Subscriber, lease, the subscriber's `resume`; counts against both caps | `accept_service_subscription` (admitted), `reject_service_subscription` or `approval_timeout_ms` (gone, `rejected` sent) |
-| admitted | Lease, last send time, keys held back by the interval | Lease expiry (gone, no frame), `__SVC_UNSUB__` from the subscriber, `end_service_subscription` (`__SVC_UNSUB__` sent), the service unregistered, or replacement by a newer subscription to the same topic (retired) |
+| admitted | Lease, last send time, keys held back by the interval | Lease expiry (gone, no frame), `__SVC_UNSUB__` from the subscriber, `end_service_subscription` (`__SVC_UNSUB__` sent), the service unregistered, or replacement by a first subscribe (no `resume`) to the same topic under a new `sub_id` (retired). A renewal (`resume`) naming another `sub_id` is dropped with no reply and replaces nothing |
 | retired | Only its `sub_id`, the last 4 per (subscriber, service, topic) | Forgotten when a fifth is retired. A frame naming it is dropped with no reply, so a renewal sent before the subscriber restarted cannot replace the subscription it made since |
 
 **Admission** is the service's policy: `restricted` (the default) asks the
@@ -122,8 +132,9 @@ of listed groups and asks or refuses the rest. It is applied to every
 renewal, not only the first subscribe: a subscriber renews every half lease,
 so a policy checked once would keep streaming to a peer it now refuses, such
 as one removed from an allowed group, for as long as that peer renews. A
-renewal the policy refuses ends the subscription with `policy`. A renewal the
-provider does not hold is asked about with `renewal: true`, which says only
+renewal the policy refuses ends the subscription with `policy`. A renewal for a
+triple the provider holds nothing for is asked about with `renewal: true`
+(one for a triple it holds under another `sub_id` is dropped), which says only
 that the frame carried `resume`: any peer can set it, so it words a prompt
 and never admits.
 
@@ -190,15 +201,20 @@ What reaches the consumer in each case:
 
 Nothing is persisted on either side, and that includes subscription frames
 waiting to be sent. The outbox is persisted and replays a restored entry
-verbatim ([outbox and retries](outbox-and-retries.md), S2 and S3), so at
-start-up the engine withdraws every queued `__SVC_SUB__`, `__SVC_SUB_R__`,
-`__SVC_UPD__` and `__SVC_UNSUB__` from the outbox, the retry queue and the
-acknowledgement tracker, with no event, before the first flush. A frame that
-had already left, to a relay mailbox or a custodian, still arrives; retired
-streams on the consumer and retired `sub_id`s on the provider drop it.
+verbatim ([outbox and retries](outbox-and-retries.md), S2 and S3), so a
+subscription frame is marked when it is queued and never written to the
+outbox's store, as a confirmation probe is not: it is retried in memory for
+the life of the process, and a restart has nothing of it to restore. The
+mark is set at queueing because a restored entry cannot be recognised: it is
+stored as its `__MLS_ENC__` envelope, and the `__SVC_` plaintext was only
+ever in memory. A frame that had already left, to a relay mailbox or a
+custodian, still arrives; retired streams on the consumer, and retired
+`sub_id`s and the rule that a renewal never replaces on the provider, drop
+it.
 
 A consumer that restarts holds no subscriptions and subscribes again; the
-provider replaces the old one and retires it (invariant 7). A provider that restarts holds no subscriptions and no topic
+provider replaces the old one and retires it (invariant 7). A provider that
+restarts holds no subscriptions, no retired `sub_id`s and no topic
 state, and mints new streams: the next renewal from each consumer is admitted
 through the policy again (`renewal: true` on the event), and the consumer
 reports `stream_reset`. An application whose `latest` state matters after a

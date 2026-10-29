@@ -46,5 +46,6 @@ Service subscriptions make the one stated exception. A `latest` value waiting
 for its subscriber is withdrawn when a newer value for the same key is queued,
 and the newer value takes custody in its place
 ([invariant 5](service-subscriptions.md#invariants)); a subscription frame
-restored after a restart is withdrawn because the stream or `sub_id` it names
-no longer exists. Neither gives up a value the receiver still needs.
+is never written to the outbox's store, so a restart, after which the stream
+or `sub_id` it names no longer exists, discards it. Neither gives up a value
+the receiver still needs.
