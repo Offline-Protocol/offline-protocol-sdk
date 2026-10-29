@@ -100,6 +100,12 @@ and the managed release runs first. The C API calls `drop` on every refused
 install as well as on replacement, so freeing on both paths would free a handle
 twice and could release another object's.
 
+### Transport notifies
+
+Transport callbacks are empty signals (no JSON). See [CS7](#cs7-transport-callbacks)
+for install and teardown, coalesced delivery, and draining through the generated
+transport local API methods.
+
 ## CS2. String ownership
 
 Strings returned from the library are freed with `offline_protocol_string_free`
@@ -195,6 +201,62 @@ in the UDL would be missing from a hand-written class with nothing to say so.
 - `bindings/csharp/local_api_methods.txt` lists every wrapped wire name, so a
   UDL change shows up as a reviewable diff.
 
+## CS7. Transport callbacks
+
+`SetBleTransportCallbackAsync`, `SetWifiDirectTransportCallbackAsync`,
+`SetReticulumTransportCallbackAsync`, and `SetNostrTransportCallbackAsync`
+install `offline_protocol_set_transport_callback` for the matching
+`OfflineProtocolTransport` value ([C K5](c.md#k5-what-offline_protocol_call-does-not-reach)).
+A notify is an empty signal: "this carrier has outbound frames". The host drains
+them with the generated methods (`BleGetNextFragmentAsync`,
+`WifiDirectGetNextMessageAsync`, and so on) until the queue answers `null`.
+
+The transport path holds the same invariants as events (CS1), and each exists
+for the same failure:
+
+- **App code never runs on the engine thread.** The native notify only posts a
+  signal; the handler runs on **one delivery thread per engine**
+  (`offline-protocol-transport-notify`, started by the first install). A handler
+  that ran inline could re-enter the engine from inside an engine call.
+- **A throwing handler never ends the process.** The delivery loop catches what
+  the handler throws, counts it in **`TransportHandlerFailureCount(transport)`**,
+  and keeps delivering. The native entry points (`OnNotify`, `OnDrop`) catch
+  everything too: an exception escaping a reverse P/Invoke terminates .NET.
+- **A replaced or cleared registration never wakes app code.** Each carrier's
+  generation only ever increments. Deactivating a registration bumps it, and a
+  signal stamped under the old generation is dropped at delivery, so the new
+  handler is not woken for a notify it never received. Resetting the generation
+  on install would break this. Native `drop` on the replaced registration frees
+  its context handle and never touches the carrier's slot, which the new
+  registration may already own.
+- **Dispose always frees the engine.** The dispose-time clear of every carrier
+  ignores the native status. It runs inside the free work item, and a throw
+  there would skip `offline_protocol_free` and leave the native engine and the
+  engine thread alive. The free drops every registration anyway.
+
+Each carrier has its own bounded queue (**256** slots), so a chatty carrier
+cannot starve another, and **`DroppedTransportNotifyCount(transport)`** counts
+rejections. A burst coalesces to one handler run per carrier per drain pass,
+which is why a handler drains until empty rather than once per signal. If an
+install is refused, the binding clears the carrier's native registration before
+surfacing the error, so the previous registration's pointers are not left
+installed behind a deactivated bridge. Each bridge's context handle is freed
+once, by whichever of native `drop` and the managed release runs first.
+
+The engine keeps a callback installed before `InitializeMls*Async` and re-applies
+it to the transport rebuilt against the derived address; for Nostr that is the
+only order that works, because the transport does not exist until then. Install
+before `StartAsync` so the first queued frame is signalled: a frame queued
+before the install is signalled only by the next one.
+
+`TransportExchangeTests` drives two engines over Wi-Fi Direct with the test
+carrying frames, as `bindings/c/consumer-check/exchange.c` does in C. It is the
+only test where the C API calls the binding's function pointers, and it checks
+the delivery thread and a throwing handler on the way.
+`the_csharp_transport_enum_is_the_c_apis` holds `OfflineProtocolTransport` to
+the C API's values (C5): a renumbered member installs one carrier's callback on
+another. The carrier count is derived from that enum, never written down.
+
 ## What CI runs
 
 The `C# Binding` job, on Linux, macOS and Windows, whenever the binding, the C
@@ -204,8 +266,8 @@ header or the FFI crate changes:
 |------|----------------|
 | `gen_csharp_local_api.py --check`, Linux only | The generated sources match the interface definition |
 | `dotnet build` | The SDK, the tests and the consumer check compile with warnings as errors |
-| `dotnet test` | The engine facade against the library built from the same tree: each status, the queue under backpressure, dispose after unawaited calls, cancellation; events on the delivery thread, a throwing handler contained, a cleared callback; conformance of the memory store, single-use providers, MLS over two providers; the telemetry refusal reached past the `os` fill, and the lifecycle calls with telemetry off |
-| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | A generated static call, storage conformance, create from a typed `ProtocolConfig`, `get_state` parsed as `Stopped`, MLS over custom providers, events, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, a document through `engine.Data`, close (CS3 step 1) |
+| `dotnet test` | The engine facade against the library built from the same tree: each status, the queue under backpressure, dispose after unawaited calls, cancellation; events on the delivery thread, a throwing handler contained, a cleared callback; transport notifies from two engines exchanging over Wi-Fi Direct, a throwing transport handler counted, dispose with a registration installed; conformance of the memory store, single-use providers, MLS over two providers; the telemetry refusal reached past the `os` fill, and the lifecycle calls with telemetry off |
+| `consumer-check`, library from `OFFLINE_PROTOCOL_LIBRARY_DIR` | A generated static call, storage conformance, create from a typed `ProtocolConfig`, `get_state` parsed as `Stopped`, MLS over custom providers, events, transport callbacks installed, swapped and cleared, `enable_telemetry` refused on an empty key after the C API fills `os`, disable, flush, app-state notifications, start, stop, file-store MLS, a document through `engine.Data`, close (CS3 step 1) |
 | `consumer-check`, library beside it | The same run with the variable unset (CS3 step 2) |
 
 `the_csharp_binding_has_a_ci_job_the_result_waits_on` holds the job, its

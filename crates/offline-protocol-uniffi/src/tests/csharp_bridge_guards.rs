@@ -72,6 +72,30 @@ fn the_csharp_status_enum_is_the_c_apis() {
     );
 }
 
+// The transport carrier is a number on the wire to the C API (C5), like the
+// status. A renumbered member installs one carrier's callback on another.
+#[test]
+fn the_csharp_transport_enum_is_the_c_apis() {
+    const RUST: &str = "crates/offline-protocol-uniffi/src/capi/ffi.rs";
+    const CSHARP: &str =
+        "bindings/csharp/src/OfflineProtocol.Sdk/Native/OfflineProtocolTransport.cs";
+    let rust = enum_members(&read(RUST), "pub enum OfflineProtocolTransport", RUST);
+    let csharp = enum_members(
+        &read(CSHARP),
+        "public enum OfflineProtocolTransport",
+        CSHARP,
+    );
+    assert!(
+        rust.len() >= 4,
+        "parsed only {} members from {RUST}; the parser is broken, not the enum: {rust:?}",
+        rust.len()
+    );
+    assert_eq!(
+        csharp, rust,
+        "{CSHARP} must list the C API's OfflineProtocolTransport members with the same values"
+    );
+}
+
 // The C# is compiled and run only by its CI job (C9). A filter that misses
 // the binding, or a job the aggregate check does not wait on, turns a broken
 // binding green.

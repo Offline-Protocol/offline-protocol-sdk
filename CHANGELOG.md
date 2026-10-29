@@ -52,6 +52,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   unset optional field to the engine's own default. Both are generated from the
   interface definition, so a new method or config field reaches C# when the
   generator is rerun ([docs/bridges/csharp.md](docs/bridges/csharp.md)).
+- **C# transport callbacks.** `SetBleTransportCallbackAsync`,
+  `SetWifiDirectTransportCallbackAsync`, `SetReticulumTransportCallbackAsync`
+  and `SetNostrTransportCallbackAsync` install
+  `offline_protocol_set_transport_callback`. Notifies coalesce per carrier and
+  reach app code on one delivery thread per engine, behind a bounded queue
+  whose rejections `DroppedTransportNotifyCount` reports. A throwing handler
+  is counted in `TransportHandlerFailureCount` and never ends the process
+  ([docs/bridges/csharp.md](docs/bridges/csharp.md#cs7-transport-callbacks)).
 
 ### Fixed
 

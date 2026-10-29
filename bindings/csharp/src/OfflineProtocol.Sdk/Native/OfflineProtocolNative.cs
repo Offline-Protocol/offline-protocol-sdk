@@ -46,6 +46,15 @@ internal static partial class OfflineProtocolNative
         IntPtr ctx,
         ref OfflineProtocolError err);
 
+    [LibraryImport(LibraryName, EntryPoint = "offline_protocol_set_transport_callback")]
+    internal static partial OfflineProtocolStatus offline_protocol_set_transport_callback(
+        IntPtr handle,
+        int transport,
+        IntPtr notify,
+        IntPtr drop,
+        IntPtr ctx,
+        ref OfflineProtocolError err);
+
     [LibraryImport(LibraryName, EntryPoint = "offline_protocol_poll_event")]
     internal static partial IntPtr offline_protocol_poll_event(IntPtr handle);
 

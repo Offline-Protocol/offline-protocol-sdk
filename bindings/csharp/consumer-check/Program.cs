@@ -113,6 +113,27 @@ try
         return 1;
     }
 
+    var transportSignals = 0;
+    await engine.SetBleTransportCallbackAsync(() => Interlocked.Increment(ref transportSignals));
+    await engine.SetWifiDirectTransportCallbackAsync(() => Interlocked.Increment(ref transportSignals));
+    await engine.SetReticulumTransportCallbackAsync(() => Interlocked.Increment(ref transportSignals));
+    await engine.SetNostrTransportCallbackAsync(() => Interlocked.Increment(ref transportSignals));
+    var bleSwapCount = 0;
+    await engine.SetBleTransportCallbackAsync(() => Interlocked.Increment(ref bleSwapCount));
+    await engine.SetBleTransportCallbackAsync(() => Interlocked.Increment(ref bleSwapCount));
+    await engine.SetBleTransportCallbackAsync(null);
+    if (bleSwapCount != 0)
+    {
+        Console.Error.WriteLine($"FAIL: BLE callback swap smoke expected 0 notifies, got {bleSwapCount}");
+        return 1;
+    }
+
+    if (transportSignals != 0)
+    {
+        Console.Error.WriteLine($"FAIL: transport notify counter expected 0 after install-only smoke, got {transportSignals}");
+        return 1;
+    }
+
     // An empty key is refused by the engine's own validation, so nothing is enabled and nothing
     // leaves the machine. Reaching that refusal, and no other, proves the C API filled `os` and
     // the JSON this binding built decoded.
