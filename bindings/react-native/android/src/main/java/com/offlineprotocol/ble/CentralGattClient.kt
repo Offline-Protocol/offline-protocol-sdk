@@ -1426,7 +1426,7 @@ internal class CentralGattClient(
         // hello), and this read is then the only proof of who is writing.
         // Without the binding its writes queued unattributed for good, and the
         // dial that should resolve them was refused every 60 s.
-        if (host.connections.bindUnmappedServerLink(address, peerId)) {
+        if (host.connections.bindUnmappedServerLink(address, peerId, host.pendingInbound.hasPending(address))) {
             Log.i(TAG, "Mapped the server link at $address to $peerId")
             drainPendingInboundFor(address, peerId)
         }

@@ -242,7 +242,10 @@ nothing, in at least one direction, until the Android app restarted.
   under ADR 0030 because another link to the iPhone is held. It used to throw
   the proof away with the link, so the writes queued unattributed and the
   dial repeated every 60 seconds. `bindUnmappedServerLink` maps that server
-  link first, never rebinding one already mapped (`DuplicateClientLinkTest`).
+  link first, never rebinding one already mapped, and only while fragments
+  written from it wait for a sender: Android reports our own dial to the
+  server too, so a server connection alone proves nothing
+  (`DuplicateClientLinkTest`).
 - **A client link that only takes writes is redialled.** `SilentLinkPolicy`
   (`SilentLinkPolicyTest`) and the connection monitor disconnect it and redial
   the same address, so the handshake runs again, hello included. The redial

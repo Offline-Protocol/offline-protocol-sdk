@@ -44,8 +44,9 @@ One usable link per peer pair, and no peer is lost while it has one.
   Membership changes and disconnects still restart it.
 - An Android server link counts only once its address is mapped to the peer:
   by a Hello the peer wrote, or by a dial to that address that verified the
-  peer and was refused as a duplicate, which maps the address only if
-  nothing maps it yet
+  peer and was refused as a duplicate while fragments written from that
+  address waited for a sender, which maps the address only if nothing maps
+  it yet
   ([K9](../bridges/kotlin.md#k9-a-bluetooth-le-link-outlives-the-app-on-the-other-end)).
   The second exists for an iPhone whose app restarted, which writes over its
   restored link with no Hello; without it the refused dial threw away the
