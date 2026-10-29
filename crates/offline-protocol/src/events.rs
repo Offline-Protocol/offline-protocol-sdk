@@ -1730,8 +1730,12 @@ pub enum Event {
         /// The subscriber, authenticated by the 1:1 MLS session: every
         /// subscription frame is sealed.
         sender: String,
-        /// A renewal of a subscription this device no longer held (it
-        /// restarted, or the lease lapsed), rather than a new one.
+        /// The frame carried `resume`: the subscriber says it held this
+        /// subscription before (this device restarted, or the lease lapsed),
+        /// or a subscription the policy admitted is back for a decision
+        /// because the policy now asks. Its claim, not this device's
+        /// knowledge, which any peer can make: for wording a prompt, never
+        /// for admitting without one.
         renewal: bool,
     },
 

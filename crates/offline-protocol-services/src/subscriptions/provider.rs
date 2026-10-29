@@ -127,6 +127,11 @@ struct Sub {
     followed: BTreeSet<String>,
     /// `false` while the application decides.
     admitted: bool,
+    /// The application admitted it (`accept`), rather than the policy alone.
+    /// A renewal the policy now answers with `Ask` goes back to the
+    /// application only when this is `false`: the application's own decision
+    /// is not asked for again every half lease.
+    admitted_by_app: bool,
     asked_at: Instant,
     lease: Duration,
     lease_until: Instant,
@@ -347,12 +352,26 @@ impl Provider {
                 warn!(sender = %sender, "Dropping a subscribe frame naming another peer's subscription");
                 return out;
             }
+            // A renewal names the subscription it renews, and nothing else.
+            // Were the frame's service read here, a peer refused on one
+            // service would renew under another whose policy admits it and
+            // keep being streamed the first; a changed topic or mode would
+            // leave the subscription's state describing a topic it no longer
+            // follows.
+            if payload.service_id != sub.service_id
+                || payload.topic != sub.topic
+                || payload.mode != sub.mode
+            {
+                warn!(sender = %sender, "Dropping a renewal that names another service, topic or mode");
+                return out;
+            }
             // The policy is applied to every renewal, not only the first
             // subscribe: a subscriber renews every half lease, so one never
             // re-examined would keep a peer the policy now refuses (removed
             // from an allowed group, or dropped from the peer list) streamed
             // to for as long as it keeps renewing.
-            if admit(&payload.service_id) == Admission::Reject {
+            let admission = admit(&sub.service_id);
+            if admission == Admission::Reject {
                 let sub_id = payload.sub_id.clone();
                 if let Some(sub) = self.subs.remove(&sub_id) {
                     out.frames.push(if sub.admitted {
@@ -377,6 +396,30 @@ impl Provider {
                 // Still with the application; the answer follows its decision.
                 sub.pending_resume = payload.resume;
                 sub.pending_resync |= payload.resync;
+                return out;
+            }
+            if admission == Admission::Ask && !sub.admitted_by_app {
+                // Admitted by the policy alone, which now asks: under `rules`
+                // with `fallback: ask`, a peer admitted as a member of an
+                // allowed group and since removed from it. Kept streaming, it
+                // would never meet the decision a newcomer in its place
+                // meets. It goes back to the application, and nothing is sent
+                // to it until the application decides; refused or unanswered,
+                // it ends as a newcomer's would.
+                sub.admitted = false;
+                sub.asked_at = now;
+                sub.pending_resume = payload.resume;
+                sub.pending_resync = payload.resync;
+                sub.dirty.clear();
+                out.events.push(ServiceEvent::ServiceSubscribeReceived {
+                    sub_id: payload.sub_id.clone(),
+                    service_id: sub.service_id.clone(),
+                    topic: sub.topic.clone(),
+                    mode: sub.mode.as_str().to_string(),
+                    params: sub.params.clone(),
+                    sender: sender.to_string(),
+                    renewal: true,
+                });
                 return out;
             }
             let sub_id = payload.sub_id.clone();
@@ -472,6 +515,7 @@ impl Provider {
             keys: payload.keys.clone(),
             followed: BTreeSet::new(),
             admitted: admission == Admission::Accept,
+            admitted_by_app: false,
             asked_at: now,
             lease,
             lease_until: now + lease,
@@ -560,6 +604,7 @@ impl Provider {
             .filter(|sub| !sub.admitted)
             .ok_or_else(|| ServiceError::UnknownSubscription(sub_id.to_string()))?;
         sub.admitted = true;
+        sub.admitted_by_app = true;
         sub.lease_until = now + sub.lease;
         let resume = sub.pending_resume.take();
         let resync = std::mem::take(&mut sub.pending_resync);
@@ -2271,5 +2316,121 @@ mod tests {
         let out = p.service_unregistered(SVC);
         assert!(out.frames[0].content.starts_with(SVC_UNSUBSCRIBE));
         assert!(!p.holds("s1"));
+    }
+    fn held_nothing() -> ResumePosition {
+        ResumePosition {
+            stream: String::new(),
+            seq: 0,
+            digest: digest(std::iter::empty()),
+            topics: Vec::new(),
+        }
+    }
+
+    fn was_asked(out: &SubscriptionOutput) -> bool {
+        out.events.iter().any(|e| {
+            matches!(
+                e,
+                ServiceEvent::ServiceSubscribeReceived { renewal: true, .. }
+            )
+        })
+    }
+
+    /// A renewal names the subscription it renews and nothing else. Read for
+    /// the frame's service, the policy of another service that admits the
+    /// peer would keep it streamed the first, which refuses it.
+    #[test]
+    fn a_renewal_naming_another_service_is_dropped_and_the_policy_is_the_subscriptions() {
+        let mut p = provider();
+        let now = Instant::now();
+        p.publish(SVC, "battery", Some("pct"), "81", now).unwrap();
+        subscribe(
+            &mut p,
+            ALICE,
+            &sub_frame("s1", "battery", SubscriptionMode::Latest),
+            Admission::Accept,
+            now,
+        );
+        let registered = |id: &str| id == SVC || id == "open.v1";
+        let admit = |id: &str| {
+            if id == SVC {
+                Admission::Reject
+            } else {
+                Admission::Accept
+            }
+        };
+        let honest = renew_frame("s1", "battery", SubscriptionMode::Latest, held_nothing());
+        for forged in [
+            honest.replace(SVC, "open.v1"),
+            honest.replace("\"battery\"", "\"other\""),
+            honest.replace("\"latest\"", "\"log\""),
+        ] {
+            let out = p.handle_subscribe(&forged, ALICE, now, &registered, &admit);
+            assert!(out.frames.is_empty() && out.events.is_empty());
+            assert!(p.holds("s1"), "dropped, not acted on");
+        }
+        // The honest renewal meets the subscription's own service's policy.
+        let out = p.handle_subscribe(&honest, ALICE, now, &registered, &admit);
+        assert!(!p.holds("s1"));
+        let ended: UnsubscribePayload = decode(&out.frames[0].content, SVC_UNSUBSCRIBE).unwrap();
+        assert_eq!(ended.reason, "policy");
+    }
+
+    /// `rules` with `fallback: ask`: a peer the policy admitted as a group
+    /// member and since removed goes back to the application on its next
+    /// renewal, and is sent nothing until the application decides. One the
+    /// application admitted is not asked again.
+    #[test]
+    fn a_renewal_the_policy_now_asks_about_goes_back_to_the_application() {
+        let mut p = provider();
+        let now = Instant::now();
+        p.publish(SVC, "battery", Some("pct"), "81", now).unwrap();
+        subscribe(
+            &mut p,
+            ALICE,
+            &sub_frame("s1", "battery", SubscriptionMode::Latest),
+            Admission::Accept,
+            now,
+        );
+        let renewal = renew_frame("s1", "battery", SubscriptionMode::Latest, held_nothing());
+        let out = subscribe(&mut p, ALICE, &renewal, Admission::Ask, now);
+        assert!(
+            out.frames.is_empty(),
+            "no answer until the application decides"
+        );
+        assert!(was_asked(&out));
+        let later = now + Duration::from_secs(1);
+        let (out, outcome) = p.publish(SVC, "battery", Some("pct"), "82", later).unwrap();
+        assert_eq!(outcome.subscribers, 0);
+        assert!(
+            out.frames.is_empty(),
+            "nothing streamed while it is asked about"
+        );
+        // Accepted: answered and caught up, and not asked again.
+        let accepted = p.accept("s1", later).unwrap();
+        assert_eq!(reply(&accepted).status, SubscribeStatus::Accepted);
+        assert_eq!(updates(&accepted).len(), 1);
+        let out = subscribe(&mut p, ALICE, &renewal, Admission::Ask, later);
+        assert!(!was_asked(&out));
+        assert_eq!(reply(&out).status, SubscribeStatus::Accepted);
+
+        // Asked about again and left unanswered: it ends as a newcomer would.
+        subscribe(
+            &mut p,
+            MALLORY,
+            &sub_frame("m1", "battery", SubscriptionMode::Latest),
+            Admission::Accept,
+            now,
+        );
+        let renewal = renew_frame("m1", "battery", SubscriptionMode::Latest, held_nothing());
+        assert!(was_asked(&subscribe(
+            &mut p,
+            MALLORY,
+            &renewal,
+            Admission::Ask,
+            now
+        )));
+        let out = p.tick(now + Duration::from_secs(61));
+        assert!(!p.holds("m1"));
+        assert_eq!(reply(&out).reason.as_deref(), Some("approval_timeout"));
     }
 }

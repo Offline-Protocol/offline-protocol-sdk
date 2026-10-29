@@ -2373,7 +2373,9 @@ export interface ServiceSubscribeReceivedEvent extends BaseEvent {
   sender: string;
   /**
    * The subscriber says it held this subscription before (this device
-   * restarted, or the lease lapsed). Its claim, which any peer can make: use
+   * restarted, or the lease lapsed), or a subscription the policy admitted is
+   * back for a decision because the policy now asks (a `rules` group member
+   * since removed, with `fallback: ask`). Its claim, which any peer can make: use
    * it to word a prompt, never to accept without asking. A subscriber to be
    * accepted without asking belongs in the policy's `allowPeers`.
    */

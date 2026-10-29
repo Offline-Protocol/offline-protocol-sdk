@@ -63,9 +63,11 @@ pub enum ServiceEvent {
         /// The MLS-authenticated subscriber.
         sender: String,
         /// The frame carried `resume`: the subscriber says it held this
-        /// subscription before (this device restarted, or the lease lapsed).
-        /// Its claim, not this device's knowledge, which any peer can make:
-        /// for wording a prompt, never for admitting without one.
+        /// subscription before (this device restarted, or the lease lapsed),
+        /// or a subscription the policy admitted is back for a decision
+        /// because the policy now asks. Its claim, not this device's
+        /// knowledge, which any peer can make: for wording a prompt, never
+        /// for admitting without one.
         renewal: bool,
     },
 

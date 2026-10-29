@@ -140,7 +140,13 @@ of listed groups and asks or refuses the rest. It is applied to every
 renewal, not only the first subscribe: a subscriber renews every half lease,
 so a policy checked once would keep streaming to a peer it now refuses, such
 as one removed from an allowed group, for as long as that peer renews. A
-renewal the policy refuses ends the subscription with `policy`. A renewal for a
+renewal the policy refuses ends the subscription with `policy`. One the policy
+admitted on its own and now asks about (`rules`, `fallback: ask`) goes back to
+awaiting the application, with `renewal: true` and nothing sent until it
+decides; one the application admitted is not asked again. A renewal whose
+service, topic or mode differs from the subscription it names is dropped: the
+policy read for the frame's service would let a peer refused on one service
+renew under another that admits it. A renewal for a
 triple the provider holds nothing for is asked about with `renewal: true`
 (one for a triple it holds under another `sub_id` is dropped), which says only
 that the frame carried `resume`: any peer can set it, so it words a prompt

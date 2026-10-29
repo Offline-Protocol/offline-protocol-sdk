@@ -218,7 +218,15 @@ returning subscribers admitted without asking puts them in `allow_peers`.
 A renewal of a subscription the provider holds goes through it too, and one
 the policy now refuses ends with `policy`. Otherwise a peer removed from an
 allowed group, which renews every half lease and so never lapses, would be
-streamed to for as long as it kept renewing.
+streamed to for as long as it kept renewing. One the policy admitted on its
+own and now answers with "ask" (`rules` with `fallback: ask`, the group
+member since removed) goes back to the application with `renewal: true`, and
+nothing is sent to it until the application decides; refused or unanswered,
+it ends as a newcomer would. One the application admitted is not asked
+again. A renewal is read for its `sub_id` only: one whose service, topic or
+mode differs from the subscription it names is dropped, because the policy
+looked up for the frame's service would let a peer refused on one service
+renew under another that admits it, and keep being streamed the first.
 
 ### Getting the state back
 
