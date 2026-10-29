@@ -9,10 +9,18 @@ package com.offlineprotocol.ble
  * the core sends ask for an acknowledgement, so a peer that can attribute our
  * writes answers within its acknowledgement timeout: over a notification on
  * this link, or over a write to our server. A link is silent when nothing
- * from the peer has arrived on any link since it came up, and a write at
- * least [ackWaitMs] after the first one (the core's resend, or another
- * message) has itself gone [ackWaitMs] unanswered. That is never sooner than
- * twice [ackWaitMs] after the first write.
+ * from the peer has arrived on any link since it came up, and a burst of
+ * writes starting at least [ackWaitMs] after the first one (the core's
+ * resend, or another message) has gone [ackWaitMs] unanswered since it
+ * ended. That is never sooner than twice [ackWaitMs] after the first write.
+ *
+ * Writes closer together than [burstGapMs] are one burst: the fragments of
+ * one message go out about 30 ms apart, and the peer can answer only once the
+ * last has arrived. Counted one by one, a message that took longer than
+ * [ackWaitMs] to send read as a resend left unanswered, and a healthy link
+ * was torn down mid-transfer.
+ * ponytail: a stall longer than [burstGapMs] inside one message, ten seconds
+ * in, still splits it; the clock then runs from the first part's end.
  *
  * Both writes are needed. The last frame of an exchange is often an
  * acknowledgement, which nothing answers, so one unanswered write proves
@@ -35,8 +43,12 @@ package com.offlineprotocol.ble
  * Keyed by link rather than by address, so a new link at the same address
  * starts unjudged. BLE-thread only; it holds no lock.
  */
-internal class SilentLinkPolicy<K : Any, P : Any>(private val ackWaitMs: Long = ACK_WAIT_MS) {
-    private class Window(val firstWriteAt: Long, var resendAt: Long? = null)
+internal class SilentLinkPolicy<K : Any, P : Any>(
+    private val ackWaitMs: Long = ACK_WAIT_MS,
+    private val burstGapMs: Long = BURST_GAP_MS,
+) {
+    /** [resendEnd] is the last write of the first burst to start [ackWaitMs] after [firstWriteAt]. */
+    private class Window(val firstWriteAt: Long, var lastWriteAt: Long, var resendEnd: Long? = null)
 
     private val windows = HashMap<K, Window>()
     private val answered = HashSet<K>()
@@ -45,10 +57,15 @@ internal class SilentLinkPolicy<K : Any, P : Any>(private val ackWaitMs: Long = 
     /** The link took a Message write at [now]. */
     fun noteWrite(link: K, now: Long) {
         if (link in answered) return
-        val window = windows.getOrPut(link) { Window(now) }
-        if (window.resendAt == null && now - window.firstWriteAt >= ackWaitMs) {
-            window.resendAt = now
+        val window = windows[link] ?: Window(now, now).also { windows[link] = it }
+        val burstStarts = now - window.lastWriteAt >= burstGapMs
+        val resendEnd = window.resendEnd
+        if (resendEnd == null) {
+            if (burstStarts && now - window.firstWriteAt >= ackWaitMs) window.resendEnd = now
+        } else if (resendEnd == window.lastWriteAt && !burstStarts) {
+            window.resendEnd = now
         }
+        window.lastWriteAt = now
     }
 
     /** Something from the peer arrived while [link] was up. */
@@ -83,7 +100,7 @@ internal class SilentLinkPolicy<K : Any, P : Any>(private val ackWaitMs: Long = 
     /** The links that are silent at [now]. */
     fun silentLinks(now: Long): List<K> =
         windows.filterValues { window ->
-            window.resendAt?.let { now - it >= ackWaitMs } ?: false
+            window.resendEnd?.let { now - it >= ackWaitMs } ?: false
         }.keys.toList()
 
     /**
@@ -108,5 +125,8 @@ internal class SilentLinkPolicy<K : Any, P : Any>(private val ackWaitMs: Long = 
     companion object {
         /** The core's acknowledgement timeout (docs/state-machines/outbox-and-retries.md). */
         const val ACK_WAIT_MS = 10_000L
+
+        /** Far above the fragment pacing, far below the core's resend interval. */
+        const val BURST_GAP_MS = 2_000L
     }
 }

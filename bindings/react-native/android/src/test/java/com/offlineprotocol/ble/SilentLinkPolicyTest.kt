@@ -39,6 +39,22 @@ class SilentLinkPolicyTest {
     }
 
     @Test
+    fun `a message that takes longer than the acknowledgement timeout to send is one write`() {
+        // The peer can answer only once the last fragment has arrived, so a
+        // long first transfer to a peer with nothing to say is not silence.
+        for (t in 0L..25_000L step 30L) policy.noteWrite("link", t)
+        assertEquals(emptyList<String>(), policy.silentLinks(60_000L))
+    }
+
+    @Test
+    fun `a resend is judged from the end of its burst`() {
+        policy.noteWrite("link", 0L)
+        for (t in 12_000L..15_000L step 30L) policy.noteWrite("link", t)
+        assertEquals(emptyList<String>(), policy.silentLinks(24_999L))
+        assertEquals(listOf("link"), policy.silentLinks(25_000L))
+    }
+
+    @Test
     fun `a later write gets the acknowledgement timeout before it counts`() {
         // An acknowledgement, a quiet minute, then a message: the peer has ten
         // seconds to answer the message, however long ago the first write was.

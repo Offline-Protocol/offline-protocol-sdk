@@ -210,16 +210,20 @@ iPhone whose app restarts keeps its links through state restoration, but the
 new process never heard the hello that named the central, so it cannot
 attribute what that central writes. On Android, a client link is disconnected
 and redialled at the same address, which writes its hello again, once nothing
-from the peer has arrived on any link since the link came up, and a write at
-least 10 seconds after its first one (the acknowledgement timeout, so the
-core's resend or another message) has itself gone 10 seconds unanswered. That
-is 20 to 25 seconds after the first write (the check runs every 5 seconds),
-and the redial follows within the 5 second reconnect backoff, whether or not
-the peer holds another link; on two phones the first message crossed 26
-seconds after the dead link came up. One unanswered write never counts,
-because the last frame of an exchange is often an acknowledgement. Only a
-fragment counts as hearing the peer: a hello or a subscription shows the peer
-is up, not that it can use what this side writes.
+from the peer has arrived on any link since the link came up, and a burst of
+writes starting at least 10 seconds after its first one (the acknowledgement
+timeout, so the core's resend or another message) has gone 10 seconds
+unanswered since it ended. Writes less than 2 seconds apart are one burst,
+because the peer can answer a message only once its last fragment has arrived:
+counted one by one, a message that took longer than 10 seconds to send read as
+an unanswered resend, and a healthy link was torn down mid-transfer. For a
+short exchange that is 20 to 25 seconds after the first write (the check runs
+every 5 seconds), and the redial follows within the 5 second reconnect
+backoff, whether or not the peer holds another link; on two phones the first
+message crossed 26 seconds after the dead link came up. One unanswered write
+never counts, because the last frame of an exchange is often an
+acknowledgement. Only a fragment counts as hearing the peer: a hello or a
+subscription shows the peer is up, not that it can use what this side writes.
 
 A peer is redialled for silence once until it is heard from again. Not every
 frame asks for an acknowledgement (ephemeral frames and relay hints do not),
