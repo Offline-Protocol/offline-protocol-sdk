@@ -90,8 +90,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   one that only receives frames asking for no acknowledgement is not redialled
   over and over. On two phones, the first iPhone restart beside a linked
   Android phone failed before, as did one in ten restarts of both apps; after,
-  36 of 36 restarts and connects carried messages, one of them only because a
-  dead link was redialled
+  36 of 36 restarts and connects carried messages, and on two earlier runs of
+  the same checks a first link left dead by an iPhone relaunch was redialled
+  and carried the message within 25 seconds
   ([kotlin-devices.md](docs/bridges/kotlin-devices.md),
   [K9](docs/bridges/kotlin.md#k9-a-bluetooth-le-link-outlives-the-app-on-the-other-end)).
 
