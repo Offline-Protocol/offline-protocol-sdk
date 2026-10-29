@@ -512,7 +512,15 @@ admission state, last send time and dirty keys.
   renews only the `sub_id` it holds, so such a frame is always one from
   before the consumer restarted. A replaced subscription is retired: the
   provider remembers the last 4 retired `sub_id`s per triple and drops a
-  frame naming one, without a reply.
+  frame naming one, without a reply. So is every subscription that ends in a
+  way its subscriber was told of, or told the provider of: unsubscribed,
+  ended, refused (by the application, the policy or the approval timeout),
+  `mode_mismatch`, or the service unregistered. A renewal of one of those,
+  still in a mailbox, would otherwise subscribe again a subscriber that is
+  done with it: a lease of updates nobody reads, or a prompt for a
+  subscription that ended. An expired lease is the one end that is not
+  retired, since the renewal of a subscriber still there is how it
+  subscribes again.
 
   Both rules are needed, because neither survives the other's gap. Retired
   ids alone are lost when the provider restarts: a renewal under the old

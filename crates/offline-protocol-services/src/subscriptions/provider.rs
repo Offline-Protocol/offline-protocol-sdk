@@ -204,8 +204,11 @@ impl Sub {
     }
 }
 
-/// A subscription another one replaced (invariant 7). Only its id and whose
-/// it was are kept: enough to drop a frame that names it.
+/// A subscription that ended in a way its subscriber was told of, or told
+/// this device of: replaced (invariant 7), unsubscribed, ended, refused or
+/// unanswered. Only its id and whose it was are kept: enough to drop a frame
+/// that names it. An expired lease is never retired, since the renewal of a
+/// subscriber still there is how it subscribes again.
 struct Retired {
     subscriber: String,
     service_id: String,
@@ -218,7 +221,7 @@ struct Retired {
 pub struct Provider {
     topics: HashMap<(String, String), Topic>,
     subs: HashMap<String, Sub>,
-    /// Replaced subscriptions, oldest first: at most
+    /// Retired subscriptions, oldest first: at most
     /// [`MAX_RETIRED_PER_TOPIC`] per (subscriber, service, topic),
     /// [`MAX_RETIRED_PER_SUBSCRIBER`] per subscriber and
     /// [`MAX_RETIRED_SUB_IDS`] in all.
@@ -316,10 +319,11 @@ impl Provider {
             warn!(sender = %sender, "Dropping a subscribe frame with an unusable id");
             return out;
         }
-        // A replaced subscription never comes back. A frame naming one was
-        // sent before the subscriber moved on, and is still arriving from a
-        // relay mailbox or a custodian; answered, it would stand beside the
-        // live one, or replace it.
+        // A retired subscription never comes back. A frame naming one was
+        // sent before the subscription ended or the subscriber moved on, and
+        // is still arriving from a relay mailbox or a custodian; answered, it
+        // would stand beside the live one, replace it, or subscribe again a
+        // subscriber that is done with it.
         if self.is_retired(sender, &payload.sub_id) {
             debug!(sender = %sender, "Dropping a subscribe frame naming a replaced subscription");
             return out;
@@ -374,6 +378,7 @@ impl Provider {
             if admission == Admission::Reject {
                 let sub_id = payload.sub_id.clone();
                 if let Some(sub) = self.subs.remove(&sub_id) {
+                    self.retire(&sub_id, &sub);
                     out.frames.push(if sub.admitted {
                         unsubscribe_frame(sender, &sub_id, "policy")
                     } else {
@@ -578,6 +583,10 @@ impl Provider {
             return None;
         }
         let sub = self.subs.remove(&payload.sub_id)?;
+        // The subscriber is done with this id. A renewal of it still in a
+        // relay mailbox would otherwise subscribe it again: a lease's worth
+        // of updates nobody reads, or a prompt for a subscription that ended.
+        self.retire(&payload.sub_id, &sub);
         let mut out = SubscriptionOutput::default();
         out.events.push(provider_changed(
             &payload.sub_id,
@@ -631,6 +640,7 @@ impl Provider {
         let Some(sub) = self.subs.remove(sub_id) else {
             return Err(ServiceError::UnknownSubscription(sub_id.to_string()));
         };
+        self.retire(sub_id, &sub);
         let reason = clamp_reason(if reason.is_empty() {
             "rejected"
         } else {
@@ -666,6 +676,7 @@ impl Provider {
             .subs
             .remove(sub_id)
             .ok_or_else(|| ServiceError::UnknownSubscription(sub_id.to_string()))?;
+        self.retire(sub_id, &sub);
         let reason = clamp_reason(if reason.is_empty() { "revoked" } else { reason });
         let mut out = SubscriptionOutput::default();
         out.frames
@@ -691,6 +702,7 @@ impl Provider {
             .collect();
         for sub_id in ended {
             if let Some(sub) = self.subs.remove(&sub_id) {
+                self.retire(&sub_id, &sub);
                 out.frames.push(unsubscribe_frame(
                     &sub.subscriber,
                     &sub_id,
@@ -899,6 +911,7 @@ impl Provider {
             let Some(sub) = self.subs.remove(&sub_id) else {
                 continue;
             };
+            self.retire(&sub_id, &sub);
             out.frames.push(SubscriptionFrame {
                 recipient: sub.subscriber.clone(),
                 content: reply_content(
@@ -1005,6 +1018,10 @@ impl Provider {
                 continue;
             };
             if reason == "approval_timeout" {
+                // Told it is over, so retired like any other end it is told
+                // of. An expired lease is not: the renewal of a subscriber
+                // still there is how it subscribes again.
+                self.retire(&sub_id, &sub);
                 out.frames.push(SubscriptionFrame {
                     recipient: sub.subscriber.clone(),
                     content: reply_content(
@@ -1244,8 +1261,8 @@ impl Provider {
         }
     }
 
-    /// Remembers `sub_id`, which a newer subscription replaced, so that a
-    /// frame naming it is dropped.
+    /// Remembers `sub_id`, which ended for good, so that a frame naming it is
+    /// dropped.
     fn retire(&mut self, sub_id: &str, sub: &Sub) {
         let same_triple = |retired: &Retired| {
             retired.subscriber == sub.subscriber
@@ -1297,7 +1314,7 @@ impl Provider {
         });
     }
 
-    /// Whether `sub_id` is one of `subscriber`'s that was replaced.
+    /// Whether `sub_id` is one of `subscriber`'s that was retired.
     fn is_retired(&self, subscriber: &str, sub_id: &str) -> bool {
         self.retired
             .iter()
@@ -2432,5 +2449,73 @@ mod tests {
         let out = p.tick(now + Duration::from_secs(61));
         assert!(!p.holds("m1"));
         assert_eq!(reply(&out).reason.as_deref(), Some("approval_timeout"));
+    }
+
+    /// An end either side is told of retires the id, so a renewal of it still
+    /// in a mailbox cannot subscribe again. An expired lease does not: the
+    /// renewal of a subscriber still there is how it comes back.
+    #[test]
+    fn an_ended_subscription_is_retired_and_an_expired_one_is_not() {
+        let mut p = provider();
+        let now = Instant::now();
+        let unsub = |id: &str| {
+            encode(
+                SVC_UNSUBSCRIBE,
+                &UnsubscribePayload {
+                    v: 1,
+                    sub_id: id.into(),
+                    reason: String::new(),
+                },
+            )
+            .unwrap()
+        };
+        let stale = |p: &mut Provider, id: &str, topic: &str| {
+            let renewal = renew_frame(id, topic, SubscriptionMode::Log, held_nothing());
+            subscribe(p, ALICE, &renewal, Admission::Accept, now)
+        };
+
+        subscribe(
+            &mut p,
+            ALICE,
+            &sub_frame("u", "a", SubscriptionMode::Log),
+            Admission::Accept,
+            now,
+        );
+        p.handle_unsubscribe(&unsub("u"), ALICE).unwrap();
+        let out = stale(&mut p, "u", "a");
+        assert!(out.frames.is_empty() && out.events.is_empty() && !p.holds("u"));
+
+        subscribe(
+            &mut p,
+            ALICE,
+            &sub_frame("e", "b", SubscriptionMode::Log),
+            Admission::Accept,
+            now,
+        );
+        p.end("e", "").unwrap();
+        assert!(stale(&mut p, "e", "b").frames.is_empty() && !p.holds("e"));
+
+        subscribe(
+            &mut p,
+            ALICE,
+            &sub_frame("r", "c", SubscriptionMode::Log),
+            Admission::Ask,
+            now,
+        );
+        p.reject("r", "").unwrap();
+        assert!(stale(&mut p, "r", "c").events.is_empty() && !p.holds("r"));
+
+        subscribe(
+            &mut p,
+            ALICE,
+            &sub_frame("x", "d", SubscriptionMode::Log),
+            Admission::Accept,
+            now,
+        );
+        p.tick(now + Duration::from_secs(61));
+        assert!(!p.holds("x"));
+        let out = stale(&mut p, "x", "d");
+        assert_eq!(reply(&out).status, SubscribeStatus::Accepted);
+        assert!(p.holds("x"), "a lapsed lease is renewed back");
     }
 }

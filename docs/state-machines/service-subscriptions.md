@@ -25,7 +25,7 @@ what each shape prevents.
    subscription awaiting the application counts against the caps.
 7. **A provider holds one subscription per (subscriber, service, topic)**;
    a first subscribe replaces the one before it, a renewal never replaces,
-   and a replaced one never returns. The consumer refuses a second
+   and a replaced or ended one never returns. The consumer refuses a second
    subscription to a triple it already holds.
 8. **A consumer that missed updates gets the state back, or an event saying
    it cannot.**
@@ -132,7 +132,7 @@ renewals would then be dropped until it ended as `provider_unreachable`.
 |-------|-------|-----------|
 | awaiting the application | Subscriber, lease, the subscriber's `resume`; counts against both caps | `accept_service_subscription` (admitted), `reject_service_subscription` or `approval_timeout_ms` (gone, `rejected` sent) |
 | admitted | Lease, last send time, keys held back by the interval | Lease expiry (gone, no frame), `__SVC_UNSUB__` from the subscriber, `end_service_subscription` (`__SVC_UNSUB__` sent), the service unregistered, or replacement by a first subscribe (no `resume`) to the same topic under a new `sub_id` (retired). A renewal (`resume`) naming another `sub_id` is dropped with no reply and replaces nothing |
-| retired | Only its `sub_id`, the last 4 per (subscriber, service, topic) | Forgotten when a fifth is retired. A frame naming it is dropped with no reply, so a renewal sent before the subscriber restarted cannot replace the subscription it made since |
+| retired | Only its `sub_id`, the last 4 per (subscriber, service, topic). Entered on replacement and on every end either side is told of (unsubscribed, ended, refused, `mode_mismatch`, service unregistered); never on lease expiry | Forgotten when a fifth is retired. A frame naming it is dropped with no reply, so a renewal sent before the subscriber restarted cannot replace the subscription it made since, and one sent before an end cannot subscribe again |
 
 **Admission** is the service's policy: `restricted` (the default) asks the
 application, `accept_all` admits, and `rules` admits listed peers and members
