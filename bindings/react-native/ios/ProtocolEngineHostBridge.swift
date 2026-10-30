@@ -1250,6 +1250,16 @@ enum ProtocolEngineHostBridge {
         }
     }
 
+    /// The lowercase name the TypeScript types and the engine's events use.
+    private static func subscriptionStateName(_ state: SubscriptionState) -> String {
+        switch state {
+        case .pending: return "pending"
+        case .active: return "active"
+        case .paused: return "paused"
+        case .ended: return "ended"
+        }
+    }
+
     static func subscribeService(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "subscribeService")
         return try host.requireMeshServices().subscribeService(
@@ -1294,7 +1304,7 @@ enum ProtocolEngineHostBridge {
                 "serviceId": info.serviceId,
                 "topic": info.topic,
                 "mode": subscriptionModeName(info.mode),
-                "state": info.state,
+                "state": subscriptionStateName(info.state),
                 "keys": info.keys,
                 "topics": info.topics,
             ]
@@ -1321,12 +1331,21 @@ enum ProtocolEngineHostBridge {
         case "reject": fallback = .reject
         default: throw HostError.invalidArgument("'fallback' must be ask or reject")
         }
+        // A list that is present but not all strings is refused: dropping it
+        // would leave a `rules` policy admitting nobody by rule, silently.
+        func strings(_ key: String) throws -> [String] {
+            guard let raw = json[key], !(raw is NSNull) else { return [] }
+            guard let list = raw as? [String] else {
+                throw HostError.invalidArgument("'\(key)' must be a list of strings")
+            }
+            return list
+        }
         try host.requireMeshServices().setServiceSubscriptionPolicy(
             serviceId: try A.requireString(m, "serviceId"),
             policy: SubscriptionPolicyConfig(
                 kind: kind,
-                allowPeers: (json["allowPeers"] as? [String]) ?? [],
-                allowGroups: (json["allowGroups"] as? [String]) ?? [],
+                allowPeers: try strings("allowPeers"),
+                allowGroups: try strings("allowGroups"),
                 rulesFallback: fallback
             )
         )
@@ -1365,7 +1384,8 @@ enum ProtocolEngineHostBridge {
         let report = try host.requireMeshServices().publishServiceUpdate(
             serviceId: try A.requireString(m, "serviceId"),
             topic: try A.requireString(m, "topic"),
-            key: A.optionalString(m, "key"),
+            // As given: an empty key is the engine's to refuse, not a log publish.
+            key: m["key"] as? String,
             body: body
         )
         return [
@@ -1408,7 +1428,7 @@ enum ProtocolEngineHostBridge {
                 "serviceId": info.serviceId,
                 "topic": info.topic,
                 "mode": subscriptionModeName(info.mode),
-                "state": info.state,
+                "state": subscriptionStateName(info.state),
                 "params": info.params,
                 "keys": info.keys,
             ]

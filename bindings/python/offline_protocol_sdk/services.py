@@ -228,13 +228,13 @@ class Services:
     def set_policy(
         self,
         service_id: str,
-        policy: str = "restricted",
+        kind: str = "restricted",
         *,
         allow_peers: list[str] | None = None,
         allow_groups: list[str] | None = None,
         fallback: str = "ask",
     ) -> None:
-        """Set who may subscribe to ``service_id``: ``"restricted"`` (ask
+        """Set who may subscribe to ``service_id``. ``kind`` is ``"restricted"`` (ask
         this application, the default), ``"accept_all"``, or ``"rules"``
         (admit ``allow_peers`` and members of ``allow_groups``; ``fallback``
         ``"ask"`` or ``"reject"`` for everyone else)."""
@@ -247,14 +247,14 @@ class Services:
             "ask": SubscriptionRulesFallback.ASK,
             "reject": SubscriptionRulesFallback.REJECT,
         }
-        if policy not in kinds:
-            raise ValueError(f"policy {policy!r} is not one of {', '.join(kinds)}")
+        if kind not in kinds:
+            raise ValueError(f"kind {kind!r} is not one of {', '.join(kinds)}")
         if fallback not in fallbacks:
             raise ValueError(f"fallback {fallback!r} is not one of {', '.join(fallbacks)}")
         self._mesh.set_service_subscription_policy(
             service_id,
             SubscriptionPolicyConfig(
-                kind=kinds[policy],
+                kind=kinds[kind],
                 allow_peers=list(allow_peers or []),
                 allow_groups=list(allow_groups or []),
                 rules_fallback=fallbacks[fallback],

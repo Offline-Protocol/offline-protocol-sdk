@@ -19490,7 +19490,8 @@ mod tests {
         assert_eq!(
             flagged, expected,
             "tools/rn_engine_bridge_error_manifest.json `mapProtocolErrors` must name exactly \
-             the methods that rejected through rejectWithProtocolError before the shared bridge"
+             the methods that rejected through rejectWithProtocolError before the shared bridge, \
+             plus the ones that joined since by decision (JOINED_SINCE)"
         );
 
         let kotlin = rn_source_code_only(

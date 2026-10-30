@@ -890,7 +890,8 @@ object ProtocolEngineHostBridge {
         val report = host.requireMeshServicesBridge().publishServiceUpdate(
             requireString(map, "serviceId"),
             requireString(map, "topic"),
-            optionalString(map, "key"),
+            // As given: an empty key is the engine's to refuse, not a log publish.
+            map["key"] as? String,
             (map["body"] as? String) ?: throw IllegalArgumentException("Missing 'body'"),
         )
         return mapOf(
@@ -1109,34 +1110,37 @@ object ProtocolEngineHostBridge {
 
     fun serviceSubscribers(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
-        return host.requireMeshServicesBridge().serviceSubscribers(optionalString(map, "serviceId")).map { info ->
-            mapOf(
-                "subId" to info.subId,
-                "subscriber" to info.subscriber,
-                "serviceId" to info.serviceId,
-                "topic" to info.topic,
-                "mode" to info.mode.name.lowercase(),
-                "state" to info.state,
-                "params" to info.params,
-                "keys" to info.keys,
-            )
-        }
+        return host.requireMeshServicesBridge().serviceSubscribers(optionalString(map, "serviceId")).map(::subscriberInfoMap)
     }
 
+    internal fun subscriberInfoMap(info: ServiceSubscriberInfo): Map<String, Any?> = mapOf(
+        "subId" to info.subId,
+        "subscriber" to info.subscriber,
+        "serviceId" to info.serviceId,
+        "topic" to info.topic,
+        "mode" to info.mode.name.lowercase(),
+        "state" to info.state.name.lowercase(),
+        "params" to info.params,
+        "keys" to info.keys,
+    )
+
     fun serviceSubscriptions(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
-        return host.requireMeshServicesBridge().serviceSubscriptions().map { info ->
-            mapOf(
-                "subId" to info.subId,
-                "provider" to info.provider,
-                "serviceId" to info.serviceId,
-                "topic" to info.topic,
-                "mode" to info.mode.name.lowercase(),
-                "state" to info.state,
-                "keys" to info.keys,
-                "topics" to info.topics,
-            )
-        }
+        return host.requireMeshServicesBridge().serviceSubscriptions().map(::subscriptionInfoMap)
     }
+
+    // Every enum crosses as the lowercase name the TypeScript types and the
+    // engine's events use; a raw enum reaches React Native as "PENDING" and
+    // makes Flutter's codec throw.
+    internal fun subscriptionInfoMap(info: ServiceSubscriptionInfo): Map<String, Any?> = mapOf(
+        "subId" to info.subId,
+        "provider" to info.provider,
+        "serviceId" to info.serviceId,
+        "topic" to info.topic,
+        "mode" to info.mode.name.lowercase(),
+        "state" to info.state.name.lowercase(),
+        "keys" to info.keys,
+        "topics" to info.topics,
+    )
 
     fun setBatteryLevel(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
@@ -1168,7 +1172,15 @@ object ProtocolEngineHostBridge {
 
     fun setServiceSubscriptionPolicy(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
-        val json = JSONObject(requireString(map, "policyJson"))
+        host.requireMeshServicesBridge().setServiceSubscriptionPolicy(
+            requireString(map, "serviceId"),
+            subscriptionPolicyFromJson(requireString(map, "policyJson")),
+        )
+        return null
+    }
+
+    internal fun subscriptionPolicyFromJson(policyJson: String): SubscriptionPolicyConfig {
+        val json = JSONObject(policyJson)
         val kind = when (json.optString("kind", "restricted").lowercase()) {
             "restricted" -> SubscriptionPolicyKind.RESTRICTED
             "accept_all" -> SubscriptionPolicyKind.ACCEPT_ALL
@@ -1180,15 +1192,15 @@ object ProtocolEngineHostBridge {
             "reject" -> SubscriptionRulesFallback.REJECT
             else -> throw IllegalArgumentException("'fallback' must be ask or reject")
         }
+        // A list that is present but not all strings is refused, as on iOS;
+        // getString would coerce a number into a peer id.
         fun strings(key: String): List<String> {
             val array = json.optJSONArray(key) ?: return emptyList()
-            return (0 until array.length()).map { array.getString(it) }
+            return (0 until array.length()).map {
+                array.get(it) as? String ?: throw IllegalArgumentException("'$key' must be a list of strings")
+            }
         }
-        host.requireMeshServicesBridge().setServiceSubscriptionPolicy(
-            requireString(map, "serviceId"),
-            SubscriptionPolicyConfig(kind, strings("allowPeers"), strings("allowGroups"), fallback),
-        )
-        return null
+        return SubscriptionPolicyConfig(kind, strings("allowPeers"), strings("allowGroups"), fallback)
     }
 
     fun setServiceTopicCheckpoint(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
@@ -1240,10 +1252,12 @@ object ProtocolEngineHostBridge {
 
     // `keys` as a list (Flutter), or `keysJson` as a JSON array (React Native,
     // whose adapter reads every array as integers).
-    private fun subscriptionKeys(map: Map<String, Any?>): List<String> {
+    internal fun subscriptionKeys(map: Map<String, Any?>): List<String> {
         val raw = map["keysJson"] as? String ?: return stringList(map, "keys")
         val array = JSONArray(raw)
-        return List(array.length()) { i -> array.getString(i) }
+        return List(array.length()) { i ->
+            array.get(i) as? String ?: throw IllegalArgumentException("'keysJson' must be a JSON array of strings")
+        }
     }
 
     fun unblockUser(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
