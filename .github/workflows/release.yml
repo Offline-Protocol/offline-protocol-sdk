@@ -107,7 +107,7 @@ env:
 jobs:
   build-ios:
     name: Build iOS Libraries
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
 
@@ -333,7 +333,7 @@ jobs:
         include:
           - arch: arm64
             target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
             lib_name: liboffline_protocol_uniffi.dylib
     steps:
       - uses: actions/checkout@v7
@@ -499,7 +499,7 @@ jobs:
       matrix:
         include:
           - platform: macos-arm64
-            runner: macos-14
+            runner: macos-15
           - platform: linux-x86_64
             runner: ubuntu-latest
           - platform: windows-x86_64
@@ -687,7 +687,7 @@ jobs:
       matrix:
         include:
           - platform: macos-arm64
-            runner: macos-14
+            runner: macos-15
           - platform: linux-x86_64
             runner: ubuntu-latest
           - platform: linux-aarch64
