@@ -90,13 +90,24 @@ Each names the failure it prevents.
    that misses an absent member counts against the budget, and a spent budget
    sends the next one reliable. That reliable copy is marked as a
    subscription frame when it is queued, so `persist_outbox_entry` never
-   writes it (ADR 0035 invariant 3). Otherwise a rung restored after a restart
+   writes it (ADR 0035 invariant 3). The topic send path sets the mark itself:
+   a 1:1 subscription frame is recognised from its re-seal provenance, and a
+   group frame deliberately has none, because a re-seal would turn group
+   ciphertext into a 1:1 payload. Otherwise a rung restored after a restart
    names a group and a stream the provider no longer has.
 7. **A key filter is never widened by a group.** A subscription with a key
    filter stays on the 1:1 session. A group frame goes to every member, so
    filtering it on the consumer would send each filtered subscriber every key
    of the topic, which is what ADR 0035's provider-side filter exists to
    prevent.
+8. **A member that cannot read the group is found, and rebuilt.** Commits and
+   the Welcome are on a ladder that gives no order and, being unpersisted, can
+   lose a frame to a restart or to expiry. So every renewal of a subscription
+   in a group reports the member's epoch, and a provider that sees a member
+   stuck behind moves it out of the group and back. Otherwise a member one
+   epoch behind reads no further publish, and is sent a snapshot every half
+   lease in place of live updates, while the provider reports it `in_group`:
+   the silent gap ADR 0035 invariant 8 forbids.
 
 ## Decision (proposed)
 
@@ -117,22 +128,42 @@ Each names the failure it prevents.
   it mints for this offer, never one from its pending list. The provider takes
   a `key_package` only on a frame for a subscription it holds with an offer
   outstanding, and validates it as `add_group_member` validates any package
-  (credential identity, address binding, lifetime cap). This costs one round
-  trip before the first commit; until the package arrives, and whenever an
-  offer goes unanswered, the subscription runs over the 1:1 session (ADR 0035)
-  and the next renewal's reply offers again.
+  (credential identity, address binding, lifetime cap). The frame that carries
+  the package is a renewal like any other: it carries `resume` and goes
+  through the policy. Its reply carries no offer, and neither does any reply
+  while the subscriber is a member; otherwise each answer would mint another
+  package. This costs one round trip before the first commit; until the
+  package arrives, and whenever an offer goes unanswered, the subscription
+  runs over the 1:1 session (ADR 0035) and the next renewal's reply offers
+  again.
 - **Joining.** With the package the provider adds the subscriber, and sends
   the Welcome to it alone as `__SVC_GWEL__`: `{v, sub_id, service_id, topic,
   welcome}`, sealed in the 1:1 session like every subscription frame, on the
   reliable ladder, marked as a subscription frame (invariant 3). It never
   passes through the conversation Welcome handler, so no group event exists
-  to suppress.
+  to suppress. A Welcome that passes invariant 3 replaces any topic group the
+  consumer still holds for the same (provider, service, topic), which is how a
+  rebuilt member or a provider that restarted leaves no second group behind.
 - **Commits.** A commit goes to each remaining member as `__SVC_GCOM__`:
-  `{v, service_id, topic, commit}`, sealed in that member's 1:1 session on the
-  reliable ladder and marked as a subscription frame. It is handled by the
-  topic-group path, which rejects a committer other than the provider, and
-  never by the conversation commit handler. A member's own removal reaches it
-  as ADR 0035's `__SVC_UNSUB__`, not as a commit.
+  `{v, service_id, topic, epoch, commit}`, sealed in that member's 1:1 session
+  on the reliable ladder and marked as a subscription frame. It is handled by
+  the topic-group path, which rejects a committer other than the provider, and
+  never by the conversation commit handler. That path holds a commit ahead of
+  the member's epoch until the ones before it arrive, at most
+  `MAX_PENDING_COMMITS_PER_GROUP` (8) per group, oldest dropped first; a commit
+  it never gets is the rebuild's to repair, and with no fork check on a topic
+  group, a held commit that expires raises no alarm. A member's own removal
+  reaches it as ADR 0035's `__SVC_UNSUB__`, not as a commit.
+- **Rebuilding a member (invariant 8).** A renewal from a member carries
+  `group_epoch`, the epoch of the topic group it holds, or nothing when it
+  holds none. A provider that gets a value below its own, or none for a
+  subscriber it has added, at two renewals in a row removes that member in the
+  next commit. One renewal is not enough, because a commit or Welcome still in
+  flight looks the same. The removal sends no `__SVC_UNSUB__`, since the
+  subscription goes on: it falls back to the 1:1 session, `in_group` turns
+  false, and the reply offers a group again, so the member joins from a fresh
+  package and Welcome. What it missed comes back as ADR 0035 recovery brings
+  back any missed update. A member at the provider's epoch needs nothing.
 - **Updates.** A live publish is one `__SVC_GUPD__` frame in the group:
   `{v, service_id, topic, stream, seq, key?, body}`. There is no `sub_id`:
   the frame is for every member. A consumer maps it to its subscription by
@@ -161,12 +192,15 @@ Each names the failure it prevents.
   tell which kind it holds.
 - **Wire.** `__SVC_GWEL__`, `__SVC_GCOM__` and `__SVC_GUPD__` join the
   reserved prefix registry (`INTERNAL_PREFIXES` and the control messages
-  chapter); none is a prefix of another or of ADR 0035's four. `group_offer`,
-  `group_declined` and `key_package` are new fields on existing frames, so
-  they raise `v` under ADR 0035's version rule, and a consumer at an older `v`
-  never answers an offer and stays on the 1:1 session. Routing the three
-  frames is a new `svc_versions` entry (`SVC_SUB_GROUP_V1`); a provider offers
-  a group only to a peer that advertises it.
+  chapter) and `SVC_SUBSCRIPTION_PREFIXES`, which is the list the sealed
+  dispatch, the plaintext drop and the persist mark test: a prefix in only the
+  first is routed as a plain service message and its outbox entry is written.
+  None is a prefix of another or of ADR 0035's four. `group_offer`,
+  `group_declined`, `key_package` and `group_epoch` are new fields on existing
+  frames, so they raise `v` under ADR 0035's version rule, and a consumer at
+  an older `v` never answers an offer and stays on the 1:1 session. Routing
+  the three frames is a new `svc_versions` entry (`SVC_SUB_GROUP_V1`); a
+  provider offers a group only to a peer that advertises it.
 
 ## Open questions
 
@@ -230,3 +264,8 @@ These need an answer before the status can move.
 - **Putting filtered subscribers in the group** and filtering on the
   consumer. The keys the filter withheld would leave the provider.
 - **Keeping removals for later.** Revocation that waits is not revocation.
+- **Dropping `group_epoch` from the renewal** because the digest "already
+  catches a gap". The digest repairs the value and never the membership, so
+  the member takes a snapshot every half lease and never reads a live update.
+- **Rebuilding a member at the first low epoch.** A renewal that crosses a
+  commit in flight would cost a removal, a package and a Welcome each time.
