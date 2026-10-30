@@ -118,7 +118,7 @@ def build_args_expr(params: str) -> str:
             items.append(f'"{name}": BridgeResults.argumentMap(from: {name} as? [String: Any])')
         elif "[NSNumber]" in typ:
             items.append(
-                f'"{name}": BridgeResults.arrayFromNSNumberList({name} as? [Any]) as Any'
+                f'"{name}": BridgeResults.byteListArgument({name})'
             )
         elif "NSArray" in typ or "[Any" in typ:
             items.append(f'"{name}": {name} as? [Any] ?? []')

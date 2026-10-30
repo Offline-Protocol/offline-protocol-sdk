@@ -441,7 +441,7 @@ _m("checkInternetPresence", """
         val map = mapFromAny(arguments)
         val manager = host.internetManager
             ?: throw IllegalStateException("Internet transport not initialized")
-        val force = map["force"] as? Boolean ?: false
+        val force = presenceForce(map)
         val latch = java.util.concurrent.CountDownLatch(1)
         var result = false
         manager.checkPresence(requireString(map, "userId"), force) { written ->

@@ -41,7 +41,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func acceptConnectionRequest(_ module: OfflineProtocolModule, _ recipient: String, accepterName: String, keyPackage: [NSNumber]?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to accept connection request", mapProtocolErrors: true) { host, env in
-            try ProtocolEngineHostBridge.acceptConnectionRequest(host: host, env: env, arguments: ["recipient": recipient, "accepterName": accepterName, "keyPackage": BridgeResults.arrayFromNSNumberList(keyPackage as? [Any]) as Any])
+            try ProtocolEngineHostBridge.acceptConnectionRequest(host: host, env: env, arguments: ["recipient": recipient, "accepterName": accepterName, "keyPackage": BridgeResults.byteListArgument(keyPackage)])
         }
     }
 
@@ -93,21 +93,21 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
-    static func createInvite(_ module: OfflineProtocolModule, _ petname: String?, sign: NSNumber, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+    static func createInvite(_ module: OfflineProtocolModule, _ petname: String?, sign signed: NSNumber, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.createInvite(host: host, env: env, arguments: ["petname": petname, "sign": sign])
+            try ProtocolEngineHostBridge.createInvite(host: host, env: env, arguments: ["petname": petname, "signed": signed])
         }
     }
 
     static func deriveAddress(_ module: OfflineProtocolModule, _ publicKey: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CRYPTO", errorMessage: "Failed to derive address") { host, env in
-            try ProtocolEngineHostBridge.deriveAddress(host: host, env: env, arguments: ["publicKey": BridgeResults.arrayFromNSNumberList(publicKey as? [Any]) as Any])
+            try ProtocolEngineHostBridge.deriveAddress(host: host, env: env, arguments: ["publicKey": BridgeResults.byteListArgument(publicKey)])
         }
     }
 
     static func deriveUserIdFromPublicKey(_ module: OfflineProtocolModule, _ publicKey: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.deriveUserIdFromPublicKey(host: host, env: env, arguments: ["publicKey": BridgeResults.arrayFromNSNumberList(publicKey as? [Any]) as Any])
+            try ProtocolEngineHostBridge.deriveUserIdFromPublicKey(host: host, env: env, arguments: ["publicKey": BridgeResults.byteListArgument(publicKey)])
         }
     }
 
@@ -335,7 +335,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func internetMessageReceived(_ module: OfflineProtocolModule, _ senderId: String, data: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INTERNET", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.internetMessageReceived(host: host, env: env, arguments: ["senderId": senderId, "data": BridgeResults.arrayFromNSNumberList(data as? [Any]) as Any])
+            try ProtocolEngineHostBridge.internetMessageReceived(host: host, env: env, arguments: ["senderId": senderId, "data": BridgeResults.byteListArgument(data)])
         }
     }
 
@@ -407,7 +407,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func mlsEncryptForUser(_ module: OfflineProtocolModule, _ otherUserId: String, plaintext: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_MLS", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.mlsEncryptForUser(host: host, env: env, arguments: ["otherUserId": otherUserId, "plaintext": BridgeResults.arrayFromNSNumberList(plaintext as? [Any]) as Any])
+            try ProtocolEngineHostBridge.mlsEncryptForUser(host: host, env: env, arguments: ["otherUserId": otherUserId, "plaintext": BridgeResults.byteListArgument(plaintext)])
         }
     }
 
@@ -437,7 +437,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func mlsImportKeyPackage(_ module: OfflineProtocolModule, _ userId: String, keyPackageData: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_MLS", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.mlsImportKeyPackage(host: host, env: env, arguments: ["userId": userId, "keyPackageData": BridgeResults.arrayFromNSNumberList(keyPackageData as? [Any]) as Any])
+            try ProtocolEngineHostBridge.mlsImportKeyPackage(host: host, env: env, arguments: ["userId": userId, "keyPackageData": BridgeResults.byteListArgument(keyPackageData)])
         }
     }
 
@@ -473,7 +473,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func processFileChunk(_ module: OfflineProtocolModule, _ fileId: String, chunkIndex: Int, totalChunks: Int, fileSize: Double, fileName: String, fileChecksum: String, data: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FILE", errorMessage: "Failed to process file chunk", mapProtocolErrors: true) { host, env in
-            try ProtocolEngineHostBridge.processFileChunk(host: host, env: env, arguments: ["fileId": fileId, "chunkIndex": chunkIndex, "totalChunks": totalChunks, "fileSize": fileSize, "fileName": fileName, "fileChecksum": fileChecksum, "data": BridgeResults.arrayFromNSNumberList(data as? [Any]) as Any])
+            try ProtocolEngineHostBridge.processFileChunk(host: host, env: env, arguments: ["fileId": fileId, "chunkIndex": chunkIndex, "totalChunks": totalChunks, "fileSize": fileSize, "fileName": fileName, "fileChecksum": fileChecksum, "data": BridgeResults.byteListArgument(data)])
         }
     }
 
@@ -539,7 +539,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func sendConnectionRequest(_ module: OfflineProtocolModule, _ recipient: String, senderName: String, keyPackage: [NSNumber]?, initialMessage: String?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to send connection request", mapProtocolErrors: true) { host, env in
-            try ProtocolEngineHostBridge.sendConnectionRequest(host: host, env: env, arguments: ["recipient": recipient, "senderName": senderName, "keyPackage": BridgeResults.arrayFromNSNumberList(keyPackage as? [Any]) as Any, "initialMessage": initialMessage])
+            try ProtocolEngineHostBridge.sendConnectionRequest(host: host, env: env, arguments: ["recipient": recipient, "senderName": senderName, "keyPackage": BridgeResults.byteListArgument(keyPackage), "initialMessage": initialMessage])
         }
     }
 
@@ -641,7 +641,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func signData(_ module: OfflineProtocolModule, _ data: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.signData(host: host, env: env, arguments: ["data": BridgeResults.arrayFromNSNumberList(data as? [Any]) as Any])
+            try ProtocolEngineHostBridge.signData(host: host, env: env, arguments: ["data": BridgeResults.byteListArgument(data)])
         }
     }
 
@@ -707,7 +707,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func verifySignature(_ module: OfflineProtocolModule, _ publicKey: [NSNumber], data: [NSNumber], signature: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.verifySignature(host: host, env: env, arguments: ["publicKey": BridgeResults.arrayFromNSNumberList(publicKey as? [Any]) as Any, "data": BridgeResults.arrayFromNSNumberList(data as? [Any]) as Any, "signature": BridgeResults.arrayFromNSNumberList(signature as? [Any]) as Any])
+            try ProtocolEngineHostBridge.verifySignature(host: host, env: env, arguments: ["publicKey": BridgeResults.byteListArgument(publicKey), "data": BridgeResults.byteListArgument(data), "signature": BridgeResults.byteListArgument(signature)])
         }
     }
 
@@ -725,7 +725,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func wifiDirectMessageReceived(_ module: OfflineProtocolModule, _ senderId: String, data: [NSNumber], resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_WIFI_DIRECT", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.wifiDirectMessageReceived(host: host, env: env, arguments: ["senderId": senderId, "data": BridgeResults.arrayFromNSNumberList(data as? [Any]) as Any])
+            try ProtocolEngineHostBridge.wifiDirectMessageReceived(host: host, env: env, arguments: ["senderId": senderId, "data": BridgeResults.byteListArgument(data)])
         }
     }
 

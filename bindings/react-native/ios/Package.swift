@@ -118,7 +118,9 @@ let package = Package(
             // compile. They run in the Swift package's CI job, which builds
             // them against the real module (bindings/swift/README.md).
             exclude: [
+                "AdapterArgumentReadTests.swift",
                 "BleDiscoveryBootstrapPolicyTests.swift",
+                "ConnectionRequestKeyPackageTests.swift",
                 "MeshControllerTests.swift",
                 "ProtocolErrorBridgeTests.swift"
             ],

@@ -24,6 +24,7 @@ check tools/gen_rn_protocol_engine_bridge_react_native_swift.py --check
 check tools/gen_protocol_engine_host_bridge.py --check
 # The Swift bridge is hand-written: one handler per shared method, no stubs.
 check tools/check_swift_protocol_engine_host_bridge.py
+check tools/check_rn_adapter_argument_keys.py
 check tools/gen_mesh_sdk_dart.py --check
 check tools/gen_engine_method_handlers.py --check
 check tools/gen_flutter_engine_bridge.py --check

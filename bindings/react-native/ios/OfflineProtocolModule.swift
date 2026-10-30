@@ -3141,12 +3141,15 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// reaches Objective-C through `OfflineProtocolModule.m`, where a
     /// parameter named `signed` is a C type specifier rather than an
     /// identifier and does not compile. The JS-facing name is unaffected —
-    /// React Native bridges positionally.
+    /// React Native bridges positionally. The internal name is `signed`,
+    /// because the generated adapter keys each argument by it and the shared
+    /// bridge reads `signed`: keyed `sign` in 0.31.0, every invite from an
+    /// iPhone came out unsigned.
     @objc func createInvite(_ petname: String?,
-                            sign: NSNumber,
+                            sign signed: NSNumber,
                             resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.createInvite(self, petname, sign: sign, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.createInvite(self, petname, sign: signed, resolver: resolver, rejecter: rejecter)
     }
 
     /// Resolve a username to the set of devices claiming it.

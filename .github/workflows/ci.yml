@@ -280,6 +280,7 @@ jobs:
               - 'tools/bridge_impl_supplement.py'
               - 'tools/extract_rn_bridge_error_manifest.py'
               - 'tools/check_swift_protocol_engine_host_bridge.py'
+              - 'tools/check_rn_adapter_argument_keys.py'
               # The Flutter half of the same gate: the manifest, its generators
               # and every file they write.
               - 'bindings/flutter/offline_protocol/method_channel_methods.txt'
@@ -1938,8 +1939,8 @@ jobs:
         run: bash scripts/package-swiftpm-xcframework.sh build/swiftpm "$SIMULATOR_ARCHIVE"
 
       # --bridge-tests adds the suites from bindings/react-native/ios/tests.
-      # Three of them run nowhere else: the SwiftPM harness above cannot
-      # compile the sources they cover.
+      # Some of them run nowhere else: the SwiftPM harness above cannot compile
+      # the sources they cover, and Package.swift lists them under `exclude`.
       - name: Assemble the package
         run: >
           bash scripts/assemble-swift-package.sh

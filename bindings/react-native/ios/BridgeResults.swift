@@ -8,11 +8,19 @@ import Foundation
 /// that `src/index.ts` passes to `JSON.parse`, and `JSON.parse` on an object
 /// throws. `parseJsonResult` is the one way to turn a JSON string into an
 /// object, and the generated adapter calls it only for methods the manifest marks
-/// `parseJsonResult`. Mirrors android/ BridgeResults.kt.
+/// `parseJsonResult`. Mirrors android/ BridgeResults.kt, except `byteListArgument`:
+/// Kotlin's adapter hands an omitted list over as null, which its reader already
+/// takes as absent, so it has no counterpart there. Do not move it without the
+/// Swift adapter generator, which names it.
 enum BridgeResults {
-    static func arrayFromNSNumberList(_ list: [Any]?) -> [Int]? {
-        guard let list else { return nil }
-        return list.compactMap { ($0 as? NSNumber)?.intValue }
+    /// A JavaScript number array as a shared-bridge argument, and an omitted
+    /// one as `NSNull`, which every argument reader takes as absent. A nil
+    /// `[Int]?` boxed `as Any` is neither `NSNull` nor a list, so in 0.31.0
+    /// `byteList` refused an omitted `keyPackage` and an iPhone could not
+    /// accept or send a connection request without one.
+    static func byteListArgument(_ list: [NSNumber]?) -> Any {
+        guard let list else { return NSNull() }
+        return list.map { $0.intValue }
     }
 
     static func argumentMap(from dict: [String: Any]?) -> [String: Any] {
