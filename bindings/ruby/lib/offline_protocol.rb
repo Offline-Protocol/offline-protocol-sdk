@@ -1261,7 +1261,7 @@ private_constant :UniffiHandleMap
     
     
     RustBuffer.check_lower_TypeSubscriptionMode(v.mode)
-    
+    RustBuffer.check_lower_TypeSubscriptionState(v.state)
     
     RustBuffer.check_lower_Sequencestring(v.keys)
   end
@@ -1287,7 +1287,7 @@ private_constant :UniffiHandleMap
     
     
     RustBuffer.check_lower_TypeSubscriptionMode(v.mode)
-    
+    RustBuffer.check_lower_TypeSubscriptionState(v.state)
     RustBuffer.check_lower_Sequencestring(v.keys)
     RustBuffer.check_lower_Sequencestring(v.topics)
   end
@@ -1742,6 +1742,25 @@ private_constant :UniffiHandleMap
   def consume_into_TypeSubscriptionRulesFallback
     consumeWithStream do |stream|
       return stream.read_TypeSubscriptionRulesFallback
+    end
+  end
+  
+
+  # The Enum type SubscriptionState.
+
+  def self.check_lower_TypeSubscriptionState(v)
+  end
+
+  def self.alloc_from_TypeSubscriptionState(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_TypeSubscriptionState(v)
+      return builder.finalize
+    end
+  end
+
+  def consume_into_TypeSubscriptionState
+    consumeWithStream do |stream|
+      return stream.read_TypeSubscriptionState
     end
   end
   
@@ -3307,7 +3326,7 @@ class RustBufferStream
       service_id: read_string,
       topic: read_string,
       mode: read_TypeSubscriptionMode,
-      state: read_string,
+      state: read_TypeSubscriptionState,
       params: read_string,
       keys: read_Sequencestring
     )
@@ -3322,7 +3341,7 @@ class RustBufferStream
       service_id: read_string,
       topic: read_string,
       mode: read_TypeSubscriptionMode,
-      state: read_string,
+      state: read_TypeSubscriptionState,
       keys: read_Sequencestring,
       topics: read_Sequencestring
     )
@@ -3899,6 +3918,31 @@ class RustBufferStream
     end
 
     raise InternalError, 'Unexpected variant tag for TypeSubscriptionRulesFallback'
+  end
+
+  
+
+  
+  
+  # The Enum type SubscriptionState.
+
+  def read_TypeSubscriptionState
+    variant = unpack_from 4, 'l>'
+    
+    if variant == 1
+      return SubscriptionState::PENDING
+    end
+    if variant == 2
+      return SubscriptionState::ACTIVE
+    end
+    if variant == 3
+      return SubscriptionState::PAUSED
+    end
+    if variant == 4
+      return SubscriptionState::ENDED
+    end
+
+    raise InternalError, 'Unexpected variant tag for TypeSubscriptionState'
   end
 
   
@@ -5201,7 +5245,7 @@ class RustBufferBuilder
     self.write_string(v.service_id)
     self.write_string(v.topic)
     self.write_TypeSubscriptionMode(v.mode)
-    self.write_string(v.state)
+    self.write_TypeSubscriptionState(v.state)
     self.write_string(v.params)
     self.write_Sequencestring(v.keys)
   end
@@ -5214,7 +5258,7 @@ class RustBufferBuilder
     self.write_string(v.service_id)
     self.write_string(v.topic)
     self.write_TypeSubscriptionMode(v.mode)
-    self.write_string(v.state)
+    self.write_TypeSubscriptionState(v.state)
     self.write_Sequencestring(v.keys)
     self.write_Sequencestring(v.topics)
   end
@@ -5641,6 +5685,24 @@ class RustBufferBuilder
     end
     if v == SubscriptionRulesFallback::REJECT
       pack_into(4, 'l>', 2)
+    end
+ end
+  
+
+  # The Enum type SubscriptionState.
+
+  def write_TypeSubscriptionState(v)
+    if v == SubscriptionState::PENDING
+      pack_into(4, 'l>', 1)
+    end
+    if v == SubscriptionState::ACTIVE
+      pack_into(4, 'l>', 2)
+    end
+    if v == SubscriptionState::PAUSED
+      pack_into(4, 'l>', 3)
+    end
+    if v == SubscriptionState::ENDED
+      pack_into(4, 'l>', 4)
     end
  end
   
@@ -6232,6 +6294,7 @@ class ProtocolError
     TelemetryConfigInvalid = Class.new StandardError
 
 end
+
 
 
 
@@ -8999,6 +9062,19 @@ end
   
   
 
+class SubscriptionState
+  PENDING = 0
+  ACTIVE = 1
+  PAUSED = 2
+  ENDED = 3
+  
+end
+
+
+  
+  
+  
+
 class TelemetryOs
   IOS = 0
   ANDROID = 1
@@ -10831,7 +10907,7 @@ end
 class SubscriptionPolicyConfig
   attr_reader :kind, :allow_peers, :allow_groups, :rules_fallback
 
-  def initialize(kind:, allow_peers:, allow_groups:, rules_fallback:)
+  def initialize(kind: SubscriptionPolicyKind::RESTRICTED, allow_peers: [], allow_groups: [], rules_fallback: SubscriptionRulesFallback::ASK)
     @kind = kind
     @allow_peers = allow_peers
     @allow_groups = allow_groups

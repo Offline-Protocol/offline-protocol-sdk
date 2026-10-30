@@ -4201,6 +4201,192 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // SERVICE SUBSCRIPTIONS (ADR 0035)
+    // ========================================================================
+
+    /// Subscribes to `topic` of `service_id` on `provider` (ADR 0035).
+    pub(crate) fn svc_subscribe_service(
+        &self,
+        provider: String,
+        service_id: String,
+        topic: String,
+        mode: SubscriptionMode,
+        params: String,
+        keys: Vec<String>,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .subscribe_service_with(
+                &provider,
+                &service_id,
+                &topic,
+                offline_protocol::SubscribeOptions {
+                    mode: mode.into(),
+                    params,
+                    keys,
+                },
+            )
+            .map_err(map_send_error)
+    }
+
+    /// Ends a subscription this device holds. `false` when there is none.
+    pub(crate) fn svc_unsubscribe_service(&self, sub_id: String) -> Result<bool, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .unsubscribe_service(&sub_id)
+            .map_err(map_send_error)
+    }
+
+    /// Asks the provider for the whole state again now.
+    pub(crate) fn svc_resync_service_subscription(
+        &self,
+        sub_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .resync_service_subscription(&sub_id)
+            .map_err(map_send_error)
+    }
+
+    /// The subscriptions this device holds on other devices.
+    pub(crate) fn svc_service_subscriptions(
+        &self,
+    ) -> Result<Vec<ServiceSubscriptionInfo>, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        Ok(protocol
+            .service_subscriptions()
+            .into_iter()
+            .map(|info| ServiceSubscriptionInfo {
+                sub_id: info.sub_id,
+                provider: info.provider,
+                service_id: info.service_id,
+                topic: info.topic,
+                mode: info.mode.into(),
+                state: info.state.into(),
+                keys: info.keys,
+                topics: info.topics,
+            })
+            .collect())
+    }
+
+    /// Sets who may subscribe to `service_id`.
+    pub(crate) fn svc_set_service_subscription_policy(
+        &self,
+        service_id: String,
+        policy: SubscriptionPolicyConfig,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .set_service_subscription_policy(&service_id, policy.into())
+            .map_err(map_send_error)
+    }
+
+    /// Accepts a subscription the app was asked about.
+    pub(crate) fn svc_accept_service_subscription(
+        &self,
+        sub_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .accept_service_subscription(&sub_id)
+            .map_err(map_send_error)
+    }
+
+    /// Rejects a subscription the app was asked about.
+    pub(crate) fn svc_reject_service_subscription(
+        &self,
+        sub_id: String,
+        reason: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .reject_service_subscription(&sub_id, &reason)
+            .map_err(map_send_error)
+    }
+
+    /// Ends a subscription another device holds on this one.
+    pub(crate) fn svc_end_service_subscription(
+        &self,
+        sub_id: String,
+        reason: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .end_service_subscription(&sub_id, &reason)
+            .map_err(map_send_error)
+    }
+
+    /// Publishes to a topic: `latest` with a key, `log` without one.
+    pub(crate) fn svc_publish_service_update(
+        &self,
+        service_id: String,
+        topic: String,
+        key: Option<String>,
+        body: String,
+    ) -> Result<ServicePublishReport, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        let report = protocol
+            .publish_service_update(&service_id, &topic, key.as_deref(), &body)
+            .map_err(map_send_error)?;
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Ok(ServicePublishReport {
+            subscribers: count(report.subscribers),
+            sent_live: count(report.sent_live),
+            queued: count(report.queued),
+            coalesced: count(report.coalesced),
+            failed: count(report.failed),
+        })
+    }
+
+    /// Sets a `log` topic's checkpoint.
+    pub(crate) fn svc_set_service_topic_checkpoint(
+        &self,
+        service_id: String,
+        topic: String,
+        body: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .set_service_topic_checkpoint(&service_id, &topic, &body)
+            .map_err(map_send_error)
+    }
+
+    /// Starts a topic over under a new stream.
+    pub(crate) fn svc_clear_service_topic(
+        &self,
+        service_id: String,
+        topic: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .clear_service_topic(&service_id, &topic)
+            .map_err(map_send_error)
+    }
+
+    /// The subscriptions other devices hold on `service_id`, or on every
+    /// service for `None`.
+    pub(crate) fn svc_service_subscribers(
+        &self,
+        service_id: Option<String>,
+    ) -> Result<Vec<ServiceSubscriberInfo>, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        Ok(protocol
+            .service_subscribers(service_id.as_deref())
+            .into_iter()
+            .map(|info| ServiceSubscriberInfo {
+                sub_id: info.sub_id,
+                subscriber: info.subscriber,
+                service_id: info.service_id,
+                topic: info.topic,
+                mode: info.mode.into(),
+                state: info.state.into(),
+                params: info.params,
+                keys: info.keys,
+            })
+            .collect())
+    }
+
+    // ========================================================================
     // BLE TRANSPORT OPERATIONS
     // ========================================================================
 
@@ -8148,54 +8334,23 @@ impl MeshServices {
         params: String,
         keys: Vec<String>,
     ) -> Result<String, ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .subscribe_service_with(
-                &provider,
-                &service_id,
-                &topic,
-                offline_protocol::SubscribeOptions {
-                    mode: mode.into(),
-                    params,
-                    keys,
-                },
-            )
-            .map_err(map_send_error)
+        self.protocol
+            .svc_subscribe_service(provider, service_id, topic, mode, params, keys)
     }
 
     /// Ends a subscription this device holds. `false` when there is none.
     pub fn unsubscribe_service(&self, sub_id: String) -> Result<bool, ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .unsubscribe_service(&sub_id)
-            .map_err(map_send_error)
+        self.protocol.svc_unsubscribe_service(sub_id)
     }
 
     /// Asks the provider for the whole state again now.
     pub fn resync_service_subscription(&self, sub_id: String) -> Result<(), ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .resync_service_subscription(&sub_id)
-            .map_err(map_send_error)
+        self.protocol.svc_resync_service_subscription(sub_id)
     }
 
     /// The subscriptions this device holds on other devices.
     pub fn service_subscriptions(&self) -> Result<Vec<ServiceSubscriptionInfo>, ProtocolError> {
-        let protocol = self.protocol.lock_inner()?;
-        Ok(protocol
-            .service_subscriptions()
-            .into_iter()
-            .map(|info| ServiceSubscriptionInfo {
-                sub_id: info.sub_id,
-                provider: info.provider,
-                service_id: info.service_id,
-                topic: info.topic,
-                mode: info.mode.into(),
-                state: info.state.as_str().to_string(),
-                keys: info.keys,
-                topics: info.topics,
-            })
-            .collect())
+        self.protocol.svc_service_subscriptions()
     }
 
     /// Sets who may subscribe to `service_id`.
@@ -8204,18 +8359,13 @@ impl MeshServices {
         service_id: String,
         policy: SubscriptionPolicyConfig,
     ) -> Result<(), ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .set_service_subscription_policy(&service_id, policy.into())
-            .map_err(map_send_error)
+        self.protocol
+            .svc_set_service_subscription_policy(service_id, policy)
     }
 
     /// Accepts a subscription the app was asked about.
     pub fn accept_service_subscription(&self, sub_id: String) -> Result<(), ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .accept_service_subscription(&sub_id)
-            .map_err(map_send_error)
+        self.protocol.svc_accept_service_subscription(sub_id)
     }
 
     /// Rejects a subscription the app was asked about.
@@ -8224,10 +8374,8 @@ impl MeshServices {
         sub_id: String,
         reason: String,
     ) -> Result<(), ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .reject_service_subscription(&sub_id, &reason)
-            .map_err(map_send_error)
+        self.protocol
+            .svc_reject_service_subscription(sub_id, reason)
     }
 
     /// Ends a subscription another device holds on this one.
@@ -8236,10 +8384,7 @@ impl MeshServices {
         sub_id: String,
         reason: String,
     ) -> Result<(), ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .end_service_subscription(&sub_id, &reason)
-            .map_err(map_send_error)
+        self.protocol.svc_end_service_subscription(sub_id, reason)
     }
 
     /// Publishes to a topic: `latest` with a key, `log` without one.
@@ -8250,18 +8395,8 @@ impl MeshServices {
         key: Option<String>,
         body: String,
     ) -> Result<ServicePublishReport, ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        let report = protocol
-            .publish_service_update(&service_id, &topic, key.as_deref(), &body)
-            .map_err(map_send_error)?;
-        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-        Ok(ServicePublishReport {
-            subscribers: count(report.subscribers),
-            sent_live: count(report.sent_live),
-            queued: count(report.queued),
-            coalesced: count(report.coalesced),
-            failed: count(report.failed),
-        })
+        self.protocol
+            .svc_publish_service_update(service_id, topic, key, body)
     }
 
     /// Sets a `log` topic's checkpoint.
@@ -8271,10 +8406,8 @@ impl MeshServices {
         topic: String,
         body: String,
     ) -> Result<(), ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .set_service_topic_checkpoint(&service_id, &topic, &body)
-            .map_err(map_send_error)
+        self.protocol
+            .svc_set_service_topic_checkpoint(service_id, topic, body)
     }
 
     /// Starts a topic over under a new stream.
@@ -8283,10 +8416,7 @@ impl MeshServices {
         service_id: String,
         topic: String,
     ) -> Result<(), ProtocolError> {
-        let mut protocol = self.protocol.lock_inner()?;
-        protocol
-            .clear_service_topic(&service_id, &topic)
-            .map_err(map_send_error)
+        self.protocol.svc_clear_service_topic(service_id, topic)
     }
 
     /// The subscriptions other devices hold on `service_id`, or on every
@@ -8295,21 +8425,7 @@ impl MeshServices {
         &self,
         service_id: Option<String>,
     ) -> Result<Vec<ServiceSubscriberInfo>, ProtocolError> {
-        let protocol = self.protocol.lock_inner()?;
-        Ok(protocol
-            .service_subscribers(service_id.as_deref())
-            .into_iter()
-            .map(|info| ServiceSubscriberInfo {
-                sub_id: info.sub_id,
-                subscriber: info.subscriber,
-                service_id: info.service_id,
-                topic: info.topic,
-                mode: info.mode.into(),
-                state: info.state.as_str().to_string(),
-                params: info.params,
-                keys: info.keys,
-            })
-            .collect())
+        self.protocol.svc_service_subscribers(service_id)
     }
 }
 
@@ -8351,6 +8467,27 @@ pub enum SubscriptionPolicyKind {
 pub enum SubscriptionRulesFallback {
     Ask,
     Reject,
+}
+
+/// Where a subscription stands. See the UDL enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionState {
+    Pending,
+    Active,
+    Paused,
+    Ended,
+}
+
+impl From<offline_protocol::SubscriptionState> for SubscriptionState {
+    fn from(state: offline_protocol::SubscriptionState) -> Self {
+        use offline_protocol::SubscriptionState as Core;
+        match state {
+            Core::Pending => Self::Pending,
+            Core::Active => Self::Active,
+            Core::Paused => Self::Paused,
+            Core::Ended => Self::Ended,
+        }
+    }
 }
 
 /// A service's admission policy, flattened for the bindings.
@@ -8397,7 +8534,7 @@ pub struct ServiceSubscriptionInfo {
     pub service_id: String,
     pub topic: String,
     pub mode: SubscriptionMode,
-    pub state: String,
+    pub state: SubscriptionState,
     pub keys: Vec<String>,
     pub topics: Vec<String>,
 }
@@ -8410,7 +8547,7 @@ pub struct ServiceSubscriberInfo {
     pub service_id: String,
     pub topic: String,
     pub mode: SubscriptionMode,
-    pub state: String,
+    pub state: SubscriptionState,
     pub params: String,
     pub keys: Vec<String>,
 }

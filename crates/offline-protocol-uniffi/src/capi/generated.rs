@@ -1897,14 +1897,43 @@ impl Codec for Vec<crate::SubscriptionRulesFallback> {
     }
 }
 
+impl Codec for crate::SubscriptionState {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        match value.as_str() {
+            Some("Pending") => Ok(Self::Pending),
+            Some("Active") => Ok(Self::Active),
+            Some("Paused") => Ok(Self::Paused),
+            Some("Ended") => Ok(Self::Ended),
+            _ => Err(variant_error(at, "SubscriptionState", &["Pending", "Active", "Paused", "Ended"])),
+        }
+    }
+    fn encode(&self) -> Value {
+        Value::from(match self {
+            Self::Pending => "Pending",
+            Self::Active => "Active",
+            Self::Paused => "Paused",
+            Self::Ended => "Ended",
+        })
+    }
+}
+
+impl Codec for Vec<crate::SubscriptionState> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
 impl Codec for crate::SubscriptionPolicyConfig {
     fn decode(value: &Value, at: &str) -> Decoded<Self> {
         let mut f = Fields::new(value, at, "SubscriptionPolicyConfig")?;
         let out = Self {
-            kind: f.take("kind")?,
-            allow_peers: f.take("allow_peers")?,
-            allow_groups: f.take("allow_groups")?,
-            rules_fallback: f.take("rules_fallback")?,
+            kind: f.take_or("kind", crate::SubscriptionPolicyKind::Restricted)?,
+            allow_peers: f.take_or("allow_peers", Vec::new())?,
+            allow_groups: f.take_or("allow_groups", Vec::new())?,
+            rules_fallback: f.take_or("rules_fallback", crate::SubscriptionRulesFallback::Ask)?,
         };
         f.finish()?;
         Ok(out)

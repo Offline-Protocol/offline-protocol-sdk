@@ -6,7 +6,7 @@ public class ServiceSubscriberInfo {
     private java.lang.String serviceId;
     private java.lang.String topic;
     private SubscriptionMode mode;
-    private java.lang.String state;
+    private SubscriptionState state;
     private java.lang.String params;
     private java.util.List<java.lang.String> keys;
 
@@ -16,7 +16,7 @@ public class ServiceSubscriberInfo {
         java.lang.String serviceId, 
         java.lang.String topic, 
         SubscriptionMode mode, 
-        java.lang.String state, 
+        SubscriptionState state, 
         java.lang.String params, 
         java.util.List<java.lang.String> keys
     ) {
@@ -58,7 +58,7 @@ public class ServiceSubscriberInfo {
         return this.mode;
     }
     
-    public java.lang.String state() {
+    public SubscriptionState state() {
         return this.state;
     }
     
@@ -84,7 +84,7 @@ public class ServiceSubscriberInfo {
     public void setMode(SubscriptionMode mode) {
         this.mode = mode;
     }
-    public void setState(java.lang.String state) {
+    public void setState(SubscriptionState state) {
         this.state = state;
     }
     public void setParams(java.lang.String params) {

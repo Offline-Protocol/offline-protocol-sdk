@@ -12,7 +12,7 @@ public enum FfiConverterTypeServiceSubscriptionInfo implements FfiConverterRustB
       FfiConverterString.INSTANCE.read(buf),
       FfiConverterString.INSTANCE.read(buf),
       FfiConverterTypeSubscriptionMode.INSTANCE.read(buf),
-      FfiConverterString.INSTANCE.read(buf),
+      FfiConverterTypeSubscriptionState.INSTANCE.read(buf),
       FfiConverterSequenceString.INSTANCE.read(buf),
       FfiConverterSequenceString.INSTANCE.read(buf)
     );
@@ -26,7 +26,7 @@ public enum FfiConverterTypeServiceSubscriptionInfo implements FfiConverterRustB
             FfiConverterString.INSTANCE.allocationSize(value.serviceId()) +
             FfiConverterString.INSTANCE.allocationSize(value.topic()) +
             FfiConverterTypeSubscriptionMode.INSTANCE.allocationSize(value.mode()) +
-            FfiConverterString.INSTANCE.allocationSize(value.state()) +
+            FfiConverterTypeSubscriptionState.INSTANCE.allocationSize(value.state()) +
             FfiConverterSequenceString.INSTANCE.allocationSize(value.keys()) +
             FfiConverterSequenceString.INSTANCE.allocationSize(value.topics())
       );
@@ -39,7 +39,7 @@ public enum FfiConverterTypeServiceSubscriptionInfo implements FfiConverterRustB
       FfiConverterString.INSTANCE.write(value.serviceId(), buf);
       FfiConverterString.INSTANCE.write(value.topic(), buf);
       FfiConverterTypeSubscriptionMode.INSTANCE.write(value.mode(), buf);
-      FfiConverterString.INSTANCE.write(value.state(), buf);
+      FfiConverterTypeSubscriptionState.INSTANCE.write(value.state(), buf);
       FfiConverterSequenceString.INSTANCE.write(value.keys(), buf);
       FfiConverterSequenceString.INSTANCE.write(value.topics(), buf);
   }

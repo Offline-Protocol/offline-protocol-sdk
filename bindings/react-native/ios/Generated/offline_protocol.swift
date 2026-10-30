@@ -6799,13 +6799,13 @@ public struct ServiceSubscriberInfo: Equatable, Hashable {
     public var serviceId: String
     public var topic: String
     public var mode: SubscriptionMode
-    public var state: String
+    public var state: SubscriptionState
     public var params: String
     public var keys: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(subId: String, subscriber: String, serviceId: String, topic: String, mode: SubscriptionMode, state: String, params: String, keys: [String]) {
+    public init(subId: String, subscriber: String, serviceId: String, topic: String, mode: SubscriptionMode, state: SubscriptionState, params: String, keys: [String]) {
         self.subId = subId
         self.subscriber = subscriber
         self.serviceId = serviceId
@@ -6837,7 +6837,7 @@ public struct FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer {
                 serviceId: FfiConverterString.read(from: &buf), 
                 topic: FfiConverterString.read(from: &buf), 
                 mode: FfiConverterTypeSubscriptionMode.read(from: &buf), 
-                state: FfiConverterString.read(from: &buf), 
+                state: FfiConverterTypeSubscriptionState.read(from: &buf), 
                 params: FfiConverterString.read(from: &buf), 
                 keys: FfiConverterSequenceString.read(from: &buf)
         )
@@ -6849,7 +6849,7 @@ public struct FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer {
         FfiConverterString.write(value.serviceId, into: &buf)
         FfiConverterString.write(value.topic, into: &buf)
         FfiConverterTypeSubscriptionMode.write(value.mode, into: &buf)
-        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterTypeSubscriptionState.write(value.state, into: &buf)
         FfiConverterString.write(value.params, into: &buf)
         FfiConverterSequenceString.write(value.keys, into: &buf)
     }
@@ -6877,13 +6877,13 @@ public struct ServiceSubscriptionInfo: Equatable, Hashable {
     public var serviceId: String
     public var topic: String
     public var mode: SubscriptionMode
-    public var state: String
+    public var state: SubscriptionState
     public var keys: [String]
     public var topics: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(subId: String, provider: String, serviceId: String, topic: String, mode: SubscriptionMode, state: String, keys: [String], topics: [String]) {
+    public init(subId: String, provider: String, serviceId: String, topic: String, mode: SubscriptionMode, state: SubscriptionState, keys: [String], topics: [String]) {
         self.subId = subId
         self.provider = provider
         self.serviceId = serviceId
@@ -6915,7 +6915,7 @@ public struct FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer {
                 serviceId: FfiConverterString.read(from: &buf), 
                 topic: FfiConverterString.read(from: &buf), 
                 mode: FfiConverterTypeSubscriptionMode.read(from: &buf), 
-                state: FfiConverterString.read(from: &buf), 
+                state: FfiConverterTypeSubscriptionState.read(from: &buf), 
                 keys: FfiConverterSequenceString.read(from: &buf), 
                 topics: FfiConverterSequenceString.read(from: &buf)
         )
@@ -6927,7 +6927,7 @@ public struct FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer {
         FfiConverterString.write(value.serviceId, into: &buf)
         FfiConverterString.write(value.topic, into: &buf)
         FfiConverterTypeSubscriptionMode.write(value.mode, into: &buf)
-        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterTypeSubscriptionState.write(value.state, into: &buf)
         FfiConverterSequenceString.write(value.keys, into: &buf)
         FfiConverterSequenceString.write(value.topics, into: &buf)
     }
@@ -6957,7 +6957,7 @@ public struct SubscriptionPolicyConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: SubscriptionPolicyKind, allowPeers: [String], allowGroups: [String], rulesFallback: SubscriptionRulesFallback) {
+    public init(kind: SubscriptionPolicyKind = .restricted, allowPeers: [String] = [], allowGroups: [String] = [], rulesFallback: SubscriptionRulesFallback = .ask) {
         self.kind = kind
         self.allowPeers = allowPeers
         self.allowGroups = allowGroups
@@ -8795,6 +8795,86 @@ public func FfiConverterTypeSubscriptionRulesFallback_lift(_ buf: RustBuffer) th
 #endif
 public func FfiConverterTypeSubscriptionRulesFallback_lower(_ value: SubscriptionRulesFallback) -> RustBuffer {
     return FfiConverterTypeSubscriptionRulesFallback.lower(value)
+}
+
+
+
+
+public enum SubscriptionState: Equatable, Hashable {
+    
+    case pending
+    case active
+    case paused
+    case ended
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SubscriptionState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubscriptionState: FfiConverterRustBuffer {
+    typealias SwiftType = SubscriptionState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubscriptionState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .pending
+        
+        case 2: return .active
+        
+        case 3: return .paused
+        
+        case 4: return .ended
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SubscriptionState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .active:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .paused:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .ended:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionState_lift(_ buf: RustBuffer) throws -> SubscriptionState {
+    return try FfiConverterTypeSubscriptionState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubscriptionState_lower(_ value: SubscriptionState) -> RustBuffer {
+    return FfiConverterTypeSubscriptionState.lower(value)
 }
 
 

@@ -7231,9 +7231,65 @@ class _UniffiFfiConverterTypeSubscriptionMode(_UniffiConverterRustBuffer):
 
 
 
+
+
+
+
+
+class SubscriptionState(enum.Enum):
+    
+    PENDING = 0
+    
+    ACTIVE = 1
+    
+    PAUSED = 2
+    
+    ENDED = 3
+    
+
+
+class _UniffiFfiConverterTypeSubscriptionState(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return SubscriptionState.PENDING
+        if variant == 2:
+            return SubscriptionState.ACTIVE
+        if variant == 3:
+            return SubscriptionState.PAUSED
+        if variant == 4:
+            return SubscriptionState.ENDED
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == SubscriptionState.PENDING:
+            return
+        if value == SubscriptionState.ACTIVE:
+            return
+        if value == SubscriptionState.PAUSED:
+            return
+        if value == SubscriptionState.ENDED:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == SubscriptionState.PENDING:
+            buf.write_i32(1)
+        if value == SubscriptionState.ACTIVE:
+            buf.write_i32(2)
+        if value == SubscriptionState.PAUSED:
+            buf.write_i32(3)
+        if value == SubscriptionState.ENDED:
+            buf.write_i32(4)
+
+
+
 @dataclass
 class ServiceSubscriberInfo:
-    def __init__(self, *, sub_id:str, subscriber:str, service_id:str, topic:str, mode:SubscriptionMode, state:str, params:str, keys:typing.List[str]):
+    def __init__(self, *, sub_id:str, subscriber:str, service_id:str, topic:str, mode:SubscriptionMode, state:SubscriptionState, params:str, keys:typing.List[str]):
         self.sub_id = sub_id
         self.subscriber = subscriber
         self.service_id = service_id
@@ -7276,7 +7332,7 @@ class _UniffiFfiConverterTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
             service_id=_UniffiFfiConverterString.read(buf),
             topic=_UniffiFfiConverterString.read(buf),
             mode=_UniffiFfiConverterTypeSubscriptionMode.read(buf),
-            state=_UniffiFfiConverterString.read(buf),
+            state=_UniffiFfiConverterTypeSubscriptionState.read(buf),
             params=_UniffiFfiConverterString.read(buf),
             keys=_UniffiFfiConverterSequenceString.read(buf),
         )
@@ -7288,7 +7344,7 @@ class _UniffiFfiConverterTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.check_lower(value.service_id)
         _UniffiFfiConverterString.check_lower(value.topic)
         _UniffiFfiConverterTypeSubscriptionMode.check_lower(value.mode)
-        _UniffiFfiConverterString.check_lower(value.state)
+        _UniffiFfiConverterTypeSubscriptionState.check_lower(value.state)
         _UniffiFfiConverterString.check_lower(value.params)
         _UniffiFfiConverterSequenceString.check_lower(value.keys)
 
@@ -7299,13 +7355,13 @@ class _UniffiFfiConverterTypeServiceSubscriberInfo(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.service_id, buf)
         _UniffiFfiConverterString.write(value.topic, buf)
         _UniffiFfiConverterTypeSubscriptionMode.write(value.mode, buf)
-        _UniffiFfiConverterString.write(value.state, buf)
+        _UniffiFfiConverterTypeSubscriptionState.write(value.state, buf)
         _UniffiFfiConverterString.write(value.params, buf)
         _UniffiFfiConverterSequenceString.write(value.keys, buf)
 
 @dataclass
 class ServiceSubscriptionInfo:
-    def __init__(self, *, sub_id:str, provider:str, service_id:str, topic:str, mode:SubscriptionMode, state:str, keys:typing.List[str], topics:typing.List[str]):
+    def __init__(self, *, sub_id:str, provider:str, service_id:str, topic:str, mode:SubscriptionMode, state:SubscriptionState, keys:typing.List[str], topics:typing.List[str]):
         self.sub_id = sub_id
         self.provider = provider
         self.service_id = service_id
@@ -7348,7 +7404,7 @@ class _UniffiFfiConverterTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer)
             service_id=_UniffiFfiConverterString.read(buf),
             topic=_UniffiFfiConverterString.read(buf),
             mode=_UniffiFfiConverterTypeSubscriptionMode.read(buf),
-            state=_UniffiFfiConverterString.read(buf),
+            state=_UniffiFfiConverterTypeSubscriptionState.read(buf),
             keys=_UniffiFfiConverterSequenceString.read(buf),
             topics=_UniffiFfiConverterSequenceString.read(buf),
         )
@@ -7360,7 +7416,7 @@ class _UniffiFfiConverterTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer)
         _UniffiFfiConverterString.check_lower(value.service_id)
         _UniffiFfiConverterString.check_lower(value.topic)
         _UniffiFfiConverterTypeSubscriptionMode.check_lower(value.mode)
-        _UniffiFfiConverterString.check_lower(value.state)
+        _UniffiFfiConverterTypeSubscriptionState.check_lower(value.state)
         _UniffiFfiConverterSequenceString.check_lower(value.keys)
         _UniffiFfiConverterSequenceString.check_lower(value.topics)
 
@@ -7371,7 +7427,7 @@ class _UniffiFfiConverterTypeServiceSubscriptionInfo(_UniffiConverterRustBuffer)
         _UniffiFfiConverterString.write(value.service_id, buf)
         _UniffiFfiConverterString.write(value.topic, buf)
         _UniffiFfiConverterTypeSubscriptionMode.write(value.mode, buf)
-        _UniffiFfiConverterString.write(value.state, buf)
+        _UniffiFfiConverterTypeSubscriptionState.write(value.state, buf)
         _UniffiFfiConverterSequenceString.write(value.keys, buf)
         _UniffiFfiConverterSequenceString.write(value.topics, buf)
 
@@ -7465,10 +7521,16 @@ class _UniffiFfiConverterTypeSubscriptionRulesFallback(_UniffiConverterRustBuffe
 
 @dataclass
 class SubscriptionPolicyConfig:
-    def __init__(self, *, kind:SubscriptionPolicyKind, allow_peers:typing.List[str], allow_groups:typing.List[str], rules_fallback:SubscriptionRulesFallback):
+    def __init__(self, *, kind:SubscriptionPolicyKind = SubscriptionPolicyKind.RESTRICTED, allow_peers:typing.List[str] = _DEFAULT, allow_groups:typing.List[str] = _DEFAULT, rules_fallback:SubscriptionRulesFallback = SubscriptionRulesFallback.ASK):
         self.kind = kind
-        self.allow_peers = allow_peers
-        self.allow_groups = allow_groups
+        if allow_peers is _DEFAULT:
+            self.allow_peers = []
+        else:
+            self.allow_peers = allow_peers
+        if allow_groups is _DEFAULT:
+            self.allow_groups = []
+        else:
+            self.allow_groups = allow_groups
         self.rules_fallback = rules_fallback
         
         
@@ -14245,6 +14307,7 @@ __all__ = [
     "MessagePriority",
     "ContentType",
     "SubscriptionMode",
+    "SubscriptionState",
     "SubscriptionPolicyKind",
     "SubscriptionRulesFallback",
     "TelemetryOs",

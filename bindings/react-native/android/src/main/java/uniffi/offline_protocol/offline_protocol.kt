@@ -10387,7 +10387,7 @@ data class ServiceSubscriberInfo (
     , 
     var `mode`: SubscriptionMode
     , 
-    var `state`: kotlin.String
+    var `state`: SubscriptionState
     , 
     var `params`: kotlin.String
     , 
@@ -10413,7 +10413,7 @@ public object FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer<Serv
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterTypeSubscriptionMode.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeSubscriptionState.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceString.read(buf),
         )
@@ -10425,7 +10425,7 @@ public object FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer<Serv
             FfiConverterString.allocationSize(value.`serviceId`) +
             FfiConverterString.allocationSize(value.`topic`) +
             FfiConverterTypeSubscriptionMode.allocationSize(value.`mode`) +
-            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterTypeSubscriptionState.allocationSize(value.`state`) +
             FfiConverterString.allocationSize(value.`params`) +
             FfiConverterSequenceString.allocationSize(value.`keys`)
     )
@@ -10436,7 +10436,7 @@ public object FfiConverterTypeServiceSubscriberInfo: FfiConverterRustBuffer<Serv
             FfiConverterString.write(value.`serviceId`, buf)
             FfiConverterString.write(value.`topic`, buf)
             FfiConverterTypeSubscriptionMode.write(value.`mode`, buf)
-            FfiConverterString.write(value.`state`, buf)
+            FfiConverterTypeSubscriptionState.write(value.`state`, buf)
             FfiConverterString.write(value.`params`, buf)
             FfiConverterSequenceString.write(value.`keys`, buf)
     }
@@ -10455,7 +10455,7 @@ data class ServiceSubscriptionInfo (
     , 
     var `mode`: SubscriptionMode
     , 
-    var `state`: kotlin.String
+    var `state`: SubscriptionState
     , 
     var `keys`: List<kotlin.String>
     , 
@@ -10481,7 +10481,7 @@ public object FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer<Se
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterTypeSubscriptionMode.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeSubscriptionState.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterSequenceString.read(buf),
         )
@@ -10493,7 +10493,7 @@ public object FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer<Se
             FfiConverterString.allocationSize(value.`serviceId`) +
             FfiConverterString.allocationSize(value.`topic`) +
             FfiConverterTypeSubscriptionMode.allocationSize(value.`mode`) +
-            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterTypeSubscriptionState.allocationSize(value.`state`) +
             FfiConverterSequenceString.allocationSize(value.`keys`) +
             FfiConverterSequenceString.allocationSize(value.`topics`)
     )
@@ -10504,7 +10504,7 @@ public object FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer<Se
             FfiConverterString.write(value.`serviceId`, buf)
             FfiConverterString.write(value.`topic`, buf)
             FfiConverterTypeSubscriptionMode.write(value.`mode`, buf)
-            FfiConverterString.write(value.`state`, buf)
+            FfiConverterTypeSubscriptionState.write(value.`state`, buf)
             FfiConverterSequenceString.write(value.`keys`, buf)
             FfiConverterSequenceString.write(value.`topics`, buf)
     }
@@ -10513,13 +10513,13 @@ public object FfiConverterTypeServiceSubscriptionInfo: FfiConverterRustBuffer<Se
 
 
 data class SubscriptionPolicyConfig (
-    var `kind`: SubscriptionPolicyKind
+    var `kind`: SubscriptionPolicyKind = SubscriptionPolicyKind.RESTRICTED 
     , 
-    var `allowPeers`: List<kotlin.String>
+    var `allowPeers`: List<kotlin.String> = listOf() 
     , 
-    var `allowGroups`: List<kotlin.String>
+    var `allowGroups`: List<kotlin.String> = listOf() 
     , 
-    var `rulesFallback`: SubscriptionRulesFallback
+    var `rulesFallback`: SubscriptionRulesFallback = SubscriptionRulesFallback.ASK 
     
 ){
     
@@ -11682,6 +11682,42 @@ public object FfiConverterTypeSubscriptionRulesFallback: FfiConverterRustBuffer<
     override fun allocationSize(value: SubscriptionRulesFallback) = 4UL
 
     override fun write(value: SubscriptionRulesFallback, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class SubscriptionState {
+    
+    PENDING,
+    ACTIVE,
+    PAUSED,
+    ENDED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSubscriptionState: FfiConverterRustBuffer<SubscriptionState> {
+    override fun read(buf: ByteBuffer) = try {
+        SubscriptionState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SubscriptionState) = 4UL
+
+    override fun write(value: SubscriptionState, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }

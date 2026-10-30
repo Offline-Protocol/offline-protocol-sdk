@@ -2158,12 +2158,24 @@ enum SubscriptionRulesFallback {
     "Reject",
 };
 
-// allow_peers, allow_groups and rules_fallback are read only for Rules.
+// Where a subscription stands. Pending: waiting for a session, a reply or
+// the provider's application. Active: accepted and within its lease.
+// Paused (the subscriber's side only): renewals went unanswered, and it
+// renews when the provider is seen again. Ended: nothing more is sent.
+enum SubscriptionState {
+    "Pending",
+    "Active",
+    "Paused",
+    "Ended",
+};
+
+// allow_peers, allow_groups and rules_fallback are read only for Rules, so
+// a Restricted or AcceptAll policy names its kind and nothing else.
 dictionary SubscriptionPolicyConfig {
-    SubscriptionPolicyKind kind;
-    sequence<string> allow_peers;
-    sequence<string> allow_groups;
-    SubscriptionRulesFallback rules_fallback;
+    SubscriptionPolicyKind kind = "Restricted";
+    sequence<string> allow_peers = [];
+    sequence<string> allow_groups = [];
+    SubscriptionRulesFallback rules_fallback = "Ask";
 };
 
 // What one publish_service_update did, per subscriber.
@@ -2189,8 +2201,7 @@ dictionary ServiceSubscriptionInfo {
     // The topic, or a pattern ("prefix*").
     string topic;
     SubscriptionMode mode;
-    // "pending", "active", "paused" or "ended".
-    string state;
+    SubscriptionState state;
     // The latest keys asked for; empty for every key.
     sequence<string> keys;
     // The topics heard of: the topic itself, or each a pattern matched.
@@ -2204,8 +2215,8 @@ dictionary ServiceSubscriberInfo {
     string service_id;
     string topic;
     SubscriptionMode mode;
-    // "pending" while the app decides, "active" after.
-    string state;
+    // Pending while the app decides, Active after.
+    SubscriptionState state;
     string params;
     // The latest keys the subscriber asked for; empty for every key.
     sequence<string> keys;
