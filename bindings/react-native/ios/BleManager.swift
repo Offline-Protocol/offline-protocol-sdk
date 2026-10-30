@@ -822,9 +822,25 @@ public class BleManager: NSObject, TransportManager {
         // Stop advertising
         stopAdvertising()
         
-        // Disconnect all peripherals
-        for peripheral in connections.allPeripherals() {
-            centralManager?.cancelPeripheralConnection(peripheral)
+        // The process keeps the managers (see `startUnsafe`), so this does
+        // what releasing them used to. Every connect is cancelled, pending
+        // ones and restored ones included, or one completes later into a
+        // stopped transport, holds a slot on the peer, and can relaunch the
+        // app under state restoration. The service is unpublished, or a peer
+        // still linked keeps reading this device's identity and writing into
+        // a transport that never answers. Only while the managers are still
+        // this instance's: a later instance may already own them.
+        if centralManager?.delegate === self {
+            var dialled: [UUID: CBPeripheral] = [:]
+            for peripheral in connections.allPeripherals() { dialled[peripheral.identifier] = peripheral }
+            for (id, peripheral) in discoveredPeripherals { dialled[id] = peripheral }
+            for (id, peripheral) in pendingRestoredPeripherals { dialled[id] = peripheral }
+            for peripheral in dialled.values {
+                centralManager?.cancelPeripheralConnection(peripheral)
+            }
+        }
+        if peripheralManager?.delegate === self {
+            peripheralManager?.removeAllServices()
         }
         clearLinkState()
         // Here, not in `clearLinkState()`: that also runs on every radio
@@ -3223,7 +3239,7 @@ extension BleManager: CBCentralManagerDelegate {
                     // central never reaches a state that accepts a command,
                     // and a later grant restarts the transport. Drop them
                     // rather than hold CBPeripheral references for the life of
-                    // the process, matching `stop()` and the central reset.
+                    // the process, matching `stop()`.
                     pendingRestoredPeripherals = [:]
                     updateState(.unavailable)
                     notifyBleStatus(false)
