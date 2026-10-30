@@ -441,11 +441,7 @@ _m("checkInternetPresence", """
         val map = mapFromAny(arguments)
         val manager = host.internetManager
             ?: throw IllegalStateException("Internet transport not initialized")
-        // React Native nests `force` in `options`; Flutter sends it beside
-        // `userId`. Reading only the top level dropped every forced check
-        // from React Native in 0.31.0.
-        val options = map["options"] as? Map<*, *>
-        val force = map["force"] as? Boolean ?: options?.get("force") as? Boolean ?: false
+        val force = presenceForce(map)
         val latch = java.util.concurrent.CountDownLatch(1)
         var result = false
         manager.checkPresence(requireString(map, "userId"), force) { written ->

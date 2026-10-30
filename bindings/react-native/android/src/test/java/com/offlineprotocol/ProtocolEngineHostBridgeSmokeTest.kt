@@ -38,6 +38,17 @@ class ProtocolEngineHostBridgeSmokeTest {
         assertEquals(false, ProtocolEngineHostBridge.isRelay(host, null, null))
     }
 
+    // React Native nests `force` in `options` and Flutter sends it at the top
+    // level. In 0.31.0 the nested one was dropped.
+    @Test
+    fun presenceForce_readsBothArgumentShapes() {
+        assertEquals(true, ProtocolEngineHostBridge.presenceForce(mapOf("options" to mapOf("force" to true))))
+        assertEquals(true, ProtocolEngineHostBridge.presenceForce(mapOf("force" to true)))
+        assertEquals(false, ProtocolEngineHostBridge.presenceForce(mapOf("options" to mapOf("force" to false))))
+        assertEquals(false, ProtocolEngineHostBridge.presenceForce(mapOf("options" to emptyMap<String, Any?>())))
+        assertEquals(false, ProtocolEngineHostBridge.presenceForce(emptyMap()))
+    }
+
     // Empty message ids are dropped before the emptiness check, as the module
     // did before the shared bridge. Flutter's Android handler delegates here.
     @Test

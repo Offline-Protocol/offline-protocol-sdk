@@ -1939,8 +1939,8 @@ jobs:
         run: bash scripts/package-swiftpm-xcframework.sh build/swiftpm "$SIMULATOR_ARCHIVE"
 
       # --bridge-tests adds the suites from bindings/react-native/ios/tests.
-      # Three of them run nowhere else: the SwiftPM harness above cannot
-      # compile the sources they cover.
+      # Some of them run nowhere else: the SwiftPM harness above cannot compile
+      # the sources they cover, and Package.swift lists them under `exclude`.
       - name: Assemble the package
         run: >
           bash scripts/assemble-swift-package.sh

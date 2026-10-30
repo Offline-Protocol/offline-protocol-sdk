@@ -8,7 +8,10 @@ import Foundation
 /// that `src/index.ts` passes to `JSON.parse`, and `JSON.parse` on an object
 /// throws. `parseJsonResult` is the one way to turn a JSON string into an
 /// object, and the generated adapter calls it only for methods the manifest marks
-/// `parseJsonResult`. Mirrors android/ BridgeResults.kt.
+/// `parseJsonResult`. Mirrors android/ BridgeResults.kt, except `byteListArgument`:
+/// Kotlin's adapter hands an omitted list over as null, which its reader already
+/// takes as absent, so it has no counterpart there. Do not move it without the
+/// Swift adapter generator, which names it.
 enum BridgeResults {
     /// A JavaScript number array as a shared-bridge argument, and an omitted
     /// one as `NSNull`, which every argument reader takes as absent. A nil

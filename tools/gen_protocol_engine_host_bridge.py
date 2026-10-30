@@ -190,6 +190,14 @@ HEADER = textwrap.dedent(
                 else -> throw IllegalArgumentException("Missing number '$key'")
             }
 
+        // React Native nests `force` in `options`; Flutter sends it beside
+        // `userId`. Reading only the top level dropped every forced check
+        // from React Native in 0.31.0.
+        internal fun presenceForce(map: Map<String, Any?>): Boolean {
+            val options = map["options"] as? Map<*, *>
+            return map["force"] as? Boolean ?: options?.get("force") as? Boolean ?: false
+        }
+
         private fun ubyteList(map: Map<String, Any?>, key: String): List<UByte> {
             val raw = map[key] ?: return emptyList()
             // Flutter's standard codec hands a Dart Uint8List over as a
