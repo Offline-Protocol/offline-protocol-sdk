@@ -1,5 +1,6 @@
 package com.offlineprotocol.ble
 
+import android.bluetooth.le.ScanSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -33,6 +34,14 @@ class BleScanPolicyTest {
         )
         assertTrue(BleScanPolicy.SCREEN_OFF_QUIET_RESTART_MS >= 60_000L)
         assertFalse(BleScanPolicy.quietRestartEscalates(screenOn = false))
+    }
+
+    @Test
+    fun `a screen-off scan runs at a lower duty than a screen-on one`() {
+        assertEquals(ScanSettings.SCAN_MODE_LOW_LATENCY, BleScanPolicy.scanMode(screenOn = true))
+        // Before the policy the stack paused this scan; full duty in a pocket
+        // would listen continuously to every peer nearby.
+        assertEquals(ScanSettings.SCAN_MODE_BALANCED, BleScanPolicy.scanMode(screenOn = false))
     }
 
     @Test

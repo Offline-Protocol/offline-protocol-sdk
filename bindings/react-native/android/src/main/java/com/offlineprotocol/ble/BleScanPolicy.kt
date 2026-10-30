@@ -1,5 +1,7 @@
 package com.offlineprotocol.ble
 
+import android.bluetooth.le.ScanSettings
+
 /**
  * What a Bluetooth LE scan asks the stack for, and what its silence means,
  * by screen state.
@@ -15,7 +17,8 @@ package com.offlineprotocol.ble
  * restart every 30 seconds and a reset every 90.
  *
  * So with the screen off the scan names the mesh service, which every SDK
- * advertiser puts in its primary packet, and its silence is not a stall: a
+ * advertiser in the foreground puts in its primary packet (a backgrounded
+ * iPhone puts it where only iOS can see it), and its silence is not a stall: a
  * pocket in a quiet place is quiet. It is still restarted, slowly and without
  * escalating, because a scan can also be dead rather than quiet: Android
  * refuses an app's sixth scan start within 30 seconds without a callback, and
@@ -37,6 +40,14 @@ internal object BleScanPolicy {
 
     /** Whether the scan filters on the mesh service: only with the screen off. */
     fun filtersOnService(screenOn: Boolean): Boolean = !screenOn
+
+    /** The scan's duty cycle. With the screen on, low latency, as before.
+     *  With it off, balanced: the stack paused that scan before, at no cost,
+     *  and a pocket left at full duty listens continuously to every peer
+     *  still advertising nearby. Links already up do not depend on the scan;
+     *  only finding a new peer is slower. */
+    fun scanMode(screenOn: Boolean): Int =
+        if (screenOn) ScanSettings.SCAN_MODE_LOW_LATENCY else ScanSettings.SCAN_MODE_BALANCED
 
     /** How long a scan may deliver nothing before the watchdog restarts it:
      *  the watchdog's own interval with the screen on, and minutes with it off. */

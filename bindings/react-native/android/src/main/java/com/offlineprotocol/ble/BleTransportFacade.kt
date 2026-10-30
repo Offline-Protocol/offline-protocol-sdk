@@ -2101,7 +2101,7 @@ class BleTransportFacade(
                 return
             }
             val scanSettings = ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setScanMode(BleScanPolicy.scanMode(screenOn))
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .build()
             

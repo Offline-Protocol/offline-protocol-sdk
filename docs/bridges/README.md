@@ -764,10 +764,15 @@ for the mesh service, and it never reads that scan's silence as a broken stack:
 | Android | The screen is off. Since Android 8.1 an unfiltered scan is paused until it comes back on | `BleScanPolicy.kt` |
 
 Outside those states both scan unfiltered and filter in software, as before.
-Every SDK advertiser puts the mesh service in its primary packet, which is what
-a filtered scan matches. A scan follows each transition (app state on iOS,
-screen on Android) by restarting under the new filter, which also restarts the
-watchdog's clock.
+Every SDK advertiser puts the mesh service in its primary packet while it is in
+the foreground (and an Android one always), which is what a filtered scan
+matches; a backgrounded iPhone does not (below). A scan follows each
+transition (app state on iOS, screen on Android) by restarting under the new
+filter, which also restarts the watchdog's clock. With the screen off Android
+also scans at a balanced duty cycle, not low latency: the stack used to pause
+that scan at no cost, and full duty in a pocket listens continuously to every
+peer nearby. Links already up do not depend on the scan, so the price is only
+a slower discovery of a new peer.
 
 Quiet is not the same as dead, and Android can kill a scan without saying so:
 it refuses an app's sixth scan start within 30 seconds, with no callback. So
