@@ -15444,6 +15444,46 @@ mod tests {
              included, or a stopped transport keeps serving its identity, takes writes it \
              never answers, and holds connects that complete after the stop"
         );
+        let stop_body = between(
+            &swift,
+            "private func stopUnsafe() {",
+            "private func dropLinksAfterRadioLoss() {",
+        );
+        let owns = stop_body
+            .find(
+                "let owns = Self.managerOwner == ObjectIdentifier(self) \
+                 if !owns { centralManager = nil peripheralManager = nil }",
+            )
+            .expect(
+                "stop must decide ownership by identity, which still compares in deinit, and a \
+                 non-owner must let go of the shared managers before touching anything",
+            );
+        let scan_stop = stop_body
+            .find("stopScanning(reason: \"stop\")")
+            .expect("stop must stop scanning");
+        assert!(
+            owns < scan_stop,
+            "a non-owner's references must be dropped before stop's scan and advertising \
+             commands, or a late stop ends the new owner's scan"
+        );
+        assert!(
+            !swift.contains("delegate === self"),
+            "ownership of the shared managers must not be read from their weak delegate: it \
+             reads nil in deinit, and a BleManager released while running then skipped its \
+             teardown"
+        );
+        assert!(
+            between(
+                &swift,
+                "private func startUnsafe() throws {",
+                "public func stop() {"
+            )
+            .contains(
+                "if let previous = Self.activeInstance, previous !== self { previous.stopUnsafe() } \
+                 Self.managerOwner = ObjectIdentifier(self)"
+            ),
+            "start must stop a running predecessor before it takes the shared managers"
+        );
         assert!(
             !swift.contains("sharedCentralManager = nil")
                 && !swift.contains("sharedPeripheralManager = nil"),
@@ -15518,6 +15558,11 @@ mod tests {
                 && kotlin.contains("scanFilteredOnService = BleScanPolicy.filtersOnService(screenOn) val filters = if (scanFilteredOnService) {"),
             "the Android scan must take its filters from BleScanPolicy.filtersOnService: an \
              unfiltered scan is paused with the screen off"
+        );
+        assert!(
+            kotlin.contains(".setScanMode(BleScanPolicy.scanMode(screenOn))"),
+            "the Android scan must take its duty cycle from BleScanPolicy.scanMode: the stack \
+             used to pause the screen-off scan, and full duty in a pocket costs battery"
         );
         let watchdog = between(
             &kotlin,
