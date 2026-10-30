@@ -2714,8 +2714,8 @@ class BleTransportFacade(
     
     /**
      * Determines if a discovered device should be processed.
-     * Implements smart filtering since we scan without a service UUID filter
-     * (required for iOS ↔ Android interoperability).
+     * Implements smart filtering, since with the screen on we scan without a
+     * service UUID filter ([BleScanPolicy]).
      *
      * Accepts:
      * - Devices advertising our service UUID

@@ -1137,7 +1137,7 @@ public class BleManager: NSObject, TransportManager {
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         )
         
-        // After 5 seconds, go back to filterless scanning
+        // After 5 seconds, go back to the scan the app state needs
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self = self, self.isScanning else { return }
             self.centralManager?.stopScan()
