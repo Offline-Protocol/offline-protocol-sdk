@@ -42,6 +42,7 @@ use offline_protocol::{
     Event, GroupInfo, GroupSendOptions, OfflineProtocol, ProtocolConfig, ProtocolStateStorage,
     SendMessageOptions,
 };
+use offline_protocol::{RulesFallback, SubscriptionMode, SubscriptionPolicy};
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_transport::{
     frame, BleTransport, NostrTransport, PeerStreamReader, StreamEvent, Transport, TransportStatus,
@@ -532,6 +533,243 @@ impl Node {
         )?;
         let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         serde_json::to_string(&ids).map_err(|e| NodeError(e.to_string()))
+    }
+
+    // ------------------------------------------------------------------
+    // Services and subscriptions (ADR 0035)
+    // ------------------------------------------------------------------
+
+    /// Registers a service this device offers. `capabilities_json` is a JSON
+    /// object of strings, empty for none.
+    pub fn register_service(
+        &mut self,
+        service_id: &str,
+        version: &str,
+        capabilities_json: &str,
+    ) -> NodeResult<()> {
+        let capabilities: HashMap<String, String> = if capabilities_json.trim().is_empty() {
+            HashMap::new()
+        } else {
+            serde_json::from_str(capabilities_json)
+                .map_err(|e| NodeError(format!("capabilities must be an object of strings: {e}")))?
+        };
+        let service_id = offline_protocol_core::ServiceId::new(service_id)
+            .map_err(|e| NodeError(e.to_string()))?;
+        self.protocol
+            .register_service(offline_protocol_core::ServiceDescriptor {
+                service_id,
+                version: version.to_string(),
+                capabilities,
+            })?;
+        Ok(())
+    }
+
+    /// Unregisters a service; `false` when it was not registered. Every
+    /// subscription on it ends.
+    pub fn unregister_service(&mut self, service_id: &str) -> NodeResult<bool> {
+        Ok(self.protocol.unregister_service(service_id)?)
+    }
+
+    /// Subscribes to `topic` of `service_id` on `provider`; `mode` is
+    /// `"latest"` or `"log"`. Returns the subscription id.
+    pub fn subscribe_service(
+        &mut self,
+        provider: &str,
+        service_id: &str,
+        topic: &str,
+        mode: &str,
+        params: &str,
+        keys: &[String],
+    ) -> NodeResult<String> {
+        let mode = match mode {
+            "latest" => SubscriptionMode::Latest,
+            "log" => SubscriptionMode::Log,
+            other => {
+                return Err(NodeError(format!(
+                    "mode must be latest or log, not {other}"
+                )))
+            }
+        };
+        Ok(self.protocol.subscribe_service_with(
+            provider,
+            service_id,
+            topic,
+            offline_protocol::SubscribeOptions {
+                mode,
+                params: params.to_string(),
+                keys: keys.to_vec(),
+            },
+        )?)
+    }
+
+    /// Ends a subscription this device holds; `false` when there is none.
+    pub fn unsubscribe_service(&mut self, sub_id: &str) -> NodeResult<bool> {
+        Ok(self.protocol.unsubscribe_service(sub_id)?)
+    }
+
+    /// Asks a subscription's provider for the whole state again.
+    pub fn resync_service_subscription(&mut self, sub_id: &str) -> NodeResult<()> {
+        Ok(self.protocol.resync_service_subscription(sub_id)?)
+    }
+
+    /// The subscriptions this device holds, as a JSON array.
+    pub fn service_subscriptions(&self) -> NodeResult<String> {
+        let list: Vec<serde_json::Value> = self
+            .protocol
+            .service_subscriptions()
+            .into_iter()
+            .map(|info| {
+                serde_json::json!({
+                    "subId": info.sub_id,
+                    "provider": info.provider,
+                    "serviceId": info.service_id,
+                    "topic": info.topic,
+                    "mode": info.mode.as_str(),
+                    "state": info.state.as_str(),
+                    "keys": info.keys,
+                    "topics": info.topics,
+                })
+            })
+            .collect();
+        serde_json::to_string(&list).map_err(|e| NodeError(e.to_string()))
+    }
+
+    /// Sets who may subscribe to `service_id`, from JSON:
+    /// `{"kind": "restricted" | "accept_all" | "rules", "allowPeers": [...],
+    /// "allowGroups": [...], "fallback": "ask" | "reject"}`.
+    pub fn set_service_subscription_policy(
+        &mut self,
+        service_id: &str,
+        policy_json: &str,
+    ) -> NodeResult<()> {
+        let json: serde_json::Value = serde_json::from_str(policy_json)
+            .map_err(|e| NodeError(format!("policy must be a JSON object: {e}")))?;
+        if !json.is_object() {
+            return Err(NodeError("policy must be a JSON object".to_string()));
+        }
+        // A list that is present but not all strings is refused, as on iOS
+        // and Android: dropping it would leave a `rules` policy admitting
+        // nobody by rule, silently.
+        let strings = |key: &str| -> NodeResult<Vec<String>> {
+            match json.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+                Some(value) => serde_json::from_value(value.clone())
+                    .map_err(|e| NodeError(format!("{key} must be a list of strings: {e}"))),
+            }
+        };
+        let allow_peers = strings("allowPeers")?;
+        let allow_groups = strings("allowGroups")?;
+        let fallback = match json
+            .get("fallback")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ask")
+        {
+            "ask" => RulesFallback::Ask,
+            "reject" => RulesFallback::Reject,
+            other => {
+                return Err(NodeError(format!(
+                    "fallback must be ask or reject, not {other}"
+                )))
+            }
+        };
+        let policy = match json
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("restricted")
+        {
+            "restricted" => SubscriptionPolicy::Restricted,
+            "accept_all" => SubscriptionPolicy::AcceptAll,
+            "rules" => SubscriptionPolicy::Rules {
+                allow_peers,
+                allow_groups,
+                fallback,
+            },
+            other => {
+                return Err(NodeError(format!(
+                    "kind must be restricted, accept_all or rules, not {other}"
+                )))
+            }
+        };
+        Ok(self
+            .protocol
+            .set_service_subscription_policy(service_id, policy)?)
+    }
+
+    /// Accepts a subscriber this application was asked about.
+    pub fn accept_service_subscription(&mut self, sub_id: &str) -> NodeResult<()> {
+        Ok(self.protocol.accept_service_subscription(sub_id)?)
+    }
+
+    /// Rejects a subscriber this application was asked about.
+    pub fn reject_service_subscription(&mut self, sub_id: &str, reason: &str) -> NodeResult<()> {
+        Ok(self.protocol.reject_service_subscription(sub_id, reason)?)
+    }
+
+    /// Ends a subscription another device holds on this one.
+    pub fn end_service_subscription(&mut self, sub_id: &str, reason: &str) -> NodeResult<()> {
+        Ok(self.protocol.end_service_subscription(sub_id, reason)?)
+    }
+
+    /// Publishes to a topic (`latest` with a key, `log` without); returns
+    /// what reached the subscribers, as JSON.
+    pub fn publish_service_update(
+        &mut self,
+        service_id: &str,
+        topic: &str,
+        key: Option<String>,
+        body: &str,
+    ) -> NodeResult<String> {
+        let report =
+            self.protocol
+                .publish_service_update(service_id, topic, key.as_deref(), body)?;
+        serde_json::to_string(&serde_json::json!({
+            "subscribers": report.subscribers,
+            "sentLive": report.sent_live,
+            "queued": report.queued,
+            "coalesced": report.coalesced,
+            "failed": report.failed,
+        }))
+        .map_err(|e| NodeError(e.to_string()))
+    }
+
+    /// Sets a `log` topic's checkpoint.
+    pub fn set_service_topic_checkpoint(
+        &mut self,
+        service_id: &str,
+        topic: &str,
+        body: &str,
+    ) -> NodeResult<()> {
+        Ok(self
+            .protocol
+            .set_service_topic_checkpoint(service_id, topic, body)?)
+    }
+
+    /// Starts a topic over under a new stream.
+    pub fn clear_service_topic(&mut self, service_id: &str, topic: &str) -> NodeResult<()> {
+        Ok(self.protocol.clear_service_topic(service_id, topic)?)
+    }
+
+    /// The subscriptions other devices hold on `service_id` (or on every
+    /// service), as a JSON array.
+    pub fn service_subscribers(&self, service_id: Option<String>) -> NodeResult<String> {
+        let list: Vec<serde_json::Value> = self
+            .protocol
+            .service_subscribers(service_id.as_deref())
+            .into_iter()
+            .map(|info| {
+                serde_json::json!({
+                    "subId": info.sub_id,
+                    "subscriber": info.subscriber,
+                    "serviceId": info.service_id,
+                    "topic": info.topic,
+                    "mode": info.mode.as_str(),
+                    "state": info.state.as_str(),
+                    "params": info.params,
+                    "keys": info.keys,
+                })
+            })
+            .collect();
+        serde_json::to_string(&list).map_err(|e| NodeError(e.to_string()))
     }
 
     /// Starts, or advances, a session with `peer`, and says where it stands:

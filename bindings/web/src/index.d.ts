@@ -152,6 +152,47 @@ export class OfflineNode extends EventTarget {
   groupInfo(groupId: string): Promise<GroupInfo | null>;
   /** `ephemeral` as for sendMessage, to every member holding a live link. */
   sendGroupMessage(groupId: string, content: string, options?: SendOptions): Promise<string[]>;
+  /** Registers a service this device offers. */
+  registerService(
+    serviceId: string,
+    options?: { version?: string; capabilities?: Record<string, string> },
+  ): Promise<void>;
+  /** Unregisters a service; every subscription on it ends. */
+  unregisterService(serviceId: string): Promise<boolean>;
+  /**
+   * Subscribes to a provider's topic (ADR 0035); resolves to the subscription
+   * id. Every subscription frame is sealed in the 1:1 session.
+   *
+   * `topic` may be a pattern, `"prefix*"` or `"*"`: every matching topic in
+   * the mode, up to 64, each update naming its own. `keys` limits a `latest`
+   * subscription to those keys, each exact or a prefix ending in `*`; the
+   * provider applies it.
+   */
+  subscribeService(
+    provider: string,
+    serviceId: string,
+    topic: string,
+    options?: { mode?: SubscriptionMode; params?: string; keys?: string[] },
+  ): Promise<string>;
+  unsubscribeService(subId: string): Promise<boolean>;
+  /** Asks the provider for the whole state again, now. */
+  resyncServiceSubscription(subId: string): Promise<void>;
+  serviceSubscriptions(): Promise<ServiceSubscriptionInfo[]>;
+  /** Who may subscribe to a service; `restricted` asks this page. */
+  setServiceSubscriptionPolicy(serviceId: string, policy: SubscriptionPolicy): Promise<void>;
+  acceptServiceSubscription(subId: string): Promise<void>;
+  rejectServiceSubscription(subId: string, reason?: string): Promise<void>;
+  endServiceSubscription(subId: string, reason?: string): Promise<void>;
+  /** With a `key` the topic is `latest`; without one it is `log`. */
+  publishServiceUpdate(
+    serviceId: string,
+    topic: string,
+    body: string,
+    options?: { key?: string | null },
+  ): Promise<ServicePublishReport>;
+  setServiceTopicCheckpoint(serviceId: string, topic: string, body: string): Promise<void>;
+  clearServiceTopic(serviceId: string, topic: string): Promise<void>;
+  serviceSubscribers(serviceId?: string | null): Promise<ServiceSubscriberInfo[]>;
   /** The durable logs' costs, or null for a node in memory. */
   stats(): Promise<{ mls: LogStats; protocol_state: LogStats } | null>;
   /** A fresh NostrSignaller room code: eighty bits a person can read out. */
@@ -391,4 +432,49 @@ export class BluetoothCarrier extends EventTarget {
   closeAll(): void;
   /** Closes every link and gives the node's Bluetooth back to another carrier. */
   release(): void;
+}
+
+/** How a topic treats its updates: state per key, or every event in order. */
+export type SubscriptionMode = "latest" | "log";
+
+/** Who may subscribe to a service. */
+export type SubscriptionPolicy =
+  | { kind: "restricted" }
+  | { kind: "accept_all" }
+  | { kind: "rules"; allowPeers?: string[]; allowGroups?: string[]; fallback?: "ask" | "reject" };
+
+/** What one publish did, per subscriber. */
+export interface ServicePublishReport {
+  subscribers: number;
+  sentLive: number;
+  queued: number;
+  coalesced: number;
+  failed: number;
+}
+
+/** A subscription this device holds on another. */
+export interface ServiceSubscriptionInfo {
+  subId: string;
+  provider: string;
+  serviceId: string;
+  topic: string;
+  mode: SubscriptionMode;
+  state: "pending" | "active" | "paused" | "ended";
+  /** The `latest` keys asked for; empty for every key. */
+  keys: string[];
+  /** The topics heard of: the topic itself, or each one a pattern matched. */
+  topics: string[];
+}
+
+/** A subscription another device holds on this one. */
+export interface ServiceSubscriberInfo {
+  subId: string;
+  subscriber: string;
+  serviceId: string;
+  topic: string;
+  mode: SubscriptionMode;
+  state: "pending" | "active";
+  params: string;
+  /** The `latest` keys the subscriber asked for; empty for every key. */
+  keys: string[];
 }
