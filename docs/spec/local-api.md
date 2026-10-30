@@ -477,6 +477,18 @@ registered it.
 | `services.discover_services` | `service_id?` | string (query id) |
 | `services.send_service_request` | `provider`, `service_id`, `method`, `body` | string (request id) |
 | `services.respond_to_service_request` | `request_id`, `requester`, `service_id`, `status`, `body` | string (message id) |
+| `services.subscribe_service` | `provider`, `service_id`, `topic` (or a pattern, `prefix*`), `mode <SubscriptionMode>`, `params`, `keys []` | string (subscription id) |
+| `services.unsubscribe_service` | `sub_id` | `!` |
+| `services.resync_service_subscription` | `sub_id` | `null` |
+| `services.service_subscriptions` | | `[{ServiceSubscriptionInfo}]`, only those handed to the caller's application |
+| `services.set_service_subscription_policy` | `service_id`, `policy {SubscriptionPolicyConfig}` | `null` |
+| `services.accept_service_subscription` | `sub_id` | `null` |
+| `services.reject_service_subscription` | `sub_id`, `reason` | `null` |
+| `services.end_service_subscription` | `sub_id`, `reason` | `null` |
+| `services.publish_service_update` | `service_id`, `topic`, `key?`, `body` | `{ServicePublishReport}` |
+| `services.set_service_topic_checkpoint` | `service_id`, `topic`, `body` | `null` |
+| `services.clear_service_topic` | `service_id`, `topic` | `null` |
+| `services.service_subscribers` | `service_id?` | `[{ServiceSubscriberInfo}]`, none on a service another application owns |
 
 ### Documents
 
@@ -575,8 +587,13 @@ server's; they never change an event and they never reach the mesh.
    delivered.
 2. **Correlated.** An event naming an identifier the server handed to one
    client as a method result (a message id, a file id, a query id, a request
-   id) reaches that client, and no other. An event naming a service id
-   reaches the clients whose application owns that service. The server keeps
+   id, a subscription id) reaches that client, and no other. An event naming a service id
+   reaches the clients whose application owns that service. A subscription
+   id correlates only the events about a subscription this device holds
+   (`service_update_received`, and `service_subscription_changed` with
+   `role` `consumer`). An event about a subscription another device holds on
+   this one names an id that device minted, which it can make equal to any
+   id it has seen, so it is routed by its service id. The server keeps
    these tables in memory for the life of the process; an identifier issued
    before a restart, or one that came from a peer rather than from a client's
    call, is unknown, and an event naming an unknown identifier is broadcast.
@@ -587,7 +604,11 @@ server's; they never change an event and they never reach the mesh.
    An identifier stays live until the event that settles it:
    `message_delivered` or `message_failed` for a message id (a connection
    request's included), `media_sent` or `media_send_failed` for a file id,
-   and `service_response_received` for a request id.
+   and `service_response_received` for a request id. A subscription id is
+   live until `service_subscription_changed` reports it `ended`, however
+   long that is: it is kept apart from the other identifiers, which a busy
+   server forgets oldest-first, because a subscription forgotten that way
+   would broadcast every later update on it to every client.
    `message_undeliverable` and `connection_request_undeliverable` settle
    nothing on a relay verdict: the engine keeps the message or the request,
    may repeat the event on every reachability probe, and later delivers it
@@ -904,8 +925,18 @@ operator who configures one has listed every application.
 **Service ownership.** `services.register_service` records the calling
 application id as the owner of that service id. `services.unregister_service`
 and `services.respond_to_service_request` for a service another application
-owns are refused; `service_request_received` for it is routed to the owner's
-clients. The engine has no owner on a registration and no way to enumerate
+owns are refused, as are the four calls that act on a service's topics or
+its policy (`set_service_subscription_policy`, `publish_service_update`,
+`set_service_topic_checkpoint`, `clear_service_topic`) and the three that
+decide a subscriber on it (`accept_service_subscription`,
+`reject_service_subscription`, `end_service_subscription`, whose service the
+server looks up from the subscription id); `service_request_received` for it
+is routed to the owner's clients, and `services.service_subscribers` lists
+its subscribers only to the owner. A subscription id is a capability in the
+same way: `services.unsubscribe_service` and
+`services.resync_service_subscription` for a subscription the server handed
+to another application are refused, and `services.service_subscriptions`
+lists only the caller's own. The engine has no owner on a registration and no way to enumerate
 them, so the server's registry is a shadow of the engine's, rebuilt from
 the clients' calls, and empty after a restart until they register again. An
 application that registers a service id another application already holds is

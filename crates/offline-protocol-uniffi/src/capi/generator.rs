@@ -327,6 +327,13 @@ impl Universe {
                 default.to_owned()
             }
             _ if default.starts_with('"') && ty == "string" => format!("{default}.to_owned()"),
+            // An enum's default names a variant as a string, as UniFFI spells
+            // it. A variant that does not exist fails the generated file's
+            // compilation rather than decoding to something else.
+            _ if default.starts_with('"') && self.enums.contains(ty) => {
+                format!("crate::{ty}::{}", default.trim_matches('"'))
+            }
+            "[]" if ty.starts_with("sequence<") => "Vec::new()".to_owned(),
             _ if default.parse::<i64>().is_ok()
                 && matches!(ty, "u8" | "u16" | "u32" | "u64" | "i16" | "i32" | "i64") =>
             {
@@ -726,6 +733,45 @@ mod tests {
         );
         assert!(
             refusal(udl).contains("both a namespace function and an OfflineProtocol method"),
+            "{}",
+            refusal(udl)
+        );
+    }
+
+    #[test]
+    fn an_enum_default_and_an_empty_sequence_default_have_rust_forms() {
+        let universe = Universe {
+            enums: ["E".to_owned()].into_iter().collect(),
+            dictionaries: BTreeSet::new(),
+            objects: BTreeSet::new(),
+            callbacks: BTreeSet::new(),
+        };
+        assert_eq!(universe.default_expr("E", "\"B\""), "crate::E::B");
+        assert_eq!(
+            universe.default_expr("sequence<string>", "[]"),
+            "Vec::new()"
+        );
+        // The definition's own use: generated, it compiles against the FFI
+        // crate's enums, so a misspelt variant fails the build.
+        let fresh = generate(UDL);
+        assert!(
+            fresh
+                .contains("kind: f.take_or(\"kind\", crate::SubscriptionPolicyKind::Restricted)?,"),
+            "{fresh}"
+        );
+        assert!(
+            fresh.contains("allow_peers: f.take_or(\"allow_peers\", Vec::new())?,"),
+            "{fresh}"
+        );
+    }
+
+    #[test]
+    fn an_empty_sequence_default_on_a_scalar_stops_the_generator() {
+        let udl: &'static str = Box::leak(
+            format!("namespace n {{}}; dictionary D {{ u32 x = []; }}; {ERRORS}").into_boxed_str(),
+        );
+        assert!(
+            refusal(udl).contains("has no Rust form"),
             "{}",
             refusal(udl)
         );

@@ -344,12 +344,48 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription(long ptr, java.lang.foreign.MemorySegment subId, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_accept_service_subscription.invokeExact(ptr, subId, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic(long ptr, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment topic, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_clear_service_topic.invokeExact(ptr, serviceId, topic, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
     static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment _uniffiOutErr) {
         try {
             return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services.invokeExact(_allocator, ptr, serviceId, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription(long ptr, java.lang.foreign.MemorySegment subId, java.lang.foreign.MemorySegment reason, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_end_service_subscription.invokeExact(ptr, subId, reason, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment topic, java.lang.foreign.MemorySegment key, java.lang.foreign.MemorySegment body, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_publish_service_update.invokeExact(_allocator, ptr, serviceId, topic, key, body, _uniffiOutErr);
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -362,12 +398,30 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription(long ptr, java.lang.foreign.MemorySegment subId, java.lang.foreign.MemorySegment reason, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_reject_service_subscription.invokeExact(ptr, subId, reason, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
     static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment requestId, java.lang.foreign.MemorySegment requester, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment status, java.lang.foreign.MemorySegment body, java.lang.foreign.MemorySegment _uniffiOutErr) {
         try {
             return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request.invokeExact(_allocator, ptr, requestId, requester, serviceId, status, body, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription(long ptr, java.lang.foreign.MemorySegment subId, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_resync_service_subscription.invokeExact(ptr, subId, _uniffiOutErr);
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -380,12 +434,66 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscribers.invokeExact(_allocator, ptr, serviceId, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_service_subscriptions.invokeExact(_allocator, ptr, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy(long ptr, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment policy, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_subscription_policy.invokeExact(ptr, serviceId, policy, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint(long ptr, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment topic, java.lang.foreign.MemorySegment body, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_set_service_topic_checkpoint.invokeExact(ptr, serviceId, topic, body, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment provider, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment topic, java.lang.foreign.MemorySegment mode, java.lang.foreign.MemorySegment params, java.lang.foreign.MemorySegment keys, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_subscribe_service.invokeExact(_allocator, ptr, provider, serviceId, topic, mode, params, keys, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
     static byte uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(long ptr, java.lang.foreign.MemorySegment serviceId, java.lang.foreign.MemorySegment _uniffiOutErr) {
         try {
             return (byte) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service.invokeExact(ptr, serviceId, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static byte uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service(long ptr, java.lang.foreign.MemorySegment subId, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (byte) MH_uniffi_offline_protocol_uniffi_fn_method_meshservices_unsubscribe_service.invokeExact(ptr, subId, _uniffiOutErr);
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -2936,12 +3044,48 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_accept_service_subscription.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_clear_service_topic.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
     static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_end_service_subscription.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_publish_service_update.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -2954,12 +3098,30 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_reject_service_subscription.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
     static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_resync_service_subscription.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -2972,12 +3134,66 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscribers.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_service_subscriptions.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_subscription_policy.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_set_service_topic_checkpoint.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_subscribe_service.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
     static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
