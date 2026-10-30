@@ -70,8 +70,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   next renewal, after a provider restart, or on `resync_service_subscription`.
   Every subscription frame is sealed in the 1:1 MLS session with no plaintext
   fallback, and none is written to the outbox's store: nothing of a
-  subscription survives a restart, and a frame from before one is dropped. Who may subscribe is the service's policy: ask the application
-  (the default), accept every peer with a session, or rules by peer and group.
+  subscription survives a restart, and a frame from before one is dropped.
+  Who may subscribe is the service's policy: ask the application (the
+  default), accept every peer with a session, or rules by peer and group.
   The calls are on `MeshServices` in every binding (Swift, Kotlin, Python,
   Ruby, Java, C), in React Native and Flutter on both platforms, in the
   Python services wrapper and local API, and in the browser worker, where

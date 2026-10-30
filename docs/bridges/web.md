@@ -723,13 +723,12 @@ The worker exposes the service registry and service subscriptions
 `registerService`, `subscribeService`, `publishServiceUpdate`,
 `resyncServiceSubscription`, `setServiceSubscriptionPolicy` and the calls
 around them; `subscribeService` takes a topic pattern and a key filter as
-`{ mode, params, keys }`. Nothing about them is browser-specific: every subscription
-frame is sealed by the engine in the 1:1 session, a `latest` update to a
-neighbour with a live link is an ephemeral send (W10), and one to a device
-reached otherwise waits in the sealed log as the one value per key that
-supersedes the last. Records cross the worker boundary as JSON, the way
-group info does. Service discovery and request/response are not exposed in
-the browser yet.
+`{ mode, params, keys }`. Nothing about them is browser-specific: every
+subscription frame is sealed by the engine in the 1:1 session, a `latest`
+update to a neighbour with a live link is an ephemeral send (W10), and one to
+a device reached otherwise waits in the sealed log as the one value per key
+that supersedes the last. Records cross the worker boundary as JSON, the way
+group info does.
 
 ## Which shared rules apply
 
@@ -951,6 +950,9 @@ subscribe to each other's live state.
   offline in three engines on one machine, which installs nothing and is
   not Safari. Opening it offline on two phones and installing it is step 9
   of the [two-device checklist](web-devices.md), not run yet (W15).
+- **Service discovery and request/response.** The worker exposes the service
+  registry and subscriptions, and a page must already know a provider's
+  address to subscribe to it.
 - **A published package.** `bindings/web` is private on npm and the
   `offline-protocol-web` crate has not been released; build both from
   source.
