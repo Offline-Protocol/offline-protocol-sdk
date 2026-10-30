@@ -644,16 +644,33 @@ impl Node {
     ) -> NodeResult<()> {
         let json: serde_json::Value = serde_json::from_str(policy_json)
             .map_err(|e| NodeError(format!("policy must be a JSON object: {e}")))?;
-        let strings = |key: &str| -> Vec<String> {
-            json.get(key)
-                .and_then(|value| value.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default()
+        if !json.is_object() {
+            return Err(NodeError("policy must be a JSON object".to_string()));
+        }
+        // A list that is present but not all strings is refused, as on iOS
+        // and Android: dropping it would leave a `rules` policy admitting
+        // nobody by rule, silently.
+        let strings = |key: &str| -> NodeResult<Vec<String>> {
+            match json.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+                Some(value) => serde_json::from_value(value.clone())
+                    .map_err(|e| NodeError(format!("{key} must be a list of strings: {e}"))),
+            }
+        };
+        let allow_peers = strings("allowPeers")?;
+        let allow_groups = strings("allowGroups")?;
+        let fallback = match json
+            .get("fallback")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ask")
+        {
+            "ask" => RulesFallback::Ask,
+            "reject" => RulesFallback::Reject,
+            other => {
+                return Err(NodeError(format!(
+                    "fallback must be ask or reject, not {other}"
+                )))
+            }
         };
         let policy = match json
             .get("kind")
@@ -663,21 +680,9 @@ impl Node {
             "restricted" => SubscriptionPolicy::Restricted,
             "accept_all" => SubscriptionPolicy::AcceptAll,
             "rules" => SubscriptionPolicy::Rules {
-                allow_peers: strings("allowPeers"),
-                allow_groups: strings("allowGroups"),
-                fallback: match json
-                    .get("fallback")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("ask")
-                {
-                    "ask" => RulesFallback::Ask,
-                    "reject" => RulesFallback::Reject,
-                    other => {
-                        return Err(NodeError(format!(
-                            "fallback must be ask or reject, not {other}"
-                        )))
-                    }
-                },
+                allow_peers,
+                allow_groups,
+                fallback,
             },
             other => {
                 return Err(NodeError(format!(

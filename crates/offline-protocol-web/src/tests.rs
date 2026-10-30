@@ -264,6 +264,142 @@ fn a_subscription_delivers_a_published_value_and_a_resync() {
         .any(|e| e["type"] == "service_update_received" && e["body"] == "c1-gps"));
 }
 
+/// A list that is not all strings is refused rather than dropped: a `rules`
+/// policy that lost its list would admit nobody by rule, silently.
+#[test]
+fn a_policy_with_a_malformed_list_is_refused() {
+    let a = peer("alice");
+    let mut node = a.node;
+    for policy in [
+        r#"{"kind":"rules","allowPeers":["a",1]}"#,
+        r#"{"kind":"rules","allowPeers":"a"}"#,
+        r#"{"kind":"rules","allowGroups":[null]}"#,
+        r#"{"kind":"accept_all","allowPeers":[1]}"#,
+        r#"{"kind":"rules","fallback":"maybe"}"#,
+        r#"{"kind":"everyone"}"#,
+        r#"["accept_all"]"#,
+        "not json",
+    ] {
+        assert!(
+            node.set_service_subscription_policy("fleet.v1", policy)
+                .is_err(),
+            "{policy} was accepted"
+        );
+    }
+    for policy in [
+        r#"{"kind":"rules","allowPeers":["a"],"allowGroups":null,"fallback":"reject"}"#,
+        r#"{"kind":"restricted"}"#,
+        "{}",
+    ] {
+        node.set_service_subscription_policy("fleet.v1", policy)
+            .unwrap_or_else(|e| panic!("{policy} was refused: {e:?}"));
+    }
+}
+
+/// `rules` through the JSON layer: a listed peer is admitted without asking,
+/// and with `fallback: reject` an unlisted one is refused without asking.
+#[test]
+fn a_rules_policy_admits_the_listed_peer_and_refuses_the_rest() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let (a_addr, b_addr) = (a.address.clone(), b.address.clone());
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "neighbor_discovered", "peer_id", &b_addr)
+    }));
+    b.node
+        .register_service("fleet.v1", "1.0", "")
+        .expect("register");
+    b.node
+        .set_service_subscription_policy(
+            "fleet.v1",
+            &serde_json::json!({
+                "kind": "rules", "allowPeers": ["someone else"], "fallback": "reject",
+            })
+            .to_string(),
+        )
+        .expect("policy");
+    let refused = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_subscription_changed"
+                && e["sub_id"] == refused
+                && e["state"] == "ended"
+        })
+    }));
+    assert!(!saw(&b, "service_subscribe_received", "sub_id", &refused));
+
+    b.node
+        .set_service_subscription_policy(
+            "fleet.v1",
+            &serde_json::json!({ "kind": "rules", "allowPeers": [a_addr] }).to_string(),
+        )
+        .expect("policy");
+    let admitted = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_subscription_changed"
+                && e["sub_id"] == admitted
+                && e["state"] == "active"
+        })
+    }));
+    assert!(!saw(&b, "service_subscribe_received", "sub_id", &admitted));
+}
+
+/// `restricted` asks the application: an answer settles the subscription on
+/// the other device, either way.
+#[test]
+fn a_restricted_service_asks_and_the_answer_reaches_the_subscriber() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "neighbor_discovered", "peer_id", &b_addr)
+    }));
+    b.node
+        .register_service("fleet.v1", "1.0", "")
+        .expect("register");
+
+    let rejected = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |_, b| {
+        saw(b, "service_subscribe_received", "sub_id", &rejected)
+    }));
+    b.node
+        .reject_service_subscription(&rejected, "not now")
+        .expect("reject");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_subscription_changed"
+                && e["sub_id"] == rejected
+                && e["state"] == "ended"
+        })
+    }));
+
+    let accepted = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |_, b| {
+        saw(b, "service_subscribe_received", "sub_id", &accepted)
+    }));
+    b.node
+        .accept_service_subscription(&accepted)
+        .expect("accept");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_subscription_changed"
+                && e["sub_id"] == accepted
+                && e["state"] == "active"
+        })
+    }));
+}
+
 #[test]
 fn a_second_link_proving_an_announced_address_is_refused() {
     let (mut a, mut b) = (peer("alice"), peer("bob"));
