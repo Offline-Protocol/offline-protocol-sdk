@@ -28,13 +28,19 @@ HELD_TAGS: frozenset[str] = frozenset({"message_received", "file_received", "med
 HOLD_CAPACITY = 256
 
 #: Identifier fields the server correlates by, in the order they are read.
-CORRELATION_KEYS: tuple[str, ...] = (
-    "message_id",
-    "file_id",
-    "query_id",
-    "request_id",
-    "sub_id",
-)
+#: A subscription id is not one of them: it lives as long as the
+#: subscription, so it has its own table (see `SUBSCRIPTION_CAPACITY`).
+CORRELATION_KEYS: tuple[str, ...] = ("message_id", "file_id", "query_id", "request_id")
+
+#: How many subscription ids handed out by ``services.subscribe_service``
+#: are remembered. They are kept apart from the issued table because a
+#: subscription lives for days while a message id lives for seconds: in the
+#: issued table, 65536 later sends would evict a live subscription and every
+#: update on it would then be broadcast, body and all, to every application.
+#: An id leaves this table when its subscription ends. The engine holds at
+#: most 64 subscriptions at once, so the capacity is a backstop for an end
+#: the server never saw, not a working limit.
+SUBSCRIPTION_CAPACITY = 4096
 
 #: How many issued identifiers are remembered. An identifier is forgotten on
 #: its terminal event; one whose terminal event never comes (a query, a
@@ -82,6 +88,7 @@ class EventRouter:
         self._sessions: dict[str, list[Session]] = {}
         self._issued: OrderedDict[str, str] = OrderedDict()
         self._settled: OrderedDict[str, str] = OrderedDict()
+        self._subscriptions: OrderedDict[str, str] = OrderedDict()
         self._held: dict[str, deque[dict[str, Any]]] = {}
         #: Events the run loop emitted while a call was in flight, naming an
         #: identifier nobody owned yet. Routed once the call's result is
@@ -134,6 +141,56 @@ class EventRouter:
             if isinstance(value, str) and value:
                 self._remember(value, app_id)
 
+    def note_subscription(self, app_id: str, sub_id: Any) -> None:
+        """Records a subscription id ``services.subscribe_service`` handed
+        to ``app_id``."""
+        if not isinstance(sub_id, str) or not sub_id:
+            return
+        self._subscriptions[sub_id] = app_id
+        self._subscriptions.move_to_end(sub_id)
+        while len(self._subscriptions) > SUBSCRIPTION_CAPACITY:
+            self._subscriptions.popitem(last=False)
+
+    def subscription_owner(self, sub_id: Any) -> str | None:
+        """The application a subscription id was handed to, while it is live
+        or recently ended; ``None`` for an id this server never issued."""
+        if not isinstance(sub_id, str):
+            return None
+        owner = self._subscriptions.get(sub_id)
+        if owner is None:
+            owner = self._settled.get(sub_id)
+        return owner
+
+    def subscription_count(self) -> int:
+        return len(self._subscriptions)
+
+    @staticmethod
+    def _consumer_side(event: dict[str, Any]) -> bool:
+        """The event concerns a subscription this device holds, whose id a
+        client was handed. A provider-side event names an id the subscriber
+        minted, which a peer can make equal to any id it has seen, so it is
+        routed by its service, never by its subscription id."""
+        tag = event.get("type")
+        if tag == "service_update_received":
+            return True
+        return tag == "service_subscription_changed" and event.get("role") == "consumer"
+
+    def _forget_subscription(self, event: dict[str, Any]) -> None:
+        if not self._consumer_side(event) or event.get("state") != "ended":
+            return
+        sub_id = event.get("sub_id")
+        if not isinstance(sub_id, str):
+            return
+        owner = self._subscriptions.pop(sub_id, None)
+        if owner is not None:
+            self._settle(sub_id, owner)
+
+    def _settle(self, identifier: str, owner: str) -> None:
+        self._settled[identifier] = owner
+        self._settled.move_to_end(identifier)
+        while len(self._settled) > SETTLED_CAPACITY:
+            self._settled.popitem(last=False)
+
     def _remember(self, identifier: str, app_id: str) -> None:
         self._issued[identifier] = app_id
         self._issued.move_to_end(identifier)
@@ -147,6 +204,10 @@ class EventRouter:
                 self._remember(value, app_id)
 
     def _correlated_app(self, event: dict[str, Any]) -> str | None:
+        if self._consumer_side(event):
+            owner = self.subscription_owner(event.get("sub_id"))
+            if owner is not None:
+                return owner
         for key in CORRELATION_KEYS:
             value = event.get(key)
             if isinstance(value, str) and value in self._issued:
@@ -169,10 +230,7 @@ class EventRouter:
             return
         owner = self._issued.pop(value, None)
         if owner is not None:
-            self._settled[value] = owner
-            self._settled.move_to_end(value)
-            while len(self._settled) > SETTLED_CAPACITY:
-                self._settled.popitem(last=False)
+            self._settle(value, owner)
 
     # -- routing --------------------------------------------------------------
 
@@ -218,6 +276,7 @@ class EventRouter:
         for session in targets:
             self._deliver(session, tag, event)
         self._forget_terminal(tag, event)
+        self._forget_subscription(event)
 
     def flush_parked(self) -> None:
         """Routes what was parked during a call, now that its identifiers are
@@ -235,7 +294,8 @@ class EventRouter:
     @staticmethod
     def _names_an_identifier(event: dict[str, Any]) -> bool:
         return any(
-            isinstance(event.get(key), str) and event.get(key) for key in CORRELATION_KEYS
+            isinstance(event.get(key), str) and event.get(key)
+            for key in (*CORRELATION_KEYS, "sub_id")
         )
 
     def _deliver(self, session: Session, tag: Any, event: dict[str, Any]) -> None:

@@ -365,6 +365,31 @@ async def test_service_ownership_is_by_application_id(harness):
     await b.call("services.register_service", {"service_id": "printer", "version": "2", "capabilities": {}})
 
 
+async def test_a_service_policy_is_set_by_its_owner_only(harness):
+    server = await harness.server()
+    a = await harness.client(server)
+    b = await harness.client(server)
+    await a.hello("app-a")
+    await b.hello("app-b")
+    await a.call("services.register_service", {"service_id": "printer", "version": "1", "capabilities": {}})
+    # The engine takes the record with its defaults filled in by the binding.
+    assert await a.call(
+        "services.set_service_subscription_policy",
+        {"service_id": "printer", "policy": {"kind": "Rules", "allow_peers": ["off1x"]}},
+    ) is None
+    for method, params in (
+        ("services.set_service_subscription_policy", {"service_id": "printer", "policy": {"kind": "AcceptAll"}}),
+        ("services.publish_service_update", {"service_id": "printer", "topic": "t", "body": "{}"}),
+        ("services.set_service_topic_checkpoint", {"service_id": "printer", "topic": "t", "body": "{}"}),
+        ("services.clear_service_topic", {"service_id": "printer", "topic": "t"}),
+    ):
+        with pytest.raises(RpcFailure) as err:
+            await b.call(method, params)
+        assert err.value.variant == "PermissionDenied", method
+    assert await b.call("services.service_subscriptions") == []
+    assert await b.call("services.service_subscribers") == []
+
+
 async def test_a_refused_registration_leaves_no_claim(harness):
     server = await harness.server()
     a = await harness.client(server)

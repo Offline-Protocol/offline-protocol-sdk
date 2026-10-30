@@ -346,8 +346,37 @@ ID_RESULTS: frozenset[str] = frozenset(
         "services.discover_services",
         "services.send_service_request",
         "services.respond_to_service_request",
-        "services.subscribe_service",
     }
+)
+
+#: Calls that act on a service's topics or on who may watch it, by the
+#: service id they name: only the owner may make them.
+SERVICE_OWNER_CALLS: frozenset[str] = frozenset(
+    {
+        "unregister_service",
+        "respond_to_service_request",
+        "set_service_subscription_policy",
+        "publish_service_update",
+        "set_service_topic_checkpoint",
+        "clear_service_topic",
+    }
+)
+
+#: Calls that decide a subscription another device holds on this one, by
+#: its subscription id alone: only the owner of the service it is on may
+#: make them. The service is looked up in the engine during the call.
+SUBSCRIBER_DECISION_CALLS: frozenset[str] = frozenset(
+    {
+        "accept_service_subscription",
+        "reject_service_subscription",
+        "end_service_subscription",
+    }
+)
+
+#: Calls on a subscription this device holds, by its subscription id: only
+#: the application it was handed to may make them.
+SUBSCRIPTION_HOLDER_CALLS: frozenset[str] = frozenset(
+    {"unsubscribe_service", "resync_service_subscription"}
 )
 
 
@@ -494,17 +523,17 @@ class Dispatcher:
             service_id = args.get("service_id")
             if declaration == "register_service":
                 self._ownership.claim(service_id, app_id)
-            elif declaration in (
-                "unregister_service",
-                "respond_to_service_request",
-                # A topic belongs to its service: only the owner publishes to
-                # it, summarises it, clears it, or decides who may watch it.
-                "set_service_subscription_policy",
-                "publish_service_update",
-                "set_service_topic_checkpoint",
-                "clear_service_topic",
-            ):
+            elif declaration in SERVICE_OWNER_CALLS:
                 self._ownership.check(service_id, app_id)
+            elif declaration in SUBSCRIPTION_HOLDER_CALLS:
+                holder = self._router.subscription_owner(args.get("sub_id"))
+                if holder is not None and holder != app_id:
+                    raise taxonomy_error(
+                        "PermissionDenied", "the subscription belongs to another application"
+                    )
+            elif declaration in SUBSCRIBER_DECISION_CALLS:
+                checked = _OwnerChecked(self._services, self._ownership, app_id)
+                return checked, declaration, args, result_type
             return self._services, declaration, args, result_type
         if obj == "DataStore":
             assert app_id is not None
@@ -568,4 +597,52 @@ class Dispatcher:
             result = [space for space in result if self._policy.allows_space(app_id, space)]
         if method in ID_RESULTS and app_id is not None:
             self._router.note_ids(app_id, result if isinstance(result, list) else [result])
+        if app_id is not None:
+            if method == "services.subscribe_service":
+                self._router.note_subscription(app_id, result)
+            elif method == "services.service_subscriptions":
+                # A subscription id is a capability (unsubscribe, resync), so
+                # an application lists only the subscriptions it was handed.
+                result = [
+                    info
+                    for info in result
+                    if self._router.subscription_owner(info.sub_id) == app_id
+                ]
+            elif method == "services.service_subscribers":
+                # Another application's subscribers are its business: listed
+                # only by the owner, as the decision calls are made only by it.
+                result = [
+                    info
+                    for info in result
+                    if self._ownership.owner(info.service_id) in (None, app_id)
+                ]
         return result
+
+
+class _OwnerChecked:
+    """The ``MeshServices`` object for a call that decides a subscriber by
+    subscription id alone, checking that the caller owns the service the
+    subscription is on before making it.
+
+    The check runs on the executor, inside the call, so it holds the server
+    lock and reads the engine's own record of the subscription. An id the
+    engine does not know is passed through for the engine to refuse.
+    """
+
+    def __init__(self, services: Any, ownership: ServiceOwnership, app_id: str) -> None:
+        self._services = services
+        self._ownership = ownership
+        self._app_id = app_id
+
+    def __getattr__(self, declaration: str) -> Callable[..., Any]:
+        target = getattr(self._services, declaration)
+
+        def call(**kwargs: Any) -> Any:
+            sub_id = kwargs.get("sub_id")
+            for info in self._services.service_subscribers(None):
+                if info.sub_id == sub_id:
+                    self._ownership.check(info.service_id, self._app_id)
+                    break
+            return target(**kwargs)
+
+        return call
