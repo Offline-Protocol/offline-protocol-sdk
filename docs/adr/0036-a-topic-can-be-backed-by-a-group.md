@@ -103,8 +103,9 @@ Each names the failure it prevents.
 8. **A member that cannot read the group is found, and rebuilt.** Commits and
    the Welcome are on a ladder that gives no order and, being unpersisted, can
    lose a frame to a restart or to expiry. So every renewal of a subscription
-   in a group reports the member's epoch, and a provider that sees a member
-   stuck behind, not merely late, moves it out of the group and back.
+   in a group reports which group the member holds and its epoch there, and a
+   provider that sees a member stuck behind, not merely late, or in a group
+   that is no longer the topic's, moves it out of the group and back.
    Otherwise a member one epoch behind reads no further publish, and is sent a
    snapshot every half lease in place of live updates, while the provider
    reports it `in_group`: the silent gap ADR 0035 invariant 8 forbids.
@@ -157,21 +158,28 @@ Each names the failure it prevents.
   raises no alarm. A member's own removal reaches it as ADR 0035's
   `__SVC_UNSUB__`, not as a commit.
 - **Rebuilding a member (invariant 8).** A renewal from a member carries
-  `group_epoch`, the epoch of the topic group it holds, or nothing when it
-  holds none. The provider keeps one value per member, the mark: its own epoch
-  when it last took one, unset when the member is added. A renewal that finds
-  no mark takes one. A renewal that finds one at least half the granted lease
-  old is compared with it and then takes a new one. A younger mark is left
-  alone, so a renewal sent early by rediscovery or a resync proves nothing
-  either way. A report below the mark, or none at all, removes the member in
-  the next commit. The comparison is with the mark and never with the
+  `group_id` and `group_epoch`, the topic group it holds and that group's
+  epoch, or neither when it holds none. Each group is minted with a fresh id. A
+  report that names any group but the one the provider holds for the topic is
+  read as no report: an epoch means something only inside its own group, and a
+  consumer that kept the old group across a provider restart reports an epoch
+  the new group may never reach, so a lost Welcome would pass. The provider
+  keeps one record per member, the mark: its own epoch when it last took one
+  and when that was, unset when the member is added. A renewal that finds no
+  mark takes one. A renewal that finds one at least half the granted lease old
+  is compared with it and then takes a new one. A younger mark is left alone,
+  so a renewal sent early by rediscovery or a resync proves nothing either
+  way. A report below the mark, or none at all, removes the member in the next
+  commit. The comparison is with the mark and never with the
   provider's current epoch, because a commit still in flight looks exactly like
   a lost one, and a churning topic always has one in flight: what fails the
   test is a commit that existed a whole renewal ago. The unset mark does the
   same for the Welcome, which a renewal can cross. A lost commit or Welcome is
-  therefore found in about one lease, whatever the commit rate. A member whose
-  path takes longer than half its lease looks stuck at every check, and should
-  ask for a longer lease.
+  therefore found in about one lease, whatever the commit rate. The commit has
+  to reach the member and the report has to come back before the check, so a
+  member whose round trip takes longer than half its lease, a one-way path
+  longer than a quarter of it, looks stuck at every check, and should ask for
+  a lease of at least four times that path.
 
   The removal sends no `__SVC_UNSUB__`, since the subscription goes on: it
   falls back to the 1:1 session, `in_group` turns false, and the reply offers a
@@ -205,6 +213,9 @@ Each names the failure it prevents.
   it; otherwise a rebuilt member at the cap declines forever behind a group
   nobody commits to. The offer does not delete that group: an offer can arrive
   after the Welcome that made it stale, and would destroy a live membership.
+  Group fields live in the per-topic entries of a pattern's `resume.topics`
+  and `topics`, the provider keeps a mark per member per topic, and a renewal
+  answering several offers carries one freshly minted key package for each.
 - **The provider can see who is revocable.** `SubscriberInfo` carries
   `in_group`, true only for a subscriber that is a member of the topic's
   group. A subscriber on the 1:1 session (no package yet, a key filter, or a
@@ -216,9 +227,11 @@ Each names the failure it prevents.
   dispatch, the plaintext drop and the persist mark test: a prefix in only the
   first is routed as a plain service message and its outbox entry is written.
   None is a prefix of another or of ADR 0035's four. `group_offer`,
-  `group_declined`, `key_package` and `group_epoch` are new fields on existing
-  frames, so they raise `v` under ADR 0035's version rule, and a consumer at
-  an older `v` never answers an offer and stays on the 1:1 session. Routing
+  `group_declined`, `key_package`, `group_id` and `group_epoch` are new fields
+  on existing frames, so they raise `v` under ADR 0035's version rule, and a
+  consumer at an older `v` never answers an offer and stays on the 1:1
+  session. For a pattern subscription each sits in the entry for its topic,
+  since one position in the frame cannot speak for several groups. Routing
   the three frames is a new `svc_versions` entry (`SVC_SUB_GROUP_V1`); a
   provider offers a group only to a peer that advertises it.
 
@@ -287,6 +300,9 @@ These need an answer before the status can move.
 - **Dropping `group_epoch` from the renewal** because the digest "already
   catches a gap". The digest repairs the value and never the membership, so
   the member takes a snapshot every half lease and never reads a live update.
+- **Comparing `group_epoch` without `group_id`.** Epochs from two groups are
+  unrelated numbers, so a member holding a dead group with a high epoch passes
+  every check while the provider reports it `in_group` and it reads nothing.
 - **Comparing the report with the provider's current epoch**, however many
   times in a row. A commit in flight looks like a stuck member, and on a
   churning topic healthy members are rebuilt; each rebuild is two more commits,
