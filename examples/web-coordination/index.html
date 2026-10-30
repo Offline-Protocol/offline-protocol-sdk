@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device coordination</title>
+<style>
+  :root {
+    --bg: #f6f6f2; --card: #ffffff; --fg: #1c1c1a; --muted: #6b6b66; --line: #e2e2da;
+    --accent: #2457c5; --accent-soft: #e6edfb; --on-accent: #ffffff;
+    --ok: #1f7a4d; --ok-soft: #e3f3ea; --busy: #9a5b00; --busy-soft: #fbefd9;
+    --warn: #b4441c; --warn-soft: #fbe6dd; --idle-soft: #ecece6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121211; --card: #1c1c1a; --fg: #ecece8; --muted: #9a9a94; --line: #2f2f2b;
+      --accent: #7aa2ff; --accent-soft: #1f2a44; --on-accent: #0d1424;
+      --ok: #5fd39a; --ok-soft: #173326; --busy: #f2b45a; --busy-soft: #3a2c14;
+      --warn: #ff8a5c; --warn-soft: #3d1f14; --idle-soft: #2a2a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 820px; margin-inline: auto; display: grid; gap: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 13px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  p { margin: 0; }
+  .lede { color: var(--muted); margin-top: 4px; }
+  code { font-size: 12px; word-break: break-all; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .stack { display: grid; gap: 10px; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  label.inline { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 14px; }
+  select, input[type=text], button {
+    font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--fg); min-width: 0;
+  }
+  input[type=text] { width: 100%; }
+  input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+  .slider { display: flex; gap: 10px; align-items: center; color: var(--fg); }
+  .slider b { width: 3ch; text-align: right; font-variant-numeric: tabular-nums; }
+  button { background: var(--accent); color: var(--on-accent); border-color: var(--accent); cursor: pointer; font-weight: 500; }
+  button:hover { filter: brightness(1.08); }
+  button.quiet { background: transparent; color: var(--accent); }
+  button.small { padding: 3px 10px; font-size: 13px; }
+  .meta { color: var(--muted); font-size: 13px; }
+
+  /* This device */
+  .me { display: flex; gap: 14px; align-items: center; }
+  .avatar { flex: none; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
+            font-weight: 700; color: #fff; font-size: 18px; }
+  .me-text { min-width: 0; flex: 1; }
+  .me-name { font-weight: 600; font-size: 17px; }
+
+  /* Pills and badges */
+  .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.idle, .pill.active { background: var(--ok-soft); color: var(--ok); }
+  .pill.busy, .pill.pending { background: var(--busy-soft); color: var(--busy); }
+  .pill.away, .pill.paused, .pill.ended { background: var(--idle-soft); color: var(--muted); }
+  .pill.urgent { background: var(--warn-soft); color: var(--warn); }
+  .pill.info { background: var(--accent-soft); color: var(--accent); }
+
+  .counters { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+  .counter { border: 1px solid var(--line); border-radius: 8px; padding: 2px 8px; font-size: 12px; color: var(--muted); }
+  .counter b { color: var(--fg); font-variant-numeric: tabular-nums; }
+
+  /* Other devices */
+  .peers { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .peer { border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: grid; gap: 8px; }
+  .peer-head { display: flex; gap: 10px; align-items: center; }
+  .peer-head .avatar { width: 32px; height: 32px; font-size: 14px; }
+  .peer-title { min-width: 0; flex: 1; }
+  .peer-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--accent); transition: width .15s; }
+  .kv { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+  .kv span:first-child { color: var(--muted); }
+  .empty { border: 1px dashed var(--line); border-radius: 10px; padding: 20px; text-align: center; color: var(--muted); }
+
+  /* Lists */
+  ul { list-style: none; padding: 0; margin: 0; }
+  .alerts li, .asks li { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .alerts li:last-child, .asks li:last-child { border-bottom: 0; }
+  .alerts .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .alerts .summary { color: var(--muted); font-style: italic; }
+  .asks li { align-items: center; }
+  .asks .who { flex: 1; min-width: 0; }
+  #asks-section { border-color: var(--busy); }
+</style>
+
+<main>
+  <header>
+    <h1>Device coordination</h1>
+    <p class="lede">Open this page in two or more tabs. Each tab is a device: it publishes its own state, and subscribes to every other device it finds. Updates arrive as they happen, sealed end to end in the 1:1 session between the two devices. A device that missed some gets the state back at its next renewal, or when you press <em>Resync</em>.</p>
+  </header>
+
+  <section class="card">
+    <div class="me">
+      <div class="avatar" id="me-avatar">·</div>
+      <div class="me-text">
+        <div class="me-name"><span id="me-name">starting…</span> <span class="pill idle" id="me-status">idle</span></div>
+        <code id="me">starting…</code>
+      </div>
+    </div>
+    <div class="counters" id="report"><span class="counter">nothing published yet</span></div>
+  </section>
+
+  <div class="grid">
+    <section class="card stack">
+      <h2>Your state</h2>
+      <label>Name <input id="name" type="text" autocomplete="off"></label>
+      <label>Status
+        <select id="status">
+          <option>idle</option><option>busy</option><option>away</option>
+        </select>
+      </label>
+      <label>Load <span class="slider"><input id="load" type="range" min="0" max="100" value="0"><b id="load-value">0</b></span></label>
+    </section>
+
+    <section class="card stack">
+      <h2>Raise an alert</h2>
+      <label>Text <input id="alert-text" type="text" placeholder="attention" autocomplete="off"></label>
+      <label>Level
+        <select id="alert-level">
+          <option>info</option><option>urgent</option>
+        </select>
+      </label>
+      <div><button id="raise">Raise alert</button></div>
+    </section>
+
+    <section class="card stack">
+      <h2>Settings</h2>
+      <label>Who may watch this device
+        <select id="policy">
+          <option value="accept_all">anyone with a session</option>
+          <option value="restricted">ask me</option>
+        </select>
+      </label>
+      <label class="inline"><input id="watch-load" type="checkbox" checked> Watch other devices' load</label>
+      <p class="meta">Off, the other devices filter load out themselves: the slider's updates never leave them.</p>
+    </section>
+  </div>
+
+  <section class="card" id="asks-section" hidden>
+    <h2>Waiting for your answer</h2>
+    <ul class="asks" id="asks"></ul>
+  </section>
+
+  <section class="card">
+    <h2>Other devices</h2>
+    <div class="peers" id="peers"></div>
+  </section>
+
+  <section class="card">
+    <h2>Alerts</h2>
+    <ul class="alerts" id="alerts"></ul>
+  </section>
+</main>
+
+<script type="module">
+import { OfflineNode } from "../../bindings/web/src/index.js";
+
+const SERVICE = "coord.v1";
+const $ = (id) => document.getElementById(id);
+const short = (address) => `${address.slice(0, 10)}…${address.slice(-6)}`;
+const el = (tag, className, text) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+// A colour per device, from its address, so a device looks the same in every tab.
+const hue = (address) => [...address].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+function avatar(address, name, target = el("div", "avatar")) {
+  target.style.background = `hsl(${hue(address)} 55% 45%)`;
+  target.textContent = (name || "?").trim().charAt(0).toUpperCase() || "?";
+  return target;
+}
+
+// address -> { state: { key: value }, linked, subs: { topic: { id, state, reason } } },
+// where `linked` is this device's own view of the neighbour, and each
+// subscription's state is the engine's. `alerts/*` is one subscription to a
+// pattern: every alert level is its own topic, and a level created later is
+// followed without asking.
+const peers = new Map();
+// sub_id -> { address, topic }
+const subscriptions = new Map();
+const alerts = [];
+// topic -> alerts raised on it. Each level is its own topic with its own
+// checkpoint, so each summary counts its own level.
+const alertCounts = new Map();
+// Under "ask me", a new subscriber waits here for an answer.
+const asks = new Map();
+
+// In memory: every tab is its own device (see examples/web-two-tabs).
+const node = await OfflineNode.start({ appId: "web-coordination-demo", storage: "memory" });
+$("me").textContent = node.address;
+$("name").value = `device ${node.address.slice(-4)}`;
+
+// ---------------------------------------------------------------------------
+// Publishing: `status` is a latest topic (one value per key), `alerts` a log
+// topic (every event) whose checkpoint summarises the ones before the buffer.
+// ---------------------------------------------------------------------------
+
+function showReport(what, report) {
+  const counter = (label, value) => {
+    const span = el("span", "counter", `${label} `);
+    span.append(el("b", "", String(value)));
+    return span;
+  };
+  $("report").replaceChildren(
+    el("span", "counter", `last publish: ${what}`),
+    counter("subscribers", report.subscribers),
+    counter("live", report.sentLive),
+    counter("queued", report.queued),
+    counter("coalesced", report.coalesced),
+  );
+}
+
+function renderMe() {
+  $("me-name").textContent = $("name").value;
+  $("me-status").textContent = $("status").value;
+  $("me-status").className = `pill ${$("status").value}`;
+  $("load-value").textContent = $("load").value;
+  avatar(node.address, $("name").value, $("me-avatar"));
+}
+
+async function publishState(key, value) {
+  renderMe();
+  showReport(key, await node.publishServiceUpdate(SERVICE, "status", value, { key }));
+}
+
+$("name").addEventListener("change", () => publishState("name", $("name").value));
+$("status").addEventListener("change", () => publishState("status", $("status").value));
+$("load").addEventListener("input", () => publishState("load", $("load").value));
+
+async function raise() {
+  const text = $("alert-text").value.trim() || "attention";
+  const topic = `alerts/${$("alert-level").value}`;
+  const count = (alertCounts.get(topic) ?? 0) + 1;
+  alertCounts.set(topic, count);
+  showReport("alert", await node.publishServiceUpdate(SERVICE, topic, text));
+  await node.setServiceTopicCheckpoint(SERVICE, topic, `${count} alert(s) so far, last: ${text}`);
+  $("alert-text").value = "";
+}
+$("raise").addEventListener("click", raise);
+$("alert-text").addEventListener("keydown", (event) => { if (event.key === "Enter") raise(); });
+
+$("policy").addEventListener("change", () =>
+  node.setServiceSubscriptionPolicy(SERVICE, { kind: $("policy").value }));
+
+// ---------------------------------------------------------------------------
+// Subscribing to every device this one finds.
+// ---------------------------------------------------------------------------
+
+// Without load, the status subscription filters it out on the provider: the
+// slider's updates never leave the other device.
+const statusKeys = () => ($("watch-load").checked ? [] : ["name", "status"]);
+
+async function subscribeTo(address, topic, options) {
+  const peer = peers.get(address);
+  peer.subs[topic] = { state: "pending", reason: "waiting for a session" };
+  try {
+    const id = await node.subscribeService(address, SERVICE, topic, options);
+    peer.subs[topic].id = id;
+    subscriptions.set(id, { address, topic });
+  } catch (error) {
+    peer.subs[topic] = { state: "ended", reason: `could not subscribe: ${error.message ?? error}` };
+  }
+}
+
+async function watch(address) {
+  const peer = peers.get(address) ?? { state: {}, subs: {} };
+  peers.set(address, peer);
+  peer.linked = true;
+  render();
+  // A subscription that ended is asked for again when the device comes back;
+  // a paused one the engine retries by itself.
+  if (!peer.subs.status?.id) await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
+  if (!peer.subs["alerts/*"]?.id) await subscribeTo(address, "alerts/*", { mode: "log" });
+  render();
+}
+
+$("watch-load").addEventListener("change", async () => {
+  for (const [address, peer] of peers) {
+    const old = peer.subs.status?.id;
+    if (old) {
+      subscriptions.delete(old);
+      delete peer.subs.status;
+      await node.unsubscribeService(old);
+    }
+    delete peer.state.load;
+    await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
+  }
+  render();
+});
+
+node.addEventListener("neighbor_discovered", ({ detail }) => watch(detail.peer_id));
+
+node.addEventListener("service_update_received", ({ detail }) => {
+  const sub = subscriptions.get(detail.sub_id);
+  if (!sub) return;
+  const peer = peers.get(sub.address);
+  if (sub.topic === "status") {
+    peer.state[detail.key] = detail.body;
+  } else {
+    alerts.unshift({
+      address: sub.address,
+      from: peer.state.name ?? short(sub.address),
+      level: detail.topic.slice("alerts/".length),
+      text: detail.body,
+      summary: detail.snapshot,
+      at: new Date(),
+    });
+  }
+  render();
+});
+
+node.addEventListener("service_subscription_changed", ({ detail }) => {
+  if (detail.role === "consumer") {
+    const sub = subscriptions.get(detail.sub_id);
+    if (!sub) return;
+    const peer = peers.get(sub.address);
+    if (detail.state === "ended") {
+      subscriptions.delete(detail.sub_id);
+      peer.subs[sub.topic] = { state: detail.state, reason: detail.reason };
+    } else {
+      Object.assign(peer.subs[sub.topic], { state: detail.state, reason: detail.reason });
+    }
+    // A provider that started over: what was held belongs to its old life.
+    if (detail.reason === "stream_reset" && sub.topic === "status") peer.state = {};
+  } else {
+    asks.delete(detail.sub_id);
+  }
+  render();
+});
+
+node.addEventListener("service_subscribe_received", ({ detail }) => {
+  asks.set(detail.sub_id, detail);
+  render();
+});
+
+node.addEventListener("neighbor_lost", ({ detail }) => {
+  const peer = peers.get(detail.peer_id);
+  // Only the link: each subscription says for itself when it pauses.
+  if (peer) peer.linked = false;
+  render();
+});
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function button(text, onClick, className = "") {
+  const b = el("button", className, text);
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function renderPeer(address, peer) {
+  const card = el("div", "peer");
+  const name = peer.state.name ?? short(address);
+
+  const head = el("div", "peer-head");
+  const title = el("div", "peer-title");
+  title.append(el("strong", "", name), el("code", "", short(address)));
+  head.append(avatar(address, name), title);
+  if (peer.state.status) head.append(el("span", `pill ${peer.state.status}`, peer.state.status));
+  card.append(head);
+
+  const load = el("div", "stack");
+  load.style.gap = "4px";
+  const loadRow = el("div", "kv");
+  const watched = $("watch-load").checked;
+  loadRow.append(el("span", "", "load"), el("span", "", watched ? (peer.state.load ?? "…") : "not watched"));
+  const bar = el("div", "bar");
+  const fill = el("span");
+  fill.style.width = `${watched ? Number(peer.state.load ?? 0) : 0}%`;
+  bar.append(fill);
+  load.append(loadRow, bar);
+  card.append(load);
+
+  for (const [topic, sub] of Object.entries(peer.subs)) {
+    const foot = el("div", "kv");
+    const state = el("span", "meta");
+    state.dataset.topic = topic;
+    state.append(el("span", `pill ${sub.state}`, sub.state), document.createTextNode(` ${topic} ${sub.reason}`));
+    foot.append(state);
+    if (sub.id) foot.append(button("Resync", () => node.resyncServiceSubscription(sub.id), "quiet small"));
+    card.append(foot);
+  }
+  if (!peer.linked) card.append(el("div", "meta", "out of range; queued updates wait for it"));
+  return card;
+}
+
+function render() {
+  const list = $("peers");
+  list.replaceChildren();
+  if (peers.size === 0) {
+    list.append(el("div", "empty", "No other devices yet. Open this page in another tab and it appears here."));
+  }
+  for (const [address, peer] of peers) list.append(renderPeer(address, peer));
+
+  const alertList = $("alerts");
+  alertList.replaceChildren();
+  if (alerts.length === 0) alertList.append(el("li", "meta", "None yet. Raise one from another tab."));
+  for (const { address, from, level, text, summary, at } of alerts.slice(0, 20)) {
+    const item = el("li");
+    const body = el("span", "text");
+    const who = el("strong", "", `${peers.get(address)?.state.name ?? from} `);
+    body.append(who, summary ? el("span", "summary", `summary: ${text}`) : document.createTextNode(text));
+    item.append(
+      el("span", `pill ${level}`, level),
+      body,
+      el("span", "meta", at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })),
+    );
+    alertList.append(item);
+  }
+
+  $("asks-section").hidden = asks.size === 0;
+  const askList = $("asks");
+  askList.replaceChildren();
+  for (const [subId, ask] of asks) {
+    const item = el("li");
+    const who = el("span", "who");
+    who.append(el("strong", "", short(ask.sender)), document.createTextNode(` wants to watch ${ask.topic}`));
+    if (ask.renewal) who.append(el("span", "meta", " (says it was watching before)"));
+    item.append(
+      who,
+      button("Accept", async () => { await node.acceptServiceSubscription(subId); asks.delete(subId); render(); }, "small"),
+      button("Reject", async () => { await node.rejectServiceSubscription(subId, "not now"); asks.delete(subId); render(); }, "quiet small"),
+    );
+    askList.append(item);
+  }
+}
+
+// Last, with every listener attached: a neighbour found during these awaits
+// is still watched.
+render();
+addEventListener("pagehide", () => node.stop());
+await node.registerService(SERVICE, { version: "1", capabilities: { topics: "status,alerts" } });
+await node.setServiceSubscriptionPolicy(SERVICE, { kind: "accept_all" });
+for (const [key, value] of [["name", $("name").value], ["status", $("status").value], ["load", $("load").value]]) {
+  await publishState(key, value);
+}
+</script>
+</html>

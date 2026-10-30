@@ -4201,6 +4201,192 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // SERVICE SUBSCRIPTIONS (ADR 0035)
+    // ========================================================================
+
+    /// Subscribes to `topic` of `service_id` on `provider` (ADR 0035).
+    pub(crate) fn svc_subscribe_service(
+        &self,
+        provider: String,
+        service_id: String,
+        topic: String,
+        mode: SubscriptionMode,
+        params: String,
+        keys: Vec<String>,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .subscribe_service_with(
+                &provider,
+                &service_id,
+                &topic,
+                offline_protocol::SubscribeOptions {
+                    mode: mode.into(),
+                    params,
+                    keys,
+                },
+            )
+            .map_err(map_send_error)
+    }
+
+    /// Ends a subscription this device holds. `false` when there is none.
+    pub(crate) fn svc_unsubscribe_service(&self, sub_id: String) -> Result<bool, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .unsubscribe_service(&sub_id)
+            .map_err(map_send_error)
+    }
+
+    /// Asks the provider for the whole state again now.
+    pub(crate) fn svc_resync_service_subscription(
+        &self,
+        sub_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .resync_service_subscription(&sub_id)
+            .map_err(map_send_error)
+    }
+
+    /// The subscriptions this device holds on other devices.
+    pub(crate) fn svc_service_subscriptions(
+        &self,
+    ) -> Result<Vec<ServiceSubscriptionInfo>, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        Ok(protocol
+            .service_subscriptions()
+            .into_iter()
+            .map(|info| ServiceSubscriptionInfo {
+                sub_id: info.sub_id,
+                provider: info.provider,
+                service_id: info.service_id,
+                topic: info.topic,
+                mode: info.mode.into(),
+                state: info.state.into(),
+                keys: info.keys,
+                topics: info.topics,
+            })
+            .collect())
+    }
+
+    /// Sets who may subscribe to `service_id`.
+    pub(crate) fn svc_set_service_subscription_policy(
+        &self,
+        service_id: String,
+        policy: SubscriptionPolicyConfig,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .set_service_subscription_policy(&service_id, policy.into())
+            .map_err(map_send_error)
+    }
+
+    /// Accepts a subscription the app was asked about.
+    pub(crate) fn svc_accept_service_subscription(
+        &self,
+        sub_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .accept_service_subscription(&sub_id)
+            .map_err(map_send_error)
+    }
+
+    /// Rejects a subscription the app was asked about.
+    pub(crate) fn svc_reject_service_subscription(
+        &self,
+        sub_id: String,
+        reason: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .reject_service_subscription(&sub_id, &reason)
+            .map_err(map_send_error)
+    }
+
+    /// Ends a subscription another device holds on this one.
+    pub(crate) fn svc_end_service_subscription(
+        &self,
+        sub_id: String,
+        reason: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .end_service_subscription(&sub_id, &reason)
+            .map_err(map_send_error)
+    }
+
+    /// Publishes to a topic: `latest` with a key, `log` without one.
+    pub(crate) fn svc_publish_service_update(
+        &self,
+        service_id: String,
+        topic: String,
+        key: Option<String>,
+        body: String,
+    ) -> Result<ServicePublishReport, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        let report = protocol
+            .publish_service_update(&service_id, &topic, key.as_deref(), &body)
+            .map_err(map_send_error)?;
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Ok(ServicePublishReport {
+            subscribers: count(report.subscribers),
+            sent_live: count(report.sent_live),
+            queued: count(report.queued),
+            coalesced: count(report.coalesced),
+            failed: count(report.failed),
+        })
+    }
+
+    /// Sets a `log` topic's checkpoint.
+    pub(crate) fn svc_set_service_topic_checkpoint(
+        &self,
+        service_id: String,
+        topic: String,
+        body: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .set_service_topic_checkpoint(&service_id, &topic, &body)
+            .map_err(map_send_error)
+    }
+
+    /// Starts a topic over under a new stream.
+    pub(crate) fn svc_clear_service_topic(
+        &self,
+        service_id: String,
+        topic: String,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .clear_service_topic(&service_id, &topic)
+            .map_err(map_send_error)
+    }
+
+    /// The subscriptions other devices hold on `service_id`, or on every
+    /// service for `None`.
+    pub(crate) fn svc_service_subscribers(
+        &self,
+        service_id: Option<String>,
+    ) -> Result<Vec<ServiceSubscriberInfo>, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        Ok(protocol
+            .service_subscribers(service_id.as_deref())
+            .into_iter()
+            .map(|info| ServiceSubscriberInfo {
+                sub_id: info.sub_id,
+                subscriber: info.subscriber,
+                service_id: info.service_id,
+                topic: info.topic,
+                mode: info.mode.into(),
+                state: info.state.into(),
+                params: info.params,
+                keys: info.keys,
+            })
+            .collect())
+    }
+
+    // ========================================================================
     // BLE TRANSPORT OPERATIONS
     // ========================================================================
 
@@ -8137,6 +8323,233 @@ impl MeshServices {
         self.protocol
             .svc_respond_to_service_request(request_id, requester, service_id, status, body)
     }
+
+    /// Subscribes to `topic` of `service_id` on `provider` (ADR 0035).
+    pub fn subscribe_service(
+        &self,
+        provider: String,
+        service_id: String,
+        topic: String,
+        mode: SubscriptionMode,
+        params: String,
+        keys: Vec<String>,
+    ) -> Result<String, ProtocolError> {
+        self.protocol
+            .svc_subscribe_service(provider, service_id, topic, mode, params, keys)
+    }
+
+    /// Ends a subscription this device holds. `false` when there is none.
+    pub fn unsubscribe_service(&self, sub_id: String) -> Result<bool, ProtocolError> {
+        self.protocol.svc_unsubscribe_service(sub_id)
+    }
+
+    /// Asks the provider for the whole state again now.
+    pub fn resync_service_subscription(&self, sub_id: String) -> Result<(), ProtocolError> {
+        self.protocol.svc_resync_service_subscription(sub_id)
+    }
+
+    /// The subscriptions this device holds on other devices.
+    pub fn service_subscriptions(&self) -> Result<Vec<ServiceSubscriptionInfo>, ProtocolError> {
+        self.protocol.svc_service_subscriptions()
+    }
+
+    /// Sets who may subscribe to `service_id`.
+    pub fn set_service_subscription_policy(
+        &self,
+        service_id: String,
+        policy: SubscriptionPolicyConfig,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .svc_set_service_subscription_policy(service_id, policy)
+    }
+
+    /// Accepts a subscription the app was asked about.
+    pub fn accept_service_subscription(&self, sub_id: String) -> Result<(), ProtocolError> {
+        self.protocol.svc_accept_service_subscription(sub_id)
+    }
+
+    /// Rejects a subscription the app was asked about.
+    pub fn reject_service_subscription(
+        &self,
+        sub_id: String,
+        reason: String,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .svc_reject_service_subscription(sub_id, reason)
+    }
+
+    /// Ends a subscription another device holds on this one.
+    pub fn end_service_subscription(
+        &self,
+        sub_id: String,
+        reason: String,
+    ) -> Result<(), ProtocolError> {
+        self.protocol.svc_end_service_subscription(sub_id, reason)
+    }
+
+    /// Publishes to a topic: `latest` with a key, `log` without one.
+    pub fn publish_service_update(
+        &self,
+        service_id: String,
+        topic: String,
+        key: Option<String>,
+        body: String,
+    ) -> Result<ServicePublishReport, ProtocolError> {
+        self.protocol
+            .svc_publish_service_update(service_id, topic, key, body)
+    }
+
+    /// Sets a `log` topic's checkpoint.
+    pub fn set_service_topic_checkpoint(
+        &self,
+        service_id: String,
+        topic: String,
+        body: String,
+    ) -> Result<(), ProtocolError> {
+        self.protocol
+            .svc_set_service_topic_checkpoint(service_id, topic, body)
+    }
+
+    /// Starts a topic over under a new stream.
+    pub fn clear_service_topic(
+        &self,
+        service_id: String,
+        topic: String,
+    ) -> Result<(), ProtocolError> {
+        self.protocol.svc_clear_service_topic(service_id, topic)
+    }
+
+    /// The subscriptions other devices hold on `service_id`, or on every
+    /// service for `None`.
+    pub fn service_subscribers(
+        &self,
+        service_id: Option<String>,
+    ) -> Result<Vec<ServiceSubscriberInfo>, ProtocolError> {
+        self.protocol.svc_service_subscribers(service_id)
+    }
+}
+
+/// How a topic treats its updates (ADR 0035). See the UDL enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionMode {
+    Latest,
+    Log,
+}
+
+impl From<SubscriptionMode> for offline_protocol::SubscriptionMode {
+    fn from(mode: SubscriptionMode) -> Self {
+        match mode {
+            SubscriptionMode::Latest => Self::Latest,
+            SubscriptionMode::Log => Self::Log,
+        }
+    }
+}
+
+impl From<offline_protocol::SubscriptionMode> for SubscriptionMode {
+    fn from(mode: offline_protocol::SubscriptionMode) -> Self {
+        match mode {
+            offline_protocol::SubscriptionMode::Latest => Self::Latest,
+            offline_protocol::SubscriptionMode::Log => Self::Log,
+        }
+    }
+}
+
+/// Which admission policy a service has. See the UDL enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionPolicyKind {
+    Restricted,
+    AcceptAll,
+    Rules,
+}
+
+/// What `Rules` does with a subscriber no rule matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionRulesFallback {
+    Ask,
+    Reject,
+}
+
+/// Where a subscription stands. See the UDL enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionState {
+    Pending,
+    Active,
+    Paused,
+    Ended,
+}
+
+impl From<offline_protocol::SubscriptionState> for SubscriptionState {
+    fn from(state: offline_protocol::SubscriptionState) -> Self {
+        use offline_protocol::SubscriptionState as Core;
+        match state {
+            Core::Pending => Self::Pending,
+            Core::Active => Self::Active,
+            Core::Paused => Self::Paused,
+            Core::Ended => Self::Ended,
+        }
+    }
+}
+
+/// A service's admission policy, flattened for the bindings.
+#[derive(Debug, Clone)]
+pub struct SubscriptionPolicyConfig {
+    pub kind: SubscriptionPolicyKind,
+    pub allow_peers: Vec<String>,
+    pub allow_groups: Vec<String>,
+    pub rules_fallback: SubscriptionRulesFallback,
+}
+
+impl From<SubscriptionPolicyConfig> for offline_protocol::SubscriptionPolicy {
+    fn from(policy: SubscriptionPolicyConfig) -> Self {
+        match policy.kind {
+            SubscriptionPolicyKind::Restricted => Self::Restricted,
+            SubscriptionPolicyKind::AcceptAll => Self::AcceptAll,
+            SubscriptionPolicyKind::Rules => Self::Rules {
+                allow_peers: policy.allow_peers,
+                allow_groups: policy.allow_groups,
+                fallback: match policy.rules_fallback {
+                    SubscriptionRulesFallback::Ask => offline_protocol::RulesFallback::Ask,
+                    SubscriptionRulesFallback::Reject => offline_protocol::RulesFallback::Reject,
+                },
+            },
+        }
+    }
+}
+
+/// What one publish did. See the UDL dictionary.
+#[derive(Debug, Clone, Default)]
+pub struct ServicePublishReport {
+    pub subscribers: u32,
+    pub sent_live: u32,
+    pub queued: u32,
+    pub coalesced: u32,
+    pub failed: u32,
+}
+
+/// A subscription this device holds on another.
+#[derive(Debug, Clone)]
+pub struct ServiceSubscriptionInfo {
+    pub sub_id: String,
+    pub provider: String,
+    pub service_id: String,
+    pub topic: String,
+    pub mode: SubscriptionMode,
+    pub state: SubscriptionState,
+    pub keys: Vec<String>,
+    pub topics: Vec<String>,
+}
+
+/// A subscription another device holds on this one.
+#[derive(Debug, Clone)]
+pub struct ServiceSubscriberInfo {
+    pub sub_id: String,
+    pub subscriber: String,
+    pub service_id: String,
+    pub topic: String,
+    pub mode: SubscriptionMode,
+    pub state: SubscriptionState,
+    pub params: String,
+    pub keys: Vec<String>,
 }
 
 #[cfg(test)]
@@ -19047,13 +19460,38 @@ mod tests {
             "sendServiceRequest",
             "sendTypingIndicator",
         ];
+        // Joined since, each by decision. The subscription calls (ADR 0035)
+        // map like the request and response they sit beside: an app tells a
+        // provider that does not route subscriptions (`ServiceError`) from a
+        // generic failure by the typed code.
+        const JOINED_SINCE: &[&str] = &[
+            "acceptServiceSubscription",
+            "clearServiceTopic",
+            "endServiceSubscription",
+            "publishServiceUpdate",
+            "rejectServiceSubscription",
+            "resyncServiceSubscription",
+            "serviceSubscribers",
+            "serviceSubscriptions",
+            "setServiceSubscriptionPolicy",
+            "setServiceTopicCheckpoint",
+            "subscribeService",
+            "unsubscribeService",
+        ];
+        let mut expected: Vec<&str> = MAPPED_BEFORE_THE_SHARED_BRIDGE
+            .iter()
+            .chain(JOINED_SINCE)
+            .copied()
+            .collect();
+        expected.sort();
         let manifest = rn_engine_bridge_manifest();
         let mut flagged = rn_engine_bridge_flagged(&manifest, "mapProtocolErrors");
         flagged.sort();
         assert_eq!(
-            flagged, MAPPED_BEFORE_THE_SHARED_BRIDGE,
+            flagged, expected,
             "tools/rn_engine_bridge_error_manifest.json `mapProtocolErrors` must name exactly \
-             the methods that rejected through rejectWithProtocolError before the shared bridge"
+             the methods that rejected through rejectWithProtocolError before the shared bridge, \
+             plus the ones that joined since by decision (JOINED_SINCE)"
         );
 
         let kotlin = rn_source_code_only(

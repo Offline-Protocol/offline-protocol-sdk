@@ -4,6 +4,11 @@
     "mapProtocolErrors": true,
     "message": "Failed to accept connection request"
   },
+  "acceptServiceSubscription": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to accept service subscription"
+  },
   "bleGetDiagnostics": {
     "code": "ERROR_BLE",
     "message": "Protocol not initialized"
@@ -30,6 +35,11 @@
     "mapProtocolErrors": true,
     "message": "Failed to query presence: Internet transport not initialized"
   },
+  "clearServiceTopic": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to clear service topic"
+  },
   "createInvite": {
     "code": "ERROR_NOT_INITIALIZED",
     "message": "Protocol not initialized"
@@ -49,6 +59,11 @@
   "discoverServices": {
     "code": "ERROR_DISCOVER_SERVICES",
     "message": "Failed to discover services"
+  },
+  "endServiceSubscription": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to end service subscription"
   },
   "eraseCustody": {
     "code": "ERROR_ERASECUSTODY",
@@ -287,6 +302,11 @@
     "mapProtocolErrors": true,
     "message": "Failed to process file chunk"
   },
+  "publishServiceUpdate": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to publish service update"
+  },
   "registerService": {
     "code": "ERROR_REGISTER_SERVICE",
     "message": "Failed to register service"
@@ -295,6 +315,11 @@
     "code": "ERROR_CONNECTION_REQUEST",
     "mapProtocolErrors": true,
     "message": "Failed to reject connection request"
+  },
+  "rejectServiceSubscription": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to reject service subscription"
   },
   "rekeySession": {
     "code": "ERROR_MLS",
@@ -317,6 +342,11 @@
     "code": "ERROR_SERVICE_RESPONSE",
     "mapProtocolErrors": true,
     "message": "Failed to respond to service request"
+  },
+  "resyncServiceSubscription": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to resync service subscription"
   },
   "sendConnectionRequest": {
     "code": "ERROR_CONNECTION_REQUEST",
@@ -363,6 +393,16 @@
     "mapProtocolErrors": true,
     "message": "Failed to send typing indicator"
   },
+  "serviceSubscribers": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to list service subscribers"
+  },
+  "serviceSubscriptions": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to list service subscriptions"
+  },
   "setBatteryLevel": {
     "code": "ERROR_BATTERY",
     "message": "Protocol not initialized"
@@ -374,6 +414,16 @@
   "setRelayPriority": {
     "code": "ERROR_RELAY",
     "message": "Protocol not initialized"
+  },
+  "setServiceSubscriptionPolicy": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to set service subscription policy"
+  },
+  "setServiceTopicCheckpoint": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to set service topic checkpoint"
   },
   "shouldEscalateToWifi": {
     "code": "ERROR_DORS",
@@ -387,6 +437,11 @@
     "code": "ERROR_NOT_INITIALIZED",
     "message": "Protocol not initialized"
   },
+  "subscribeService": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to subscribe to service"
+  },
   "unblockUser": {
     "code": "ERROR_UNBLOCK_USER",
     "message": "Failed to unblock user"
@@ -394,6 +449,11 @@
   "unregisterService": {
     "code": "ERROR_UNREGISTER_SERVICE",
     "message": "Failed to unregister service"
+  },
+  "unsubscribeService": {
+    "code": "ERROR_SERVICE_SUBSCRIPTION",
+    "mapProtocolErrors": true,
+    "message": "Failed to unsubscribe from service"
   },
   "updateAckConfig": {
     "code": "ERROR_CONFIG",

@@ -190,6 +190,216 @@ fn a_removed_member_is_told_and_the_group_moves_to_a_new_epoch() {
     assert_eq!(b.node.group_info(&group).expect("info"), None);
 }
 
+/// A subscription between two browser nodes (ADR 0035): opened before any
+/// session, admitted by policy, then a `latest` value published on one
+/// arrives on the other, and a resync hands it back.
+#[test]
+fn a_subscription_delivers_a_published_value_and_a_resync() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "neighbor_discovered", "peer_id", &b_addr)
+    }));
+    b.node
+        .register_service("fleet.v1", "1.0", r#"{"kind":"tracker"}"#)
+        .expect("register");
+    b.node
+        .set_service_subscription_policy("fleet.v1", r#"{"kind":"accept_all"}"#)
+        .expect("policy");
+    b.node
+        .publish_service_update("fleet.v1", "battery", Some("pct".into()), "81")
+        .expect("publish");
+    let sub_id = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_update_received" && e["sub_id"] == sub_id && e["body"] == "81"
+        })
+    }));
+    let subs: serde_json::Value =
+        serde_json::from_str(&a.node.service_subscriptions().expect("list")).expect("json");
+    assert_eq!(subs[0]["state"], "active");
+    let subscribers: serde_json::Value =
+        serde_json::from_str(&b.node.service_subscribers(None).expect("list")).expect("json");
+    assert_eq!(subscribers[0]["subId"], sub_id.as_str());
+
+    a.events.clear();
+    a.node.resync_service_subscription(&sub_id).expect("resync");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events
+            .iter()
+            .any(|e| e["type"] == "service_update_received" && e["snapshot"] == true)
+    }));
+    assert!(a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "x", "stream", "", &[])
+        .is_err());
+
+    // A pattern with a key filter: one subscription across topics, and only
+    // the keys asked for.
+    b.node
+        .publish_service_update("fleet.v1", "cars/1", Some("pct".into()), "c1-pct")
+        .expect("publish");
+    b.node
+        .publish_service_update("fleet.v1", "cars/1", Some("gps".into()), "c1-gps")
+        .expect("publish");
+    a.events.clear();
+    let pattern = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "cars/*", "latest", "", &["pct".into()])
+        .expect("subscribe to a pattern");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_update_received"
+                && e["sub_id"] == pattern
+                && e["topic"] == "cars/1"
+                && e["body"] == "c1-pct"
+        })
+    }));
+    assert!(!a
+        .events
+        .iter()
+        .any(|e| e["type"] == "service_update_received" && e["body"] == "c1-gps"));
+}
+
+/// A list that is not all strings is refused rather than dropped: a `rules`
+/// policy that lost its list would admit nobody by rule, silently.
+#[test]
+fn a_policy_with_a_malformed_list_is_refused() {
+    let a = peer("alice");
+    let mut node = a.node;
+    for policy in [
+        r#"{"kind":"rules","allowPeers":["a",1]}"#,
+        r#"{"kind":"rules","allowPeers":"a"}"#,
+        r#"{"kind":"rules","allowGroups":[null]}"#,
+        r#"{"kind":"accept_all","allowPeers":[1]}"#,
+        r#"{"kind":"rules","fallback":"maybe"}"#,
+        r#"{"kind":"everyone"}"#,
+        r#"["accept_all"]"#,
+        "not json",
+    ] {
+        assert!(
+            node.set_service_subscription_policy("fleet.v1", policy)
+                .is_err(),
+            "{policy} was accepted"
+        );
+    }
+    for policy in [
+        r#"{"kind":"rules","allowPeers":["a"],"allowGroups":null,"fallback":"reject"}"#,
+        r#"{"kind":"restricted"}"#,
+        "{}",
+    ] {
+        node.set_service_subscription_policy("fleet.v1", policy)
+            .unwrap_or_else(|e| panic!("{policy} was refused: {e:?}"));
+    }
+}
+
+/// `rules` through the JSON layer: a listed peer is admitted without asking,
+/// and with `fallback: reject` an unlisted one is refused without asking.
+#[test]
+fn a_rules_policy_admits_the_listed_peer_and_refuses_the_rest() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let (a_addr, b_addr) = (a.address.clone(), b.address.clone());
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "neighbor_discovered", "peer_id", &b_addr)
+    }));
+    b.node
+        .register_service("fleet.v1", "1.0", "")
+        .expect("register");
+    b.node
+        .set_service_subscription_policy(
+            "fleet.v1",
+            &serde_json::json!({
+                "kind": "rules", "allowPeers": ["someone else"], "fallback": "reject",
+            })
+            .to_string(),
+        )
+        .expect("policy");
+    let refused = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_subscription_changed"
+                && e["sub_id"] == refused
+                && e["state"] == "ended"
+        })
+    }));
+    assert!(!saw(&b, "service_subscribe_received", "sub_id", &refused));
+
+    b.node
+        .set_service_subscription_policy(
+            "fleet.v1",
+            &serde_json::json!({ "kind": "rules", "allowPeers": [a_addr] }).to_string(),
+        )
+        .expect("policy");
+    let admitted = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_subscription_changed"
+                && e["sub_id"] == admitted
+                && e["state"] == "active"
+        })
+    }));
+    assert!(!saw(&b, "service_subscribe_received", "sub_id", &admitted));
+}
+
+/// `restricted` asks the application: an answer settles the subscription on
+/// the other device, either way.
+#[test]
+fn a_restricted_service_asks_and_the_answer_reaches_the_subscriber() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "neighbor_discovered", "peer_id", &b_addr)
+    }));
+    b.node
+        .register_service("fleet.v1", "1.0", "")
+        .expect("register");
+
+    let rejected = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |_, b| {
+        saw(b, "service_subscribe_received", "sub_id", &rejected)
+    }));
+    b.node
+        .reject_service_subscription(&rejected, "not now")
+        .expect("reject");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_subscription_changed"
+                && e["sub_id"] == rejected
+                && e["state"] == "ended"
+        })
+    }));
+
+    let accepted = a
+        .node
+        .subscribe_service(&b_addr, "fleet.v1", "battery", "latest", "", &[])
+        .expect("subscribe");
+    assert!(run_until(&mut a, &mut b, |_, b| {
+        saw(b, "service_subscribe_received", "sub_id", &accepted)
+    }));
+    b.node
+        .accept_service_subscription(&accepted)
+        .expect("accept");
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        a.events.iter().any(|e| {
+            e["type"] == "service_subscription_changed"
+                && e["sub_id"] == accepted
+                && e["state"] == "active"
+        })
+    }));
+}
+
 #[test]
 fn a_second_link_proving_an_announced_address_is_refused() {
     let (mut a, mut b) = (peer("alice"), peer("bob"));
@@ -392,6 +602,8 @@ fn the_browser_tests_run_in_ci() {
         "bash bindings/web/scripts/test-conformance.sh",
         // A lobby-only change must run the job that reloads it offline (W15).
         "- 'examples/web-lobby/**'",
+        // The browser job opens the coordination example in two frames.
+        "- 'examples/web-coordination/**'",
     ] {
         assert!(
             ci.contains(needle),

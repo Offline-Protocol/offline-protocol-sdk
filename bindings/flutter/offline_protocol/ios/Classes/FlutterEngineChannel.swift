@@ -21,6 +21,8 @@ enum FlutterEngineChannel {
         switch method {
         case "acceptConnectionRequest":
             return try ProtocolEngineHostBridge.acceptConnectionRequest(host: host, env: env, arguments: arguments)
+        case "acceptServiceSubscription":
+            return try ProtocolEngineHostBridge.acceptServiceSubscription(host: host, env: env, arguments: arguments)
         case "bleGetDiagnostics":
             return try ProtocolEngineHostBridge.bleGetDiagnostics(host: host, env: env, arguments: arguments)
         case "bleGetPeerCount":
@@ -33,6 +35,8 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.cancelFileTransfer(host: host, env: env, arguments: arguments)
         case "checkInternetPresence":
             return try ProtocolEngineHostBridge.checkInternetPresence(host: host, env: env, arguments: arguments)
+        case "clearServiceTopic":
+            return try ProtocolEngineHostBridge.clearServiceTopic(host: host, env: env, arguments: arguments)
         case "create":
             return try ProtocolEngineHostBridge.create(host: host, env: env, arguments: arguments)
         case "createInvite":
@@ -117,6 +121,8 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.enableTelemetry(host: host, env: env, arguments: arguments)
         case "enableTransport":
             return try ProtocolEngineHostBridge.enableTransport(host: host, env: env, arguments: arguments)
+        case "endServiceSubscription":
+            return try ProtocolEngineHostBridge.endServiceSubscription(host: host, env: env, arguments: arguments)
         case "endTelemetrySession":
             return try ProtocolEngineHostBridge.endTelemetrySession(host: host, env: env, arguments: arguments)
         case "eraseCustody":
@@ -273,12 +279,16 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.pause(host: host, env: env, arguments: arguments)
         case "processFileChunk":
             return try ProtocolEngineHostBridge.processFileChunk(host: host, env: env, arguments: arguments)
+        case "publishServiceUpdate":
+            return try ProtocolEngineHostBridge.publishServiceUpdate(host: host, env: env, arguments: arguments)
         case "receiveMessage":
             return try ProtocolEngineHostBridge.receiveMessage(host: host, env: env, arguments: arguments)
         case "registerService":
             return try ProtocolEngineHostBridge.registerService(host: host, env: env, arguments: arguments)
         case "rejectConnectionRequest":
             return try ProtocolEngineHostBridge.rejectConnectionRequest(host: host, env: env, arguments: arguments)
+        case "rejectServiceSubscription":
+            return try ProtocolEngineHostBridge.rejectServiceSubscription(host: host, env: env, arguments: arguments)
         case "rekeySession":
             return try ProtocolEngineHostBridge.rekeySession(host: host, env: env, arguments: arguments)
         case "releaseTransportLock":
@@ -293,6 +303,8 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.respondToServiceRequest(host: host, env: env, arguments: arguments)
         case "resume":
             return try ProtocolEngineHostBridge.resume(host: host, env: env, arguments: arguments)
+        case "resyncServiceSubscription":
+            return try ProtocolEngineHostBridge.resyncServiceSubscription(host: host, env: env, arguments: arguments)
         case "sendConnectionRequest":
             return try ProtocolEngineHostBridge.sendConnectionRequest(host: host, env: env, arguments: arguments)
         case "sendFileFromPath":
@@ -313,12 +325,20 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.sendServiceRequest(host: host, env: env, arguments: arguments)
         case "sendTypingIndicator":
             return try ProtocolEngineHostBridge.sendTypingIndicator(host: host, env: env, arguments: arguments)
+        case "serviceSubscribers":
+            return try ProtocolEngineHostBridge.serviceSubscribers(host: host, env: env, arguments: arguments)
+        case "serviceSubscriptions":
+            return try ProtocolEngineHostBridge.serviceSubscriptions(host: host, env: env, arguments: arguments)
         case "setBatteryLevel":
             return try ProtocolEngineHostBridge.setBatteryLevel(host: host, env: env, arguments: arguments)
         case "setBatteryState":
             return try ProtocolEngineHostBridge.setBatteryState(host: host, env: env, arguments: arguments)
         case "setRelayPriority":
             return try ProtocolEngineHostBridge.setRelayPriority(host: host, env: env, arguments: arguments)
+        case "setServiceSubscriptionPolicy":
+            return try ProtocolEngineHostBridge.setServiceSubscriptionPolicy(host: host, env: env, arguments: arguments)
+        case "setServiceTopicCheckpoint":
+            return try ProtocolEngineHostBridge.setServiceTopicCheckpoint(host: host, env: env, arguments: arguments)
         case "setTelemetryEnabled":
             return try ProtocolEngineHostBridge.setTelemetryEnabled(host: host, env: env, arguments: arguments)
         case "shouldEscalateToWifi":
@@ -331,6 +351,8 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.start(host: host, env: env, arguments: arguments)
         case "stop":
             return try ProtocolEngineHostBridge.stop(host: host, env: env, arguments: arguments)
+        case "subscribeService":
+            return try ProtocolEngineHostBridge.subscribeService(host: host, env: env, arguments: arguments)
         case "telemetryInstallId":
             return try ProtocolEngineHostBridge.telemetryInstallId(host: host, env: env, arguments: arguments)
         case "telemetryStats":
@@ -339,6 +361,8 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.unblockUser(host: host, env: env, arguments: arguments)
         case "unregisterService":
             return try ProtocolEngineHostBridge.unregisterService(host: host, env: env, arguments: arguments)
+        case "unsubscribeService":
+            return try ProtocolEngineHostBridge.unsubscribeService(host: host, env: env, arguments: arguments)
         case "updateAckConfig":
             return try ProtocolEngineHostBridge.updateAckConfig(host: host, env: env, arguments: arguments)
         case "updateDedupConfig":

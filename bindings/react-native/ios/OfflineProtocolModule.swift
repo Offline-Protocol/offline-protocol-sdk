@@ -2111,6 +2111,56 @@ class OfflineProtocolModule: RCTEventEmitter {
         ProtocolEngineHostBridgeReactNative.respondToServiceRequest(self, requestId, requester: requester, serviceId: serviceId, status: status, body: body, resolver: resolver, rejecter: rejecter)
     }
 
+    // Service subscriptions (ADR 0035).
+
+    @objc func subscribeService(_ provider: String, serviceId: String, topic: String, mode: String, params: String, keysJson: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.subscribeService(self, provider, serviceId: serviceId, topic: topic, mode: mode, params: params, keysJson: keysJson, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func unsubscribeService(_ subId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.unsubscribeService(self, subId, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func resyncServiceSubscription(_ subId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.resyncServiceSubscription(self, subId, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func serviceSubscriptions(_ resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.serviceSubscriptions(self, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func setServiceSubscriptionPolicy(_ serviceId: String, policyJson: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.setServiceSubscriptionPolicy(self, serviceId, policyJson: policyJson, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func acceptServiceSubscription(_ subId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.acceptServiceSubscription(self, subId, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func rejectServiceSubscription(_ subId: String, reason: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.rejectServiceSubscription(self, subId, reason: reason, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func endServiceSubscription(_ subId: String, reason: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.endServiceSubscription(self, subId, reason: reason, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func publishServiceUpdate(_ serviceId: String, topic: String, key: String?, body: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.publishServiceUpdate(self, serviceId, topic: topic, key: key, body: body, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func setServiceTopicCheckpoint(_ serviceId: String, topic: String, body: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.setServiceTopicCheckpoint(self, serviceId, topic: topic, body: body, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func clearServiceTopic(_ serviceId: String, topic: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.clearServiceTopic(self, serviceId, topic: topic, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func serviceSubscribers(_ serviceId: String?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.serviceSubscribers(self, serviceId, resolver: resolver, rejecter: rejecter)
+    }
+
     // MARK: - User Blocking
 
     @objc func blockUser(_ userId: String,

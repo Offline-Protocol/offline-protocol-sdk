@@ -629,8 +629,8 @@ reported rather than silent.
 3. **Fan-out.** Group-backed topics (one MLS group per topic: cryptographic
    revocation and one encryption for many subscribers, at the cost of a
    commit per join and ADR 0032's ratchet-gap budget) change how groups
-   behave rather than how subscriptions do, and are their own decision,
-   proposed in an ADR of its own.
+   behave rather than how subscriptions do, and are their own decision:
+   [ADR 0036](0036-a-topic-can-be-backed-by-a-group.md).
 
 ## Consequences
 

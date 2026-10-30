@@ -142,6 +142,99 @@ class StaleAddressDisconnectTest {
     }
 
     @Test
+    fun `a link disconnected to redial is redialled even though the peer holds another link`() {
+        // A silent link's peer usually also writes to our server from an
+        // address its hello mapped. Dropping the silent address as stale left
+        // the redial to a fresh advertisement, which a backgrounded iPhone may
+        // never send.
+        val silent = gatt(old)
+        host.connections.registerGatt(old, silent)
+        host.connections.markClientEstablished(old)
+        host.connections.setDeviceIdentifier(old, "peerH")
+        host.connections.registerGatt(new, gatt(new))
+        host.connections.setDeviceIdentifier(new, "peerH")
+
+        client.disconnectToRedial(silent)
+        disconnect(silent)
+
+        assertEquals(listOf(old), host.dialed)
+        assertEquals(emptyList<String>(), host.staleDropped)
+    }
+
+    @Test
+    fun `a client link is redialled when the peer's only other link is an unsubscribed server link`() {
+        // A restarted iPhone's restored link to our server is mapped (by its
+        // old hello, or a refused dial) but never subscribed again, so it
+        // cannot carry our sends. Counted as the peer's other link, it made
+        // the client link stale and left nothing to send over.
+        val dropped = gatt(old)
+        host.connections.registerGatt(old, dropped)
+        host.connections.markClientEstablished(old)
+        host.connections.setDeviceIdentifier(old, "peerM")
+        host.connections.trackServerConnection(new)
+        host.connections.setDeviceIdentifier(new, "peerM")
+
+        disconnect(dropped)
+
+        assertEquals(listOf(old), host.dialed)
+        assertEquals(emptyList<String>(), host.staleDropped)
+    }
+
+    @Test
+    fun `a subscribed server link still makes a dropped client link stale`() {
+        val dropped = gatt(old)
+        host.connections.registerGatt(old, dropped)
+        host.connections.setDeviceIdentifier(old, "peerN")
+        host.connections.trackServerConnection(new)
+        host.connections.setDeviceIdentifier(new, "peerN")
+        host.subscribed += new
+
+        disconnect(dropped)
+
+        assertEquals(emptyList<String>(), host.dialed)
+        assertEquals(listOf(old), host.staleDropped)
+    }
+
+    @Test
+    fun `fragments drained once their writer is named count as hearing the peer`() {
+        // Otherwise an answer that arrived before its sender was resolved went
+        // unseen, and a link the peer had answered was torn down as silent.
+        host.pendingInbound.enqueue(old, byteArrayOf(1))
+        host.pendingInbound.enqueue(old, byteArrayOf(2))
+
+        client.drainPendingInboundFor(old, "peerI")
+        client.drainPendingInboundFor(new, "peerJ")
+
+        assertEquals(listOf("peerI"), host.heard)
+    }
+
+    @Test
+    fun `a refused dial maps the server link a hello-less writer uses, as a hello would`() {
+        // The binding skipped the per-peer MTU flush every other mapping runs,
+        // so a notify over that link could be sized for another one.
+        host.connections.trackServerConnection(old)
+        host.pendingInbound.enqueue(old, byteArrayOf(1))
+
+        client.bindRefusedDialServerLink(old, "peerK")
+
+        assertEquals("peerK", host.connections.deviceIdForAddress(old))
+        assertEquals(listOf(old to "peerK"), host.bound)
+        assertEquals(listOf("peerK"), host.heard)
+    }
+
+    @Test
+    fun `a refused dial's own echo on our server is not mapped`() {
+        // Android reports our own dial to the server too; with nothing written
+        // from that address there is no proof of who is there.
+        host.connections.trackServerConnection(old)
+
+        client.bindRefusedDialServerLink(old, "peerL")
+
+        assertNull(host.connections.deviceIdForAddress(old))
+        assertEquals(emptyList<Pair<String, String>>(), host.bound)
+    }
+
+    @Test
     fun `a stale address's gatt is closed even though it is not redialled`() {
         val oldGatt = gatt(old)
         host.connections.registerGatt(old, oldGatt)
@@ -174,6 +267,9 @@ class StaleAddressDisconnectTest {
         val linkDropped = mutableListOf<String>()
         val dialed = mutableListOf<String>()
         val staleDropped = mutableListOf<String>()
+        val heard = mutableListOf<String>()
+        val bound = mutableListOf<Pair<String, String>>()
+        val subscribed = mutableSetOf<String>()
 
         // `finalizeGivenUpPeer` catches what this throws, so the test records
         // peer loss through `onPeerGivenUp`, which runs right after it.
@@ -197,6 +293,9 @@ class StaleAddressDisconnectTest {
         override fun drainAndSendFragments() {}
         override fun onWriteCompleted(address: String) {}
         override fun handleInboundFragment(address: String, data: ByteArray) {}
+        override fun onPeerHeard(deviceId: String) { heard += deviceId }
+        override fun isCentralSubscribed(address: String) = address in subscribed
+        override fun onServerLinkBound(address: String, deviceId: String) { bound += address to deviceId }
         override fun onPeerMtuNegotiated(address: String, maxPayload: Int) {}
         override fun onDeviceIdResolved(address: String, deviceId: String) {}
         override fun onPeerGivenUp(address: String, peerId: String) { givenUp += peerId }

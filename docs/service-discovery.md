@@ -550,6 +550,26 @@ Subscriptions are switched by `ProtocolConfig::service_subscriptions` (on by
 default) and need MLS. The bindings do not carry that section yet, so a device
 on a binding runs the defaults.
 
+### In the bindings
+
+The calls are on `MeshServices` in every UniFFI binding (Swift, Kotlin,
+Python, Ruby, Java, C), with the mode and policy as enums and the policy as
+a `SubscriptionPolicyConfig` record. The hand-written layers take strings:
+
+| Binding | Subscribe | Publish | Policy |
+|---------|-----------|---------|--------|
+| React Native | `new MeshServices().subscribeService(provider, serviceId, topic, 'latest')` | `services.publishServiceUpdate(serviceId, topic, body, key?)` | `services.setServiceSubscriptionPolicy(serviceId, { kind: 'rules', allowGroups, fallback: 'ask' })` |
+| Flutter | `MeshSdk.subscribeService({'provider': ..., 'serviceId': ..., 'topic': ..., 'mode': 'latest'})` | `MeshSdk.publishServiceUpdate({'serviceId': ..., 'topic': ..., 'key': ..., 'body': ...})` | `MeshSdk.setServiceSubscriptionPolicy({'serviceId': ..., 'policyJson': '{"kind":"accept_all"}'})` |
+| Python | `Services.subscribe(provider, service_id, topic, mode="latest")` | `Services.publish(service_id, topic, body, key=...)` | `Services.set_policy(service_id, "rules", allow_groups=[...])` |
+| Browser | `node.subscribeService(provider, serviceId, topic, { mode: "latest" })` | `node.publishServiceUpdate(serviceId, topic, body, { key })` | `node.setServiceSubscriptionPolicy(serviceId, { kind: "accept_all" })` |
+
+The Python local API server routes `service_update_received` and
+`service_subscription_changed` to the client that subscribed, and lets only
+the application that registered a service publish to it, clear it, set its
+checkpoint or set its policy ([local API](spec/local-api.md)).
+[`examples/web-coordination`](../examples/web-coordination) is a page of
+devices that subscribe to each other's state.
+
 ## Example: MeshWiki
 
 The `examples/mesh-wiki/` directory contains a full React Native app demonstrating service discovery in a real-world scenario: a decentralized offline knowledge base.

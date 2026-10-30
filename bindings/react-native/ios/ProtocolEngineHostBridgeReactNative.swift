@@ -45,6 +45,12 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
+    static func acceptServiceSubscription(_ module: OfflineProtocolModule, _ subId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to accept service subscription", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.acceptServiceSubscription(host: host, env: env, arguments: ["subId": subId])
+        }
+    }
+
     static func bleGetDiagnostics(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BLE", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.bleGetDiagnostics(host: host, env: env, arguments: nil)
@@ -81,6 +87,12 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
+    static func clearServiceTopic(_ module: OfflineProtocolModule, _ serviceId: String, topic: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to clear service topic", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.clearServiceTopic(host: host, env: env, arguments: ["serviceId": serviceId, "topic": topic])
+        }
+    }
+
     static func createInvite(_ module: OfflineProtocolModule, _ petname: String?, sign signed: NSNumber, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.createInvite(host: host, env: env, arguments: ["petname": petname, "signed": signed])
@@ -108,6 +120,12 @@ enum ProtocolEngineHostBridgeReactNative {
     static func discoverServices(_ module: OfflineProtocolModule, _ serviceId: String?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_DISCOVER_SERVICES", errorMessage: "Failed to discover services") { host, env in
             try ProtocolEngineHostBridge.discoverServices(host: host, env: env, arguments: ["serviceId": serviceId])
+        }
+    }
+
+    static func endServiceSubscription(_ module: OfflineProtocolModule, _ subId: String, reason: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to end service subscription", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.endServiceSubscription(host: host, env: env, arguments: ["subId": subId, "reason": reason])
         }
     }
 
@@ -459,6 +477,12 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
+    static func publishServiceUpdate(_ module: OfflineProtocolModule, _ serviceId: String, topic: String, key: String?, body: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to publish service update", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.publishServiceUpdate(host: host, env: env, arguments: ["serviceId": serviceId, "topic": topic, "key": key, "body": body])
+        }
+    }
+
     static func registerService(_ module: OfflineProtocolModule, _ serviceId: String, version: String, capabilitiesJson: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_REGISTER_SERVICE", errorMessage: "Failed to register service") { host, env in
             try ProtocolEngineHostBridge.registerService(host: host, env: env, arguments: ["serviceId": serviceId, "version": version, "capabilitiesJson": capabilitiesJson])
@@ -468,6 +492,12 @@ enum ProtocolEngineHostBridgeReactNative {
     static func rejectConnectionRequest(_ module: OfflineProtocolModule, _ recipient: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_CONNECTION_REQUEST", errorMessage: "Failed to reject connection request", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.rejectConnectionRequest(host: host, env: env, arguments: ["recipient": recipient])
+        }
+    }
+
+    static func rejectServiceSubscription(_ module: OfflineProtocolModule, _ subId: String, reason: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to reject service subscription", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.rejectServiceSubscription(host: host, env: env, arguments: ["subId": subId, "reason": reason])
         }
     }
 
@@ -498,6 +528,12 @@ enum ProtocolEngineHostBridgeReactNative {
     static func respondToServiceRequest(_ module: OfflineProtocolModule, _ requestId: String, requester: String, serviceId: String, status: String, body: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_RESPONSE", errorMessage: "Failed to respond to service request", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.respondToServiceRequest(host: host, env: env, arguments: ["requestId": requestId, "requester": requester, "serviceId": serviceId, "status": status, "body": body])
+        }
+    }
+
+    static func resyncServiceSubscription(_ module: OfflineProtocolModule, _ subId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to resync service subscription", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.resyncServiceSubscription(host: host, env: env, arguments: ["subId": subId])
         }
     }
 
@@ -555,6 +591,18 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
+    static func serviceSubscribers(_ module: OfflineProtocolModule, _ serviceId: String?, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to list service subscribers", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.serviceSubscribers(host: host, env: env, arguments: ["serviceId": serviceId])
+        }
+    }
+
+    static func serviceSubscriptions(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to list service subscriptions", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.serviceSubscriptions(host: host, env: env, arguments: nil)
+        }
+    }
+
     static func setBatteryLevel(_ module: OfflineProtocolModule, _ level: Int, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BATTERY", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.setBatteryLevel(host: host, env: env, arguments: ["level": level])
@@ -570,6 +618,18 @@ enum ProtocolEngineHostBridgeReactNative {
     static func setRelayPriority(_ module: OfflineProtocolModule, _ priorityString: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_RELAY", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.setRelayPriority(host: host, env: env, arguments: ["priorityString": priorityString])
+        }
+    }
+
+    static func setServiceSubscriptionPolicy(_ module: OfflineProtocolModule, _ serviceId: String, policyJson: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to set service subscription policy", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.setServiceSubscriptionPolicy(host: host, env: env, arguments: ["serviceId": serviceId, "policyJson": policyJson])
+        }
+    }
+
+    static func setServiceTopicCheckpoint(_ module: OfflineProtocolModule, _ serviceId: String, topic: String, body: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to set service topic checkpoint", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.setServiceTopicCheckpoint(host: host, env: env, arguments: ["serviceId": serviceId, "topic": topic, "body": body])
         }
     }
 
@@ -591,6 +651,12 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
+    static func subscribeService(_ module: OfflineProtocolModule, _ provider: String, serviceId: String, topic: String, mode: String, params: String, keysJson: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to subscribe to service", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.subscribeService(host: host, env: env, arguments: ["provider": provider, "serviceId": serviceId, "topic": topic, "mode": mode, "params": params, "keysJson": keysJson])
+        }
+    }
+
     static func unblockUser(_ module: OfflineProtocolModule, _ userId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_UNBLOCK_USER", errorMessage: "Failed to unblock user") { host, env in
             try ProtocolEngineHostBridge.unblockUser(host: host, env: env, arguments: ["userId": userId])
@@ -600,6 +666,12 @@ enum ProtocolEngineHostBridgeReactNative {
     static func unregisterService(_ module: OfflineProtocolModule, _ serviceId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_UNREGISTER_SERVICE", errorMessage: "Failed to unregister service") { host, env in
             try ProtocolEngineHostBridge.unregisterService(host: host, env: env, arguments: ["serviceId": serviceId])
+        }
+    }
+
+    static func unsubscribeService(_ module: OfflineProtocolModule, _ subId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to unsubscribe from service", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.unsubscribeService(host: host, env: env, arguments: ["subId": subId])
         }
     }
 

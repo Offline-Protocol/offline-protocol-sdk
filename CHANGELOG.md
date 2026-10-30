@@ -60,6 +60,33 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   whose rejections `DroppedTransportNotifyCount` reports. A throwing handler
   is counted in `TransportHandlerFailureCount` and never ends the process
   ([docs/bridges/csharp.md](docs/bridges/csharp.md#cs7-transport-callbacks)).
+- **A service can be subscribed to.** `subscribe_service` gives a consumer a
+  lease on one topic of a provider's service, and the provider's
+  `publish_service_update` reaches every subscriber as it happens: once over a
+  live link, or through the reliable ladder across hops, where a `latest`
+  value replaces the one still queued for its key rather than waiting behind
+  it. A topic is `latest` (current state per key) or `log` (every event, with
+  a checkpoint), and a consumer that missed updates gets the state back at its
+  next renewal, after a provider restart, or on `resync_service_subscription`.
+  Every subscription frame is sealed in the 1:1 MLS session with no plaintext
+  fallback, and none is written to the outbox's store: nothing of a
+  subscription survives a restart, and a frame from before one is dropped.
+  Who may subscribe is the service's policy: ask the application (the
+  default), accept every peer with a session, or rules by peer and group.
+  The calls are on `MeshServices` in every binding (Swift, Kotlin, Python,
+  Ruby, Java, C), in React Native and Flutter on both platforms, in the
+  Python services wrapper and local API, and in the browser worker, where
+  `examples/web-coordination` shows devices watching each other's state. The
+  decision is ADR 0035, the behaviour `docs/state-machines/service-subscriptions.md`.
+- **A subscription can be narrowed.** A topic pattern (`rooms/*`, or `*`)
+  follows every matching topic in its mode, up to 64, including topics first
+  published after it, each caught up and recovered on its own; every update
+  names its topic. A key filter limits a `latest` subscription to the keys it
+  lists, exact or by prefix. The provider applies both, so a filtered key or
+  an unmatched topic never leaves its device. `subscribe_service_with` takes
+  the filter in Rust, and `subscribe_service` takes `keys` in every binding.
+  Group-backed topics, the rest of ADR 0035's third phase, are proposed in
+  ADR 0036.
 
 ### Fixed
 
@@ -73,6 +100,28 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   in about one run in three on the host. The side that keeps its group now
   sends a fresh package for each session Welcome it does not adopt
   ([both-create convergence](docs/state-machines/session-lifecycle.md#both-create-convergence)).
+
+- **An Android phone keeps talking to an iPhone whose app restarted.** An
+  iPhone keeps its Bluetooth LE links across an app restart, and its new
+  process knows nothing about them: not the hello that named the Android
+  phone, and not where it was subscribed. Android saw no disconnect and
+  carried nothing more, in one direction or both, until its own app restarted.
+  Android now sends over any ready client link to the peer, not only the
+  address the peer's hello mapped. A dial that proves who writes to its
+  server, and is then refused as a duplicate link, now maps that writer before
+  it closes. And a client link that keeps taking writes and has never had an
+  answer is dropped and redialled, which writes the hello again, about 20 to
+  25 seconds after its first write, even when the peer holds another link. A
+  link the peer has answered once, even before it restarted, is never dropped
+  for silence, and a peer is redialled once until it is heard from again, so
+  one that only receives frames asking for no acknowledgement is not redialled
+  over and over. On two phones, the first iPhone restart beside a linked
+  Android phone failed before, as did one in ten restarts of both apps; after,
+  36 of 36 restarts and connects carried messages, and on two earlier runs of
+  the same checks a first link left dead by an iPhone relaunch was redialled
+  and carried the message within 25 seconds
+  ([kotlin-devices.md](docs/bridges/kotlin-devices.md),
+  [K9](docs/bridges/kotlin.md#k9-a-bluetooth-le-link-outlives-the-app-on-the-other-end)).
 
 - **`sendReadReceipt` works again from React Native on Android.** Since the
   shared engine bridge (0.31.0), every array argument crossed the Android

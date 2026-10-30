@@ -20,6 +20,15 @@ internal object EngineMethodHandlers {
     }
 
     @JvmStatic
+    fun acceptServiceSubscription(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.acceptServiceSubscription(host, env.context, arguments)
+    }
+
+    @JvmStatic
     fun bleGetDiagnostics(
         host: ProtocolEngineHost,
         env: FlutterEngineChannel.Environment,
@@ -71,6 +80,15 @@ internal object EngineMethodHandlers {
         arguments: Any?,
     ): Any? {
         return com.offlineprotocol.ProtocolEngineHostBridge.checkInternetPresence(host, env.context, arguments)
+    }
+
+    @JvmStatic
+    fun clearServiceTopic(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.clearServiceTopic(host, env.context, arguments)
     }
 
     @JvmStatic
@@ -496,6 +514,15 @@ internal object EngineMethodHandlers {
             env.discardOneShotEvent(com.offlineprotocol.SupersededLatchPolicy.EVENT_TYPE)
         }
         return null
+    }
+
+    @JvmStatic
+    fun endServiceSubscription(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.endServiceSubscription(host, env.context, arguments)
     }
 
     @JvmStatic
@@ -1225,6 +1252,15 @@ internal object EngineMethodHandlers {
     }
 
     @JvmStatic
+    fun publishServiceUpdate(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.publishServiceUpdate(host, env.context, arguments)
+    }
+
+    @JvmStatic
     fun receiveMessage(
         host: ProtocolEngineHost,
         env: FlutterEngineChannel.Environment,
@@ -1249,6 +1285,15 @@ internal object EngineMethodHandlers {
         arguments: Any?,
     ): Any? {
         return com.offlineprotocol.ProtocolEngineHostBridge.rejectConnectionRequest(host, env.context, arguments)
+    }
+
+    @JvmStatic
+    fun rejectServiceSubscription(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.rejectServiceSubscription(host, env.context, arguments)
     }
 
     @JvmStatic
@@ -1319,6 +1364,15 @@ internal object EngineMethodHandlers {
     ): Any? {
         host.resume()
         return null
+    }
+
+    @JvmStatic
+    fun resyncServiceSubscription(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.resyncServiceSubscription(host, env.context, arguments)
     }
 
     @JvmStatic
@@ -1418,6 +1472,24 @@ internal object EngineMethodHandlers {
     }
 
     @JvmStatic
+    fun serviceSubscribers(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.serviceSubscribers(host, env.context, arguments)
+    }
+
+    @JvmStatic
+    fun serviceSubscriptions(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.serviceSubscriptions(host, env.context, arguments)
+    }
+
+    @JvmStatic
     fun setBatteryLevel(
         host: ProtocolEngineHost,
         env: FlutterEngineChannel.Environment,
@@ -1442,6 +1514,24 @@ internal object EngineMethodHandlers {
         arguments: Any?,
     ): Any? {
         return com.offlineprotocol.ProtocolEngineHostBridge.setRelayPriority(host, env.context, arguments)
+    }
+
+    @JvmStatic
+    fun setServiceSubscriptionPolicy(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.setServiceSubscriptionPolicy(host, env.context, arguments)
+    }
+
+    @JvmStatic
+    fun setServiceTopicCheckpoint(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.setServiceTopicCheckpoint(host, env.context, arguments)
     }
 
     @JvmStatic
@@ -1507,6 +1597,15 @@ internal object EngineMethodHandlers {
     }
 
     @JvmStatic
+    fun subscribeService(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.subscribeService(host, env.context, arguments)
+    }
+
+    @JvmStatic
     fun telemetryInstallId(
         host: ProtocolEngineHost,
         env: FlutterEngineChannel.Environment,
@@ -1541,6 +1640,15 @@ internal object EngineMethodHandlers {
         arguments: Any?,
     ): Any? {
         return com.offlineprotocol.ProtocolEngineHostBridge.unregisterService(host, env.context, arguments)
+    }
+
+    @JvmStatic
+    fun unsubscribeService(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.unsubscribeService(host, env.context, arguments)
     }
 
     @JvmStatic

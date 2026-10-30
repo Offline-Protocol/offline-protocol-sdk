@@ -42,10 +42,18 @@ One usable link per peer pair, and no peer is lost while it has one.
 - Android's periodic refresh restarts the advertisement only while no
   identified peer is linked, or when the advertiser reports it stopped.
   Membership changes and disconnects still restart it.
-- An Android server link counts only once its peer has written a Hello that
-  maps its address. A subscribed central that writes none (a Mac, a leaf, a
-  service without it) is invisible to the refusal, so the second client link
-  beside it is kept.
+- An Android server link counts only once its address is mapped to the peer:
+  by a Hello the peer wrote, or by a dial to that address that verified the
+  peer and was refused as a duplicate while fragments written from that
+  address waited for a sender, which maps the address only if nothing maps
+  it yet
+  ([K9](../bridges/kotlin.md#k9-a-bluetooth-le-link-outlives-the-app-on-the-other-end)).
+  The second exists for an iPhone whose app restarted, which writes over its
+  restored link with no Hello; without it the refused dial threw away the
+  proof and repeated every 60 seconds. A subscribed central that writes no
+  Hello (a Mac, a leaf, a service without it) is still invisible to the
+  refusal, so the second client link beside it is kept: nothing else is held
+  to refuse a dial against, so no dial to it is refused.
 - iOS never reports a peer lost, and never redials, when the identifier that
   dropped belongs to a peer connected and verified on another identifier or
   subscribed to its server from one and heard from in the last 60 seconds.

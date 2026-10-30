@@ -1,0 +1,174 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// Service subscriptions through every layer the Rust tests skip: the page's
+// wrappers, the worker's handlers and the wasm-bindgen signatures, with each
+// record and event read as an application reads it. The title ends as PASS
+// or FAIL: <step>, which scripts/test-browser.sh reads.
+import { OfflineNode } from "../src/index.js";
+
+const log = (line) => (document.getElementById("log").textContent += line + "\n");
+const appId = `web-test-${crypto.randomUUID()}`;
+const SERVICE = "fleet.v1";
+
+function waitFor(node, type, predicate = () => true, ms = 20000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${type}`)), ms);
+    node.addEventListener(type, function on({ detail }) {
+      if (!predicate(detail)) return;
+      clearTimeout(timer);
+      node.removeEventListener(type, on);
+      resolve(detail);
+    });
+  });
+}
+
+function expect(what, actual, wanted) {
+  const [got, want] = [JSON.stringify(actual), JSON.stringify(wanted)];
+  if (got !== want) throw new Error(`${what}: ${got}, expected ${want}`);
+}
+
+async function refused(what, call) {
+  let failed = false;
+  try {
+    await call();
+  } catch {
+    failed = true;
+  }
+  if (!failed) throw new Error(`${what} was accepted`);
+}
+
+const update = (node, subId, predicate = () => true) =>
+  waitFor(node, "service_update_received", (e) => e.sub_id === subId && predicate(e));
+const changed = (node, subId, state) =>
+  waitFor(node, "service_subscription_changed", (e) => e.sub_id === subId && e.state === state);
+
+let step = "start";
+try {
+  const [a, b] = await Promise.all([
+    OfflineNode.start({ appId, profile: "alice", storage: "memory" }),
+    OfflineNode.start({ appId, profile: "bob", storage: "memory" }),
+  ]);
+
+  step = "session";
+  await Promise.all([
+    waitFor(a, "secure_session_established", (e) => e.peer_id === b.address),
+    waitFor(b, "secure_session_established", (e) => e.peer_id === a.address),
+  ]);
+
+  step = "register";
+  await b.registerService(SERVICE, { version: "1", capabilities: { kind: "tracker" } });
+  await b.registerService("bare.v1");
+  await b.setServiceSubscriptionPolicy(SERVICE, { kind: "accept_all" });
+
+  step = "policy refused";
+  await refused("a non-string peer", () =>
+    b.setServiceSubscriptionPolicy(SERVICE, { kind: "rules", allowPeers: [1] }));
+  await refused("an unknown kind", () =>
+    b.setServiceSubscriptionPolicy(SERVICE, { kind: "everyone" }));
+  await refused("a mode that does not exist", () =>
+    a.subscribeService(b.address, SERVICE, "battery", { mode: "stream" }));
+
+  step = "publish";
+  const quiet = await b.publishServiceUpdate(SERVICE, "battery", "81", { key: "pct" });
+  expect("the report", [quiet.subscribers, quiet.sentLive, quiet.queued, quiet.coalesced, quiet.failed],
+    [0, 0, 0, 0, 0]);
+
+  step = "subscribe";
+  const sub = await a.subscribeService(b.address, SERVICE, "battery");
+  const first = update(a, sub);
+  await changed(a, sub, "active");
+  const value = await first;
+  expect("the update", [value.topic, value.key, value.body, value.snapshot], ["battery", "pct", "81", true]);
+
+  step = "lists";
+  const [held] = await a.serviceSubscriptions();
+  expect("the subscription", [held.subId, held.provider, held.serviceId, held.topic, held.mode, held.state, held.keys],
+    [sub, b.address, SERVICE, "battery", "latest", "active", []]);
+  const [holder] = await b.serviceSubscribers(SERVICE);
+  expect("the subscriber", [holder.subId, holder.subscriber, holder.mode, holder.state],
+    [sub, a.address, "latest", "active"]);
+  expect("another service's subscribers", await b.serviceSubscribers("bare.v1"), []);
+  expect("every service's subscribers", (await b.serviceSubscribers()).length, 1);
+
+  step = "live update";
+  // Past the update interval since the catch-up, so this one is not held back.
+  await new Promise((r) => setTimeout(r, 200));
+  const live = update(a, sub, (e) => e.body === "80");
+  const report = await b.publishServiceUpdate(SERVICE, "battery", "80", { key: "pct" });
+  expect("subscribers reached", report.subscribers, 1);
+  expect("the update's snapshot flag", (await live).snapshot, false);
+
+  step = "resync";
+  const again = update(a, sub, (e) => e.snapshot === true);
+  await a.resyncServiceSubscription(sub);
+  expect("the resync", (await again).body, "80");
+
+  step = "pattern and keys";
+  await b.publishServiceUpdate(SERVICE, "cars/1", "c1-pct", { key: "pct" });
+  await b.publishServiceUpdate(SERVICE, "cars/1", "c1-gps", { key: "gps" });
+  const seen = [];
+  const collect = ({ detail }) => seen.push(detail.body);
+  a.addEventListener("service_update_received", collect);
+  const pattern = await a.subscribeService(b.address, SERVICE, "cars/*", { keys: ["pct"] });
+  const filtered = await update(a, pattern, (e) => e.body === "c1-pct");
+  expect("the matched topic", filtered.topic, "cars/1");
+  // Past the update interval, so a key the filter let through would have come.
+  await new Promise((r) => setTimeout(r, 300));
+  a.removeEventListener("service_update_received", collect);
+  if (seen.includes("c1-gps")) throw new Error("a filtered key left the provider");
+
+  step = "log and checkpoint";
+  await b.publishServiceUpdate(SERVICE, "alerts", "one");
+  await b.setServiceTopicCheckpoint(SERVICE, "alerts", "one so far");
+  const logged = await a.subscribeService(b.address, SERVICE, "alerts", { mode: "log" });
+  const summary = update(a, logged, (e) => e.snapshot === true);
+  expect("the checkpoint", (await summary).body, "one so far");
+
+  step = "clear";
+  const reset = waitFor(a, "service_subscription_changed",
+    (e) => e.sub_id === sub && e.reason === "stream_reset");
+  await b.clearServiceTopic(SERVICE, "battery");
+  await reset;
+
+  step = "ask and reject";
+  await b.setServiceSubscriptionPolicy(SERVICE, { kind: "rules", allowPeers: [], fallback: "ask" });
+  let asked = waitFor(b, "service_subscribe_received", (e) => e.topic === "gate");
+  const turnedAway = await a.subscribeService(b.address, SERVICE, "gate");
+  expect("the asker", (await asked).sender, a.address);
+  const rejected = changed(a, turnedAway, "ended");
+  await b.rejectServiceSubscription(turnedAway, "not now");
+  await rejected;
+
+  step = "ask and accept";
+  asked = waitFor(b, "service_subscribe_received", (e) => e.topic === "gate");
+  const accepted = await a.subscribeService(b.address, SERVICE, "gate");
+  await asked;
+  const admitted = changed(a, accepted, "active");
+  await b.acceptServiceSubscription(accepted);
+  await admitted;
+
+  step = "end";
+  const ended = changed(a, accepted, "ended");
+  await b.endServiceSubscription(accepted, "done");
+  await ended;
+
+  step = "unsubscribe";
+  expect("a held subscription", await a.unsubscribeService(sub), true);
+  expect("one already gone", await a.unsubscribeService(sub), false);
+
+  step = "unregister";
+  const gone = changed(a, pattern, "ended");
+  expect("a registered service", await b.unregisterService(SERVICE), true);
+  expect("an unknown service", await b.unregisterService(SERVICE), false);
+  await gone;
+
+  await Promise.all([a.stop(), b.stop()]);
+  document.title = "PASS";
+} catch (error) {
+  log(String(error?.stack ?? error));
+  document.title = `FAIL: ${step}: ${error?.message ?? error}`;
+}
+</script>

@@ -197,3 +197,53 @@ class TestBaseInstall:
         done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
         assert done.returncode == 0, done.stderr
         assert done.stdout.strip() == "refused"
+
+
+# -- subscriptions (ADR 0035) --------------------------------------------------
+
+
+def test_subscribe_maps_the_mode_and_returns_the_id() -> None:
+    from offline_protocol_sdk.offline_protocol import SubscriptionMode
+
+    mesh = MagicMock()
+    mesh.subscribe_service.return_value = "sub-1"
+    services = Services(MagicMock(), mesh_services=mesh)
+    assert services.subscribe("bob", "fleet.v1", "battery") == "sub-1"
+    services.subscribe("bob", "fleet.v1", "doors", mode="log", params="{}")
+    assert mesh.subscribe_service.call_args_list[0].args[3] == SubscriptionMode.LATEST
+    assert mesh.subscribe_service.call_args_list[1].args[3] == SubscriptionMode.LOG
+    assert mesh.subscribe_service.call_args_list[0].args[5] == []
+    services.subscribe("bob", "fleet.v1", "rooms/*", keys=["temp", "pos.*"])
+    assert mesh.subscribe_service.call_args_list[2].args[2] == "rooms/*"
+    assert mesh.subscribe_service.call_args_list[2].args[5] == ["temp", "pos.*"]
+    with pytest.raises(ValueError):
+        services.subscribe("bob", "fleet.v1", "x", mode="stream")
+
+
+def test_set_policy_builds_the_config_and_refuses_unknown_kinds() -> None:
+    from offline_protocol_sdk.offline_protocol import (
+        SubscriptionPolicyKind,
+        SubscriptionRulesFallback,
+    )
+
+    mesh = MagicMock()
+    services = Services(MagicMock(), mesh_services=mesh)
+    services.set_policy("fleet.v1", "rules", allow_groups=["group:1"], fallback="reject")
+    service_id, config = mesh.set_service_subscription_policy.call_args.args
+    assert service_id == "fleet.v1"
+    assert config.kind == SubscriptionPolicyKind.RULES
+    assert config.allow_groups == ["group:1"] and config.allow_peers == []
+    assert config.rules_fallback == SubscriptionRulesFallback.REJECT
+    with pytest.raises(ValueError):
+        services.set_policy("fleet.v1", "open")
+    with pytest.raises(ValueError):
+        services.set_policy("fleet.v1", "rules", fallback="maybe")
+
+
+def test_publish_passes_the_key_through() -> None:
+    mesh = MagicMock()
+    services = Services(MagicMock(), mesh_services=mesh)
+    services.publish("fleet.v1", "battery", "81", key="pct")
+    services.publish("fleet.v1", "doors", "opened")
+    assert mesh.publish_service_update.call_args_list[0].args == ("fleet.v1", "battery", "pct", "81")
+    assert mesh.publish_service_update.call_args_list[1].args == ("fleet.v1", "doors", None, "opened")

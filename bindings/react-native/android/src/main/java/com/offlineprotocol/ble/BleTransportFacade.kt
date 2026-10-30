@@ -115,6 +115,25 @@ internal fun resolveSubscribedAddress(
 ): String? = subscribedAddresses.firstOrNull { resolveDeviceId(it) == deviceId }
 
 /**
+ * The address to write a peer's fragments to as a central: [resolved] when its
+ * client link is ready, otherwise any other address of the peer
+ * ([peerAddresses]) whose client link is, otherwise [resolved] unchanged.
+ *
+ * [resolved] is the address the peer resolved to last, and a hello makes that
+ * the address the peer connected to our server from, where this side holds no
+ * client link. Once that central stopped being subscribed, every send was
+ * deferred as "not yet ready" for good, beside a ready client link to the same
+ * peer, until the app restarted: an iPhone whose app restarts keeps its links
+ * (state restoration) but not its subscription. Pure, so it is unit-testable
+ * without the Android BLE stack.
+ */
+internal fun resolveClientEgressAddress(
+    resolved: String?,
+    peerAddresses: Collection<String>,
+    isReady: (String) -> Boolean,
+): String? = resolved?.takeIf(isReady) ?: peerAddresses.firstOrNull(isReady) ?: resolved
+
+/**
  * BLE transport facade implementing [TransportManager] for Bluetooth Low
  * Energy communication. Ensures iOS ↔ Android cross-platform compatibility.
  *
@@ -527,6 +546,15 @@ class BleTransportFacade(
                     this@BleTransportFacade.onWriteCompleted(address)
                 override fun handleInboundFragment(address: String, data: ByteArray) =
                     this@BleTransportFacade.handleReceivedData(data, address)
+                override fun onPeerHeard(deviceId: String) = noteHeardFrom(deviceId)
+                override fun onServerLinkBound(address: String, deviceId: String) {
+                    // The refused client link at this address staged its own
+                    // central payload; promoted, it would size the core's
+                    // fragments for the link being closed, not the one kept.
+                    peerMaxPayloads.remove(address)
+                    cancelPeerLostGrace(deviceId)
+                    flushPeerMtu(address, deviceId)
+                }
                 override fun connectToDevice(device: BluetoothDevice) =
                     this@BleTransportFacade.connectToDevice(device)
 
@@ -1229,6 +1257,11 @@ class BleTransportFacade(
     // BLE-thread only (every accessor runs under assertOnBleThread).
     private val writeInFlight = HashMap<String, Long>()
 
+    // Client links that keep taking Message writes with nothing coming back
+    // from the peer ([SilentLinkPolicy]). Checked by the connection monitor,
+    // which disconnects a silent link so it is redialled. BLE-thread only.
+    private val silentLinks = SilentLinkPolicy<BluetoothGatt, String>()
+
     // MARK: - TransportManager Implementation
     
     private fun emitDiagnostic(level: String, message: String, context: Map<String, Any?> = emptyMap()) {
@@ -1474,6 +1507,7 @@ class BleTransportFacade(
         // cross-session reasoning burden.
         writeInFlight.clear()
         centralClient.clearAll()
+        silentLinks.clear()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
         unknownBootstrapAttempts.clear()
@@ -1890,6 +1924,7 @@ class BleTransportFacade(
         peripheralPayloadByDevice.clear()
         writeInFlight.clear()
         centralClient.clearAll()
+        silentLinks.clear()
         lastSeenMeshAdvertisements.clear()
         // A peer probed while its radio was coming back serves no mesh
         // service yet; cached as non-mesh, it was skipped for five minutes.
@@ -2232,9 +2267,11 @@ class BleTransportFacade(
                 if (state != TransportState.RUNNING) {
                     return
                 }
-                
+
+                closeSilentClientLinks()
+
                 val now = System.currentTimeMillis()
-                
+
                 // Check for discovered devices that aren't connected
                 for ((address, observation) in lastSeenMeshAdvertisements) {
                     // Skip if already connected
@@ -3599,11 +3636,47 @@ class BleTransportFacade(
         address?.let { connections.getGatt(it) } != null ||
             subscribedNotifyAddressFor(recipientId) != null
 
+    /** A fragment from [peerId] arrived: every client link to it is delivering. */
+    private fun noteHeardFrom(peerId: String) {
+        silentLinks.notePeerHeard(peerId)
+        for (address in connections.addressesForDevice(peerId)) {
+            connections.getGatt(address)?.let(silentLinks::noteHeard)
+        }
+    }
+
+    /**
+     * Disconnects every client link [SilentLinkPolicy] says to redial, and
+     * redials it at the same address, so the handshake (hello included) runs
+     * again. A link that takes writes and returns nothing is otherwise
+     * never torn down, and only an app restart here ended one: an iPhone whose
+     * app restarted holds its links through state restoration but not the
+     * hello that named us, and a peripheral that cannot name a central drops
+     * what it writes. BLE-thread only.
+     */
+    private fun closeSilentClientLinks() {
+        silentLinks.retainAll { gatt -> connections.getGatt(gatt.device.address) === gatt }
+        val now = android.os.SystemClock.elapsedRealtime()
+        for (gatt in silentLinks.linksToRedial(now) { connections.deviceIdForAddress(it.device.address) }) {
+            val address = gatt.device.address
+            val peerId = connections.deviceIdForAddress(address)
+            Log.w(TAG, "Client link to $peerId at $address takes writes and returns nothing; disconnecting to redial")
+            emitDiagnostic("warning", "BLE client link silent; redialing", mapOf(
+                "address" to address,
+                "peerId" to (peerId ?: "unknown"),
+            ))
+            centralClient.disconnectToRedial(gatt)
+        }
+    }
+
     private fun resolveTargetAddress(recipientId: String): String? {
         if (recipientId == deviceId) {
             return null
         }
-        connections.addressForDevice(recipientId)?.let { return it }
+        connections.addressForDevice(recipientId)?.let { resolved ->
+            return resolveClientEgressAddress(resolved, connections.addressesForDevice(recipientId)) {
+                connections.getGatt(it) != null && centralClient.isLinkReady(it)
+            }
+        }
         connections.connectionRoleEntries()
             .sortedBy { entry -> if (entry.value == MeshRole.BRIDGE) 0 else 1 }
             .firstOrNull()
@@ -3875,6 +3948,7 @@ class BleTransportFacade(
         // Write was initiated successfully (actual completion is asynchronous for WRITE_TYPE_NO_RESPONSE)
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
+        silentLinks.noteWrite(gatt, android.os.SystemClock.elapsedRealtime())
 
         // Hold the per-peer write gate. onCharacteristicWrite releases it when
         // it fires — but for WRITE_TYPE_NO_RESPONSE that completion callback is
@@ -3986,6 +4060,7 @@ class BleTransportFacade(
             // non-null here: the `resolvedSender == null` disjunct in the guard
             // above returns, so reaching this point proves it is non-null.
             val resolvedSenderId: String = resolvedSender
+            noteHeardFrom(resolvedSenderId)
 
             lastSeenRssi[address]?.toInt()?.let { observedRssi ->
                 meshController.updatePeerMetrics(

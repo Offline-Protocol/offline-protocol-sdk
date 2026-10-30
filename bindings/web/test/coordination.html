@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<iframe id="one" src="../../../examples/web-coordination/index.html" width="800" height="600"></iframe>
+<iframe id="two" src="../../../examples/web-coordination/index.html" width="800" height="600"></iframe>
+<script type="module">
+// The coordination example as it ships: two copies in frames find each other,
+// subscribe to each other, and show the other's name. Nothing else loads the
+// page, so an API it calls could otherwise be renamed with every job green.
+const log = (line) => (document.getElementById("log").textContent += line + "\n");
+const frames = [document.getElementById("one"), document.getElementById("two")];
+const documentOf = (frame) => frame.contentDocument;
+
+async function until(what, predicate, ms = 60000) {
+  const deadline = performance.now() + ms;
+  while (!predicate()) {
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+let step = "load";
+try {
+  await until("both pages' addresses", () =>
+    frames.every((frame) => documentOf(frame)?.getElementById("me")?.textContent.startsWith("starting") === false));
+
+  step = "subscribed";
+  const active = (frame, topic) => documentOf(frame).querySelector(`[data-topic="${topic}"] .pill.active`) !== null;
+  await until("both subscriptions, both ways", () =>
+    frames.every((frame) => active(frame, "status") && active(frame, "alerts/*")));
+
+  step = "state";
+  const names = frames.map((frame) => documentOf(frame).getElementById("name").value);
+  const shows = (frame, name) => documentOf(frame).querySelector(".peer strong")?.textContent === name;
+  await until("each page showing the other's name", () => shows(frames[0], names[1]) && shows(frames[1], names[0]));
+
+  document.title = "PASS";
+} catch (error) {
+  log(String(error?.stack ?? error));
+  document.title = `FAIL: ${step}: ${error?.message ?? error}`;
+}
+</script>

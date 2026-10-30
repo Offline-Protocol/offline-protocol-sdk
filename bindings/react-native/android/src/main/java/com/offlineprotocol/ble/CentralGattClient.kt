@@ -128,6 +128,17 @@ internal class CentralGattClient(
          *  notify or via central-side write). Called on the BLE thread. */
         fun handleInboundFragment(address: String, data: ByteArray)
 
+        /** Fragments [deviceId] wrote while its address was unresolved were
+         *  just drained: the peer has been heard from, as on the direct path
+         *  through [handleInboundFragment]. Called on the BLE thread. */
+        fun onPeerHeard(deviceId: String) {}
+
+        /** A refused duplicate dial just mapped the server link at [address]
+         *  to [deviceId] ([bindRefusedDialServerLink]). The facade does what
+         *  a hello's mapping does for the per-peer MTU and the lost grace.
+         *  Called on the BLE thread. */
+        fun onServerLinkBound(address: String, deviceId: String) {}
+
         /** Notify the facade that a remote peripheral's ATT MTU negotiation
          *  has completed. [maxPayload] is the already header-adjusted max
          *  fragment size (ATT MTU minus the 3-byte header). Called from the
@@ -267,6 +278,9 @@ internal class CentralGattClient(
 
     private val connectionRetryCount = ConcurrentHashMap<String, Int>()
 
+    /** Addresses disconnected by [disconnectToRedial] whose disconnect has not landed yet. */
+    private val redialOnDisconnect: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     // Payload negotiated on each client link (MTU minus the ATT header),
     // so the hello is written only where it fits in one write.
     private val negotiatedPayload = ConcurrentHashMap<String, Int>()
@@ -355,6 +369,25 @@ internal class CentralGattClient(
     /** True if a successful CCCD write has been observed for [address]. */
     fun isLinkReady(address: String): Boolean = linkReady.contains(address)
 
+    /**
+     * Disconnects [gatt] and redials its address through the reconnect
+     * backoff, even when the peer holds another link. A silent link's peer
+     * usually also writes to our server from an address its hello mapped, and
+     * the stale-address branch of [handleDisconnected] would otherwise drop
+     * this address instead of redialling it, leaving the redial to a fresh
+     * advertisement that a backgrounded iPhone may never send.
+     */
+    fun disconnectToRedial(gatt: BluetoothGatt) {
+        val address = gatt.device.address
+        redialOnDisconnect.add(address)
+        try {
+            gatt.disconnect()
+        } catch (e: Exception) {
+            redialOnDisconnect.remove(address)
+            Log.w(TAG, "Error disconnecting silent link $address", e)
+        }
+    }
+
     /** Drop link-ready, retry, and device-id state for [address]. */
     fun forgetLink(address: String) {
         linkReady.remove(address)
@@ -364,6 +397,7 @@ internal class CentralGattClient(
         cancelMtuWatchdog(address)
         cancelHelloWatchdog(address, null)
         clearServiceInstanceSelection(address)
+        redialOnDisconnect.remove(address)
     }
 
     /** Drop all per-address state. Used by transport stop. */
@@ -381,6 +415,7 @@ internal class CentralGattClient(
         helloInFlight.values.forEach { bleHandler.removeCallbacks(it.second) }
         helloInFlight.clear()
         boundServiceInstanceIds.clear()
+        redialOnDisconnect.clear()
     }
 
     /**
@@ -1031,9 +1066,16 @@ internal class CentralGattClient(
 
         // The peer already reconnected from another address: this one is
         // stale, so drop it instead of redialling it and later reporting the
-        // (live) peer as lost.
+        // (live) peer as lost. Only a link that can carry our sends makes it
+        // stale (a client link, or the peer's subscribed link to our server).
+        // An unsubscribed server link cannot, and a restarted iPhone's
+        // restored one is never subscribed again: counted, it left the peer
+        // with nothing to send over until a fresh advertisement.
+        val redial = redialOnDisconnect.remove(address)
         val stalePeerId = host.connections.deviceIdForAddress(address)
-        if (stalePeerId != null && host.connections.hasOtherLiveLink(stalePeerId, address)) {
+        if (!redial && stalePeerId != null &&
+            host.connections.hasOtherUsableLink(stalePeerId, address, host::isCentralSubscribed)
+        ) {
             connectionRetryCount.remove(address)
             bleHandler.post { finalizeGivenUpPeer(address, stalePeerId) }
             return
@@ -1391,7 +1433,25 @@ internal class CentralGattClient(
             SystemClock.elapsedRealtime() + DUPLICATE_LINK_SUPPRESS_MS,
         )
         host.connections.consumePendingRole(address)
+        bindRefusedDialServerLink(address, peerId)
         closeGattClient(gatt, "duplicate_identity")
+    }
+
+    /**
+     * Maps the server link at [address] to [peerId] after a dial there
+     * verified the peer and was refused as a duplicate, when fragments from
+     * that address wait for a sender, then delivers them. The peer may write
+     * to our server from this address with no hello (an iPhone whose app
+     * restarted keeps the link but not the hello), and the refused dial's read
+     * is then the only proof of who is writing. Without the binding its writes
+     * queued unattributed for good, and the dial that should resolve them was
+     * refused every 60 s. BLE thread only.
+     */
+    internal fun bindRefusedDialServerLink(address: String, peerId: String) {
+        if (!host.connections.bindUnmappedServerLink(address, peerId, host.pendingInbound.hasPending(address))) return
+        Log.i(TAG, "Mapped the server link at $address to $peerId")
+        host.onServerLinkBound(address, peerId)
+        drainPendingInboundFor(address, peerId)
     }
 
     /**
@@ -1618,6 +1678,7 @@ internal class CentralGattClient(
         while (iterations < MAX_DRAIN_ITERATIONS) {
             val fragments = host.pendingInbound.drain(address)
             if (fragments.isEmpty()) break
+            if (iterations == 0) host.onPeerHeard(deviceId)
             iterations++
             for (fragment in fragments) {
                 try {
