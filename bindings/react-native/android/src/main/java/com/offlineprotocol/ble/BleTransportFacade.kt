@@ -1889,22 +1889,29 @@ class BleTransportFacade(
      */
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val on = when (intent.action) {
-                Intent.ACTION_SCREEN_ON -> true
-                Intent.ACTION_SCREEN_OFF -> false
-                else -> return
+            when (intent.action) {
+                Intent.ACTION_SCREEN_ON -> onScreenStateChanged(true)
+                Intent.ACTION_SCREEN_OFF -> onScreenStateChanged(false)
             }
-            if (on == screenOn) return
-            screenOn = on
-            // The scan's silence so far was measured under the other state.
-            lastDiscoveryAt = System.currentTimeMillis()
-            emitDiagnostic("info", "BLE scan follows screen state", mapOf(
-                "screenOn" to on,
-                "scanning" to isScanning
-            ))
-            bleHandler.removeCallbacks(screenScanRestart)
-            bleHandler.postDelayed(screenScanRestart, BleScanPolicy.SCREEN_TRANSITION_DEBOUNCE_MS)
         }
+    }
+
+    /** From [screenStateReceiver], and from [registerScreenStateReceiver] for
+     *  a change the receiver was not yet registered to hear. BLE thread. */
+    private fun onScreenStateChanged(on: Boolean) {
+        if (on == screenOn) return
+        screenOn = on
+        // Only on the way on: the pocket's silence must not trip the 30 s
+        // escalating watchdog during the debounce. On the way off the
+        // threshold becomes minutes anyway, and re-stamping there would let
+        // every glance keep a silently refused scan dead.
+        if (on) lastDiscoveryAt = System.currentTimeMillis()
+        emitDiagnostic("info", "BLE scan follows screen state", mapOf(
+            "screenOn" to on,
+            "scanning" to isScanning
+        ))
+        bleHandler.removeCallbacks(screenScanRestart)
+        bleHandler.postDelayed(screenScanRestart, BleScanPolicy.SCREEN_TRANSITION_DEBOUNCE_MS)
     }
 
     /** Moves a running scan to the filter the screen now needs, if it has
@@ -1932,6 +1939,11 @@ class BleTransportFacade(
                 context.registerReceiver(screenStateReceiver, filter, null, bleHandler)
             }
             screenStateReceiverRegistered = true
+            // A screen change since [startUnsafe] read the screen state was
+            // broadcast before this receiver could hear it, and the broadcast
+            // is not sticky.
+            (context.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive
+                ?.let { onScreenStateChanged(it) }
         } catch (e: Exception) {
             // The scan keeps the filter it started with; a screen-off scan
             // started with the screen on stays paused until the next restart.

@@ -19,8 +19,9 @@ package com.offlineprotocol.ble
  * pocket in a quiet place is quiet. It is still restarted, slowly and without
  * escalating, because a scan can also be dead rather than quiet: Android
  * refuses an app's sixth scan start within 30 seconds without a callback, and
- * each screen transition is a start. Nothing else would notice a dead scan
- * with the screen off, since the proactive refresh runs only on a result.
+ * scans are started by refreshes and screen transitions alike. Nothing else
+ * would notice a dead scan with the screen off, since the proactive refresh
+ * runs only on a result.
  *
  * iOS names the service in the background too (BleScanPolicy.swift), and
  * never restarts there: it refuses no start, and a restart costs a
