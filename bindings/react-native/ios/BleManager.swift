@@ -439,6 +439,12 @@ public class BleManager: NSObject, TransportManager {
     /// and never released (see `startUnsafe`). Main only.
     private static var sharedCentralManager: CBCentralManager?
     private static var sharedPeripheralManager: CBPeripheralManager?
+    /// The instance whose start took the managers' delegates, by identity:
+    /// an `ObjectIdentifier` still compares in `deinit`, where a weak
+    /// reference to `self` (the managers' delegate) already reads nil.
+    /// Main only.
+    private static var managerOwner: ObjectIdentifier?
+    private static weak var activeInstance: BleManager?
     private var connectionMonitor: DispatchSourceTimer?
     private var connectionAttemptTimestamps: [UUID: Date] = [:]
     private var connectionRetryCount: [UUID: Int] = [:]
@@ -749,8 +755,18 @@ public class BleManager: NSObject, TransportManager {
         // second start while the first is still `.starting` made exactly that
         // pair. A reused manager delivers no state change, so its state is
         // replayed through the delegate, which starts the transport as it
-        // would on power-on. One running BleManager per process: the restore
-        // identifiers allow no more.
+        // would on power-on.
+        //
+        // One running BleManager per process, as the restore identifiers
+        // allow no more, and enforced: a predecessor still running (a React
+        // Native reload starts the new module before the old one is freed)
+        // stops with its own teardown before this one takes the managers, so
+        // its late stop cannot end this one's scan or advertising.
+        if let previous = Self.activeInstance, previous !== self {
+            previous.stopUnsafe()
+        }
+        Self.managerOwner = ObjectIdentifier(self)
+        Self.activeInstance = self
         if let central = Self.sharedCentralManager, let peripheral = Self.sharedPeripheralManager {
             centralManager = central
             peripheralManager = peripheral
@@ -815,6 +831,15 @@ public class BleManager: NSObject, TransportManager {
         }
         
         updateState(.stopping)
+
+        // Only the owner commands the shared managers. One that is not lets
+        // go of its references first, so the bookkeeping below touches
+        // nothing of the owner's (see `managerOwner`).
+        let owns = Self.managerOwner == ObjectIdentifier(self)
+        if !owns {
+            centralManager = nil
+            peripheralManager = nil
+        }
         
         // Stop scanning
         stopScanning(reason: "stop")
@@ -828,9 +853,8 @@ public class BleManager: NSObject, TransportManager {
         // stopped transport, holds a slot on the peer, and can relaunch the
         // app under state restoration. The service is unpublished, or a peer
         // still linked keeps reading this device's identity and writing into
-        // a transport that never answers. Only while the managers are still
-        // this instance's: a later instance may already own them.
-        if centralManager?.delegate === self {
+        // a transport that never answers.
+        if owns {
             var dialled: [UUID: CBPeripheral] = [:]
             for peripheral in connections.allPeripherals() { dialled[peripheral.identifier] = peripheral }
             for (id, peripheral) in discoveredPeripherals { dialled[id] = peripheral }
@@ -838,8 +862,6 @@ public class BleManager: NSObject, TransportManager {
             for peripheral in dialled.values {
                 centralManager?.cancelPeripheralConnection(peripheral)
             }
-        }
-        if peripheralManager?.delegate === self {
             peripheralManager?.removeAllServices()
         }
         clearLinkState()
@@ -858,10 +880,12 @@ public class BleManager: NSObject, TransportManager {
         // The process keeps the managers for the next start (see
         // `startUnsafe`); this instance lets go of them. Detached, so that a
         // Bluetooth power change cannot start a stopped transport (the
-        // power-on handlers scan and advertise whatever the state), unless a
-        // later instance already holds them.
-        if centralManager?.delegate === self { centralManager?.delegate = nil }
-        if peripheralManager?.delegate === self { peripheralManager?.delegate = nil }
+        // power-on handlers scan and advertise whatever the state).
+        if owns {
+            centralManager?.delegate = nil
+            peripheralManager?.delegate = nil
+            Self.managerOwner = nil
+        }
         centralManager = nil
         peripheralManager = nil
         
@@ -1020,7 +1044,9 @@ public class BleManager: NSObject, TransportManager {
         // Filterless in the foreground, where the discovery callback filters
         // instead (an Android stack that puts the service in its scan response
         // only is still seen); the mesh service in the background, where a
-        // filterless scan delivers nothing (BleScanPolicy).
+        // filterless scan delivers nothing (BleScanPolicy). In the background
+        // such a stack is missed: the SDK's own Android advertiser puts the
+        // service in its primary packet.
         central.scanForPeripherals(
             withServices: BleScanPolicy.services(SERVICE_UUID, inBackground: isInBackground),
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
