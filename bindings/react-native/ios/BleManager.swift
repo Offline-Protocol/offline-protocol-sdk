@@ -793,6 +793,10 @@ public class BleManager: NSObject, TransportManager {
             centralManager?.cancelPeripheralConnection(peripheral)
         }
         clearLinkState()
+        // Here, not in `clearLinkState()`: that also runs on every radio
+        // loss, after which the transport carries on and its scan must still
+        // follow the app's state.
+        stopObservingAppState()
         pendingAdvertiseRestart?.cancel()
         pendingAdvertiseRestart = nil
         lastAdvertiseRestartAt = nil
@@ -892,8 +896,6 @@ public class BleManager: NSObject, TransportManager {
         serviceInstanceDeadlines.removeAll()
         for report in centralLostReports.values { report.cancel() }
         centralLostReports.removeAll()
-        for observer in appStateObservers { NotificationCenter.default.removeObserver(observer) }
-        appStateObservers.removeAll()
         serviceInstanceProbes.removeAll()
         serviceInstanceLock.lock()
         serviceInstanceBindings.removeAll()
@@ -1150,6 +1152,9 @@ public class BleManager: NSObject, TransportManager {
     /// filter the new state needs (BleScanPolicy). Main only; from
     /// `startUnsafe`.
     private func observeAppState() {
+        // A second `start()` while still `.starting` would otherwise leave
+        // the first pair registered.
+        stopObservingAppState()
         isInBackground = UIApplication.shared.applicationState == .background
         let center = NotificationCenter.default
         appStateObservers = [
@@ -1160,6 +1165,12 @@ public class BleManager: NSObject, TransportManager {
                 self?.appStateChanged(inBackground: false)
             },
         ]
+    }
+
+    /// Main only; from `stopUnsafe` and `observeAppState`.
+    private func stopObservingAppState() {
+        for observer in appStateObservers { NotificationCenter.default.removeObserver(observer) }
+        appStateObservers.removeAll()
     }
 
     /// A scan started under the other state keeps that state's filter, so
