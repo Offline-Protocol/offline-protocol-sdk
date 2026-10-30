@@ -435,6 +435,10 @@ public class BleManager: NSObject, TransportManager {
     /// Force a complete BLE stack refresh periodically even when things seem healthy
     private let FORCED_BLE_REFRESH_INTERVAL: TimeInterval = 120.0
     private var lastForcedBleRefresh: Date?
+    /// The process's one pair of Bluetooth managers, made on the first start
+    /// and never released (see `startUnsafe`). Main only.
+    private static var sharedCentralManager: CBCentralManager?
+    private static var sharedPeripheralManager: CBPeripheralManager?
     private var connectionMonitor: DispatchSourceTimer?
     private var connectionAttemptTimestamps: [UUID: Date] = [:]
     private var connectionRetryCount: [UUID: Int] = [:]
@@ -735,6 +739,34 @@ public class BleManager: NSObject, TransportManager {
         updateState(.starting)
         transportStartAt = Date()
         
+        // One pair of managers for the process, made on the first start and
+        // reused by every later one, by this instance or the next. A manager
+        // made under a restore identifier whose previous manager's session is
+        // still alive reports `.unsupported` for good (BleScanPolicy), and
+        // `bluetoothd` keeps a released manager's session for about 15
+        // seconds. The bridges release their BleManager on stop and make a new
+        // one on the next start, so a stop then start, an engine rebuilt, or a
+        // second start while the first is still `.starting` made exactly that
+        // pair. A reused manager delivers no state change, so its state is
+        // replayed through the delegate, which starts the transport as it
+        // would on power-on. One running BleManager per process: the restore
+        // identifiers allow no more.
+        if let central = Self.sharedCentralManager, let peripheral = Self.sharedPeripheralManager {
+            centralManager = central
+            peripheralManager = peripheral
+            central.delegate = self
+            peripheral.delegate = self
+            observeAppState()
+            print("[BleManager] ♻️ Reusing the Bluetooth managers")
+            emitDiagnostic("info", "Reusing the Bluetooth managers", context: [
+                "centralState": central.state.rawValue,
+                "peripheralState": peripheral.state.rawValue
+            ])
+            centralManagerDidUpdateState(central)
+            peripheralManagerDidUpdateState(peripheral)
+            return
+        }
+
         // Initialize Central Manager (for scanning) with state restoration support.
         // The restore identifier allows iOS to relaunch the app and restore BLE
         // connections after the app has been terminated by the OS.
@@ -758,6 +790,8 @@ public class BleManager: NSObject, TransportManager {
                 CBPeripheralManagerOptionRestoreIdentifierKey: "com.offlineprotocol.peripheral"
             ]
         )
+        Self.sharedCentralManager = centralManager
+        Self.sharedPeripheralManager = peripheralManager
         
         observeAppState()
 
@@ -805,7 +839,13 @@ public class BleManager: NSObject, TransportManager {
         lastForcedBleRefresh = nil
         aggressiveDiscoveryStarted = nil
 
-        // Clean up managers
+        // The process keeps the managers for the next start (see
+        // `startUnsafe`); this instance lets go of them. Detached, so that a
+        // Bluetooth power change cannot start a stopped transport (the
+        // power-on handlers scan and advertise whatever the state), unless a
+        // later instance already holds them.
+        if centralManager?.delegate === self { centralManager?.delegate = nil }
+        if peripheralManager?.delegate === self { peripheralManager?.delegate = nil }
         centralManager = nil
         peripheralManager = nil
         
@@ -1184,6 +1224,10 @@ public class BleManager: NSObject, TransportManager {
             "background": inBackground,
             "scanning": isScanning
         ])
+        // The monitor skips every refresh in the background, so the forced
+        // refresh's clock is stale on return and would fire on the next tick:
+        // a second restart and an advertising gap on every foregrounding.
+        if !inBackground { lastForcedBleRefresh = Date() }
         guard isScanning else { return }
         centralManager?.stopScan()
         isScanning = false

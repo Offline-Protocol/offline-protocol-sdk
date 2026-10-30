@@ -791,7 +791,10 @@ pocket discovered nobody and the scan watchdogs restarted the quiet scan:
   was killed. Inbound kept arriving, so every peer saw a link that took its
   writes and never answered. It happened about two minutes after backgrounding,
   next to a peer whose writes kept waking the app. The replacement is gone: a
-  restart never escalates on iOS.
+  restart never escalates on iOS. The same pair was also made by an ordinary
+  stop then start, because the bridges release their `BleManager` on stop and
+  `bluetoothd` keeps a released manager's session for about 15 seconds, so
+  the managers are now made once per process and reused by every start.
 - **Android** reset the stack every 90 seconds with the screen off, and the
   reset restarted the advertisement. A new advertising set has a new random
   address, which is the churn [ADR 0030](../adr/0030-one-bluetooth-le-link-per-peer-pair.md)
