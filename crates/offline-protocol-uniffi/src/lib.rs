@@ -15430,6 +15430,20 @@ mod tests {
              manager's session for about 15 seconds, and a manager made under the same \
              restore identifier meanwhile reports `.unsupported` for good"
         );
+        let stop = between(
+            &swift,
+            "private func stopUnsafe() {",
+            "private func dropLinksAfterRadioLoss() {",
+        );
+        assert!(
+            stop.contains("peripheralManager?.removeAllServices()")
+                && stop.contains("for (id, peripheral) in discoveredPeripherals {")
+                && stop.contains("for (id, peripheral) in pendingRestoredPeripherals {"),
+            "with the managers kept for the process, stop must do what releasing them did: \
+             unpublish the service, and cancel every connect, pending and restored ones \
+             included, or a stopped transport keeps serving its identity, takes writes it \
+             never answers, and holds connects that complete after the stop"
+        );
         assert!(
             !swift.contains("sharedCentralManager = nil")
                 && !swift.contains("sharedPeripheralManager = nil"),
