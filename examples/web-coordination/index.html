@@ -179,22 +179,25 @@ function avatar(address, name, target = el("div", "avatar")) {
   return target;
 }
 
-// address -> { state: { key: value }, subs: { status, alerts }, sub: { state, reason } }.
-// `alerts` is one subscription to the pattern `alerts/*`: every alert level
-// is its own topic, and a level created later is followed without asking.
+// address -> { state: { key: value }, linked, subs: { topic: { id, state, reason } } },
+// where `linked` is this device's own view of the neighbour, and each
+// subscription's state is the engine's. `alerts/*` is one subscription to a
+// pattern: every alert level is its own topic, and a level created later is
+// followed without asking.
 const peers = new Map();
 // sub_id -> { address, topic }
 const subscriptions = new Map();
 const alerts = [];
-let alertCount = 0;
+// topic -> alerts raised on it. Each level is its own topic with its own
+// checkpoint, so each summary counts its own level.
+const alertCounts = new Map();
+// Under "ask me", a new subscriber waits here for an answer.
+const asks = new Map();
 
 // In memory: every tab is its own device (see examples/web-two-tabs).
 const node = await OfflineNode.start({ appId: "web-coordination-demo", storage: "memory" });
 $("me").textContent = node.address;
 $("name").value = `device ${node.address.slice(-4)}`;
-
-await node.registerService(SERVICE, { version: "1", capabilities: { topics: "status,alerts" } });
-await node.setServiceSubscriptionPolicy(SERVICE, { kind: "accept_all" });
 
 // ---------------------------------------------------------------------------
 // Publishing: `status` is a latest topic (one value per key), `alerts` a log
@@ -232,16 +235,14 @@ async function publishState(key, value) {
 $("name").addEventListener("change", () => publishState("name", $("name").value));
 $("status").addEventListener("change", () => publishState("status", $("status").value));
 $("load").addEventListener("input", () => publishState("load", $("load").value));
-for (const [key, value] of [["name", $("name").value], ["status", $("status").value], ["load", $("load").value]]) {
-  await publishState(key, value);
-}
 
 async function raise() {
   const text = $("alert-text").value.trim() || "attention";
   const topic = `alerts/${$("alert-level").value}`;
-  alertCount += 1;
+  const count = (alertCounts.get(topic) ?? 0) + 1;
+  alertCounts.set(topic, count);
   showReport("alert", await node.publishServiceUpdate(SERVICE, topic, text));
-  await node.setServiceTopicCheckpoint(SERVICE, topic, `${alertCount} alert(s) so far, last: ${text}`);
+  await node.setServiceTopicCheckpoint(SERVICE, topic, `${count} alert(s) so far, last: ${text}`);
   $("alert-text").value = "";
 }
 $("raise").addEventListener("click", raise);
@@ -260,28 +261,31 @@ const statusKeys = () => ($("watch-load").checked ? [] : ["name", "status"]);
 
 async function subscribeTo(address, topic, options) {
   const peer = peers.get(address);
+  peer.subs[topic] = { state: "pending", reason: "waiting for a session" };
   try {
-    const subId = await node.subscribeService(address, SERVICE, topic, options);
-    peer.subs[topic] = subId;
-    subscriptions.set(subId, { address, topic });
+    const id = await node.subscribeService(address, SERVICE, topic, options);
+    peer.subs[topic].id = id;
+    subscriptions.set(id, { address, topic });
   } catch (error) {
-    peer.sub = { state: "ended", reason: `could not subscribe: ${error.message ?? error}` };
+    peer.subs[topic] = { state: "ended", reason: `could not subscribe: ${error.message ?? error}` };
   }
 }
 
 async function watch(address) {
-  if (peers.has(address)) return;
-  const peer = { state: {}, sub: { state: "pending", reason: "waiting for a session" }, subs: {} };
+  const peer = peers.get(address) ?? { state: {}, subs: {} };
   peers.set(address, peer);
+  peer.linked = true;
   render();
-  await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
-  await subscribeTo(address, "alerts/*", { mode: "log" });
+  // A subscription that ended is asked for again when the device comes back;
+  // a paused one the engine retries by itself.
+  if (!peer.subs.status?.id) await subscribeTo(address, "status", { mode: "latest", keys: statusKeys() });
+  if (!peer.subs["alerts/*"]?.id) await subscribeTo(address, "alerts/*", { mode: "log" });
   render();
 }
 
 $("watch-load").addEventListener("change", async () => {
   for (const [address, peer] of peers) {
-    const old = peer.subs.status;
+    const old = peer.subs.status?.id;
     if (old) {
       subscriptions.delete(old);
       delete peer.subs.status;
@@ -319,21 +323,20 @@ node.addEventListener("service_subscription_changed", ({ detail }) => {
     const sub = subscriptions.get(detail.sub_id);
     if (!sub) return;
     const peer = peers.get(sub.address);
-    peer.sub = { state: detail.state, reason: detail.reason };
-    // A provider that started over: what was held belongs to its old life.
-    if (detail.reason === "stream_reset" && sub.topic === "status") peer.state = {};
     if (detail.state === "ended") {
       subscriptions.delete(detail.sub_id);
-      delete peer.subs[sub.topic];
+      peer.subs[sub.topic] = { state: detail.state, reason: detail.reason };
+    } else {
+      Object.assign(peer.subs[sub.topic], { state: detail.state, reason: detail.reason });
     }
+    // A provider that started over: what was held belongs to its old life.
+    if (detail.reason === "stream_reset" && sub.topic === "status") peer.state = {};
   } else {
     asks.delete(detail.sub_id);
   }
   render();
 });
 
-// Under "ask me", a new subscriber waits here for an answer.
-const asks = new Map();
 node.addEventListener("service_subscribe_received", ({ detail }) => {
   asks.set(detail.sub_id, detail);
   render();
@@ -341,7 +344,8 @@ node.addEventListener("service_subscribe_received", ({ detail }) => {
 
 node.addEventListener("neighbor_lost", ({ detail }) => {
   const peer = peers.get(detail.peer_id);
-  if (peer) peer.sub = { state: "paused", reason: "out of range; queued updates wait for it" };
+  // Only the link: each subscription says for itself when it pauses.
+  if (peer) peer.linked = false;
   render();
 });
 
@@ -378,15 +382,16 @@ function renderPeer(address, peer) {
   load.append(loadRow, bar);
   card.append(load);
 
-  const foot = el("div", "kv");
-  const state = el("span");
-  state.append(el("span", `pill ${peer.sub.state}`, peer.sub.state), document.createTextNode(` ${peer.sub.reason}`));
-  state.className = "meta";
-  foot.append(state);
-  if (peer.subs.status) {
-    foot.append(button("Resync", () => node.resyncServiceSubscription(peer.subs.status), "quiet small"));
+  for (const [topic, sub] of Object.entries(peer.subs)) {
+    const foot = el("div", "kv");
+    const state = el("span", "meta");
+    state.dataset.topic = topic;
+    state.append(el("span", `pill ${sub.state}`, sub.state), document.createTextNode(` ${topic} ${sub.reason}`));
+    foot.append(state);
+    if (sub.id) foot.append(button("Resync", () => node.resyncServiceSubscription(sub.id), "quiet small"));
+    card.append(foot);
   }
-  card.append(foot);
+  if (!peer.linked) card.append(el("div", "meta", "out of range; queued updates wait for it"));
   return card;
 }
 
@@ -431,7 +436,14 @@ function render() {
   }
 }
 
+// Last, with every listener attached: a neighbour found during these awaits
+// is still watched.
 render();
 addEventListener("pagehide", () => node.stop());
+await node.registerService(SERVICE, { version: "1", capabilities: { topics: "status,alerts" } });
+await node.setServiceSubscriptionPolicy(SERVICE, { kind: "accept_all" });
+for (const [key, value] of [["name", $("name").value], ["status", $("status").value], ["load", $("load").value]]) {
+  await publishState(key, value);
+}
 </script>
 </html>

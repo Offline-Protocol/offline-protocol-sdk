@@ -602,6 +602,8 @@ fn the_browser_tests_run_in_ci() {
         "bash bindings/web/scripts/test-conformance.sh",
         // A lobby-only change must run the job that reloads it offline (W15).
         "- 'examples/web-lobby/**'",
+        // The browser job opens the coordination example in two frames.
+        "- 'examples/web-coordination/**'",
     ] {
         assert!(
             ci.contains(needle),
