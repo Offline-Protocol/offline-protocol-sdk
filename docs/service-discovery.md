@@ -558,7 +558,7 @@ a `SubscriptionPolicyConfig` record. The hand-written layers take strings:
 
 | Binding | Subscribe | Publish | Policy |
 |---------|-----------|---------|--------|
-| React Native | `protocol.subscribeService(provider, serviceId, topic, 'latest')` | `protocol.publishServiceUpdate(serviceId, topic, body, key?)` | `protocol.setServiceSubscriptionPolicy(serviceId, { kind: 'rules', allowGroups, fallback: 'ask' })` |
+| React Native | `new MeshServices().subscribeService(provider, serviceId, topic, 'latest')` | `services.publishServiceUpdate(serviceId, topic, body, key?)` | `services.setServiceSubscriptionPolicy(serviceId, { kind: 'rules', allowGroups, fallback: 'ask' })` |
 | Flutter | `MeshSdk.subscribeService({'provider': ..., 'serviceId': ..., 'topic': ..., 'mode': 'latest'})` | `MeshSdk.publishServiceUpdate({'serviceId': ..., 'topic': ..., 'key': ..., 'body': ...})` | `MeshSdk.setServiceSubscriptionPolicy({'serviceId': ..., 'policyJson': '{"kind":"accept_all"}'})` |
 | Python | `Services.subscribe(provider, service_id, topic, mode="latest")` | `Services.publish(service_id, topic, body, key=...)` | `Services.set_policy(service_id, "rules", allow_groups=[...])` |
 

@@ -353,21 +353,28 @@ Render replies in the UI by resolving `replyToMsg` to the original message.
 A device can subscribe to another's live state and receive sealed updates as
 they happen ([service discovery guide](service-discovery.md#subscriptions)):
 
+The calls are on `MeshServices`, next to service requests; updates arrive as
+events on the protocol.
+
 ```ts
+import { MeshServices } from '@offline-protocol/mesh-sdk';
+
+const services = new MeshServices();
+
 // Provider
-await protocol.setServiceSubscriptionPolicy('fleet.v1', { kind: 'accept_all' });
-await protocol.publishServiceUpdate('fleet.v1', 'battery', '81', 'pct');
+await services.setServiceSubscriptionPolicy('fleet.v1', { kind: 'accept_all' });
+await services.publishServiceUpdate('fleet.v1', 'battery', '81', 'pct');
 
 // Consumer
-const subId = await protocol.subscribeService(providerAddress, 'fleet.v1', 'battery', 'latest');
-protocol.onEvent((event) => {
-  if (event.type === 'service_update_received' && event.sub_id === subId) {
+const subId = await services.subscribeService(providerAddress, 'fleet.v1', 'battery', 'latest');
+protocol.on('service_update_received', (event) => {
+  if (event.sub_id === subId) {
     render(event.key, event.body);
   }
 });
 
 // Every topic under rooms/, and only two keys of each; updates name their topic.
-await protocol.subscribeService(providerAddress, 'home.v1', 'rooms/*', 'latest', '', ['temp', 'humidity']);
+await services.subscribeService(providerAddress, 'home.v1', 'rooms/*', 'latest', '', ['temp', 'humidity']);
 ```
 
 ---
