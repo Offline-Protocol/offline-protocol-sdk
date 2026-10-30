@@ -175,11 +175,19 @@ Each names the failure it prevents.
   a lost one, and a churning topic always has one in flight: what fails the
   test is a commit that existed a whole renewal ago. The unset mark does the
   same for the Welcome, which a renewal can cross. A lost commit or Welcome is
-  therefore found in about one lease, whatever the commit rate. The commit has
-  to reach the member and the report has to come back before the check, so a
-  member whose round trip takes longer than half its lease, a one-way path
-  longer than a quarter of it, looks stuck at every check, and should ask for
-  a lease of at least four times that path.
+  therefore found in about one lease, whatever the commit rate.
+
+  A slow path alone does not fail the check. A member times its next renewal
+  from the reply it receives, and the commit of the marked epoch left the
+  provider before that reply, so on the ordinary cycle path latency cancels.
+  Two cases can still fail a healthy member. A commit can reach it more than
+  half a lease after the reply that was queued behind it, which the unordered
+  ladder allows when the commit's first attempt is refused and backs off. And
+  a renewal not timed from a reply (the last reply was lost, or rediscovery or
+  a resync sent it) can reach a mark old enough to compare while a commit on a
+  one-way path longer than a quarter of the lease is still in flight. Each
+  rebuilds that member once, at two commits, and neither is a steady state, so
+  a lease of at least four times the one-way path keeps the second case out.
 
   The removal sends no `__SVC_UNSUB__`, since the subscription goes on: it
   falls back to the 1:1 session, `in_group` turns false, and the reply offers a
