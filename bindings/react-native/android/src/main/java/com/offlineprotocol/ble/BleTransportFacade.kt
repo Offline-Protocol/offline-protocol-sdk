@@ -2105,11 +2105,9 @@ class BleTransportFacade(
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .build()
             
-            // Scan without service UUID filter for iOS ↔ Android interoperability
-            // iOS's CoreBluetooth has known issues recognizing 128-bit service UUIDs from Android
-            // advertisements, and vice versa. Scanning without filter and filtering in software
-            // ensures we discover all mesh devices regardless of platform quirks.
-            // We filter in handleScanResult using shouldProcessDiscoveredDevice().
+            // With the screen on the scan is unfiltered and handleScanResult
+            // filters in software (shouldProcessDiscoveredDevice); with it off
+            // the stack runs only a filtered scan ([BleScanPolicy]).
             
             scanCallback = object : ScanCallback() {
                 // Scan callbacks arrive on a private Binder thread. Repost
@@ -2199,7 +2197,6 @@ class BleTransportFacade(
                 }
             }
             
-            // Scan without filter - we'll filter in software for cross-platform compatibility
             try {
                 // Unfiltered with the screen on, where software filters
                 // instead; the mesh service with it off, where the stack
