@@ -15370,6 +15370,144 @@ mod tests {
         );
     }
 
+    /// A scan the platform restricts names the mesh service, and its silence
+    /// is never read as a stalled stack (C14 in docs/bridges/README.md):
+    /// iOS in the background, Android with the screen off. `BleScanPolicy`
+    /// is unit-tested on both platforms, but a policy nobody calls passes its
+    /// own tests, and both call sites sit behind the platform's Bluetooth
+    /// stack, so they are pinned here. So is the iOS rule that a restart
+    /// never escalates to a second `CBCentralManager`: one made under the
+    /// same restore identifier while the first one's session is alive
+    /// reports `.unsupported` for good, and a backgrounded iPhone stopped
+    /// sending on every link that way.
+    #[test]
+    fn ble_scans_follow_the_platform_restriction_and_ios_never_replaces_its_central() {
+        fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+            let from = text
+                .find(start)
+                .unwrap_or_else(|| panic!("missing `{start}`"));
+            let body = from + start.len();
+            let to = body
+                + text[body..]
+                    .find(end)
+                    .unwrap_or_else(|| panic!("missing `{end}` after `{start}`"));
+            &text[from..to]
+        }
+
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        assert_eq!(
+            swift.matches("CBCentralManager(").count(),
+            1,
+            "BleManager.swift must construct its CBCentralManager once: a second one under \
+             the same restore identifier reports `.unsupported` for good"
+        );
+        assert!(
+            between(
+                &swift,
+                "private func startUnsafe() throws {",
+                "public func stop() {"
+            )
+            .contains("CBCentralManager("),
+            "the one CBCentralManager must be constructed in startUnsafe"
+        );
+        let scans: Vec<&str> = swift
+            .split("scanForPeripherals(")
+            .skip(1)
+            .map(str::trim_start)
+            .collect();
+        assert!(!scans.is_empty(), "BleManager.swift must scan somewhere");
+        for scan in &scans {
+            assert!(
+                scan.starts_with("withServices: BleScanPolicy.services(")
+                    || scan.starts_with("withServices: [SERVICE_UUID]"),
+                "every iOS scan must take its services from BleScanPolicy.services (the \
+                 targeted service scan aside): a filterless scan delivers nothing in the \
+                 background ({})",
+                &scan[..scan.len().min(80)]
+            );
+        }
+        let monitor = between(
+            &swift,
+            "private func startScanMonitor() {",
+            "private func stopScanMonitor() {",
+        );
+        let quiet = monitor
+            .find("BleScanPolicy.mayRestartQuietScan(")
+            .expect("the scan monitor must ask BleScanPolicy.mayRestartQuietScan");
+        let restart = monitor
+            .find("restartScanningDueToInactivity()")
+            .expect("the scan monitor must still restart a stalled foreground scan");
+        assert!(
+            quiet < restart,
+            "the scan monitor must consult mayRestartQuietScan before any restart"
+        );
+        assert!(
+            between(
+                &swift,
+                "private func stopUnsafe() {",
+                "private func dropLinksAfterRadioLoss() {"
+            )
+            .contains("stopObservingAppState()"),
+            "stop must end the app-state observation"
+        );
+        assert!(
+            !between(
+                &swift,
+                "private func clearLinkState() {",
+                "public func pause() {"
+            )
+            .contains("stopObservingAppState()"),
+            "clearLinkState also runs on every radio loss, after which the scan must still \
+             follow the app's state: it must not end the app-state observation"
+        );
+
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let starts: Vec<&str> = kotlin
+            .split(".startScan(")
+            .skip(1)
+            .map(str::trim_start)
+            .collect();
+        assert_eq!(
+            starts.len(),
+            1,
+            "BleTransportFacade.kt must start its scan in one place"
+        );
+        assert!(
+            starts[0].starts_with("filters, scanSettings, scanCallback)")
+                && kotlin.contains("val filters = if (BleScanPolicy.filtersOnService(screenOn)) {"),
+            "the Android scan must take its filters from BleScanPolicy.filtersOnService: an \
+             unfiltered scan is paused with the screen off"
+        );
+        let watchdog = between(
+            &kotlin,
+            "private val scanWatchdogRunnable = object : Runnable {",
+            "private val",
+        );
+        let quiet = watchdog
+            .find("BleScanPolicy.mayRestartQuietScan(screenOn)")
+            .expect("the scan watchdog must ask BleScanPolicy.mayRestartQuietScan");
+        let restart = watchdog
+            .find("restartScanning(\"watchdog\")")
+            .expect("the scan watchdog must still restart a stalled screen-on scan");
+        assert!(
+            quiet < restart,
+            "the scan watchdog must consult mayRestartQuietScan before restarting"
+        );
+        let reset = between(
+            &kotlin,
+            "private fun evaluateBleHealthAfterRestart() {",
+            "private val writeInFlight",
+        );
+        assert!(
+            reset.contains("AdvertisingRefreshPolicy.restartsAdvertising(")
+                && reset.contains("if (restartAdvertising) { startAdvertising(\"ble_reset\") }"),
+            "the stack reset must restart the advertisement only as AdvertisingRefreshPolicy \
+             allows: a new advertising set has a new random address (ADR 0030)"
+        );
+    }
+
     /// The iOS peripheral serves Hello, and binds a central only on what its
     /// hello proves.
     ///
