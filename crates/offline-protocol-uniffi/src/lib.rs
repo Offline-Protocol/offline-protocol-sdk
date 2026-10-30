@@ -15410,6 +15410,31 @@ mod tests {
             .contains("CBCentralManager("),
             "the one CBCentralManager must be constructed in startUnsafe"
         );
+        assert_eq!(
+            swift.matches("CBPeripheralManager(").count(),
+            1,
+            "BleManager.swift must construct its CBPeripheralManager once, for the same reason"
+        );
+        assert!(
+            between(
+                &swift,
+                "private func startUnsafe() throws {",
+                "public func stop() {"
+            )
+            .contains(
+                "if let central = Self.sharedCentralManager, let peripheral = Self.sharedPeripheralManager {"
+            ) && swift.contains("Self.sharedCentralManager = centralManager")
+                && swift.contains("Self.sharedPeripheralManager = peripheralManager"),
+            "startUnsafe must reuse the process's Bluetooth managers: the bridges release \
+             their BleManager on stop and make a new one, bluetoothd keeps a released \
+             manager's session for about 15 seconds, and a manager made under the same \
+             restore identifier meanwhile reports `.unsupported` for good"
+        );
+        assert!(
+            !swift.contains("sharedCentralManager = nil")
+                && !swift.contains("sharedPeripheralManager = nil"),
+            "the process's Bluetooth managers must never be released"
+        );
         let scans: Vec<&str> = swift
             .split("scanForPeripherals(")
             .skip(1)
@@ -15506,6 +15531,27 @@ mod tests {
             ),
             "the screen-off watchdog must not re-stamp the clock and skip: a refused start is \
              silent, and nothing else restarts a dead scan with the screen off"
+        );
+        let screen = between(
+            &kotlin,
+            "private fun onScreenStateChanged(on: Boolean) {",
+            "private val screenScanRestart",
+        );
+        assert!(
+            screen.contains("if (on) lastDiscoveryAt = System.currentTimeMillis()")
+                && screen.matches("lastDiscoveryAt =").count() == 1,
+            "a screen transition may re-stamp the watchdog's clock only on the way on: \
+             re-stamped on the way off, every glance would keep a refused scan dead"
+        );
+        assert!(
+            between(
+                &kotlin,
+                "private fun registerScreenStateReceiver() {",
+                "private fun unregisterScreenStateReceiver() {"
+            )
+            .contains("?.let { onScreenStateChanged(it) }"),
+            "registering the screen receiver must re-read the screen state: a change before \
+             it registered was broadcast to nobody, and the broadcast is not sticky"
         );
         let reset = between(
             &kotlin,
