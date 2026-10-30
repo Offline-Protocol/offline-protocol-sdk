@@ -219,6 +219,50 @@ configuration keeps the current setting rather than turning formation off.
 replaying the chapter's vectors. The group handling itself is not covered in
 CI (C9).
 
+## K9. A Bluetooth LE link outlives the app on the other end
+
+Both platforms keep a link up across an app restart: Android because the link
+belongs to the Bluetooth process, an iPhone through CoreBluetooth state
+restoration. What the link meant does not survive. The new process never
+received the hello that named the central, and a subscription the old one
+held is gone. Three things in the Android central follow, all found by
+restarting the iPhone app beside a linked Android phone
+([device runs](kotlin-devices.md)). Each one missing left the pair carrying
+nothing, in at least one direction, until the Android app restarted.
+
+- **A send goes over any ready client link to the peer.** A hello maps the
+  peer at the address it connected to our server from, where this side holds
+  no client link. Sends used to go to that address, and once its central
+  stopped being subscribed every one was deferred as "not yet ready" for good,
+  beside a ready client link to the same peer. `resolveClientEgressAddress`
+  falls back to that link (`ClientEgressAddressTest`).
+- **A dial refused as a duplicate still names the server link it proved.**
+  The restarted iPhone writes to our server over its restored link with no
+  hello. The dial that resolves such writes verifies it, and is then refused
+  under ADR 0030 because another link to the iPhone is held. It used to throw
+  the proof away with the link, so the writes queued unattributed and the
+  dial repeated every 60 seconds. `bindUnmappedServerLink` maps that server
+  link first, never rebinding one already mapped, and only while fragments
+  written from it wait for a sender: Android reports our own dial to the
+  server too, so a server connection alone proves nothing. Like a hello's
+  mapping, it then flushes the per-peer MTU, leaving out the payload the
+  refused dial staged (`DuplicateClientLinkTest`,
+  `StaleAddressDisconnectTest`). Such a server link is never subscribed
+  again, so it cannot carry our sends: a client link that drops while it is
+  the peer's only other link is redialled, not dropped as stale.
+- **A client link that only takes writes is redialled.** `SilentLinkPolicy`
+  (`SilentLinkPolicyTest`) and the connection monitor disconnect it and redial
+  the same address, so the handshake runs again, hello included. The redial
+  is explicit (`disconnectToRedial`): the peer usually also holds a link to
+  our server, and the ordinary disconnect path drops the address of a peer
+  linked elsewhere instead of redialling it, which left the redial to a fresh
+  advertisement. A link is judged only until the peer first answers on it,
+  and a peer is redialled once until it is heard from again. A link dead in
+  one direction only, while the peer still writes to our server, is not
+  caught, and neither is a link the peer answered before it restarted. The
+  rule, its bounds and those gaps are in
+  [the transport lifecycle](../state-machines/transport-lifecycle.md#per-transport-constraints).
+
 ## Testing
 
 Unit tests live in
