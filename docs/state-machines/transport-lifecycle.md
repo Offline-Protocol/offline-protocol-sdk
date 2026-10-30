@@ -278,3 +278,16 @@ LE and Wi-Fi Direct fail closed, because self is never a peer they hold a link
 to, but that only helps on a device with no other carrier: the transport manager
 treats a synchronous refusal as a fallback trigger and hands the frame to one of
 the others anyway.
+
+The same asymmetry decides where a frame for a mesh neighbor goes. DORS ranks
+carriers without looking at the recipient, so on a device with a relay up it
+can rank Nostr or the internet first for a recipient whose only path is a
+direct Bluetooth or Wi-Fi Direct link. Those carriers accept the frame and
+report success, the mesh fallback above never runs, and every retry takes the
+same route. A Web Bluetooth central is always such a recipient: it holds no
+relay presence at all. So `TransportManager::send` sends a frame for a
+recipient with a live direct mesh link on that link first, on every path:
+retries, acknowledgements and session control frames as well as the
+application dispatch, which applies the same rule itself. A refusal falls
+through to selection (`TransportManager::send_selected`) exactly as before, so
+a marginal radio never strands a frame another carrier could take.

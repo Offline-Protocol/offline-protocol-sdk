@@ -90,6 +90,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Frames for a Bluetooth neighbor no longer leave through a relay that
+  cannot reach it.** The application dispatch sent a message for a recipient
+  with a live direct mesh link over that link, but retries,
+  acknowledgements and session control frames went straight to DORS, which
+  ranks carriers without looking at the recipient. Nostr, the internet relay
+  and Reticulum accept a frame for any recipient and report success, so on a
+  device with a relay up those frames for a peer whose only path was the link
+  never arrived and were retried the same way until they failed. A browser
+  linked over Web Bluetooth to a phone with relays configured never completed
+  its session: after the Welcome, the phone's frames went to Nostr and the
+  browser's dial timed out. `TransportManager::send` now applies the
+  dispatch's rule on every path, and a refusal still falls through to
+  selection (`send_selected`)
+  ([transport lifecycle](docs/state-machines/transport-lifecycle.md#what-sent-means-at-each-layer)).
+
 - **Two devices that meet only through a third can invite each other to a
   group.** When the packages of such a pair crossed, so that each built a
   session from the other's before either Welcome arrived, the side the
