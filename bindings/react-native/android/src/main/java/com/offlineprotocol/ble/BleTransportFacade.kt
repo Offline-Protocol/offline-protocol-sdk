@@ -470,6 +470,9 @@ class BleTransportFacade(
      *  its silence is a stall ([BleScanPolicy]). BLE thread; read at start
      *  and kept current by [screenStateReceiver]. */
     private var screenOn = true
+    /** Whether the running scan was started with the mesh-service filter.
+     *  BLE thread. */
+    private var scanFilteredOnService = false
     // Set only when scan startup observes the adapter off. Generic scan
     // failures must not rebuild the peripheral or churn a healthy advertiser.
     private var adapterWasOff = false
@@ -1037,23 +1040,26 @@ class BleTransportFacade(
             if (!isScanning) {
                 return
             }
-            // A quiet scan with the screen off is the stack working as
-            // designed, not a stall ([BleScanPolicy]).
-            if (!BleScanPolicy.mayRestartQuietScan(screenOn)) {
-                lastDiscoveryAt = System.currentTimeMillis()
-                bleHandler.postDelayed(this, SCAN_WATCHDOG_HEARTBEAT_MS)
-                return
-            }
             val now = System.currentTimeMillis()
             val idleMs = now - lastDiscoveryAt
-            if (idleMs >= SCAN_WATCHDOG_INTERVAL_MS) {
+            // With the screen off a quiet scan is the stack working as
+            // designed, so it waits minutes and never escalates; it is still
+            // restarted, because a refused start is silent ([BleScanPolicy]).
+            if (idleMs >= BleScanPolicy.quietRestartAfterMs(screenOn, SCAN_WATCHDOG_INTERVAL_MS)) {
                 if (logThrottler.shouldLog("scan_watchdog", intervalMs = SCAN_WATCHDOG_INTERVAL_MS)) {
                     Log.w(TAG, "Restarting BLE scan after ${idleMs}ms of inactivity")
-                    emitDiagnostic("warning", "Restarting BLE scan due to inactivity", mapOf("idleMs" to idleMs))
+                    emitDiagnostic("warning", "Restarting BLE scan due to inactivity", mapOf(
+                        "idleMs" to idleMs,
+                        "screenOn" to screenOn
+                    ))
                 }
-                scanRestartCount++
-                restartScanning("watchdog")
-                evaluateBleHealthAfterRestart()
+                if (BleScanPolicy.quietRestartEscalates(screenOn)) {
+                    scanRestartCount++
+                    restartScanning("watchdog")
+                    evaluateBleHealthAfterRestart()
+                } else {
+                    restartScanning("screen_off_quiet")
+                }
                 return
             }
             bleHandler.postDelayed(this, SCAN_WATCHDOG_HEARTBEAT_MS)
@@ -1890,13 +1896,25 @@ class BleTransportFacade(
             }
             if (on == screenOn) return
             screenOn = on
+            // The scan's silence so far was measured under the other state.
+            lastDiscoveryAt = System.currentTimeMillis()
             emitDiagnostic("info", "BLE scan follows screen state", mapOf(
                 "screenOn" to on,
                 "scanning" to isScanning
             ))
-            if (state == TransportState.RUNNING && isScanning) {
-                restartScanning(if (on) "screen_on" else "screen_off")
-            }
+            bleHandler.removeCallbacks(screenScanRestart)
+            bleHandler.postDelayed(screenScanRestart, BleScanPolicy.SCREEN_TRANSITION_DEBOUNCE_MS)
+        }
+    }
+
+    /** Moves a running scan to the filter the screen now needs, if it has
+     *  the other one. Debounced, so a glance at the phone costs no starts:
+     *  Android refuses the sixth start within 30 seconds, silently. */
+    private val screenScanRestart = Runnable {
+        if (state == TransportState.RUNNING && isScanning &&
+            scanFilteredOnService != BleScanPolicy.filtersOnService(screenOn)
+        ) {
+            restartScanning(if (screenOn) "screen_on" else "screen_off")
         }
     }
     private var screenStateReceiverRegistered = false
@@ -1922,6 +1940,7 @@ class BleTransportFacade(
     }
 
     private fun unregisterScreenStateReceiver() {
+        bleHandler.removeCallbacks(screenScanRestart)
         if (!screenStateReceiverRegistered) return
         screenStateReceiverRegistered = false
         try {
@@ -2173,7 +2192,8 @@ class BleTransportFacade(
                 // Unfiltered with the screen on, where software filters
                 // instead; the mesh service with it off, where the stack
                 // pauses an unfiltered scan ([BleScanPolicy]).
-                val filters = if (BleScanPolicy.filtersOnService(screenOn)) {
+                scanFilteredOnService = BleScanPolicy.filtersOnService(screenOn)
+                val filters = if (scanFilteredOnService) {
                     listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build())
                 } else {
                     null

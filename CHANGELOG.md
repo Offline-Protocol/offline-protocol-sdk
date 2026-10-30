@@ -123,8 +123,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the scan every 30 seconds and reset the stack every 90. Each reset restarted
   the advertisement under a new random address, which a linked peer then dials
   and never connects (ADR 0030). With the screen off the scan now filters on
-  the mesh service, its silence is not a stall, and the reset restarts the
-  advertisement only as the forced refresh does
+  the mesh service, its silence is not a stall (it is restarted after five
+  quiet minutes, never escalating to a reset, so a scan Android silently
+  refused does not stay dead), a screen transition moves the scan two seconds
+  later and only if it must, and the reset restarts the advertisement only as
+  the forced refresh does
   ([C14](docs/bridges/README.md#c14-a-quiet-scan-in-a-pocket-is-not-a-stall)).
 
 - **Two devices that meet only through a third can invite each other to a

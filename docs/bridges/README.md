@@ -769,6 +769,16 @@ a filtered scan matches. A scan follows each transition (app state on iOS,
 screen on Android) by restarting under the new filter, which also restarts the
 watchdog's clock.
 
+Quiet is not the same as dead, and Android can kill a scan without saying so:
+it refuses an app's sixth scan start within 30 seconds, with no callback. So
+Android waits two seconds before moving the scan at a screen transition, and
+skips the move when the scan already has the filter it needs; a glance at the
+phone then costs no start. And it still restarts a screen-off scan that has
+delivered nothing for five minutes, without counting the restart toward the
+stack reset, because nothing else would notice a dead scan in a pocket. iOS
+refuses no start, and a restart in the background only costs the app its next
+wake-up, so it never restarts there.
+
 The failure this prevents, measured on 2026-10-30 with an iPhone 16 and a
 Galaxy M17. The bridges scanned unfiltered in every state, so a phone in a
 pocket discovered nobody and the scan watchdogs restarted the quiet scan:

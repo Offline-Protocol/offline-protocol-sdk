@@ -2,8 +2,9 @@
 // BleScanPolicyTests.swift
 //
 // Pins what a scan names and when its silence may be read as a stall, by app
-// state (see BleScanPolicy.swift). Android pins the same two rules against
-// the screen in BleScanPolicyTest.kt.
+// state (see BleScanPolicy.swift). Android pins its screen-state rules in
+// BleScanPolicyTest.kt: the same filter, and a slow restart that never
+// escalates instead of none.
 //
 
 import XCTest

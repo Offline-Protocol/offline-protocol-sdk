@@ -1,5 +1,6 @@
 package com.offlineprotocol.ble
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -17,13 +18,25 @@ class BleScanPolicyTest {
     }
 
     @Test
-    fun `a quiet scan with the screen on may be restarted`() {
-        assertTrue(BleScanPolicy.mayRestartQuietScan(screenOn = true))
+    fun `a quiet scan with the screen on is restarted on the watchdog's interval and escalates`() {
+        assertEquals(30_000L, BleScanPolicy.quietRestartAfterMs(screenOn = true, screenOnMs = 30_000L))
+        assertTrue(BleScanPolicy.quietRestartEscalates(screenOn = true))
     }
 
     @Test
-    fun `a quiet scan with the screen off is not a stall`() {
-        // Reading it as one restarted the advertisement every 90 seconds.
-        assertFalse(BleScanPolicy.mayRestartQuietScan(screenOn = false))
+    fun `a quiet scan with the screen off is restarted slowly and never escalates`() {
+        // Escalating restarted the advertisement every 90 seconds; never
+        // restarting left a scan Android refused dead for the whole pocket.
+        assertEquals(
+            BleScanPolicy.SCREEN_OFF_QUIET_RESTART_MS,
+            BleScanPolicy.quietRestartAfterMs(screenOn = false, screenOnMs = 30_000L),
+        )
+        assertTrue(BleScanPolicy.SCREEN_OFF_QUIET_RESTART_MS >= 60_000L)
+        assertFalse(BleScanPolicy.quietRestartEscalates(screenOn = false))
+    }
+
+    @Test
+    fun `a screen transition waits long enough to absorb a glance`() {
+        assertTrue(BleScanPolicy.SCREEN_TRANSITION_DEBOUNCE_MS in 1_000L..5_000L)
     }
 }

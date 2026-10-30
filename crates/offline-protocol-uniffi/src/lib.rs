@@ -15476,7 +15476,7 @@ mod tests {
         );
         assert!(
             starts[0].starts_with("filters, scanSettings, scanCallback)")
-                && kotlin.contains("val filters = if (BleScanPolicy.filtersOnService(screenOn)) {"),
+                && kotlin.contains("scanFilteredOnService = BleScanPolicy.filtersOnService(screenOn) val filters = if (scanFilteredOnService) {"),
             "the Android scan must take its filters from BleScanPolicy.filtersOnService: an \
              unfiltered scan is paused with the screen off"
         );
@@ -15485,15 +15485,27 @@ mod tests {
             "private val scanWatchdogRunnable = object : Runnable {",
             "private val",
         );
-        let quiet = watchdog
-            .find("BleScanPolicy.mayRestartQuietScan(screenOn)")
-            .expect("the scan watchdog must ask BleScanPolicy.mayRestartQuietScan");
-        let restart = watchdog
-            .find("restartScanning(\"watchdog\")")
-            .expect("the scan watchdog must still restart a stalled screen-on scan");
         assert!(
-            quiet < restart,
-            "the scan watchdog must consult mayRestartQuietScan before restarting"
+            watchdog.contains(
+                "if (idleMs >= BleScanPolicy.quietRestartAfterMs(screenOn, SCAN_WATCHDOG_INTERVAL_MS)) {"
+            ),
+            "the scan watchdog must take its interval from BleScanPolicy.quietRestartAfterMs"
+        );
+        assert!(
+            watchdog.contains(
+                "if (BleScanPolicy.quietRestartEscalates(screenOn)) { scanRestartCount++ \
+                 restartScanning(\"watchdog\") evaluateBleHealthAfterRestart() } else { \
+                 restartScanning(\"screen_off_quiet\") }"
+            ),
+            "only a restart quietRestartEscalates allows may count toward the stack reset: \
+             a screen-off scan is quiet by design, and the reset restarts the advertisement"
+        );
+        assert!(
+            !watchdog.contains(
+                "lastDiscoveryAt = System.currentTimeMillis() bleHandler.postDelayed(this"
+            ),
+            "the screen-off watchdog must not re-stamp the clock and skip: a refused start is \
+             silent, and nothing else restarts a dead scan with the screen off"
         );
         let reset = between(
             &kotlin,
