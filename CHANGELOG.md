@@ -105,6 +105,28 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   selection (`send_selected`)
   ([transport lifecycle](docs/state-machines/transport-lifecycle.md#what-sent-means-at-each-layer)).
 
+- **A backgrounded iPhone keeps its Bluetooth LE links.** About two minutes
+  after the app went to the background, beside a peer whose writes kept it
+  awake, the iPhone stopped sending on every link and never recovered, even
+  in the foreground, while it kept receiving. The scan watchdog read the
+  silence of a background scan as a stalled stack and replaced the central
+  manager, and a second manager under the same restore identifier reports
+  `unsupported` for good. A backgrounded iPhone now scans for the mesh
+  service, the only scan iOS runs in the background, so it also discovers new
+  peers there; the watchdog does nothing in the background; and a restart
+  never replaces the manager
+  ([C14](docs/bridges/README.md#c14-a-quiet-scan-in-a-pocket-is-not-a-stall)).
+
+- **An Android phone with its screen off keeps discovering peers and stops
+  churning its advertising address.** With the screen off, the stack pauses an
+  unfiltered scan, so the phone discovered nobody, and the watchdog restarted
+  the scan every 30 seconds and reset the stack every 90. Each reset restarted
+  the advertisement under a new random address, which a linked peer then dials
+  and never connects (ADR 0030). With the screen off the scan now filters on
+  the mesh service, its silence is not a stall, and the reset restarts the
+  advertisement only as the forced refresh does
+  ([C14](docs/bridges/README.md#c14-a-quiet-scan-in-a-pocket-is-not-a-stall)).
+
 - **Two devices that meet only through a third can invite each other to a
   group.** When the packages of such a pair crossed, so that each built a
   session from the other's before either Welcome arrived, the side the

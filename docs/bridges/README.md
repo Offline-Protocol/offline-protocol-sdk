@@ -753,6 +753,49 @@ The failure this prevents: a native package that stops building, or builds
 against a different version of a dependency than the code was tested with,
 found by the first application to update.
 
+## C14. A quiet scan in a pocket is not a stall
+
+Whenever the operating system restricts a Bluetooth LE scan, the bridge scans
+for the mesh service, and it never reads that scan's silence as a broken stack:
+
+| Platform | When the scan names the service, and its silence means nothing | Policy |
+|----------|------|--------|
+| iOS | The app is in the background. iOS runs only a scan that names a service, and delivers nothing to one that does not | `BleScanPolicy.swift` |
+| Android | The screen is off. Since Android 8.1 an unfiltered scan is paused until it comes back on | `BleScanPolicy.kt` |
+
+Outside those states both scan unfiltered and filter in software, as before.
+Every SDK advertiser puts the mesh service in its primary packet, which is what
+a filtered scan matches. A scan follows each transition (app state on iOS,
+screen on Android) by restarting under the new filter, which also restarts the
+watchdog's clock.
+
+The failure this prevents, measured on 2026-10-30 with an iPhone 16 and a
+Galaxy M17. The bridges scanned unfiltered in every state, so a phone in a
+pocket discovered nobody and the scan watchdogs restarted the quiet scan:
+- **iOS** escalated, after three restarts, to replacing its `CBCentralManager`.
+  A second manager under the same restore identifier, created while the first
+  one's session is still alive, reports `.unsupported` and never leaves it. The
+  bridge took that as a device with no Bluetooth: it reported the radio
+  unavailable, the core dropped every Bluetooth neighbour at once, and the
+  fragment drain sent nothing on any link, foreground included, until the app
+  was killed. Inbound kept arriving, so every peer saw a link that took its
+  writes and never answered. It happened about two minutes after backgrounding,
+  next to a peer whose writes kept waking the app. The replacement is gone: a
+  restart never escalates on iOS.
+- **Android** reset the stack every 90 seconds with the screen off, and the
+  reset restarted the advertisement. A new advertising set has a new random
+  address, which is the churn [ADR 0030](../adr/0030-one-bluetooth-le-link-per-peer-pair.md)
+  removed from the forced refresh. The reset is now unreachable with the screen
+  off, and restarts the advertisement only as `AdvertisingRefreshPolicy` allows.
+
+What remains out of reach is the platform's. A backgrounded iPhone advertises
+its service in Apple's overflow area, which only an iOS device scanning for that
+service sees, so an Android phone cannot discover a backgrounded iPhone. Links
+already formed are unaffected, and a backgrounded iPhone still finds Android
+peers and dials them. On Android, all of this assumes the transport stays alive
+with the screen off: the React Native module's foreground service is what keeps
+it alive.
+
 ## What each binding owes
 
 | Binding | Owes |
