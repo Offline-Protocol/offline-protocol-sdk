@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -465,6 +466,10 @@ class BleTransportFacade(
     // threading argument the next time a callback path grows.
     @Volatile
     private var isScanning = false
+    /** Whether the screen is on, which decides the scan's filter and whether
+     *  its silence is a stall ([BleScanPolicy]). BLE thread; read at start
+     *  and kept current by [screenStateReceiver]. */
+    private var screenOn = true
     // Set only when scan startup observes the adapter off. Generic scan
     // failures must not rebuild the peripheral or churn a healthy advertiser.
     private var adapterWasOff = false
@@ -1032,6 +1037,13 @@ class BleTransportFacade(
             if (!isScanning) {
                 return
             }
+            // A quiet scan with the screen off is the stack working as
+            // designed, not a stall ([BleScanPolicy]).
+            if (!BleScanPolicy.mayRestartQuietScan(screenOn)) {
+                lastDiscoveryAt = System.currentTimeMillis()
+                bleHandler.postDelayed(this, SCAN_WATCHDOG_HEARTBEAT_MS)
+                return
+            }
             val now = System.currentTimeMillis()
             val idleMs = now - lastDiscoveryAt
             if (idleMs >= SCAN_WATCHDOG_INTERVAL_MS) {
@@ -1204,7 +1216,9 @@ class BleTransportFacade(
 
     /**
      * Evaluates BLE stack health after consecutive restarts and resets adapter if needed.
-     * This mirrors iOS's evaluateCentralHealthAfterRestart mechanism.
+     * Reached only with the screen on ([BleScanPolicy]). iOS has no counterpart
+     * any more: replacing its central manager left Bluetooth `.unsupported`
+     * for good (BleScanPolicy.swift). This one tears down no link.
      */
     private fun evaluateBleHealthAfterRestart() {
         if (scanRestartCount < MAX_CONSECUTIVE_SCAN_RESTARTS) {
@@ -1224,21 +1238,35 @@ class BleTransportFacade(
         lastAdapterReset = now
         scanRestartCount = 0
         
-        // Force stop and restart everything
+        // Re-initialize the scanner always; the advertisement only as
+        // [AdvertisingRefreshPolicy] allows, as the forced refresh does: a
+        // restarted advertisement has a new random address, and a linked
+        // peer then dials an address pair the Link Layer never connects
+        // (ADR 0030). This reset ran every 90 seconds with the screen off,
+        // before a quiet screen-off scan stopped counting as a stall.
         bleHandler.post {
             if (state == TransportState.RUNNING) {
+                val restartAdvertising = AdvertisingRefreshPolicy.restartsAdvertising(
+                    connections.identifiedLinkCount(),
+                    leAdvertiser.isAdvertising,
+                )
                 stopScanning("ble_reset")
-                stopAdvertising()
+                if (restartAdvertising) {
+                    stopAdvertising()
+                }
                 
-                // Re-initialize scanner and advertiser
                 bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
-                leAdvertiser.attachAdvertiser(bluetoothAdapter?.bluetoothLeAdvertiser)
+                if (restartAdvertising) {
+                    leAdvertiser.attachAdvertiser(bluetoothAdapter?.bluetoothLeAdvertiser)
+                }
                 
                 // Restart after a brief delay
                 bleHandler.postDelayed({
                     if (state == TransportState.RUNNING) {
                         startScanning("ble_reset")
-                        startAdvertising("ble_reset")
+                        if (restartAdvertising) {
+                            startAdvertising("ble_reset")
+                        }
                     }
                 }, 1000)
             }
@@ -1328,6 +1356,7 @@ class BleTransportFacade(
         // early-returning; a fresh start must explicitly re-open the gate.
         shuttingDown = false
         adapterWasOff = false
+        screenOn = (context.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive ?: true
         paused = false
         
         // Check permissions with detailed logging
@@ -1402,6 +1431,7 @@ class BleTransportFacade(
                 reportBleAvailability(true, "start")
             }
             registerAdapterStateReceiver()
+            registerScreenStateReceiver()
             
             Log.i(TAG, "BLE transport ready - scanning and advertising active")
             emitDiagnostic(
@@ -1452,6 +1482,7 @@ class BleTransportFacade(
         // reader is a callback that races with a single BLE-thread writer.
         shuttingDown = true
         unregisterAdapterStateReceiver()
+        unregisterScreenStateReceiver()
 
         // Stop fragment polling — must happen before clearing queues
         bleHandler.removeCallbacks(fragmentPollingRunnable)
@@ -1844,6 +1875,62 @@ class BleTransportFacade(
         }
     }
 
+    /**
+     * Moves a running scan to the filter the screen state needs
+     * ([BleScanPolicy]): the stack pauses an unfiltered scan while the screen
+     * is off. Restarting also resets the watchdog's clock, so a screen coming
+     * on does not read the pocket's silence as a stall.
+     */
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val on = when (intent.action) {
+                Intent.ACTION_SCREEN_ON -> true
+                Intent.ACTION_SCREEN_OFF -> false
+                else -> return
+            }
+            if (on == screenOn) return
+            screenOn = on
+            emitDiagnostic("info", "BLE scan follows screen state", mapOf(
+                "screenOn" to on,
+                "scanning" to isScanning
+            ))
+            if (state == TransportState.RUNNING && isScanning) {
+                restartScanning(if (on) "screen_on" else "screen_off")
+            }
+        }
+    }
+    private var screenStateReceiverRegistered = false
+
+    private fun registerScreenStateReceiver() {
+        if (screenStateReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(screenStateReceiver, filter, null, bleHandler, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(screenStateReceiver, filter, null, bleHandler)
+            }
+            screenStateReceiverRegistered = true
+        } catch (e: Exception) {
+            // The scan keeps the filter it started with; a screen-off scan
+            // started with the screen on stays paused until the next restart.
+            Log.w(TAG, "Could not listen for screen state changes", e)
+        }
+    }
+
+    private fun unregisterScreenStateReceiver() {
+        if (!screenStateReceiverRegistered) return
+        screenStateReceiverRegistered = false
+        try {
+            context.unregisterReceiver(screenStateReceiver)
+        } catch (e: IllegalArgumentException) {
+            // Already unregistered.
+        }
+    }
+
     private fun onAdapterStateChanged(adapterState: Int) {
         // RUNNING as well as the barrier: startUnsafe registers before its
         // last diagnostic, and a throw there leaves the receiver live on a
@@ -2083,7 +2170,15 @@ class BleTransportFacade(
             
             // Scan without filter - we'll filter in software for cross-platform compatibility
             try {
-                scanner.startScan(null, scanSettings, scanCallback)
+                // Unfiltered with the screen on, where software filters
+                // instead; the mesh service with it off, where the stack
+                // pauses an unfiltered scan ([BleScanPolicy]).
+                val filters = if (BleScanPolicy.filtersOnService(screenOn)) {
+                    listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build())
+                } else {
+                    null
+                }
+                scanner.startScan(filters, scanSettings, scanCallback)
             } catch (e: IllegalStateException) {
                 // Lost the race against the adapter check above: the framework
                 // throws IllegalStateException("BT Adapter is not turned ON")
@@ -2125,10 +2220,11 @@ class BleTransportFacade(
             scheduleScanWatchdog()
             startConnectionMonitor()
             if (logThrottler.shouldLog("scan_started")) {
-                Log.i(TAG, "BLE scanning started (no filter, reason: $reason)")
+                val filterless = !BleScanPolicy.filtersOnService(screenOn)
+                Log.i(TAG, "BLE scanning started (filterless: $filterless, reason: $reason)")
                 emitDiagnostic("info", "BLE scanning started", mapOf(
                     "reason" to reason,
-                    "filterless" to true
+                    "filterless" to filterless
                 ))
             }
             
