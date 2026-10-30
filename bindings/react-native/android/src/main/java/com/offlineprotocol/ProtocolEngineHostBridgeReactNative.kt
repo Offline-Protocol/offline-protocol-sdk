@@ -50,6 +50,12 @@ fun acceptConnectionRequest(module: OfflineProtocolModule, recipient: String, ac
     }
 }
 
+fun acceptServiceSubscription(module: OfflineProtocolModule, subId: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to accept service subscription", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.acceptServiceSubscription(host, context, mapOf("subId" to subId))
+    }
+}
+
 fun bleGetDiagnostics(module: OfflineProtocolModule, promise: Promise) {
     run(module, promise, "ERROR_BLE", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.bleGetDiagnostics(host, context, null)
@@ -86,6 +92,12 @@ fun checkInternetPresence(module: OfflineProtocolModule, userId: String, options
     }
 }
 
+fun clearServiceTopic(module: OfflineProtocolModule, serviceId: String, topic: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to clear service topic", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.clearServiceTopic(host, context, mapOf("serviceId" to serviceId, "topic" to topic))
+    }
+}
+
 fun createInvite(module: OfflineProtocolModule, petname: String?, signed: Boolean, promise: Promise) {
     run(module, promise, "ERROR_NOT_INITIALIZED", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.createInvite(host, context, mapOf("petname" to petname, "signed" to signed))
@@ -113,6 +125,12 @@ fun disableTransport(module: OfflineProtocolModule, type: String, promise: Promi
 fun discoverServices(module: OfflineProtocolModule, serviceId: String?, promise: Promise) {
     run(module, promise, "ERROR_DISCOVER_SERVICES", "Failed to discover services") { host, context ->
         ProtocolEngineHostBridge.discoverServices(host, context, mapOf("serviceId" to serviceId))
+    }
+}
+
+fun endServiceSubscription(module: OfflineProtocolModule, subId: String, reason: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to end service subscription", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.endServiceSubscription(host, context, mapOf("subId" to subId, "reason" to reason))
     }
 }
 
@@ -464,6 +482,12 @@ fun processFileChunk(module: OfflineProtocolModule, fileId: String, chunkIndex: 
     }
 }
 
+fun publishServiceUpdate(module: OfflineProtocolModule, serviceId: String, topic: String, key: String?, body: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to publish service update", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.publishServiceUpdate(host, context, mapOf("serviceId" to serviceId, "topic" to topic, "key" to key, "body" to body))
+    }
+}
+
 fun registerService(module: OfflineProtocolModule, serviceId: String, version: String, capabilitiesJson: String, promise: Promise) {
     run(module, promise, "ERROR_REGISTER_SERVICE", "Failed to register service") { host, context ->
         ProtocolEngineHostBridge.registerService(host, context, mapOf("serviceId" to serviceId, "version" to version, "capabilitiesJson" to capabilitiesJson))
@@ -473,6 +497,12 @@ fun registerService(module: OfflineProtocolModule, serviceId: String, version: S
 fun rejectConnectionRequest(module: OfflineProtocolModule, recipient: String, promise: Promise) {
     run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to reject connection request", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.rejectConnectionRequest(host, context, mapOf("recipient" to recipient))
+    }
+}
+
+fun rejectServiceSubscription(module: OfflineProtocolModule, subId: String, reason: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to reject service subscription", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.rejectServiceSubscription(host, context, mapOf("subId" to subId, "reason" to reason))
     }
 }
 
@@ -503,6 +533,12 @@ fun resolveUsername(module: OfflineProtocolModule, username: String, promise: Pr
 fun respondToServiceRequest(module: OfflineProtocolModule, requestId: String, requester: String, serviceId: String, status: String, body: String, promise: Promise) {
     run(module, promise, "ERROR_SERVICE_RESPONSE", "Failed to respond to service request", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.respondToServiceRequest(host, context, mapOf("requestId" to requestId, "requester" to requester, "serviceId" to serviceId, "status" to status, "body" to body))
+    }
+}
+
+fun resyncServiceSubscription(module: OfflineProtocolModule, subId: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to resync service subscription", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.resyncServiceSubscription(host, context, mapOf("subId" to subId))
     }
 }
 
@@ -560,6 +596,18 @@ fun sendTypingIndicator(module: OfflineProtocolModule, recipient: String, conver
     }
 }
 
+fun serviceSubscribers(module: OfflineProtocolModule, serviceId: String?, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to list service subscribers", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.serviceSubscribers(host, context, mapOf("serviceId" to serviceId))
+    }
+}
+
+fun serviceSubscriptions(module: OfflineProtocolModule, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to list service subscriptions", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.serviceSubscriptions(host, context, null)
+    }
+}
+
 fun setBatteryLevel(module: OfflineProtocolModule, level: Int, promise: Promise) {
     run(module, promise, "ERROR_BATTERY", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.setBatteryLevel(host, context, mapOf("level" to level))
@@ -575,6 +623,18 @@ fun setBatteryState(module: OfflineProtocolModule, level: Int, isCharging: Boole
 fun setRelayPriority(module: OfflineProtocolModule, priorityString: String, promise: Promise) {
     run(module, promise, "ERROR_RELAY", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.setRelayPriority(host, context, mapOf("priorityString" to priorityString))
+    }
+}
+
+fun setServiceSubscriptionPolicy(module: OfflineProtocolModule, serviceId: String, policyJson: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to set service subscription policy", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.setServiceSubscriptionPolicy(host, context, mapOf("serviceId" to serviceId, "policyJson" to policyJson))
+    }
+}
+
+fun setServiceTopicCheckpoint(module: OfflineProtocolModule, serviceId: String, topic: String, body: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to set service topic checkpoint", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.setServiceTopicCheckpoint(host, context, mapOf("serviceId" to serviceId, "topic" to topic, "body" to body))
     }
 }
 
@@ -596,6 +656,12 @@ fun signDataBase64(module: OfflineProtocolModule, dataBase64: String, promise: P
     }
 }
 
+fun subscribeService(module: OfflineProtocolModule, provider: String, serviceId: String, topic: String, mode: String, params: String, keysJson: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to subscribe to service", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.subscribeService(host, context, mapOf("provider" to provider, "serviceId" to serviceId, "topic" to topic, "mode" to mode, "params" to params, "keysJson" to keysJson))
+    }
+}
+
 fun unblockUser(module: OfflineProtocolModule, userId: String, promise: Promise) {
     run(module, promise, "ERROR_UNBLOCK_USER", "Failed to unblock user") { host, context ->
         ProtocolEngineHostBridge.unblockUser(host, context, mapOf("userId" to userId))
@@ -605,6 +671,12 @@ fun unblockUser(module: OfflineProtocolModule, userId: String, promise: Promise)
 fun unregisterService(module: OfflineProtocolModule, serviceId: String, promise: Promise) {
     run(module, promise, "ERROR_UNREGISTER_SERVICE", "Failed to unregister service") { host, context ->
         ProtocolEngineHostBridge.unregisterService(host, context, mapOf("serviceId" to serviceId))
+    }
+}
+
+fun unsubscribeService(module: OfflineProtocolModule, subId: String, promise: Promise) {
+    run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to unsubscribe from service", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.unsubscribeService(host, context, mapOf("subId" to subId))
     }
 }
 

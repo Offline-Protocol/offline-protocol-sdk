@@ -19460,13 +19460,38 @@ mod tests {
             "sendServiceRequest",
             "sendTypingIndicator",
         ];
+        // Joined since, each by decision. The subscription calls (ADR 0035)
+        // map like the request and response they sit beside: an app tells a
+        // provider that does not route subscriptions (`ServiceError`) from a
+        // generic failure by the typed code.
+        const JOINED_SINCE: &[&str] = &[
+            "acceptServiceSubscription",
+            "clearServiceTopic",
+            "endServiceSubscription",
+            "publishServiceUpdate",
+            "rejectServiceSubscription",
+            "resyncServiceSubscription",
+            "serviceSubscribers",
+            "serviceSubscriptions",
+            "setServiceSubscriptionPolicy",
+            "setServiceTopicCheckpoint",
+            "subscribeService",
+            "unsubscribeService",
+        ];
+        let mut expected: Vec<&str> = MAPPED_BEFORE_THE_SHARED_BRIDGE
+            .iter()
+            .chain(JOINED_SINCE)
+            .copied()
+            .collect();
+        expected.sort();
         let manifest = rn_engine_bridge_manifest();
         let mut flagged = rn_engine_bridge_flagged(&manifest, "mapProtocolErrors");
         flagged.sort();
         assert_eq!(
-            flagged, MAPPED_BEFORE_THE_SHARED_BRIDGE,
+            flagged, expected,
             "tools/rn_engine_bridge_error_manifest.json `mapProtocolErrors` must name exactly \
-             the methods that rejected through rejectWithProtocolError before the shared bridge"
+             the methods that rejected through rejectWithProtocolError before the shared bridge, \
+             plus the ones that joined since by decision (JOINED_SINCE)"
         );
 
         let kotlin = rn_source_code_only(
