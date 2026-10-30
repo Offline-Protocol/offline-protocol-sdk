@@ -104,10 +104,10 @@ Each names the failure it prevents.
    the Welcome are on a ladder that gives no order and, being unpersisted, can
    lose a frame to a restart or to expiry. So every renewal of a subscription
    in a group reports the member's epoch, and a provider that sees a member
-   stuck behind moves it out of the group and back. Otherwise a member one
-   epoch behind reads no further publish, and is sent a snapshot every half
-   lease in place of live updates, while the provider reports it `in_group`:
-   the silent gap ADR 0035 invariant 8 forbids.
+   stuck behind, not merely late, moves it out of the group and back.
+   Otherwise a member one epoch behind reads no further publish, and is sent a
+   snapshot every half lease in place of live updates, while the provider
+   reports it `in_group`: the silent gap ADR 0035 invariant 8 forbids.
 
 ## Decision (proposed)
 
@@ -146,24 +146,37 @@ Each names the failure it prevents.
   rebuilt member or a provider that restarted leaves no second group behind.
 - **Commits.** A commit goes to each remaining member as `__SVC_GCOM__`:
   `{v, service_id, topic, epoch, commit}`, sealed in that member's 1:1 session
-  on the reliable ladder and marked as a subscription frame. It is handled by
-  the topic-group path, which rejects a committer other than the provider, and
-  never by the conversation commit handler. That path holds a commit ahead of
-  the member's epoch until the ones before it arrive, at most
-  `MAX_PENDING_COMMITS_PER_GROUP` (8) per group, oldest dropped first; a commit
-  it never gets is the rebuild's to repair, and with no fork check on a topic
-  group, a held commit that expires raises no alarm. A member's own removal
-  reaches it as ADR 0035's `__SVC_UNSUB__`, not as a commit.
+  on the reliable ladder and marked as a subscription frame. `epoch` is the
+  epoch a member must be at to apply the commit, so the hold below is decided
+  before any MLS processing. It is handled by the topic-group path, which
+  rejects a committer other than the provider, and never by the conversation
+  commit handler. That path holds a commit ahead of the member's epoch until
+  the ones before it arrive, at most `MAX_PENDING_COMMITS_PER_GROUP` (8) per
+  group, oldest dropped first; a commit it never gets is the rebuild's to
+  repair, and with no fork check on a topic group, a held commit that expires
+  raises no alarm. A member's own removal reaches it as ADR 0035's
+  `__SVC_UNSUB__`, not as a commit.
 - **Rebuilding a member (invariant 8).** A renewal from a member carries
   `group_epoch`, the epoch of the topic group it holds, or nothing when it
-  holds none. A provider that gets a value below its own, or none for a
-  subscriber it has added, at two renewals in a row removes that member in the
-  next commit. One renewal is not enough, because a commit or Welcome still in
-  flight looks the same. The removal sends no `__SVC_UNSUB__`, since the
-  subscription goes on: it falls back to the 1:1 session, `in_group` turns
-  false, and the reply offers a group again, so the member joins from a fresh
-  package and Welcome. What it missed comes back as ADR 0035 recovery brings
-  back any missed update. A member at the provider's epoch needs nothing.
+  holds none. The provider keeps one value per member, the mark: its own epoch
+  when it last took one, unset when the member is added. A renewal that finds
+  no mark takes one. A renewal that finds one at least half the granted lease
+  old is compared with it and then takes a new one. A younger mark is left
+  alone, so a renewal sent early by rediscovery or a resync proves nothing
+  either way. A report below the mark, or none at all, removes the member in
+  the next commit. The comparison is with the mark and never with the
+  provider's current epoch, because a commit still in flight looks exactly like
+  a lost one, and a churning topic always has one in flight: what fails the
+  test is a commit that existed a whole renewal ago. The unset mark does the
+  same for the Welcome, which a renewal can cross. A lost commit or Welcome is
+  therefore found in about one lease, whatever the commit rate. A member whose
+  path takes longer than half its lease looks stuck at every check, and should
+  ask for a longer lease.
+
+  The removal sends no `__SVC_UNSUB__`, since the subscription goes on: it
+  falls back to the 1:1 session, `in_group` turns false, and the reply offers a
+  group again, so the member joins from a fresh package and Welcome. What it
+  missed comes back as ADR 0035 recovery brings back any missed update.
 - **Updates.** A live publish is one `__SVC_GUPD__` frame in the group:
   `{v, service_id, topic, stream, seq, key?, body}`. There is no `sub_id`:
   the frame is for every member. A consumer maps it to its subscription by
@@ -171,7 +184,10 @@ Each names the failure it prevents.
   superseding rules unchanged. A plaintext decrypted from a topic group that
   is not `__SVC_GUPD__` is dropped, and an `__SVC_` frame decrypted from a
   conversation group is dropped. A `latest` value missed by an absent member
-  is recovered by the digest at the next renewal, as today.
+  is recovered by the digest at the next renewal, as today. An update from an
+  epoch the member has not reached cannot be decrypted and is dropped, not
+  held; it is a gap like any other, which the next renewal repairs (ADR 0035
+  invariant 8).
 - **Leaving.** `unsubscribe_service`, a lapsed lease, a replacement and
   `end_service_subscription` each queue the member's removal; removals and
   additions within one tick are one commit.
@@ -184,7 +200,11 @@ Each names the failure it prevents.
 - **Pattern subscriptions** follow each matched topic's group separately.
   A consumer already in `MAX_TOPIC_GROUPS` (proposed: 16) topic groups
   answers a further offer with `group_declined: true` and no key package, and
-  stays on the 1:1 session for that topic.
+  stays on the 1:1 session for that topic. A group it still holds for the
+  offered (provider, service, topic) does not count, since the Welcome replaces
+  it; otherwise a rebuilt member at the cap declines forever behind a group
+  nobody commits to. The offer does not delete that group: an offer can arrive
+  after the Welcome that made it stale, and would destroy a live membership.
 - **The provider can see who is revocable.** `SubscriberInfo` carries
   `in_group`, true only for a subscriber that is a member of the topic's
   group. A subscriber on the 1:1 session (no package yet, a key filter, or a
@@ -267,5 +287,7 @@ These need an answer before the status can move.
 - **Dropping `group_epoch` from the renewal** because the digest "already
   catches a gap". The digest repairs the value and never the membership, so
   the member takes a snapshot every half lease and never reads a live update.
-- **Rebuilding a member at the first low epoch.** A renewal that crosses a
-  commit in flight would cost a removal, a package and a Welcome each time.
+- **Comparing the report with the provider's current epoch**, however many
+  times in a row. A commit in flight looks like a stuck member, and on a
+  churning topic healthy members are rebuilt; each rebuild is two more commits,
+  which puts every other member further behind.
