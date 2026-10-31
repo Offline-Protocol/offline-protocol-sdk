@@ -50,8 +50,9 @@
 // at every restoration and the age-out would stop being an age-out: it would
 // be an unconditional cancel of every pending connect. That matters because a
 // pending connect is the only way iOS wakes this app when a known peer
-// reappears — a background scan with `withServices: nil` is ignored by the OS
-// — so cancelling them all trades a visible bug for an invisible one.
+// reappears — a background scan delivers nothing unless it names a service,
+// and never sees a backgrounded iPhone — so cancelling them all trades a
+// visible bug for an invisible one.
 //
 // It is not measured against the newest record in the map either. A record is
 // refreshed by three different kinds of evidence, and only one of them says

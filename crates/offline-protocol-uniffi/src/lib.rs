@@ -15370,6 +15370,261 @@ mod tests {
         );
     }
 
+    /// A scan the platform restricts names the mesh service, and its silence
+    /// is never read as a stalled stack (C14 in docs/bridges/README.md):
+    /// iOS in the background, Android with the screen off. `BleScanPolicy`
+    /// is unit-tested on both platforms, but a policy nobody calls passes its
+    /// own tests, and both call sites sit behind the platform's Bluetooth
+    /// stack, so they are pinned here. So is the iOS rule that a restart
+    /// never escalates to a second `CBCentralManager`: one made under the
+    /// same restore identifier while the first one's session is alive
+    /// reports `.unsupported` for good, and a backgrounded iPhone stopped
+    /// sending on every link that way.
+    #[test]
+    fn ble_scans_follow_the_platform_restriction_and_ios_never_replaces_its_central() {
+        fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+            let from = text
+                .find(start)
+                .unwrap_or_else(|| panic!("missing `{start}`"));
+            let body = from + start.len();
+            let to = body
+                + text[body..]
+                    .find(end)
+                    .unwrap_or_else(|| panic!("missing `{end}` after `{start}`"));
+            &text[from..to]
+        }
+
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        assert_eq!(
+            swift.matches("CBCentralManager(").count(),
+            1,
+            "BleManager.swift must construct its CBCentralManager once: a second one under \
+             the same restore identifier reports `.unsupported` for good"
+        );
+        assert!(
+            between(
+                &swift,
+                "private func startUnsafe() throws {",
+                "public func stop() {"
+            )
+            .contains("CBCentralManager("),
+            "the one CBCentralManager must be constructed in startUnsafe"
+        );
+        assert_eq!(
+            swift.matches("CBPeripheralManager(").count(),
+            1,
+            "BleManager.swift must construct its CBPeripheralManager once, for the same reason"
+        );
+        assert!(
+            between(
+                &swift,
+                "private func startUnsafe() throws {",
+                "public func stop() {"
+            )
+            .contains(
+                "if let central = Self.sharedCentralManager, let peripheral = Self.sharedPeripheralManager {"
+            ) && swift.contains("Self.sharedCentralManager = centralManager")
+                && swift.contains("Self.sharedPeripheralManager = peripheralManager"),
+            "startUnsafe must reuse the process's Bluetooth managers: the bridges release \
+             their BleManager on stop and make a new one, bluetoothd keeps a released \
+             manager's session for about 15 seconds, and a manager made under the same \
+             restore identifier meanwhile reports `.unsupported` for good"
+        );
+        let stop = between(
+            &swift,
+            "private func stopUnsafe() {",
+            "private func dropLinksAfterRadioLoss() {",
+        );
+        assert!(
+            stop.contains("peripheralManager?.removeAllServices()")
+                && stop.contains("for (id, peripheral) in discoveredPeripherals {")
+                && stop.contains("for (id, peripheral) in pendingRestoredPeripherals {"),
+            "with the managers kept for the process, stop must do what releasing them did: \
+             unpublish the service, and cancel every connect, pending and restored ones \
+             included, or a stopped transport keeps serving its identity, takes writes it \
+             never answers, and holds connects that complete after the stop"
+        );
+        let stop_body = between(
+            &swift,
+            "private func stopUnsafe() {",
+            "private func dropLinksAfterRadioLoss() {",
+        );
+        let owns = stop_body
+            .find(
+                "let owns = Self.managerOwner == ObjectIdentifier(self) \
+                 if !owns { centralManager = nil peripheralManager = nil }",
+            )
+            .expect(
+                "stop must decide ownership by identity, which still compares in deinit, and a \
+                 non-owner must let go of the shared managers before touching anything",
+            );
+        let scan_stop = stop_body
+            .find("stopScanning(reason: \"stop\")")
+            .expect("stop must stop scanning");
+        assert!(
+            owns < scan_stop,
+            "a non-owner's references must be dropped before stop's scan and advertising \
+             commands, or a late stop ends the new owner's scan"
+        );
+        assert!(
+            !swift.contains("delegate === self"),
+            "ownership of the shared managers must not be read from their weak delegate: it \
+             reads nil in deinit, and a BleManager released while running then skipped its \
+             teardown"
+        );
+        assert!(
+            between(
+                &swift,
+                "private func startUnsafe() throws {",
+                "public func stop() {"
+            )
+            .contains(
+                "if let previous = Self.activeInstance, previous !== self { previous.stopUnsafe() } \
+                 Self.managerOwner = ObjectIdentifier(self)"
+            ),
+            "start must stop a running predecessor before it takes the shared managers"
+        );
+        assert!(
+            !swift.contains("sharedCentralManager = nil")
+                && !swift.contains("sharedPeripheralManager = nil"),
+            "the process's Bluetooth managers must never be released"
+        );
+        let scans: Vec<&str> = swift
+            .split("scanForPeripherals(")
+            .skip(1)
+            .map(str::trim_start)
+            .collect();
+        assert!(!scans.is_empty(), "BleManager.swift must scan somewhere");
+        for scan in &scans {
+            assert!(
+                scan.starts_with("withServices: BleScanPolicy.services(")
+                    || scan.starts_with("withServices: [SERVICE_UUID]"),
+                "every iOS scan must take its services from BleScanPolicy.services (the \
+                 targeted service scan aside): a filterless scan delivers nothing in the \
+                 background ({})",
+                &scan[..scan.len().min(80)]
+            );
+        }
+        let monitor = between(
+            &swift,
+            "private func startScanMonitor() {",
+            "private func stopScanMonitor() {",
+        );
+        let quiet = monitor
+            .find("BleScanPolicy.mayRestartQuietScan(")
+            .expect("the scan monitor must ask BleScanPolicy.mayRestartQuietScan");
+        let restart = monitor
+            .find("restartScanningDueToInactivity()")
+            .expect("the scan monitor must still restart a stalled foreground scan");
+        assert!(
+            quiet < restart,
+            "the scan monitor must consult mayRestartQuietScan before any restart"
+        );
+        assert!(
+            between(
+                &swift,
+                "private func stopUnsafe() {",
+                "private func dropLinksAfterRadioLoss() {"
+            )
+            .contains("stopObservingAppState()"),
+            "stop must end the app-state observation"
+        );
+        assert!(
+            !between(
+                &swift,
+                "private func clearLinkState() {",
+                "public func pause() {"
+            )
+            .contains("stopObservingAppState()"),
+            "clearLinkState also runs on every radio loss, after which the scan must still \
+             follow the app's state: it must not end the app-state observation"
+        );
+
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let starts: Vec<&str> = kotlin
+            .split(".startScan(")
+            .skip(1)
+            .map(str::trim_start)
+            .collect();
+        assert_eq!(
+            starts.len(),
+            1,
+            "BleTransportFacade.kt must start its scan in one place"
+        );
+        assert!(
+            starts[0].starts_with("filters, scanSettings, scanCallback)")
+                && kotlin.contains("scanFilteredOnService = BleScanPolicy.filtersOnService(screenOn) val filters = if (scanFilteredOnService) {"),
+            "the Android scan must take its filters from BleScanPolicy.filtersOnService: an \
+             unfiltered scan is paused with the screen off"
+        );
+        assert!(
+            kotlin.contains(".setScanMode(BleScanPolicy.scanMode(screenOn))"),
+            "the Android scan must take its duty cycle from BleScanPolicy.scanMode: the stack \
+             used to pause the screen-off scan, and full duty in a pocket costs battery"
+        );
+        let watchdog = between(
+            &kotlin,
+            "private val scanWatchdogRunnable = object : Runnable {",
+            "private val",
+        );
+        assert!(
+            watchdog.contains(
+                "if (idleMs >= BleScanPolicy.quietRestartAfterMs(screenOn, SCAN_WATCHDOG_INTERVAL_MS)) {"
+            ),
+            "the scan watchdog must take its interval from BleScanPolicy.quietRestartAfterMs"
+        );
+        assert!(
+            watchdog.contains(
+                "if (BleScanPolicy.quietRestartEscalates(screenOn)) { scanRestartCount++ \
+                 restartScanning(\"watchdog\") evaluateBleHealthAfterRestart() } else { \
+                 restartScanning(\"screen_off_quiet\") }"
+            ),
+            "only a restart quietRestartEscalates allows may count toward the stack reset: \
+             a screen-off scan is quiet by design, and the reset restarts the advertisement"
+        );
+        assert!(
+            !watchdog.contains(
+                "lastDiscoveryAt = System.currentTimeMillis() bleHandler.postDelayed(this"
+            ),
+            "the screen-off watchdog must not re-stamp the clock and skip: a refused start is \
+             silent, and nothing else restarts a dead scan with the screen off"
+        );
+        let screen = between(
+            &kotlin,
+            "private fun onScreenStateChanged(on: Boolean) {",
+            "private val screenScanRestart",
+        );
+        assert!(
+            screen.contains("if (on) lastDiscoveryAt = System.currentTimeMillis()")
+                && screen.matches("lastDiscoveryAt =").count() == 1,
+            "a screen transition may re-stamp the watchdog's clock only on the way on: \
+             re-stamped on the way off, every glance would keep a refused scan dead"
+        );
+        assert!(
+            between(
+                &kotlin,
+                "private fun registerScreenStateReceiver() {",
+                "private fun unregisterScreenStateReceiver() {"
+            )
+            .contains("?.let { onScreenStateChanged(it) }"),
+            "registering the screen receiver must re-read the screen state: a change before \
+             it registered was broadcast to nobody, and the broadcast is not sticky"
+        );
+        let reset = between(
+            &kotlin,
+            "private fun evaluateBleHealthAfterRestart() {",
+            "private val writeInFlight",
+        );
+        assert!(
+            reset.contains("AdvertisingRefreshPolicy.restartsAdvertising(")
+                && reset.contains("if (restartAdvertising) { startAdvertising(\"ble_reset\") }"),
+            "the stack reset must restart the advertisement only as AdvertisingRefreshPolicy \
+             allows: a new advertising set has a new random address (ADR 0030)"
+        );
+    }
+
     /// The iOS peripheral serves Hello, and binds a central only on what its
     /// hello proves.
     ///

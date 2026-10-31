@@ -435,6 +435,16 @@ public class BleManager: NSObject, TransportManager {
     /// Force a complete BLE stack refresh periodically even when things seem healthy
     private let FORCED_BLE_REFRESH_INTERVAL: TimeInterval = 120.0
     private var lastForcedBleRefresh: Date?
+    /// The process's one pair of Bluetooth managers, made on the first start
+    /// and never released (see `startUnsafe`). Main only.
+    private static var sharedCentralManager: CBCentralManager?
+    private static var sharedPeripheralManager: CBPeripheralManager?
+    /// The instance whose start took the managers' delegates, by identity:
+    /// an `ObjectIdentifier` still compares in `deinit`, where a weak
+    /// reference to `self` (the managers' delegate) already reads nil.
+    /// Main only.
+    private static var managerOwner: ObjectIdentifier?
+    private static weak var activeInstance: BleManager?
     private var connectionMonitor: DispatchSourceTimer?
     private var connectionAttemptTimestamps: [UUID: Date] = [:]
     private var connectionRetryCount: [UUID: Int] = [:]
@@ -455,10 +465,11 @@ public class BleManager: NSObject, TransportManager {
     private let CENTRAL_LOST_GRACE: TimeInterval = 15.0
     private let MAX_RECONNECT_INTERVAL: TimeInterval = 60.0
     private let MAX_CONNECTION_RETRIES = 5
-    private var scanRestartCount: Int = 0
-    private var lastCentralReset: Date?
-    private let MAX_CONSECUTIVE_SCAN_RESTARTS = 3
-    private let CENTRAL_RESET_BACKOFF: TimeInterval = 45.0
+    /// Whether the app is in the background, where iOS runs only a scan
+    /// that names a service (`BleScanPolicy`). Main only; kept current by
+    /// `appStateObservers` from `start` to `stop`.
+    private var isInBackground = false
+    private var appStateObservers: [NSObjectProtocol] = []
     private let MINIMUM_RSSI_TO_CONNECT: Int16 = -90
     /// Cooldown between provisional bootstrap attempts for unknown peripherals
     private let UNKNOWN_BOOTSTRAP_RATE_LIMIT: TimeInterval = 12.0
@@ -734,6 +745,44 @@ public class BleManager: NSObject, TransportManager {
         updateState(.starting)
         transportStartAt = Date()
         
+        // One pair of managers for the process, made on the first start and
+        // reused by every later one, by this instance or the next. A manager
+        // made under a restore identifier whose previous manager's session is
+        // still alive reports `.unsupported` for good (BleScanPolicy), and
+        // `bluetoothd` keeps a released manager's session for about 15
+        // seconds. The bridges release their BleManager on stop and make a new
+        // one on the next start, so a stop then start, an engine rebuilt, or a
+        // second start while the first is still `.starting` made exactly that
+        // pair. A reused manager delivers no state change, so its state is
+        // replayed through the delegate, which starts the transport as it
+        // would on power-on.
+        //
+        // One running BleManager per process, as the restore identifiers
+        // allow no more, and enforced: a predecessor still running (a React
+        // Native reload starts the new module before the old one is freed)
+        // stops with its own teardown before this one takes the managers, so
+        // its late stop cannot end this one's scan or advertising.
+        if let previous = Self.activeInstance, previous !== self {
+            previous.stopUnsafe()
+        }
+        Self.managerOwner = ObjectIdentifier(self)
+        Self.activeInstance = self
+        if let central = Self.sharedCentralManager, let peripheral = Self.sharedPeripheralManager {
+            centralManager = central
+            peripheralManager = peripheral
+            central.delegate = self
+            peripheral.delegate = self
+            observeAppState()
+            print("[BleManager] ♻️ Reusing the Bluetooth managers")
+            emitDiagnostic("info", "Reusing the Bluetooth managers", context: [
+                "centralState": central.state.rawValue,
+                "peripheralState": peripheral.state.rawValue
+            ])
+            centralManagerDidUpdateState(central)
+            peripheralManagerDidUpdateState(peripheral)
+            return
+        }
+
         // Initialize Central Manager (for scanning) with state restoration support.
         // The restore identifier allows iOS to relaunch the app and restore BLE
         // connections after the app has been terminated by the OS.
@@ -757,7 +806,11 @@ public class BleManager: NSObject, TransportManager {
                 CBPeripheralManagerOptionRestoreIdentifierKey: "com.offlineprotocol.peripheral"
             ]
         )
+        Self.sharedCentralManager = centralManager
+        Self.sharedPeripheralManager = peripheralManager
         
+        observeAppState()
+
         print("[BleManager] ⏳ Waiting for Bluetooth to power on and permissions to be granted...")
         emitDiagnostic("info", "Waiting for Bluetooth to power on and permissions")
         // Note: Actual start happens in delegate callbacks when ready
@@ -778,6 +831,15 @@ public class BleManager: NSObject, TransportManager {
         }
         
         updateState(.stopping)
+
+        // Only the owner commands the shared managers. One that is not lets
+        // go of its references first, so the bookkeeping below touches
+        // nothing of the owner's (see `managerOwner`).
+        let owns = Self.managerOwner == ObjectIdentifier(self)
+        if !owns {
+            centralManager = nil
+            peripheralManager = nil
+        }
         
         // Stop scanning
         stopScanning(reason: "stop")
@@ -785,11 +847,28 @@ public class BleManager: NSObject, TransportManager {
         // Stop advertising
         stopAdvertising()
         
-        // Disconnect all peripherals
-        for peripheral in connections.allPeripherals() {
-            centralManager?.cancelPeripheralConnection(peripheral)
+        // The process keeps the managers (see `startUnsafe`), so this does
+        // what releasing them used to. Every connect is cancelled, pending
+        // ones and restored ones included, or one completes later into a
+        // stopped transport, holds a slot on the peer, and can relaunch the
+        // app under state restoration. The service is unpublished, or a peer
+        // still linked keeps reading this device's identity and writing into
+        // a transport that never answers.
+        if owns {
+            var dialled: [UUID: CBPeripheral] = [:]
+            for peripheral in connections.allPeripherals() { dialled[peripheral.identifier] = peripheral }
+            for (id, peripheral) in discoveredPeripherals { dialled[id] = peripheral }
+            for (id, peripheral) in pendingRestoredPeripherals { dialled[id] = peripheral }
+            for peripheral in dialled.values {
+                centralManager?.cancelPeripheralConnection(peripheral)
+            }
+            peripheralManager?.removeAllServices()
         }
         clearLinkState()
+        // Here, not in `clearLinkState()`: that also runs on every radio
+        // loss, after which the transport carries on and its scan must still
+        // follow the app's state.
+        stopObservingAppState()
         pendingAdvertiseRestart?.cancel()
         pendingAdvertiseRestart = nil
         lastAdvertiseRestartAt = nil
@@ -798,7 +877,15 @@ public class BleManager: NSObject, TransportManager {
         lastForcedBleRefresh = nil
         aggressiveDiscoveryStarted = nil
 
-        // Clean up managers
+        // The process keeps the managers for the next start (see
+        // `startUnsafe`); this instance lets go of them. Detached, so that a
+        // Bluetooth power change cannot start a stopped transport (the
+        // power-on handlers scan and advertise whatever the state).
+        if owns {
+            centralManager?.delegate = nil
+            peripheralManager?.delegate = nil
+            Self.managerOwner = nil
+        }
         centralManager = nil
         peripheralManager = nil
         
@@ -954,16 +1041,14 @@ public class BleManager: NSObject, TransportManager {
             return
         }
 
-        if reason != "watchdog" {
-            scanRestartCount = 0
-        }
-        
-        // Scan without service UUID filter for iOS ↔ Android interoperability
-        // iOS's scanForPeripherals(withServices:) has known issues recognizing 128-bit
-        // service UUIDs from Android advertisements. Scanning with nil allows us to see
-        // all peripherals and filter in the discovery callback instead.
+        // Filterless in the foreground, where the discovery callback filters
+        // instead (an Android stack that puts the service in its scan response
+        // only is still seen); the mesh service in the background, where a
+        // filterless scan delivers nothing (BleScanPolicy). In the background
+        // such a stack is missed: the SDK's own Android advertiser puts the
+        // service in its primary packet.
         central.scanForPeripherals(
-            withServices: nil,
+            withServices: BleScanPolicy.services(SERVICE_UUID, inBackground: isInBackground),
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         )
         isScanning = true
@@ -1030,6 +1115,9 @@ public class BleManager: NSObject, TransportManager {
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             guard self.isScanning else { return }
+            // Every branch below restarts or refreshes a scan that iOS is
+            // keeping quiet on purpose in the background (BleScanPolicy).
+            guard BleScanPolicy.mayRestartQuietScan(inBackground: self.isInBackground) else { return }
             let now = Date()
             let lastActivity = self.lastDiscoveryDate ?? self.scanStartDate ?? now
             let idleDuration = now.timeIntervalSince(lastActivity)
@@ -1106,9 +1194,12 @@ public class BleManager: NSObject, TransportManager {
             guard self.isScanning else { return }
             self.centralManager?.stopScan()
             self.isScanning = false
-            self.scanRestartCount += 1
+            // A restart only. This used to escalate, after three, to
+            // replacing the CBCentralManager, and a second manager under
+            // the same restore identifier reports `.unsupported` for good
+            // (BleScanPolicy). It also invalidated every CBPeripheral, so
+            // each link this device had dialled went with it.
             self.startScanning(reason: "watchdog")
-            self.evaluateCentralHealthAfterRestart()
         }
     }
     
@@ -1128,43 +1219,63 @@ public class BleManager: NSObject, TransportManager {
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         )
         
-        // After 5 seconds, go back to filterless scanning
+        // After 5 seconds, go back to the scan the app state needs
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self = self, self.isScanning else { return }
             self.centralManager?.stopScan()
             self.centralManager?.scanForPeripherals(
-                withServices: nil,
+                withServices: BleScanPolicy.services(self.SERVICE_UUID, inBackground: self.isInBackground),
                 options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
             )
         }
     }
     
-    private func evaluateCentralHealthAfterRestart() {
-        guard scanRestartCount >= MAX_CONSECUTIVE_SCAN_RESTARTS else { return }
-        let now = Date()
-        if let lastReset = lastCentralReset, now.timeIntervalSince(lastReset) < CENTRAL_RESET_BACKOFF {
-            return
-        }
-        emitDiagnostic("warning", "Resetting BLE central due to repeated scan stalls", context: [
-            "restartCount": scanRestartCount
-        ])
-        centralReady = false
-        centralManager?.stopScan()
-        // Peripherals held from the old central's restoration belong to that
-        // instance. The replacement delivers its own `willRestoreState`.
-        pendingRestoredPeripherals = [:]
-        centralManager = CBCentralManager(
-            delegate: self,
-            queue: nil,
-            options: [
-                CBCentralManagerOptionShowPowerAlertKey: true,
-                CBCentralManagerOptionRestoreIdentifierKey: "com.offlineprotocol.central"
-            ]
-        )
-        lastCentralReset = now
-        scanRestartCount = 0
+    /// Keeps `isInBackground` current and moves a running scan to the
+    /// filter the new state needs (BleScanPolicy). Main only; from
+    /// `startUnsafe`.
+    private func observeAppState() {
+        // A second `start()` while still `.starting` would otherwise leave
+        // the first pair registered.
+        stopObservingAppState()
+        isInBackground = UIApplication.shared.applicationState == .background
+        let center = NotificationCenter.default
+        appStateObservers = [
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.appStateChanged(inBackground: true)
+            },
+            center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.appStateChanged(inBackground: false)
+            },
+        ]
     }
-    
+
+    /// Main only; from `stopUnsafe` and `observeAppState`.
+    private func stopObservingAppState() {
+        for observer in appStateObservers { NotificationCenter.default.removeObserver(observer) }
+        appStateObservers.removeAll()
+    }
+
+    /// A scan started under the other state keeps that state's filter, so
+    /// it is started again. Restarting resets the watchdog's clock too, so a
+    /// return to the foreground does not read the background's silence as a
+    /// stall. Main only.
+    private func appStateChanged(inBackground: Bool) {
+        guard isInBackground != inBackground else { return }
+        isInBackground = inBackground
+        emitDiagnostic("info", "BLE scan follows app state", context: [
+            "background": inBackground,
+            "scanning": isScanning
+        ])
+        // The monitor skips every refresh in the background, so the forced
+        // refresh's clock is stale on return and would fire on the next tick:
+        // a second restart and an advertising gap on every foregrounding.
+        if !inBackground { lastForcedBleRefresh = Date() }
+        guard isScanning else { return }
+        centralManager?.stopScan()
+        isScanning = false
+        startScanning(reason: inBackground ? "app_background" : "app_foreground")
+    }
+
     private func markDiscoveryEvent() {
         lastDiscoveryDate = Date()
     }
@@ -3154,7 +3265,7 @@ extension BleManager: CBCentralManagerDelegate {
                     // central never reaches a state that accepts a command,
                     // and a later grant restarts the transport. Drop them
                     // rather than hold CBPeripheral references for the life of
-                    // the process, matching `stop()` and the central reset.
+                    // the process, matching `stop()`.
                     pendingRestoredPeripherals = [:]
                     updateState(.unavailable)
                     notifyBleStatus(false)

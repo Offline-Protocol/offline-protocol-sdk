@@ -1760,7 +1760,7 @@ jobs:
             PeerStreamSession.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
-            BleHelloPolicy.swift BleMessageNotificationPolicy.swift BleWriteStallPolicy.swift \
+            BleHelloPolicy.swift BleMessageNotificationPolicy.swift BleWriteStallPolicy.swift BleScanPolicy.swift \
             BleAppTag.swift BleDensityPolicy.swift PeerRssiFeedPolicy.swift BleServiceInstanceSelection.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             AddressDeclarationPolicy.swift \

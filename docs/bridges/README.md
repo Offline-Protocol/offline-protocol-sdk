@@ -753,6 +753,67 @@ The failure this prevents: a native package that stops building, or builds
 against a different version of a dependency than the code was tested with,
 found by the first application to update.
 
+## C14. A quiet scan in a pocket is not a stall
+
+Whenever the operating system restricts a Bluetooth LE scan, the bridge scans
+for the mesh service, and it never reads that scan's silence as a broken stack:
+
+| Platform | When the scan names the service, and its silence means nothing | Policy |
+|----------|------|--------|
+| iOS | The app is in the background. iOS runs only a scan that names a service, and delivers nothing to one that does not | `BleScanPolicy.swift` |
+| Android | The screen is off. Since Android 8.1 an unfiltered scan is paused until it comes back on | `BleScanPolicy.kt` |
+
+Outside those states both scan unfiltered and filter in software, as before.
+Every SDK advertiser puts the mesh service in its primary packet while it is in
+the foreground (and an Android one always), which is what a filtered scan
+matches; a backgrounded iPhone does not (below). A scan follows each
+transition (app state on iOS, screen on Android) by restarting under the new
+filter, which also restarts the watchdog's clock. With the screen off Android
+also scans at a balanced duty cycle, not low latency: the stack used to pause
+that scan at no cost, and full duty in a pocket listens continuously to every
+peer nearby. Links already up do not depend on the scan, so the price is only
+a slower discovery of a new peer.
+
+Quiet is not the same as dead, and Android can kill a scan without saying so:
+it refuses an app's sixth scan start within 30 seconds, with no callback. So
+Android waits two seconds before moving the scan at a screen transition, and
+skips the move when the scan already has the filter it needs; a glance at the
+phone then costs no start. And it still restarts a screen-off scan that has
+delivered nothing for five minutes, without counting the restart toward the
+stack reset, because nothing else would notice a dead scan in a pocket. iOS
+refuses no start, and a restart in the background only costs the app its next
+wake-up, so it never restarts there.
+
+The failure this prevents, measured on 2026-10-30 with an iPhone 16 and a
+Galaxy M17. The bridges scanned unfiltered in every state, so a phone in a
+pocket discovered nobody and the scan watchdogs restarted the quiet scan:
+- **iOS** escalated, after three restarts, to replacing its `CBCentralManager`.
+  A second manager under the same restore identifier, created while the first
+  one's session is still alive, reports `.unsupported` and never leaves it. The
+  bridge took that as a device with no Bluetooth: it reported the radio
+  unavailable, the core dropped every Bluetooth neighbour at once, and the
+  fragment drain sent nothing on any link, foreground included, until the app
+  was killed. Inbound kept arriving, so every peer saw a link that took its
+  writes and never answered. It happened about two minutes after backgrounding,
+  next to a peer whose writes kept waking the app. The replacement is gone: a
+  restart never escalates on iOS. The same pair was also made by an ordinary
+  stop then start, because the bridges release their `BleManager` on stop and
+  `bluetoothd` keeps a released manager's session for about 15 seconds, so
+  the managers are now made once per process and reused by every start.
+- **Android** reset the stack every 90 seconds with the screen off, and the
+  reset restarted the advertisement. A new advertising set has a new random
+  address, which is the churn [ADR 0030](../adr/0030-one-bluetooth-le-link-per-peer-pair.md)
+  removed from the forced refresh. The reset is now unreachable with the screen
+  off, and restarts the advertisement only as `AdvertisingRefreshPolicy` allows.
+
+What remains out of reach is the platform's. A backgrounded iPhone advertises
+its service in Apple's overflow area, which only an iOS device scanning for that
+service sees, so an Android phone cannot discover a backgrounded iPhone. Links
+already formed are unaffected, and a backgrounded iPhone still finds Android
+peers and dials them. On Android, all of this assumes the transport stays alive
+with the screen off: the React Native module's foreground service is what keeps
+it alive.
+
 ## What each binding owes
 
 | Binding | Owes |
