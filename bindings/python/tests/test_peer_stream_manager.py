@@ -13,7 +13,9 @@ import asyncio
 import json
 import os
 import socket
+import threading
 import time
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -133,6 +135,33 @@ async def closed_by_peer(reader: asyncio.StreamReader) -> bool:
         return True
     except asyncio.TimeoutError:
         return False
+
+
+def dns_sd_reaches_this_host(timeout: float = 5.0) -> bool:
+    """Whether two zeroconf instances here can see each other, asked of
+    zeroconf alone so that a fault in the manager cannot answer no. macOS 15
+    CI runners fail this: sends to their IPv6 multicast group return "No
+    route to host" and nothing advertised arrives."""
+    from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, Zeroconf
+
+    service_type = "_opsdkprobe._tcp.local."
+    found = threading.Event()
+    publisher = Zeroconf(ip_version=IPVersion.All)
+    browser = Zeroconf(ip_version=IPVersion.All)
+    try:
+        ServiceBrowser(browser, service_type, handlers=[lambda **_: found.set()])
+        publisher.register_service(
+            ServiceInfo(
+                service_type,
+                f"{uuid.uuid4().hex}.{service_type}",
+                addresses=[socket.inet_aton("127.0.0.1")],
+                port=1,
+            )
+        )
+        return found.wait(timeout)
+    finally:
+        publisher.close()
+        browser.close()
 
 
 async def until(predicate, timeout: float = 2.0) -> None:
@@ -1014,6 +1043,8 @@ class TestDiscoveryLifecycle:
 
     async def test_a_host_advertised_over_dns_sd_is_found_and_proved(self, fake_verifier):
         pytest.importorskip("zeroconf")
+        if not await asyncio.to_thread(dns_sd_reaches_this_host):
+            pytest.skip("this host's network does not carry its own DNS-SD")
         a_protocol = make_protocol(assertion=OUR_ASSERTION, address=OUR_ADDRESS)
         b_protocol = make_protocol(assertion=PEER_ASSERTION, address=PEER_ADDRESS)
         a = PeerStreamManager(a_protocol, listen_host="127.0.0.1", listen_port=0, advertise=True)

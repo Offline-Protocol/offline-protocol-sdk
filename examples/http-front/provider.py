@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socketserver
 import sys
 import time
 import urllib.error
@@ -79,6 +80,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         sys.stderr.write(f"{self.address_string()} {format % args}\n")
+
+
+class Server(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind fills server_name from reverse DNS, which
+        # nothing here reads and which takes 35 seconds where the resolver
+        # does not answer for loopback (macOS 15 CI runners), long enough
+        # for a host waiting on the registration to give up.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def _front_headers(token_file: str | None) -> dict[str, str]:
@@ -150,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     Handler.allowed = frozenset(args.allow)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = Server(("127.0.0.1", args.port), Handler)
     port = server.server_address[1]
     Thread(target=server.serve_forever, daemon=True).start()
     register(args.front, port, time.monotonic() + args.wait, args.token_file)
