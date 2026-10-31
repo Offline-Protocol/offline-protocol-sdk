@@ -594,7 +594,7 @@ async def test_an_owner_only_pre_existing_directory_is_used_as_is(harness):
 
 
 async def test_a_slow_call_leaves_the_loop_ticking_and_other_calls_waiting(harness):
-    import time
+    import threading
 
     server = await harness.server(tcp=True)
     engine = server.manager.protocol
@@ -605,8 +605,12 @@ async def test_a_slow_call_leaves_the_loop_ticking_and_other_calls_waiting(harne
         ticks[0] += 1
         return real_process()
 
+    # A gate rather than a sleep: every step below runs inside the stall
+    # however slow the runner, and only the test ends it.
+    release = threading.Event()
+
     def slow():
-        time.sleep(1.0)
+        release.wait(30)
         return 0
 
     engine.process = counting_process
@@ -614,7 +618,6 @@ async def test_a_slow_call_leaves_the_loop_ticking_and_other_calls_waiting(harne
     # Held for an application whose client arrives during the stall.
     server._on_engine_event({"type": "message_received", "message_id": "held-1", "app_id": "late"})
 
-    loop = asyncio.get_running_loop()
     a = await harness.client(server)
     await a.hello("a", token=server.token)
     slow_call = asyncio.ensure_future(a.call("get_pending_ack_count"))
@@ -624,27 +627,28 @@ async def test_a_slow_call_leaves_the_loop_ticking_and_other_calls_waiting(harne
 
     # During the stall: health answers, a late client is greeted and gets
     # its held event, and the loop ticks the engine.
-    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", server.port), 0.5)
+    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", server.port), 5)
     writer.write(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
     await writer.drain()
-    head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 0.5)
+    head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
     assert head.startswith(b"HTTP/1.1 200")
     writer.close()
     late = await harness.client(server)
-    await asyncio.wait_for(late.hello("late", token=server.token), 0.5)
-    held = await late.wait_event("message_received", timeout=0.5, message_id="held-1")
+    await asyncio.wait_for(late.hello("late", token=server.token), 5)
+    held = await late.wait_event("message_received", timeout=5, message_id="held-1")
     assert held["message_id"] == "held-1"
     assert not slow_call.done()
 
     # Another client's engine call is serialised behind the slow one.
     b = await harness.client(server)
     await b.hello("b", token=server.token)
-    started = loop.time()
-    assert await b.call("get_state") == "Running"
-    waited = loop.time() - started
-    assert slow_call.done() and await slow_call == 0
-    assert waited >= 0.3, waited
+    queued = asyncio.ensure_future(b.call("get_state"))
+    await asyncio.sleep(0.5)
+    assert not queued.done() and not slow_call.done()
     assert ticks[0] - ticks_before >= 3, ticks
+    release.set()
+    assert await queued == "Running"
+    assert slow_call.done() and await slow_call == 0
 
 
 async def test_a_loop_event_for_the_calls_own_id_reaches_only_the_caller(harness):
