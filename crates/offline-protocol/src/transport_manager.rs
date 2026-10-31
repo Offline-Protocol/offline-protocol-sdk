@@ -719,6 +719,43 @@ impl TransportManager {
     /// Retry/re-routing for those messages is handled by the higher-level
     /// outbox retry mechanism.
     pub fn send(&mut self, message: &Message) -> Result<()> {
+        // A recipient this device holds a live direct mesh link to is reached
+        // over that link, on every path that sends through here: retries,
+        // acknowledgements and session control frames as well as the
+        // application dispatch, which applies the same rule itself. DORS
+        // ranks carriers without looking at the recipient, and an
+        // infrastructure carrier accepts a frame for any recipient and reports
+        // success (T3), so without this a frame for a peer whose only path is
+        // the link (a Web Bluetooth central has no relay presence at all) was
+        // handed to Nostr or the internet relay whenever DORS ranked one first,
+        // never arrived, and every retry took the same route.
+        //
+        // The link is ground truth read from the carrier now, not a stored
+        // claim. A refusal is not terminal: the frame goes to selection
+        // exactly as before, so a marginal radio never strands a frame another
+        // carrier could take.
+        if let Some(mesh) = self.mesh_transport_for(message.recipient.as_str()) {
+            match self.send_via_transport(message, mesh) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    self.record_retry_failure(mesh);
+                    debug!(
+                        message_id = %message.id,
+                        transport = ?mesh,
+                        error = %err,
+                        "Direct mesh link refused the frame; falling back to transport selection"
+                    );
+                }
+            }
+        }
+        self.send_selected(message)
+    }
+
+    /// Sends `message` on the carrier DORS selects, with the fallback order
+    /// below, and without the direct-link preference [`Self::send`] applies
+    /// first. For a caller that has already tried the recipient's live link
+    /// and must not try it again (the application dispatch).
+    pub fn send_selected(&mut self, message: &Message) -> Result<()> {
         // Stamp the negotiated wire codec for this recipient. The clone happens
         // only on the binary path (peers known to support it); JSON and unknown
         // peers reuse the borrowed message. The internet transport ignores the
@@ -1983,6 +2020,119 @@ mod tests {
         let m = metrics.get(&TransportType::BLE).expect("metrics");
         assert_eq!(m.battery_level, Some(7));
         assert!(!m.is_charging);
+    }
+
+    /// DORS ranks an infrastructure carrier first and the recipient is reachable
+    /// only over a live direct Bluetooth link (a Web Bluetooth central, for
+    /// instance, has no relay presence at all). Before the fix the frame went to
+    /// the relay, which accepts any recipient and reports success, so it was
+    /// lost with no fallback; now it goes over the link.
+    fn relay_ranked_first_with_ble() -> (TransportManager, MockTransport, MockTransport) {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let nostr = MockTransport::new(TransportType::Nostr);
+        nostr.start().unwrap();
+        nostr.set_metrics(TransportMetrics {
+            latency_ms: Some(20),
+            bandwidth_bps: Some(10_000_000),
+            success_count: 200,
+            ..Default::default()
+        });
+        manager.add_transport(TransportType::Nostr, Box::new(nostr.clone()));
+
+        let ble = MockTransport::new(TransportType::BLE);
+        ble.start().unwrap();
+        ble.set_reject_unknown_recipients(true);
+        ble.set_metrics(TransportMetrics {
+            latency_ms: Some(1_500),
+            bandwidth_bps: Some(2_000),
+            congestion: 0.9,
+            failure_count: 50,
+            ..Default::default()
+        });
+        manager.add_transport(TransportType::BLE, Box::new(ble.clone()));
+        (manager, nostr, ble)
+    }
+
+    #[test]
+    fn a_recipient_linked_only_over_ble_is_sent_on_the_link_when_dors_ranks_a_relay_first() {
+        let (mut manager, nostr, ble) = relay_ranked_first_with_ble();
+        // Precondition: with no link to the recipient, DORS's pick is the relay.
+        manager.send(&create_test_message()).expect("send");
+        assert_eq!(
+            nostr.sent_messages().len(),
+            1,
+            "DORS must rank the relay first here"
+        );
+        assert!(ble.sent_messages().is_empty());
+        nostr.clear_sent_messages();
+
+        ble.add_connected_peer("bob", -60);
+        manager.send(&create_test_message()).expect("send");
+        assert_eq!(
+            ble.sent_messages().len(),
+            1,
+            "a recipient linked over BLE must be sent on the link"
+        );
+        assert!(
+            nostr.sent_messages().is_empty(),
+            "the relay cannot vouch for this recipient"
+        );
+    }
+
+    #[test]
+    fn a_link_that_refuses_the_frame_falls_back_to_dors() {
+        let (mut manager, nostr, ble) = relay_ranked_first_with_ble();
+        ble.add_connected_peer("bob", -60);
+        ble.set_fail_next_sends(1);
+        manager.send(&create_test_message()).expect("send");
+        assert!(ble.sent_messages().is_empty());
+        assert_eq!(nostr.sent_messages().len(), 1);
+    }
+
+    #[test]
+    fn send_selected_skips_the_link_for_a_caller_that_already_tried_it() {
+        let (mut manager, nostr, ble) = relay_ranked_first_with_ble();
+        ble.add_connected_peer("bob", -60);
+        manager.send_selected(&create_test_message()).expect("send");
+        assert!(ble.sent_messages().is_empty());
+        assert_eq!(nostr.sent_messages().len(), 1);
+    }
+
+    #[test]
+    fn a_recipient_with_no_mesh_link_still_follows_dors() {
+        let (mut manager, nostr, ble) = relay_ranked_first_with_ble();
+        // Another peer is linked; the recipient is not.
+        ble.add_connected_peer("carol", -60);
+        manager.send(&create_test_message()).expect("send");
+        assert_eq!(nostr.sent_messages().len(), 1);
+        assert!(ble.sent_messages().is_empty());
+    }
+
+    #[test]
+    fn a_mesh_pick_is_kept_and_falls_back_to_the_carrier_that_holds_the_link() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+        let wifi = MockTransport::new(TransportType::WiFiDirect);
+        wifi.start().unwrap();
+        wifi.set_reject_unknown_recipients(true);
+        wifi.set_metrics(TransportMetrics {
+            latency_ms: Some(10),
+            bandwidth_bps: Some(50_000_000),
+            success_count: 200,
+            ..Default::default()
+        });
+        manager.add_transport(TransportType::WiFiDirect, Box::new(wifi.clone()));
+        let ble = MockTransport::new(TransportType::BLE);
+        ble.start().unwrap();
+        ble.set_reject_unknown_recipients(true);
+        ble.add_connected_peer("bob", -60);
+        manager.add_transport(TransportType::BLE, Box::new(ble.clone()));
+
+        manager.send(&create_test_message()).expect("send");
+        assert_eq!(ble.sent_messages().len(), 1);
+        assert!(wifi.sent_messages().is_empty());
     }
 
     #[test]

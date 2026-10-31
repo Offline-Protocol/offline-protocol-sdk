@@ -463,7 +463,8 @@ impl OfflineProtocol {
         let (send_result, current_transport) = match sent_via_mesh {
             Some(transport) => (Ok(()), Some(transport)),
             None => {
-                let result = self.transport_manager.send(&message);
+                // The link was tried above (or there is none): selection only.
+                let result = self.transport_manager.send_selected(&message);
                 (result, self.transport_manager.current_transport())
             }
         };
