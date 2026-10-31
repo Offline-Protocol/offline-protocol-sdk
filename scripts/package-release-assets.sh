@@ -99,7 +99,7 @@ desktop_spec() {
       lib=liboffline_protocol_uniffi.dylib
       loader_name=libuniffi.dylib
       fmt=tar
-      built_on="macOS 14 (arm64)"
+      built_on="macOS 15 (arm64)"
       ;;
     linux-*)
       lib=liboffline_protocol_uniffi.so
