@@ -13,12 +13,18 @@
 //! - **Cost** — it does so without the network transmitting more than it should.
 //!   Reach alone is easy to get by repeating everything endlessly; the counts in
 //!   these tests are what separate a working mesh from one that floods.
+//!
+//! Most tests state a small topology by hand. The crowd tests at the end draw
+//! one instead: tens of devices scattered at random, each holding at most the
+//! four links a phone's Bluetooth LE stack allows, over a radio that can lose
+//! and delay frames ([`Air`]). Every draw is seeded, so a failure repeats.
 
 use offline_protocol::{CustodyConfig, Event, OfflineProtocol, ProtocolConfig};
 use offline_protocol_core::{AppId, Message, UserId};
 use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// A simulated neighborhood of devices.
 ///
@@ -38,6 +44,68 @@ struct Neighborhood {
     /// What each device has surfaced to its app, kept because stepping the
     /// network is what drains it.
     inboxes: HashMap<String, Vec<String>>,
+    /// What the air does to a frame between two devices.
+    air: Air,
+    /// Frames on the air, as `(round due, from, to, frame)`.
+    in_flight: Vec<(u64, String, String, Message)>,
+    /// Rounds stepped so far.
+    round: u64,
+    /// Links a device holds at most. A phone's Bluetooth LE stack holds four
+    /// (`MAX_CONNECTIONS_PER_DEVICE` in the iOS bridge), and a device with
+    /// four refuses a fifth, however close it is.
+    max_links: Option<usize>,
+}
+
+/// What happens to a frame between the device that sends it and the one it
+/// was handed to. The default is a perfect radio: every frame arrives, within
+/// the round it was sent, and a round takes no time.
+///
+/// The engine reads the real clock, so `tick` is real time: each round sleeps
+/// it, and a timer (an acknowledgement timeout, a forward's jitter) fires
+/// after however many rounds that adds up to.
+#[derive(Clone, Copy)]
+struct Air {
+    /// Share of hand-offs lost on the air, in `[0, 1]`.
+    loss: f64,
+    /// Extra rounds a frame spends on the air, drawn uniformly from the range.
+    delay_rounds: (u64, u64),
+    tick: Duration,
+    /// Seeds every draw, so a layout and its losses repeat exactly.
+    seed: u64,
+}
+
+impl Default for Air {
+    fn default() -> Self {
+        Self {
+            loss: 0.0,
+            delay_rounds: (0, 0),
+            tick: Duration::ZERO,
+            seed: 1,
+        }
+    }
+}
+
+/// A small seeded generator (SplitMix64), so a layout and its losses are the
+/// same on every run and every machine.
+struct Draw(u64);
+
+impl Draw {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform in `[0, 1)`.
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn between(&mut self, (low, high): (u64, u64)) -> u64 {
+        low + self.next() % (high - low + 1)
+    }
 }
 
 impl Neighborhood {
@@ -49,6 +117,10 @@ impl Neighborhood {
             transmissions: Vec::new(),
             frames: Vec::new(),
             inboxes: HashMap::new(),
+            air: Air::default(),
+            in_flight: Vec::new(),
+            round: 0,
+            max_links: None,
         };
 
         for id in node_ids {
@@ -125,8 +197,14 @@ impl Neighborhood {
             .unwrap();
     }
 
-    /// Puts two devices in range of each other.
+    /// Puts two devices in range of each other, unless either already holds
+    /// as many links as it can.
     fn link(&mut self, a: &str, b: &str) {
+        if let Some(cap) = self.max_links {
+            if self.links[a].len() >= cap || self.links[b].len() >= cap {
+                return;
+            }
+        }
         self.radios[a].add_connected_peer(b, -55);
         self.radios[b].add_connected_peer(a, -55);
         self.links.get_mut(a).unwrap().push(b.to_string());
@@ -151,9 +229,14 @@ impl Neighborhood {
     /// Runs one round: every device processes what it holds, and whatever it
     /// hands to a neighbor is delivered to that neighbor.
     ///
-    /// Returns how many hand-offs crossed a link this round, so a caller can
-    /// run until the network goes quiet.
+    /// Returns how many hand-offs crossed a link this round plus how many
+    /// are still on the air, so a caller can run until the network goes
+    /// quiet.
     fn step(&mut self) -> usize {
+        if !self.air.tick.is_zero() {
+            std::thread::sleep(self.air.tick);
+        }
+        self.round += 1;
         // Let each device act on what it has received, keeping whatever it
         // surfaced to its app.
         for id in self.node_ids() {
@@ -170,6 +253,7 @@ impl Neighborhood {
         // was addressed to a neighbor and sent normally, or it was handed to a
         // neighbor to carry. Both cross exactly one link.
         let mut moved = 0;
+        let mut draw = Draw(self.air.seed ^ self.round.wrapping_mul(0x2545_F491_4F6C_DD1D));
         for from in self.node_ids() {
             let mut handed: Vec<(String, Message)> = self.radios[&from]
                 .sent_messages()
@@ -190,13 +274,30 @@ impl Neighborhood {
                     .push((from.clone(), to.clone(), message.id.as_str()));
                 self.frames
                     .push((from.clone(), to.clone(), message.clone()));
-                // The receiver sees which link it arrived on, as a radio reports.
-                self.radios[&to].queue_message_from(message, from.clone());
                 moved += 1;
+                // A lost frame was still transmitted: it cost the airtime.
+                if draw.unit() < self.air.loss {
+                    continue;
+                }
+                let due = self.round + draw.between(self.air.delay_rounds);
+                self.in_flight.push((due, from.clone(), to, message));
             }
         }
 
-        moved
+        // Land what is due. The receiver sees which link it arrived on, as a
+        // radio reports, and nothing arrives over a link that has since gone.
+        let round = self.round;
+        let (landing, flying) = std::mem::take(&mut self.in_flight)
+            .into_iter()
+            .partition(|(due, ..)| *due <= round);
+        self.in_flight = flying;
+        for (_, from, to, message) in landing {
+            if self.links[&from].contains(&to) {
+                self.radios[&to].queue_message_from(message, from);
+            }
+        }
+
+        moved + self.in_flight.len()
     }
 
     /// Steps until nothing more moves, or the round limit is hit.
@@ -263,6 +364,67 @@ impl Neighborhood {
             .iter()
             .filter(|(_, to, id)| to == node_id && id == message_id)
             .count()
+    }
+}
+
+impl Neighborhood {
+    /// A crowd: `count` devices scattered over a unit square by `air.seed`.
+    /// Each pair closer than `range` can hear each other, and they link
+    /// nearest first, the way a phone takes the strongest peers it hears,
+    /// until a device reaches `max_links`.
+    fn scattered(count: usize, range: f64, max_links: usize, air: Air) -> Self {
+        let mut draw = Draw(air.seed);
+        let ids: Vec<String> = (0..count).map(|i| format!("n{i:02}")).collect();
+        let places: Vec<(f64, f64)> = ids.iter().map(|_| (draw.unit(), draw.unit())).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut net = Self::new(&id_refs);
+        net.air = air;
+        net.max_links = Some(max_links);
+
+        let mut pairs = Vec::new();
+        for a in 0..count {
+            for b in a + 1..count {
+                let (dx, dy) = (places[a].0 - places[b].0, places[a].1 - places[b].1);
+                let distance = (dx * dx + dy * dy).sqrt();
+                if distance < range {
+                    pairs.push((distance, a, b));
+                }
+            }
+        }
+        pairs.sort_by(|x, y| x.0.total_cmp(&y.0));
+        for (_, a, b) in pairs {
+            net.link(&ids[a], &ids[b]);
+        }
+        net
+    }
+
+    /// The fewest links between two devices, or `None` if no path joins them.
+    fn hops_between(&self, from: &str, to: &str) -> Option<usize> {
+        let mut seen = vec![from.to_string()];
+        let mut frontier = vec![from.to_string()];
+        for hops in 0.. {
+            if frontier.iter().any(|id| id == to) {
+                return Some(hops);
+            }
+            let next: Vec<String> = frontier
+                .iter()
+                .flat_map(|id| self.links[id].iter().cloned())
+                .filter(|id| !seen.contains(id))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if next.is_empty() {
+                return None;
+            }
+            seen.extend(next.iter().cloned());
+            frontier = next;
+        }
+        unreachable!()
+    }
+
+    /// How many links the layout holds.
+    fn link_count(&self) -> usize {
+        self.links.values().map(Vec::len).sum::<usize>() / 2
     }
 }
 
@@ -1336,4 +1498,216 @@ fn a_resend_over_a_live_link_is_not_also_handed_to_the_mesh() {
         "the first copy and one resend, nothing extra"
     );
     assert_eq!(net.deliveries_to("bob", &msg_id), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Crowds: random layouts of tens of devices under the Bluetooth LE link cap.
+// ---------------------------------------------------------------------------
+
+/// The link cap a phone's Bluetooth LE stack imposes.
+const PHONE_LINK_CAP: usize = 4;
+
+/// Sender and recipient pairs drawn from a layout, far apart on purpose: a
+/// pair one link apart says nothing about forwarding.
+fn far_pairs(net: &Neighborhood, seed: u64, count: usize) -> Vec<(String, String, usize)> {
+    let ids = net.node_ids();
+    let mut draw = Draw(seed ^ 0xA5A5);
+    let mut pairs = Vec::new();
+    for _ in 0..count * 50 {
+        if pairs.len() == count {
+            break;
+        }
+        let from = &ids[(draw.next() % ids.len() as u64) as usize];
+        let to = &ids[(draw.next() % ids.len() as u64) as usize];
+        if let Some(hops) = net.hops_between(from, to) {
+            if hops >= 3 {
+                pairs.push((from.clone(), to.clone(), hops));
+            }
+        }
+    }
+    pairs
+}
+
+/// One message sent across a crowd, and what became of it.
+struct Flow {
+    from: String,
+    to: String,
+    hops: usize,
+    content: String,
+    id: String,
+    receipts: Arc<Mutex<Vec<String>>>,
+}
+
+impl Flow {
+    fn delivered(&self, net: &mut Neighborhood) -> usize {
+        net.inbox(&self.to)
+            .iter()
+            .filter(|c| **c == self.content)
+            .count()
+    }
+
+    fn acknowledged(&self) -> bool {
+        self.receipts.lock().unwrap().contains(&self.id)
+    }
+}
+
+/// Sends one message for each far pair in the crowd, all at once, the way
+/// several people in a crowd talk at the same time.
+fn send_across(net: &mut Neighborhood, seed: u64, count: usize) -> Vec<Flow> {
+    far_pairs(net, seed, count)
+        .into_iter()
+        .map(|(from, to, hops)| {
+            let receipts = watch_deliveries(net, &from);
+            let content = format!("{from} to {to}");
+            let id = net.send(&from, &to, &content);
+            Flow {
+                from,
+                to,
+                hops,
+                content,
+                id,
+                receipts,
+            }
+        })
+        .collect()
+}
+
+/// Steps the crowd until `done` holds or `limit` of real time has passed.
+fn step_until(
+    net: &mut Neighborhood,
+    limit: Duration,
+    mut done: impl FnMut(&mut Neighborhood) -> bool,
+) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < limit {
+        net.step();
+        if done(net) {
+            return;
+        }
+    }
+}
+
+/// A round is one link crossing, about what a Bluetooth LE write and its
+/// response take, so the send budgets refill at their real rate.
+const CROWD_TICK: Duration = Duration::from_millis(20);
+
+#[test]
+fn a_crowd_carries_a_message_as_far_as_its_hop_budget_and_no_further() {
+    // Forty phones scattered over a square, each linked to the nearest it
+    // hears until it holds four links. Six far pairs talk at once. On a
+    // perfect radio every pair within the hop budget is reached exactly once,
+    // and a pair beyond it is not: the budget is what stops a flood, so it is
+    // also the network's diameter.
+    for seed in 1..=3 {
+        let air = Air {
+            seed,
+            tick: CROWD_TICK,
+            ..Air::default()
+        };
+        let mut net = Neighborhood::scattered(40, 0.22, PHONE_LINK_CAP, air);
+        assert!(net.links.values().all(|l| l.len() <= PHONE_LINK_CAP));
+        let flows = send_across(&mut net, seed, 6);
+        assert!(
+            flows.iter().any(|f| f.hops >= 5),
+            "seed {seed} drew no far pair"
+        );
+        let budget = usize::from(net.node("n00").mesh_relay_config().max_ttl);
+
+        let reachable: Vec<&Flow> = flows.iter().filter(|f| f.hops <= budget).collect();
+        step_until(&mut net, Duration::from_secs(5), |net| {
+            reachable.iter().all(|f| f.delivered(net) > 0)
+        });
+        // Then long enough for the send budgets to refill and release every
+        // forward they held back: a late copy is exactly what this counts.
+        step_until(&mut net, Duration::from_secs(2), |_| false);
+
+        for flow in &flows {
+            let expected = usize::from(flow.hops <= budget);
+            assert_eq!(
+                flow.delivered(&mut net),
+                expected,
+                "seed {seed}: {} to {}, {} hops apart",
+                flow.from,
+                flow.to,
+                flow.hops
+            );
+            // A flood crosses each link at most once each way.
+            assert!(
+                net.transmission_count(&flow.id) <= 2 * net.link_count(),
+                "seed {seed}: {} to {} crossed {} links of {}",
+                flow.from,
+                flow.to,
+                net.transmission_count(&flow.id),
+                net.link_count()
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "fails today: a receipt is lost when a fan-out is cut short by the send budget or refused by a neighbor's acceptance limit, and the sender's retry cannot pass the forwarders' ten-minute suppression"]
+fn every_receipt_in_a_crowd_comes_back() {
+    // The messages all arrive (the test above). Their receipts are four
+    // floods per message, one per copy the recipient heard, and together they
+    // outrun the send budgets: a forwarder out of budget hands a receipt to
+    // one neighbor and counts it forwarded, and one whose neighbor exceeded
+    // its acceptance limit drops it. Either way no device holds it any more.
+    let mut missing = Vec::new();
+    for seed in 1..=4 {
+        let air = Air {
+            seed,
+            tick: CROWD_TICK,
+            ..Air::default()
+        };
+        let mut net = Neighborhood::scattered(40, 0.22, PHONE_LINK_CAP, air);
+        let budget = usize::from(net.node("n00").mesh_relay_config().max_ttl);
+        let flows: Vec<Flow> = send_across(&mut net, seed, 6)
+            .into_iter()
+            .filter(|f| f.hops <= budget)
+            .collect();
+        step_until(&mut net, Duration::from_secs(15), |_| {
+            flows.iter().all(Flow::acknowledged)
+        });
+        missing.extend(
+            flows
+                .iter()
+                .filter(|f| !f.acknowledged())
+                .map(|f| format!("seed {seed}: {} to {}, {} hops apart", f.from, f.to, f.hops)),
+        );
+    }
+    assert!(missing.is_empty(), "no receipt for {missing:#?}");
+}
+
+#[test]
+#[ignore = "fails today: a lost frame is retried by its sender, and every forwarder past the first suppresses the retry for ten minutes"]
+fn a_crowd_on_a_lossy_radio_recovers_by_retrying() {
+    // One hand-off in ten lost, and frames up to two rounds late. The first
+    // flood misses some recipients and loses some receipts; the sender's
+    // acknowledgement timeout (ten seconds) is what should cover them.
+    for seed in 2..=3 {
+        let air = Air {
+            seed,
+            loss: 0.1,
+            delay_rounds: (0, 2),
+            tick: CROWD_TICK,
+        };
+        let mut net = Neighborhood::scattered(40, 0.22, PHONE_LINK_CAP, air);
+        let budget = usize::from(net.node("n00").mesh_relay_config().max_ttl);
+        let flows: Vec<Flow> = send_across(&mut net, seed, 6)
+            .into_iter()
+            .filter(|f| f.hops <= budget)
+            .collect();
+        step_until(&mut net, Duration::from_secs(35), |_| {
+            flows.iter().all(Flow::acknowledged)
+        });
+        for flow in &flows {
+            assert!(
+                flow.acknowledged(),
+                "seed {seed}: {} to {}, {} hops apart, settled nothing",
+                flow.from,
+                flow.to,
+                flow.hops
+            );
+        }
+    }
 }
