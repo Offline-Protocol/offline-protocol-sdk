@@ -15,6 +15,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A delivery carried across the mesh is answered once, not once per path.**
+  A recipient answered every copy it heard, and one delivery arrives by as
+  many paths as neighbors carried it, so each message cost up to four answer
+  floods in a crowd of phones holding four links each. A copy a relay carried
+  is no longer answered when the same message, under the same resend
+  generation, was answered in the last five seconds. A copy from the sender
+  itself, one over any other carrier, and a resend are still always
+  answered. In a simulated crowd of forty phones this cut the receipt frames
+  by a half to two thirds and the total airtime by up to a half.
+
 - **A resend crosses the mesh as far as the first copy did.** Every device
   that carries a frame ignores its id for ten minutes, so a sender's resend
   stopped at the first forwarder: the device beside the sender carried it

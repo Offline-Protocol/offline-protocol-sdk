@@ -147,9 +147,9 @@ pub const MAX_RELAY_RATE_PEERS: usize = 256;
 /// forward into an abandoned one, which `ProtocolConfig::validate` refuses.
 pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 
-/// The metadata key a sender stamps on a resend it hands to the mesh: the
-/// second it was made, in Unix seconds. Engine-written and unsigned, like the
-/// hop fields.
+/// The metadata key a sender stamps on a resend it hands to the mesh: its
+/// generation, how many acknowledgement timeouts old the message is, from 1.
+/// Engine-written and unsigned, like the hop fields.
 ///
 /// Every device that carried the first copy suppresses its id for the
 /// retention window, so a resend under the same id stopped at the first
@@ -2136,7 +2136,7 @@ mod tests {
         let mut resend = first.clone();
         resend
             .metadata
-            .insert(RESEND_META_KEY.to_string(), "1700000000".to_string());
+            .insert(RESEND_META_KEY.to_string(), "1".to_string());
         assert!(!gov.absorb_settled_duplicate(&resend, Some("bob")));
         assert_eq!(gov.admit(&resend, Some("bob"), 3), RelayAdmission::Queued);
         gov.take_due(Instant::now());

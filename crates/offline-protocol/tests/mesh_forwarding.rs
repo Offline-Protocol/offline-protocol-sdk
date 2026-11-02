@@ -1477,7 +1477,12 @@ fn a_resend_reaches_past_forwarders_that_already_carried_the_first_copy() {
     // and to carol that is an echo. A frame lost past the first forwarder
     // could not be recovered by retrying, and neither could a lost receipt,
     // since the recipient answers only a copy that reaches it.
-    let mut net = Neighborhood::new(&["alice", "bob", "carol", "dave"]);
+    // A one-second acknowledgement timeout, so the resend below is a
+    // generation old rather than ten seconds' wait away.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 1_000;
+    let mut net = Neighborhood::new(&["bob", "carol", "dave"]);
+    net.add_node("alice", alice);
     net.air.delay_rounds = (1, 1);
     net.link("alice", "bob");
     net.link("bob", "carol");
@@ -1500,12 +1505,97 @@ fn a_resend_reaches_past_forwarders_that_already_carried_the_first_copy() {
         "the first copy should have been lost"
     );
 
-    // A second later alice re-drives her outbox, as a retry does.
+    // A timeout later alice re-drives her outbox, as a retry does.
     std::thread::sleep(Duration::from_millis(1_100));
     net.node("alice").flush_outbox_all();
     step_until_delivered(&mut net, &delivered, 24);
 
     assert_eq!(net.inbox("dave"), vec!["worth a second try".to_string()]);
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
+}
+
+/// The distinct receipts `from` has sent for `message_id`, each of which is a
+/// flood of its own.
+fn receipts_sent(net: &Neighborhood, from: &str, message_id: &str) -> usize {
+    net.frames
+        .iter()
+        .filter(|(sender, _, m)| {
+            sender == from && m.metadata.get("ack_for").map(String::as_str) == Some(message_id)
+        })
+        .map(|(_, _, m)| m.id.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+#[test]
+fn a_delivery_heard_over_several_paths_is_answered_once() {
+    // alice — {bob, carol} — dave. Dave hears the message from bob and from
+    // carol, moments apart. Each copy was answered, and each answer is a
+    // flood of its own back across the mesh: in a crowd of phones holding
+    // four links, up to four floods per message, which is what ran the send
+    // budgets dry. Two copies of one flood, seconds apart, are one delivery.
+    let mut net = Neighborhood::new(&["alice", "bob", "carol", "dave"]);
+    net.link("alice", "bob");
+    net.link("alice", "carol");
+    net.link("bob", "dave");
+    net.link("carol", "dave");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let msg_id = net.send("alice", "dave", "heard twice");
+    net.run_until_quiet(16);
+
+    assert_eq!(
+        net.deliveries_to("dave", &msg_id),
+        2,
+        "both paths carried it"
+    );
+    assert_eq!(net.inbox("dave"), vec!["heard twice".to_string()]);
+    assert_eq!(receipts_sent(&net, "dave", &msg_id), 1);
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
+}
+
+#[test]
+fn a_resend_is_answered_even_moments_after_the_first_answer() {
+    // alice — bob — dave. Dave's answer is lost on its way back, and alice's
+    // resend reaches him seconds later, well inside the window in which
+    // copies of one flood go unanswered. A resend is a new generation, so it
+    // is answered: staying quiet would turn a delivered message into a
+    // failed one.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 1_000;
+    let mut net = Neighborhood::new(&["bob", "dave"]);
+    net.add_node("alice", alice);
+    net.air.delay_rounds = (1, 1);
+    net.link("alice", "bob");
+    net.link("bob", "dave");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let msg_id = net.send("alice", "dave", "answer me again");
+    for _ in 0..16 {
+        let answered = net.frames.iter().any(|(from, to, m)| {
+            from == "bob"
+                && to == "alice"
+                && m.metadata.get("ack_for").map(String::as_str) == Some(msg_id.as_str())
+        });
+        if answered {
+            break;
+        }
+        net.step();
+    }
+    // The answer is on the air to alice: she steps out of range as it lands.
+    net.unlink_all("alice");
+    net.step();
+    net.link("alice", "bob");
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "the answer should have been lost"
+    );
+
+    std::thread::sleep(Duration::from_millis(1_100));
+    net.node("alice").flush_outbox_all();
+    step_until_delivered(&mut net, &delivered, 24);
+
+    assert_eq!(receipts_sent(&net, "dave", &msg_id), 2);
     assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
 }
 
@@ -1847,7 +1937,9 @@ fn every_receipt_in_a_crowd_comes_back() {
             .into_iter()
             .filter(|f| f.hops <= budget)
             .collect();
-        step_until(&mut net, Duration::from_secs(15), |_| {
+        // Up to two resend generations: the ladder's resend fourteen seconds in
+        // is the first a full timeout old, and the next comes at thirty.
+        step_until(&mut net, Duration::from_secs(32), |_| {
             flows.iter().all(Flow::acknowledged)
         });
         missing.extend(

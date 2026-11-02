@@ -22,7 +22,7 @@ use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
     ACK_COALESCE_MAX, ACK_COALESCE_WINDOW, ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_MORE_KEY,
     ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT,
-    MAX_OUTBOX_ENTRIES,
+    MAX_OUTBOX_ENTRIES, MESH_COPY_ANSWER_WINDOW,
 };
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
@@ -4358,20 +4358,40 @@ impl OfflineProtocol {
     /// the frame, and one that refused it (rate limit, full queue) is exactly
     /// the one a later offer should reach.
     ///
-    /// The copy is stamped with the resend's generation
-    /// ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)), which is
-    /// what carries it past forwarders that suppress the first copy's id: to
-    /// them it is a new flood, and its own copies are suppressed as usual.
+    /// A resend made a full acknowledgement timeout or more after the
+    /// message was written is stamped with its generation
+    /// ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)): how many
+    /// timeouts old the message is. That is what carries it past forwarders
+    /// that suppress the first copy's id. To them it is a new flood, and its
+    /// own copies are suppressed as usual.
+    ///
+    /// Generation 0 is never stamped, so a resend inside the first timeout is
+    /// one more copy of the first flood, suppressed past the device beside us
+    /// as before. The retry ladder resends a frame handed to the mesh after
+    /// two seconds, then four and eight, and an answer across several hops of
+    /// phones takes about three: stamping every resend re-flooded the mesh for
+    /// most messages that were never lost. Counting generations by timeout
+    /// gives at most one new flood per timeout, whatever the ladder does.
     pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
         if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
             return 0;
         }
-        let mut resend = message.clone();
-        resend.metadata.insert(
-            super::mesh_relay::RESEND_META_KEY.to_string(),
-            Utc::now().timestamp().to_string(),
-        );
-        let message = &resend;
+        let period_ms = self.config.reliability.ack.default_timeout_ms.max(1);
+        let age_ms = u64::try_from(Utc::now().timestamp_millis() - message.timestamp.as_millis())
+            .unwrap_or(0);
+        let generation = age_ms / period_ms;
+        let stamped;
+        let message = if generation > 0 {
+            let mut resend = message.clone();
+            resend.metadata.insert(
+                super::mesh_relay::RESEND_META_KEY.to_string(),
+                generation.to_string(),
+            );
+            stamped = resend;
+            &stamped
+        } else {
+            message
+        };
         let handed_to_mesh = self.offer_to_mesh(message);
         if handed_to_mesh > 0 {
             debug!(
@@ -5693,11 +5713,43 @@ impl OfflineProtocol {
         inbound_transport: TransportType,
         status: Option<&str>,
     ) -> Result<()> {
-        if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {
-            return Ok(());
+        if status.is_none() {
+            self.record_answered(message);
+            if self.try_coalesce_ack(message, inbound_transport) {
+                return Ok(());
+            }
         }
         let ack = self.build_ack(message, inbound_transport, status)?;
         self.route_ack(&ack, inbound_transport)
+    }
+
+    /// Whether `message` is one more relayed copy of a mesh flood this device
+    /// answered moments ago ([`MESH_COPY_ANSWER_WINDOW`]).
+    ///
+    /// Only a copy a relay carried (hop spent, over a mesh carrier) and under
+    /// a generation already answered. A copy straight from its sender, one
+    /// over any other carrier, and a resend under a new generation are always
+    /// answered: each may be the sender retrying because the answer was lost,
+    /// and staying quiet for it turns a delivered message into a failed one.
+    pub(super) fn is_answered_flood_copy(
+        &self,
+        message: &Message,
+        inbound_transport: TransportType,
+    ) -> bool {
+        TransportManager::is_mesh_transport(inbound_transport)
+            && message.hop_count.value() > 0
+            && self
+                .answered_deliveries
+                .get(&super::mesh_relay::relay_key(message))
+                .is_some_and(|at| at.elapsed() < MESH_COPY_ANSWER_WINDOW)
+    }
+
+    fn record_answered(&mut self, message: &Message) {
+        let now = Instant::now();
+        self.answered_deliveries
+            .retain(|_, at| now.saturating_duration_since(*at) < MESH_COPY_ANSWER_WINDOW);
+        self.answered_deliveries
+            .insert(super::mesh_relay::relay_key(message), now);
     }
 
     /// Holds the delivery ACK for `message` to go out with others to the same

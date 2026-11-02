@@ -168,18 +168,22 @@ impl OfflineProtocol {
                         // retrying — but NOT for blocked users, to avoid
                         // leaking presence information.
                         //
-                        // Every copy is answered, including the several that
-                        // one delivery produces when it travels through nearby
-                        // devices. Answering only the first was tried and
-                        // rejected: a copy arriving moments later and a
-                        // retransmission arriving because the answer was lost
-                        // are not distinguishable here, and staying quiet for
-                        // the second turns a delivered message into a failed
-                        // one. The redundant answers are bounded — a delivery
-                        // arrives by at most as many paths as neighbors carried
-                        // it, answers never provoke further answers, and every
-                        // frame that leaves is rate-capped like any other.
-                        if !sender_blocked && message.requires_ack {
+                        // Every copy is answered except one more relayed copy
+                        // of a mesh flood answered moments ago
+                        // (`is_answered_flood_copy`). Answering only the first
+                        // copy of all was tried and rejected: a copy arriving
+                        // moments later and a retransmission arriving because
+                        // the answer was lost could not be told apart, and
+                        // staying quiet for the second turns a delivered
+                        // message into a failed one. A mesh resend now carries
+                        // its generation, which tells them apart; answering
+                        // every relayed copy as well sent one flood per path
+                        // the delivery took, which in a crowd ran the send
+                        // budgets dry and lost the very receipts it answered.
+                        if !sender_blocked
+                            && message.requires_ack
+                            && !self.is_answered_flood_copy(&message, transport_used)
+                        {
                             if let Err(err) = self.send_delivery_ack(&message, transport_used) {
                                 error!(
                                     message_id = %message.id,

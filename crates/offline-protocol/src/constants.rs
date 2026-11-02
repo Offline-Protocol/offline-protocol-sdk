@@ -46,6 +46,19 @@ pub const ACK_COALESCE_MAX: usize = 5;
 /// that at a few messages a second each ACK frame answers two or three.
 pub const ACK_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long a delivery stays answered against further copies of the same mesh
+/// flood: copies that relays carried, under the same resend generation.
+///
+/// Each answer is a flood of its own back across the mesh, and one delivery
+/// arrives by as many paths as neighbors carried it, so answering every copy
+/// sent up to four floods per message in a crowd of phones holding four links
+/// each, which is what ran the send budgets dry and lost receipts. The copies
+/// of one flood land within seconds of each other; the sender's resend comes
+/// after its acknowledgement timeout (ten seconds) and carries a new
+/// generation, so it is answered whatever the window. Long enough for a flood
+/// to finish arriving: a forward is abandoned once five seconds overdue.
+pub const MESH_COPY_ANSWER_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Metadata key marking a frame the SDK sent on its own: control traffic,
 /// key packages, data-sync frames, receipts, typing, presence, and a 1:1
 /// Welcome no user message is waiting on.

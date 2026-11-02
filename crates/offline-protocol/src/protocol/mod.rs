@@ -429,6 +429,12 @@ pub struct OfflineProtocol {
     /// answered again when the resend arrives as a duplicate.
     coalesced_acks_out: HashMap<String, CoalescedAcks>,
 
+    /// When each delivery was last answered, keyed by message id and resend
+    /// generation, for [`MESH_COPY_ANSWER_WINDOW`](crate::constants::MESH_COPY_ANSWER_WINDOW).
+    /// Entries older than the window are dropped on every insert, so it holds
+    /// only the last few seconds of deliveries.
+    answered_deliveries: HashMap<String, Instant>,
+
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are
     /// refused.
@@ -1286,6 +1292,7 @@ impl OfflineProtocol {
             peer_undecryptable_ack: std::collections::HashSet::new(),
             peer_coalesced_ack: std::collections::HashSet::new(),
             coalesced_acks_out: HashMap::new(),
+            answered_deliveries: HashMap::new(),
             control_freshness_peers: std::collections::HashSet::new(),
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),
