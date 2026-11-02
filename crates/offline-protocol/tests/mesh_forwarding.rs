@@ -715,6 +715,47 @@ fn everyone_hearing_everyone_does_not_multiply_the_traffic() {
 }
 
 #[test]
+fn a_device_hands_its_own_frame_to_every_neighbor_a_phone_can_hold() {
+    // alice holds four links, and only bob leads anywhere: dave is beyond
+    // him. A forwarder fans out to three, which with four links is every
+    // neighbor but the one it heard the frame from. Alice heard it from
+    // nobody, so three of her four left one out, chosen by a hash of the
+    // message id. A message that left out bob never reached dave, and since
+    // the choice is stable per id, neither did any resend of it.
+    // Budgets, and an allowance per neighbor, that sixteen messages and their
+    // answers cannot exhaust, since the rounds here take no time to refill
+    // them.
+    let roomy = |id: &str| {
+        let mut config = default_config(id);
+        config.mesh_relay.burst = 1_000.0;
+        config.mesh_relay.peer_burst = 1_000.0;
+        config
+    };
+    let mut net = Neighborhood::new(&["carol", "dave", "erin", "frank"]);
+    net.add_node("alice", roomy("alice"));
+    net.add_node("bob", roomy("bob"));
+    for peer in ["bob", "carol", "erin", "frank"] {
+        net.link("alice", peer);
+    }
+    net.link("bob", "dave");
+
+    let sent: Vec<String> = (0..16)
+        .map(|n| {
+            let content = format!("message {n}");
+            net.send("alice", "dave", &content);
+            content
+        })
+        .collect();
+    net.run_until_quiet(24);
+
+    let mut inbox = net.inbox("dave");
+    inbox.sort();
+    let mut expected = sent;
+    expected.sort();
+    assert_eq!(inbox, expected);
+}
+
+#[test]
 fn a_fan_out_cut_short_by_the_send_budget_is_finished_when_it_refills() {
     // alice — bob — {carol, dave, erin, grace}. Bob fans out to three of his
     // four onward neighbors and can afford one forward at a time, so his

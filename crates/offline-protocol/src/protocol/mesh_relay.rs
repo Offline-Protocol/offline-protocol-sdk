@@ -1306,13 +1306,27 @@ impl MeshRelayGovernor {
     /// Bias still reaches this device's own traffic through the send budget's
     /// forwarding share, which is the one dial that cannot mistake the two: see
     /// [`Self::take_own_send_token`].
+    ///
+    /// One wider than a forward's fan-out. A forwarder never hands a frame
+    /// back to the neighbor it came from, so its fan-out covers that many of
+    /// its *other* links; this device heard the frame from nobody. At the
+    /// same width, a phone holding four Bluetooth LE links handed its own
+    /// frame to three and left one out by a hash of the message id, and a
+    /// message whose only way on was that link never left, nor did any resend
+    /// of it, the choice being stable per id. It cost a delivery receipt the
+    /// same way whenever the link left out was the one the message arrived on.
     pub fn select_origination_targets<'a>(
         &self,
         neighbors: impl IntoIterator<Item = (&'a str, u8, TransportType)>,
         exclude: &[&str],
         message_id: &str,
     ) -> Vec<String> {
-        self.select_within_fanout(neighbors, exclude, message_id, self.config.fanout.max(1))
+        self.select_within_fanout(
+            neighbors,
+            exclude,
+            message_id,
+            self.config.fanout.max(1) + 1,
+        )
     }
 
     /// The fan-out width for other people's traffic.
@@ -2486,10 +2500,15 @@ mod tests {
                 "each carrier's best goes first: {targets:?}"
             );
             assert!(targets[0] == "p1" || targets[0] == "p2");
+            // The same choice in the same order, one wider: a forward's
+            // fan-out leaves out the neighbor it came from, an own frame's
+            // has nobody to leave out.
+            let own = gov.select_origination_targets(neighbors, &[], id);
+            assert_eq!(own.len(), DEFAULT_RELAY_FANOUT + 1);
             assert_eq!(
-                gov.select_origination_targets(neighbors, &[], id),
+                own[..DEFAULT_RELAY_FANOUT],
                 targets,
-                "a forward and an origination choose alike at full width",
+                "an origination must start with what a forward chooses",
             );
         }
 
@@ -2727,8 +2746,9 @@ mod tests {
         assert_eq!(
             weak.select_origination_targets(neighbors.clone(), &[], "msg-1")
                 .len(),
-            DEFAULT_RELAY_FANOUT,
-            "this device's own frame must reach as many neighbors as a capable device's",
+            DEFAULT_RELAY_FANOUT + 1,
+            "this device's own frame must reach as many neighbors as a capable device's, \
+             and one more than a forward, which leaves out the neighbor it came from",
         );
 
         // And identical to what a fully capable device would have picked, not

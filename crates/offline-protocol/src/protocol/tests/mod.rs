@@ -28970,8 +28970,10 @@ fn test_a_weak_device_offers_its_own_message_to_every_neighbor() {
     let message = signed_frame(&id("user123"), "far-away", "carry this for me");
     let handed_to = protocol.offer_to_mesh(&message);
 
+    // One wider than a forward's: every one of a phone's four links.
     assert_eq!(
-        handed_to, DEFAULT_RELAY_FANOUT,
+        handed_to,
+        DEFAULT_RELAY_FANOUT + 1,
         "a device's own message must reach the full fan-out whatever its battery",
     );
 }

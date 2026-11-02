@@ -15,6 +15,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A device hands its own frame to every neighbor a phone can hold.** A
+  forward's fan-out of three covers every link of a four-link phone but the
+  one the frame came from, and a device's own frame was given the same
+  three, so one of its four links was left out, chosen by the message id. A
+  message whose only way on was that link never left, nor did any resend of
+  it, and a delivery receipt was lost the same way when the link left out
+  was the one the message arrived on. A device's own frames now go to one
+  more neighbor than a forward.
+
 - **A delivery carried across the mesh is answered once, not once per path.**
   A recipient answered every copy it heard, and one delivery arrives by as
   many paths as neighbors carried it, so each message cost up to four answer
