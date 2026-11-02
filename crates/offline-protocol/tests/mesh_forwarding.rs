@@ -715,6 +715,51 @@ fn everyone_hearing_everyone_does_not_multiply_the_traffic() {
 }
 
 #[test]
+fn a_fan_out_cut_short_by_the_send_budget_is_finished_when_it_refills() {
+    // alice — bob — {carol, dave, erin, grace}. Bob fans out to three of his
+    // four onward neighbors and can afford one forward at a time, so his
+    // fan-out runs out after the first. Counting the frame forwarded there
+    // left it with one neighbor, chosen by a hash rather than by where its
+    // recipient is, and its id suppressed for ten minutes: in a crowd that is
+    // how a receipt went one way, the wrong one, and never arrived.
+    let mut bob = default_config("bob");
+    bob.mesh_relay.burst = 2.0;
+    bob.mesh_relay.rate_per_sec = 8.0;
+    let onward = ["carol", "dave", "erin", "grace"];
+
+    let mut net = Neighborhood::new(&["alice", "carol", "dave", "erin", "grace"]);
+    net.add_node("bob", bob);
+    net.link("alice", "bob");
+    for peer in onward {
+        net.link("bob", peer);
+    }
+
+    let msg_id = net.send("alice", "frank", "carried all the way out");
+    for _ in 0..12 {
+        net.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The rest of the fan-out goes out once the budget refills, to the
+    // neighbors first chosen: finished, never widened to the fourth.
+    let reached: Vec<usize> = onward
+        .iter()
+        .map(|peer| net.deliveries_to(peer, &msg_id))
+        .collect();
+    assert_eq!(
+        reached.iter().sum::<usize>(),
+        3,
+        "bob's fan-out reached {reached:?}"
+    );
+    assert!(
+        reached.iter().all(|&n| n <= 1),
+        "a neighbor got it twice: {reached:?}"
+    );
+    // Finishing the fan-out is not a second forward of the frame.
+    assert_eq!(net.node("bob").mesh_relay_stats().forwarded, 1);
+}
+
+#[test]
 fn a_device_hearing_a_frame_from_every_side_still_carries_it_onward() {
     // Three devices hear each other and the sender, and each also reaches
     // dave, the one way on toward the recipient:
@@ -1738,13 +1783,13 @@ fn a_crowd_carries_a_message_as_far_as_its_hop_budget_and_no_further() {
 }
 
 #[test]
-#[ignore = "fails today: a receipt is lost when a fan-out is cut short by the send budget or refused by a neighbor's acceptance limit, and the sender's retry cannot pass the forwarders' ten-minute suppression"]
+#[ignore = "fails today: a receipt refused by a neighbor's acceptance limit is lost, and the sender's retry cannot pass the forwarders' ten-minute suppression"]
 fn every_receipt_in_a_crowd_comes_back() {
     // The messages all arrive (the test above). Their receipts are four
     // floods per message, one per copy the recipient heard, and together they
-    // outrun the send budgets: a forwarder out of budget hands a receipt to
-    // one neighbor and counts it forwarded, and one whose neighbor exceeded
-    // its acceptance limit drops it. Either way no device holds it any more.
+    // outrun the budgets. A fan-out the send budget cuts short is finished
+    // when it refills; a receipt a neighbor refuses over its acceptance limit
+    // is dropped, and no device holds it any more.
     let mut missing = Vec::new();
     for seed in 1..=4 {
         let air = Air {

@@ -328,6 +328,17 @@ pub struct PendingRelay {
     /// covered. Kept apart from [`Self::arrival_peer`], which custody reads
     /// as the link the frame first came in on.
     pub heard_from: Vec<String>,
+    /// The neighbors a fan-out cut short by the send budget still owes the
+    /// frame. Empty until a fan-out has reached some of its neighbors and not
+    /// the rest. The rest go out as the budget refills, to these neighbors
+    /// alone rather than a fresh selection, so a cut-short fan-out is
+    /// finished, never widened. Counting the frame forwarded at the cut left
+    /// it with whichever neighbor came first, chosen by a hash rather than by
+    /// where the recipient is, and its id suppressed for the whole retention
+    /// window. In a crowd that is how a receipt went one way, the wrong one,
+    /// and never arrived. Bounded like any queued forward: by the overdue
+    /// cut-off, measured from the original due time.
+    pub owed: Vec<String>,
     /// When it becomes eligible to transmit.
     pub due_at: Instant,
     /// The class token the frame carried as a deposit request on arrival
@@ -890,6 +901,7 @@ impl MeshRelayGovernor {
             message: forwarded,
             arrival_peer: arrival_peer.map(str::to_string),
             heard_from: Vec::new(),
+            owed: Vec::new(),
             due_at,
             custody_request,
             custody_target: None,
@@ -935,6 +947,7 @@ impl MeshRelayGovernor {
             message,
             arrival_peer: None,
             heard_from: Vec::new(),
+            owed: Vec::new(),
             due_at: now,
             custody_request: None,
             custody_target: Some(target.to_string()),
@@ -3012,6 +3025,7 @@ mod tests {
             message: frame(),
             arrival_peer: None,
             heard_from: Vec::new(),
+            owed: Vec::new(),
             due_at: Instant::now(),
             custody_request: None,
             custody_target: Some("dave".to_string()),

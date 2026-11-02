@@ -15,6 +15,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A forward that runs out of send budget partway through its fan-out is
+  finished when the budget refills.** The device counted it forwarded at the
+  cut, so the frame went to whichever neighbor came first, chosen by a hash
+  rather than by where its recipient is, and its id stayed suppressed for ten
+  minutes. In a simulated crowd of forty phones with six conversations at
+  once, the delivery receipts outran the budgets this way and 4 to 7 of about
+  20 never came back; after the fix 0 to 2 do not. The remaining neighbors
+  now get the frame within the few seconds a queued forward is kept, and
+  only those chosen in the first place, so the fan-out is never widened.
+
 - **A mesh-only device stops flooding its neighbors with probes for peers that
   are gone.** A pending 1:1 session was probed every five seconds forever when
   no relay was there to say its peer was unreachable, and pending sessions are
