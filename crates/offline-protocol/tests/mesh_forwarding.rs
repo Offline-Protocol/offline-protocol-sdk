@@ -17,7 +17,8 @@
 //! Most tests state a small topology by hand. The crowd tests at the end draw
 //! one instead: tens of devices scattered at random, each holding at most the
 //! four links a phone's Bluetooth LE stack allows, over a radio that can lose
-//! and delay frames ([`Air`]). Every draw is seeded, so a failure repeats.
+//! and delay frames ([`Air`]). Every draw in the harness is seeded, so a layout
+//! and its losses repeat. The engine's clock is real, so timing does not.
 
 use offline_protocol::{CustodyConfig, Event, OfflineProtocol, ProtocolConfig};
 use offline_protocol_core::{AppId, Message, UserId};
@@ -373,11 +374,24 @@ impl Neighborhood {
     /// nearest first, the way a phone takes the strongest peers it hears,
     /// until a device reaches `max_links`.
     fn scattered(count: usize, range: f64, max_links: usize, air: Air) -> Self {
+        Self::scattered_with(count, range, max_links, air, default_config)
+    }
+
+    /// [`Self::scattered`], with each device configured by `config`.
+    fn scattered_with(
+        count: usize,
+        range: f64,
+        max_links: usize,
+        air: Air,
+        config: impl Fn(&str) -> ProtocolConfig,
+    ) -> Self {
         let mut draw = Draw(air.seed);
         let ids: Vec<String> = (0..count).map(|i| format!("n{i:02}")).collect();
         let places: Vec<(f64, f64)> = ids.iter().map(|_| (draw.unit(), draw.unit())).collect();
-        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        let mut net = Self::new(&id_refs);
+        let mut net = Self::new(&[]);
+        for id in &ids {
+            net.add_node(id, config(id));
+        }
         net.air = air;
         net.max_links = Some(max_links);
 
@@ -1507,8 +1521,14 @@ fn a_resend_over_a_live_link_is_not_also_handed_to_the_mesh() {
 /// The link cap a phone's Bluetooth LE stack imposes.
 const PHONE_LINK_CAP: usize = 4;
 
+/// A hop budget shorter than a crowd is wide. The default budget of eight is
+/// wider than these layouts, where no pair sits more than seven hops apart, so
+/// under it a test of what lies beyond the budget has nothing to look at.
+const CROWD_HOP_BUDGET: u8 = 5;
+
 /// Sender and recipient pairs drawn from a layout, far apart on purpose: a
-/// pair one link apart says nothing about forwarding.
+/// pair one link apart says nothing about forwarding. No pair repeats: flows
+/// tell their deliveries apart by content, which names the pair.
 fn far_pairs(net: &Neighborhood, seed: u64, count: usize) -> Vec<(String, String, usize)> {
     let ids = net.node_ids();
     let mut draw = Draw(seed ^ 0xA5A5);
@@ -1519,6 +1539,9 @@ fn far_pairs(net: &Neighborhood, seed: u64, count: usize) -> Vec<(String, String
         }
         let from = &ids[(draw.next() % ids.len() as u64) as usize];
         let to = &ids[(draw.next() % ids.len() as u64) as usize];
+        if pairs.iter().any(|(f, t, _)| f == from && t == to) {
+            continue;
+        }
         if let Some(hops) = net.hops_between(from, to) {
             if hops >= 3 {
                 pairs.push((from.clone(), to.clone(), hops));
@@ -1597,21 +1620,36 @@ fn a_crowd_carries_a_message_as_far_as_its_hop_budget_and_no_further() {
     // hears until it holds four links. Six far pairs talk at once. On a
     // perfect radio every pair within the hop budget is reached exactly once,
     // and a pair beyond it is not: the budget is what stops a flood, so it is
-    // also the network's diameter.
+    // also the network's diameter. Each layout must hold a pair on either side
+    // of that line, or the half of this test that stops the flood proves
+    // nothing.
     for seed in 1..=3 {
         let air = Air {
             seed,
             tick: CROWD_TICK,
             ..Air::default()
         };
-        let mut net = Neighborhood::scattered(40, 0.22, PHONE_LINK_CAP, air);
+        let mut net = Neighborhood::scattered_with(40, 0.22, PHONE_LINK_CAP, air, |id| {
+            let mut config = default_config(id);
+            config.mesh_relay.max_ttl = CROWD_HOP_BUDGET;
+            // Every link carries the frame. At the default fan-out of three a
+            // device holding four links skips one, and if that one is the only
+            // shortest path the frame goes the long way and runs out of hops,
+            // so "hops apart" would not be how far the flood has to go.
+            config.mesh_relay.fanout = PHONE_LINK_CAP;
+            config
+        });
         assert!(net.links.values().all(|l| l.len() <= PHONE_LINK_CAP));
         let flows = send_across(&mut net, seed, 6);
-        assert!(
-            flows.iter().any(|f| f.hops >= 5),
-            "seed {seed} drew no far pair"
-        );
         let budget = usize::from(net.node("n00").mesh_relay_config().max_ttl);
+        assert!(
+            flows.iter().any(|f| f.hops == budget),
+            "seed {seed} drew no pair at the edge of the budget"
+        );
+        assert!(
+            flows.iter().any(|f| f.hops > budget),
+            "seed {seed} drew no pair beyond the budget"
+        );
 
         let reachable: Vec<&Flow> = flows.iter().filter(|f| f.hops <= budget).collect();
         step_until(&mut net, Duration::from_secs(5), |net| {
