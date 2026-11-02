@@ -1469,6 +1469,47 @@ fn a_flushed_message_no_carrier_takes_is_handed_to_the_neighbors() {
 }
 
 #[test]
+fn a_resend_reaches_past_forwarders_that_already_carried_the_first_copy() {
+    // alice — bob — carol — dave. The first copy is lost on its last hop,
+    // after bob and carol have both taken it on. Each suppresses the id for
+    // ten minutes, so alice's resend went no further than bob: he carries a
+    // resend from alice herself, but the copy he hands carol has a spent hop,
+    // and to carol that is an echo. A frame lost past the first forwarder
+    // could not be recovered by retrying, and neither could a lost receipt,
+    // since the recipient answers only a copy that reaches it.
+    let mut net = Neighborhood::new(&["alice", "bob", "carol", "dave"]);
+    net.air.delay_rounds = (1, 1);
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+    net.link("carol", "dave");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let msg_id = net.send("alice", "dave", "worth a second try");
+    for _ in 0..12 {
+        if net.deliveries_to("dave", &msg_id) > 0 {
+            break;
+        }
+        net.step();
+    }
+    // The copy is on the air to dave: he steps out of range as it lands.
+    net.unlink_all("dave");
+    net.step();
+    net.link("carol", "dave");
+    assert!(
+        net.inbox("dave").is_empty(),
+        "the first copy should have been lost"
+    );
+
+    // A second later alice re-drives her outbox, as a retry does.
+    std::thread::sleep(Duration::from_millis(1_100));
+    net.node("alice").flush_outbox_all();
+    step_until_delivered(&mut net, &delivered, 24);
+
+    assert_eq!(net.inbox("dave"), vec!["worth a second try".to_string()]);
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
+}
+
+#[test]
 fn a_resend_a_carrier_swallows_is_still_handed_to_the_neighbors() {
     // A carrier can take a frame for a recipient it cannot reach and report
     // success (the internet transport does, for one the relay has said it
@@ -1783,13 +1824,16 @@ fn a_crowd_carries_a_message_as_far_as_its_hop_budget_and_no_further() {
 }
 
 #[test]
-#[ignore = "fails today: a receipt refused by a neighbor's acceptance limit is lost, and the sender's retry cannot pass the forwarders' ten-minute suppression"]
 fn every_receipt_in_a_crowd_comes_back() {
     // The messages all arrive (the test above). Their receipts are four
     // floods per message, one per copy the recipient heard, and together they
-    // outrun the budgets. A fan-out the send budget cuts short is finished
-    // when it refills; a receipt a neighbor refuses over its acceptance limit
-    // is dropped, and no device holds it any more.
+    // outrun the budgets. Two things bring every one back. A fan-out the send
+    // budget cuts short is finished when it refills, rather than left with
+    // whichever neighbor came first. And a receipt lost anyway (a neighbor
+    // over its acceptance limit drops it) is answered again when the sender
+    // retries, because a resend is a new flood to the forwarders that
+    // carried the first copy: before, they suppressed it for ten minutes, so
+    // it never reached the recipient to be answered.
     let mut missing = Vec::new();
     for seed in 1..=4 {
         let air = Air {
@@ -1817,11 +1861,13 @@ fn every_receipt_in_a_crowd_comes_back() {
 }
 
 #[test]
-#[ignore = "fails today: a lost frame is retried by its sender, and every forwarder past the first suppresses the retry for ten minutes"]
+#[ignore = "a measurement, not a gate: a sender behind a chain of single links can lose every resend that fits in 35 seconds to chance; about six runs in ten settle every flow"]
 fn a_crowd_on_a_lossy_radio_recovers_by_retrying() {
     // One hand-off in ten lost, and frames up to two rounds late. The first
     // flood misses some recipients and loses some receipts; the sender's
-    // acknowledgement timeout (ten seconds) is what should cover them.
+    // acknowledgement timeout (ten seconds) and its resends cover them. Before
+    // a resend was a new flood to the forwarders, no run settled every flow:
+    // a frame lost past the first forwarder stayed lost for ten minutes.
     for seed in 2..=3 {
         let air = Air {
             seed,

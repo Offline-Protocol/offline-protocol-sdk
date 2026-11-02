@@ -4353,15 +4353,25 @@ impl OfflineProtocol {
     /// own-send tokens any other frame of ours does, and a neighbor that took
     /// the frame carries our re-send again only within its per-neighbor
     /// allowance for us (it has to: the recipient re-acknowledges only a
-    /// re-send that reaches it). Every device further on still suppresses the
-    /// id for the `RelaySeenCache` retention window. Excluding neighbors we already handed it to
+    /// re-send that reaches it). Excluding neighbors we already handed it to
     /// would be wrong, because a neighbor records an id only when it *accepts*
     /// the frame, and one that refused it (rate limit, full queue) is exactly
     /// the one a later offer should reach.
+    ///
+    /// The copy is stamped with the resend's generation
+    /// ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)), which is
+    /// what carries it past forwarders that suppress the first copy's id: to
+    /// them it is a new flood, and its own copies are suppressed as usual.
     pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
         if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
             return 0;
         }
+        let mut resend = message.clone();
+        resend.metadata.insert(
+            super::mesh_relay::RESEND_META_KEY.to_string(),
+            Utc::now().timestamp().to_string(),
+        );
+        let message = &resend;
         let handed_to_mesh = self.offer_to_mesh(message);
         if handed_to_mesh > 0 {
             debug!(

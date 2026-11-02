@@ -147,6 +147,41 @@ pub const MAX_RELAY_RATE_PEERS: usize = 256;
 /// forward into an abandoned one, which `ProtocolConfig::validate` refuses.
 pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 
+/// The metadata key a sender stamps on a resend it hands to the mesh: the
+/// second it was made, in Unix seconds. Engine-written and unsigned, like the
+/// hop fields.
+///
+/// Every device that carried the first copy suppresses its id for the
+/// retention window, so a resend under the same id stopped at the first
+/// forwarder: the one beside the sender carries a resend from the sender
+/// itself ([`MeshRelayGovernor::admit`]), but the copy it hands on has a spent
+/// hop, and to the next forwarder that is an echo. A frame lost past the first
+/// forwarder could not be recovered by retrying for ten minutes, and nor could
+/// a lost acknowledgement, since the recipient answers only a copy that
+/// reaches it. Suppression is therefore per resend: an id under a generation
+/// it has not handled is taken on afresh, through the full admission, and
+/// copies of that generation are suppressed as before.
+///
+/// Nothing authenticates the stamp, so a forged one buys what a frame under a
+/// fresh id already buys: one more flood, paid for from the same per-neighbor
+/// and per-device budgets.
+pub const RESEND_META_KEY: &str = "__resend";
+
+/// What suppression is keyed on: the id, and the resend generation when the
+/// frame carries a well-formed one. A malformed stamp is ignored rather than
+/// trusted, so it cannot grow the cache's keys.
+pub(crate) fn relay_key(message: &Message) -> String {
+    let id = message.id.as_str();
+    match message
+        .metadata
+        .get(RESEND_META_KEY)
+        .and_then(|generation| generation.parse::<u64>().ok())
+    {
+        Some(generation) => format!("{id}~{generation}"),
+        None => id,
+    }
+}
+
 /// Smallest share of the full forwarding effort a device is scaled down to by
 /// capability bias.
 ///
@@ -787,6 +822,7 @@ impl MeshRelayGovernor {
     ) -> RelayAdmission {
         let now = Instant::now();
         let message_id = message.id.as_str();
+        let key = relay_key(message);
 
         // The origin re-sending its own frame is a sender that heard no
         // acknowledgement, not a copy echoing round the neighbourhood, and
@@ -802,7 +838,7 @@ impl MeshRelayGovernor {
         // it here, before those checks, meant a re-send refused for rate or
         // queue space left the id open, and the next forwarder's echo of it
         // (hop spent, never an origin re-send) was carried a second time.
-        let suppressed = self.seen.contains(&message_id);
+        let suppressed = self.seen.contains(&key);
         let origin_resend = suppressed && self.is_origin_resend(message, arrival_peer);
 
         // Has this id been dealt with? Checked without recording, because a
@@ -837,7 +873,7 @@ impl MeshRelayGovernor {
             if let Some(pending) = self
                 .pending
                 .iter_mut()
-                .find(|p| p.message.id.as_str() == message_id)
+                .find(|p| relay_key(&p.message) == key)
             {
                 if let Some(peer) = arrival_peer {
                     if pending.arrival_peer.as_deref() != Some(peer)
@@ -892,9 +928,9 @@ impl MeshRelayGovernor {
         // nothing bounds. An accepted origin re-send is recorded afresh, so the
         // window runs from the copy this device is about to transmit.
         if origin_resend {
-            self.seen.forget(&message_id);
+            self.seen.forget(&key);
         }
-        self.seen.observe(&message_id);
+        self.seen.observe(&key);
 
         let due_at = now + self.jitter_for(&message_id, degree);
         self.pending.push(PendingRelay {
@@ -1012,7 +1048,7 @@ impl MeshRelayGovernor {
                     // id, and refusing them would close this route for the
                     // whole retention window over a few seconds of
                     // congestion.
-                    self.seen.forget(&relay.message.id.as_str());
+                    self.seen.forget(&relay_key(&relay.message));
                     self.counters.abandoned_overdue =
                         self.counters.abandoned_overdue.saturating_add(1);
                 }
@@ -1130,7 +1166,7 @@ impl MeshRelayGovernor {
             // having reached nobody. Release its id for the same reason the
             // overdue cut-off does — a copy behind it, or the sender's own
             // retransmission, is now the only way it travels.
-            self.seen.forget(&relay.message.id.as_str());
+            self.seen.forget(&relay_key(&relay.message));
             self.counters.queue_full = self.counters.queue_full.saturating_add(1);
             return None;
         }
@@ -1200,7 +1236,7 @@ impl MeshRelayGovernor {
             && !self
                 .pending
                 .iter()
-                .any(|p| p.message.id.as_str() == message.id.as_str())
+                .any(|p| relay_key(&p.message) == relay_key(message))
     }
 
     /// Absorbs an arrival that is a copy of a frame already dealt with and
@@ -1223,15 +1259,11 @@ impl MeshRelayGovernor {
         message: &Message,
         arrival_peer: Option<&str>,
     ) -> bool {
-        let message_id = message.id.as_str();
-        if !self.seen.contains(&message_id) || self.is_origin_resend(message, arrival_peer) {
+        let key = relay_key(message);
+        if !self.seen.contains(&key) || self.is_origin_resend(message, arrival_peer) {
             return false;
         }
-        if self
-            .pending
-            .iter()
-            .any(|p| p.message.id.as_str() == message_id)
-        {
+        if self.pending.iter().any(|p| relay_key(&p.message) == key) {
             return false;
         }
         self.counters.duplicates_suppressed = self.counters.duplicates_suppressed.saturating_add(1);
@@ -1449,7 +1481,7 @@ impl MeshRelayGovernor {
                 // being unknown, so the copy behind it — or the sender's
                 // retransmission — can still be carried by this device once
                 // there is room again.
-                self.seen.forget(&displaced.message.id.as_str());
+                self.seen.forget(&relay_key(&displaced.message));
                 self.counters.queue_evicted = self.counters.queue_evicted.saturating_add(1);
                 true
             }
@@ -2086,6 +2118,45 @@ mod tests {
         let mut echoed = msg.clone();
         echoed.hop_count = echoed.hop_count.increment().unwrap();
         assert!(gov.absorb_settled_duplicate(&echoed, Some("alice")));
+    }
+
+    /// A resend generation is a new flood to a forwarder that carried the
+    /// first copy, however many hops from the sender it is, and its own echoes
+    /// are suppressed as before. Without it a forwarder past the first
+    /// suppressed every resend for the retention window, so a frame or an
+    /// acknowledgement lost beyond it was never recovered by retrying.
+    #[test]
+    fn a_resend_generation_is_carried_past_a_forwarder_that_carried_the_first_copy() {
+        let mut gov = governor();
+        let mut first = frame();
+        first.hop_count = first.hop_count.increment().unwrap();
+        assert_eq!(gov.admit(&first, Some("bob"), 3), RelayAdmission::Queued);
+        gov.take_due(Instant::now());
+
+        let mut resend = first.clone();
+        resend
+            .metadata
+            .insert(RESEND_META_KEY.to_string(), "1700000000".to_string());
+        assert!(!gov.absorb_settled_duplicate(&resend, Some("bob")));
+        assert_eq!(gov.admit(&resend, Some("bob"), 3), RelayAdmission::Queued);
+        gov.take_due(Instant::now());
+
+        assert!(
+            gov.absorb_settled_duplicate(&resend, Some("carol")),
+            "an echo of the same generation is absorbed"
+        );
+        assert!(
+            gov.absorb_settled_duplicate(&first, Some("carol")),
+            "and the first copy is still suppressed"
+        );
+
+        // A stamp that is not a generation is ignored, not trusted: it is the
+        // first copy again.
+        let mut forged = first.clone();
+        forged
+            .metadata
+            .insert(RESEND_META_KEY.to_string(), "x".repeat(4096));
+        assert!(gov.absorb_settled_duplicate(&forged, Some("carol")));
     }
 
     /// An origin re-send that admission refuses leaves the id suppressed. The

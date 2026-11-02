@@ -15,6 +15,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A resend crosses the mesh as far as the first copy did.** Every device
+  that carries a frame ignores its id for ten minutes, so a sender's resend
+  stopped at the first forwarder: the device beside the sender carried it
+  again, but to every device after it the copy was an echo. A message lost
+  past the first forwarder could not be recovered by retrying, and neither
+  could a lost delivery receipt, since the recipient answers only a copy
+  that reaches it. A resend handed to the mesh now carries its generation
+  in a new reserved metadata key, `__resend`, and a forwarder suppresses
+  each generation separately, so a resend is a new flood and its own copies
+  are still suppressed. In a simulated crowd of forty phones, every delivery
+  receipt now comes back; at one hand-off in ten lost, about six runs in ten
+  settle every message within 35 seconds, where none did before. Older
+  senders send no stamp and behave as before.
+
 - **A forward that runs out of send budget partway through its fan-out is
   finished when the budget refills.** The device counted it forwarded at the
   cut, so the frame went to whichever neighbor came first, chosen by a hash
