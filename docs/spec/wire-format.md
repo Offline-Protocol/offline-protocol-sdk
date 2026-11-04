@@ -140,6 +140,18 @@ frames always carry the configured one. A receiver MUST NOT drop or
 authorize a frame by its `app_id`: it reports the id with the delivered
 message and leaves routing to whoever serves the applications.
 
+A forwarder MUST NOT read `app_id` either: it carries a frame for an
+application it does not run exactly as it carries one for its own, and hands
+it on with the `app_id` it arrived with. The network is therefore every
+install of the protocol, not one application's. A forwarding decision taken on
+the id would be one any carrier can steer by rewriting it, and a filter for
+"my application's frames only" would split the network into one per
+application. Fairness between the traffic a device carries is per arrival
+link, plus a reserve of the forwarding budget that only the device's own
+frames can spend
+([mesh relay](../mesh.md#what-a-device-does-with-a-frame-for-someone-else));
+a share per application would key on a value the sender chooses.
+
 ### Binary wire v1
 
 A compact positional encoding for hop-local use. It is emitted only to a peer
