@@ -402,11 +402,9 @@ class WifiDirectManager(
 
         // Bind the peer-stream port before anything below that would need
         // unwinding. The LAN advert carries the port it got, so a start with
-        // no port fails, and it must fail here: a throw after the channel,
-        // the receiver and discovery are up leaves all three behind, and the
-        // next enable, which stops only a RUNNING manager, registers a second
-        // receiver over them. A bind is a local call with no network round
-        // trip, so it may run on the transport thread.
+        // no port fails, and it fails here, where there is nothing to undo
+        // yet: no channel, no receiver, no discovery. A bind is a local call
+        // with no network round trip, so it may run on the transport thread.
         val listener = PeerStreamListener.bind()
             ?: throw TransportException.StartFailed("no port to listen for peer streams on")
         // The accept timeout is set here too, not in the accept task: a stop()
@@ -419,6 +417,31 @@ class WifiDirectManager(
             throw TransportException.StartFailed("peer stream listener: ${e.message ?: "unknown"}")
         }
 
+        // Everything after the bind unwinds on a throw. The listener is not
+        // in [serverSocket] until [startServerSocket], so [stopUnsafe] alone
+        // would not close it: a throw before then (a state listener, the
+        // receiver registration, discovery) stranded the socket for the life
+        // of the process, still holding the group port, so every later start
+        // landed on an ephemeral port with `canOwn = false` and this device
+        // never formed a group again. The channel, receiver and discovery a
+        // partial start brought up are undone by [stopUnsafe], which accepts
+        // STARTING.
+        try {
+            startBound(p2p, listener)
+        } catch (e: Throwable) {
+            try { listener.socket.close() } catch (_: IOException) {}
+            try {
+                stopUnsafe()
+            } catch (cleanup: Throwable) {
+                e.addSuppressed(cleanup)
+            }
+            throw e
+        }
+    }
+
+    /** The part of [startUnsafe] after the bind; [startUnsafe] unwinds it on a throw. */
+    @SuppressLint("MissingPermission")
+    private fun startBound(p2p: Boolean, listener: PeerStreamListener.Bound) {
         updateState(TransportState.STARTING)
 
         // An explicit start() means "run": a pause() from a previous session

@@ -267,7 +267,7 @@ class ProtocolEngineHost(
                     onDiagnostic("info", "Internet manager created on demand", emptyMap())
                 }
                 val manager = internetManager ?: throw IllegalStateException("Failed to create Internet manager")
-                if (manager.state == TransportState.RUNNING || manager.state == TransportState.STARTING) {
+                if (stopsBeforeEnable(manager.state)) {
                     manager.stop()
                 }
                 val json = config ?: JSONObject()
@@ -290,7 +290,7 @@ class ProtocolEngineHost(
                 val autoAccept = config?.let { json ->
                     if (json.has("autoAccept") && !json.isNull("autoAccept")) json.getBoolean("autoAccept") else null
                 }
-                if (manager.state == TransportState.RUNNING) {
+                if (stopsBeforeEnable(manager.state)) {
                     manager.stop()
                 }
                 manager.formGroups = WifiDirectGroupFormation.formGroupsAfterEnable(manager.formGroups, autoAccept)
@@ -727,3 +727,15 @@ class ProtocolEngineHost(
         onDiagnostic("info", "Nostr transport enabled", mapOf("relayCount" to relayUrls.size))
     }
 }
+
+/**
+ * Whether an enable stops the transport before it starts it again: when it is
+ * RUNNING, and when it is STARTING too. A manager left in STARTING by a start
+ * that never finished still holds what that start brought up (for Wi-Fi Direct
+ * the channel, the broadcast receiver and the peer-stream listener), and its
+ * `start()` checks only for RUNNING, so starting it over without a stop
+ * registered a second receiver over the first and bound a second listener.
+ * Both managers that use it, Internet and Wi-Fi Direct, accept STARTING in `stop()`.
+ */
+internal fun stopsBeforeEnable(state: TransportState): Boolean =
+    state == TransportState.RUNNING || state == TransportState.STARTING
