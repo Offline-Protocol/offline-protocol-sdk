@@ -128,6 +128,11 @@ impl Node {
     /// and has said hello: tells the transport its write payload, then the
     /// engine that the peer is here.
     pub fn ble_link_up(&mut self, peer: &str, max_payload: u32) -> NodeResult<()> {
+        // ORDERING: the slot before either set changes. Before `initialize`
+        // there is no BLE transport, and refusing after the insert below left
+        // the address in `linked`: the next link-up read as a relink and was
+        // never announced, and fragments from the address were accepted.
+        let transport = self.ble_slot()?;
         let host = self.ble_host_mut()?;
         let Some(at) = host.verified.iter().position(|held| held == peer) else {
             return Err(NodeError(format!(
@@ -141,7 +146,6 @@ impl Node {
         }
         host.verified.remove(at);
         let relinked = !host.linked.insert(peer.to_string());
-        let transport = self.ble_slot()?;
         // ORDERING: the payload before the peer, as every binding does.
         transport.set_peer_mtu(peer, max_payload as usize);
         if relinked {
