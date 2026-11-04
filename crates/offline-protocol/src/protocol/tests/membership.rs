@@ -1457,3 +1457,157 @@ fn an_unconfigured_node_stamps_its_own_application_id_as_before() {
         .filter(|m| !m.content.starts_with(internal_prefixes::MEMBER))
         .all(|m| m.app_id.as_str() == APP));
 }
+
+// --- Every neighbour report is the core's decision (step 8) -------------------
+
+/// The source of `file` without its inline test modules.
+fn shipped_source(file: &std::path::Path) -> String {
+    let source = std::fs::read_to_string(file).unwrap_or_default();
+    let mut cut = source.len();
+    let mut from = 0;
+    while let Some(at) = source[from..].find("#[cfg(test)]\nmod ") {
+        let at = from + at;
+        let line_end = source[at + 13..]
+            .find('\n')
+            .map_or(source.len(), |n| at + 13 + n);
+        if source[at..line_end].trim_end().ends_with('{') {
+            cut = at;
+            break;
+        }
+        from = line_end;
+    }
+    source[..cut].to_string()
+}
+
+/// A report of a neighbour reaches the application only through the core's
+/// gate: `neighbor_reachable`, `neighbor_unreachable` or `app_sees_peer`, or
+/// from the core's own release once a held peer turns visible. A host that
+/// emits one on its own would show an application a peer it never admitted,
+/// and every test above would still pass, because they drive the core.
+///
+/// The check is textual: each construction of `NeighborDiscovered`,
+/// `NeighborLost` or `PeerRssi` outside the event definitions and telemetry
+/// must be handed straight to an emitter, with a gate call in the lines
+/// before it. A new site either takes the gate or fails here.
+#[test]
+fn every_neighbour_report_passes_the_core_gate() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if !crates.join("offline-protocol-uniffi").is_dir() {
+        return;
+    }
+    const REPORTS: [&str; 3] = [
+        "Event::NeighborDiscovered {",
+        "Event::NeighborLost {",
+        "Event::PeerRssi {",
+    ];
+    const GATES: [&str; 4] = [
+        "neighbor_reachable(",
+        "neighbor_unreachable(",
+        "app_sees_peer(",
+        "fn release_held_discovery(",
+    ];
+    const WINDOW: usize = 14;
+
+    let mut sites = 0;
+    let mut offenders = Vec::new();
+    let mut stack: Vec<_> = [
+        "offline-protocol",
+        "offline-protocol-uniffi",
+        "offline-protocol-web",
+    ]
+    .iter()
+    .map(|name| crates.join(name).join("src"))
+    .collect();
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" && name != "telemetry" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !name.ends_with(".rs") || name.ends_with("_tests.rs") || name == "events.rs" {
+                continue;
+            }
+            let source = shipped_source(&path);
+            let lines: Vec<&str> = source.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                if !REPORTS.iter().any(|report| line.contains(report)) {
+                    continue;
+                }
+                sites += 1;
+                let before = &lines[n.saturating_sub(WINDOW)..n];
+                let emitted = lines[n.saturating_sub(2)..=n]
+                    .iter()
+                    .any(|l| l.contains("emit_event(") || l.contains("push_event("));
+                let gated = before.iter().any(|l| GATES.iter().any(|g| l.contains(g)));
+                if !emitted || !gated {
+                    offenders.push(format!("{}:{}", path.display(), n + 1));
+                }
+            }
+        }
+    }
+    // The FFI crate's six, the browser's five and the core's release: a
+    // count that drops means the scan stopped seeing them, not that they went.
+    assert!(sites >= 12, "found only {sites} neighbour reports");
+    assert!(
+        offenders.is_empty(),
+        "a neighbour report the core did not decide (ADR 0037): {offenders:#?}"
+    );
+}
+
+/// Every frame addressed to this node enters through one loop, and the
+/// membership gate sits in it ahead of the first side effect. Data sync,
+/// presence, key packages and acknowledgements are then all answered under
+/// the same predicate, with no list of their own to keep in step. A second
+/// reader of the transport would be a second entry with no gate.
+#[test]
+fn frames_for_this_node_have_one_entry_and_it_is_gated() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut readers = Vec::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if name.ends_with(".rs") && !name.ends_with("_tests.rs") {
+                let count = shipped_source(&path)
+                    .matches("transport_manager.receive()")
+                    .count();
+                readers.extend(std::iter::repeat_n(path.clone(), count));
+            }
+        }
+    }
+    assert_eq!(
+        readers,
+        vec![src.join("protocol").join("receive.rs")],
+        "frames for this node must have exactly one entry"
+    );
+
+    let receive = shipped_source(&src.join("protocol").join("receive.rs"));
+    let entry = receive.find("transport_manager.receive()").unwrap();
+    let gate = receive[entry..]
+        .find("inbound_admitted(")
+        .expect("the entry loop runs the membership gate");
+    let first_effect = receive[entry..]
+        .find("lamport_clock.value()")
+        .expect("the entry loop merges the sender's clock");
+    assert!(
+        gate < first_effect,
+        "the gate runs before the first side effect"
+    );
+}
