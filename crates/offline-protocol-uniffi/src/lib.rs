@@ -20002,6 +20002,67 @@ mod tests {
         );
     }
 
+    /// Every Android enable branch that restarts a manager stops it first when
+    /// it is STARTING, not only when it is RUNNING.
+    ///
+    /// STARTING is a state a manager rests in: Reticulum and Nostr stay in it
+    /// until their connect answers, and their `start()` refuses it, so an
+    /// enable during a connect applied the new configuration and then failed
+    /// with `AlreadyRunning`. Wi-Fi Direct's `start()` checks only RUNNING, so
+    /// the same enable registered a second broadcast receiver over the first
+    /// and bound a second listener. The rule is one Kotlin predicate,
+    /// `stopsBeforeEnable`, which `TransportEnableRestartTest` pins; this pins
+    /// that each branch calls it, which a Kotlin unit test cannot see. BLE is
+    /// not listed: its enable starts a stopped manager and never restarts one.
+    #[test]
+    fn react_native_android_every_enable_stops_a_starting_manager() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt");
+        let enable = code
+            .find("fun enableTransport(")
+            .map(|at| &code[at..])
+            .expect("ProtocolEngineHost.kt: no enableTransport");
+        let branches = [
+            "\"internet\" -> {",
+            "\"wifidirect\", \"wifi_direct\" -> {",
+            "\"ble\" -> {",
+            "\"reticulum\" -> {",
+            "\"nostr\" -> {",
+            "else -> throw IllegalArgumentException(\"Unsupported transport type",
+        ];
+        let starts: Vec<usize> = branches
+            .iter()
+            .map(|b| {
+                enable.find(b).unwrap_or_else(|| {
+                    panic!("ProtocolEngineHost.kt: enableTransport has no branch `{b}`")
+                })
+            })
+            .collect();
+        assert!(
+            starts.windows(2).all(|w| w[0] < w[1]),
+            "ProtocolEngineHost.kt: enableTransport's branches moved; update this guard's \
+             order, which slices one branch from the next"
+        );
+        let pinned = "if (stopsBeforeEnable(manager.state)) { manager.stop() }";
+        for (i, branch) in branches.iter().enumerate().take(branches.len() - 1) {
+            let body = &enable[starts[i]..starts[i + 1]];
+            let restarts = !branch.starts_with("\"ble\"");
+            assert_eq!(
+                body.contains(pinned),
+                restarts,
+                "ProtocolEngineHost.kt, enable branch `{branch}`: expected it {} call \
+                 `{pinned}`. A restart that stops only a RUNNING manager starts a STARTING \
+                 one over itself",
+                if restarts { "to" } else { "not to" },
+            );
+            assert!(
+                !body.contains("manager.state == TransportState.RUNNING) { manager.stop() }"),
+                "ProtocolEngineHost.kt, enable branch `{branch}` stops only a RUNNING \
+                 manager; ask stopsBeforeEnable"
+            );
+        }
+    }
+
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code =

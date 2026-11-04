@@ -323,7 +323,7 @@ class ProtocolEngineHost(
                     onDiagnostic("info", "Reticulum manager created on demand", emptyMap())
                 }
                 val manager = reticulumManager ?: throw IllegalStateException("Failed to create Reticulum manager")
-                if (manager.state == TransportState.RUNNING) {
+                if (stopsBeforeEnable(manager.state)) {
                     manager.stop()
                 }
                 configureAndStartReticulum(manager, config)
@@ -334,7 +334,7 @@ class ProtocolEngineHost(
                     onDiagnostic("info", "Nostr manager created on demand", emptyMap())
                 }
                 val manager = nostrManager ?: throw IllegalStateException("Failed to create Nostr manager")
-                if (manager.state == TransportState.RUNNING) {
+                if (stopsBeforeEnable(manager.state)) {
                     manager.stop()
                 }
                 configureAndStartNostr(manager, config)
@@ -730,12 +730,18 @@ class ProtocolEngineHost(
 
 /**
  * Whether an enable stops the transport before it starts it again: when it is
- * RUNNING, and when it is STARTING too. A manager left in STARTING by a start
- * that never finished still holds what that start brought up (for Wi-Fi Direct
- * the channel, the broadcast receiver and the peer-stream listener), and its
- * `start()` checks only for RUNNING, so starting it over without a stop
- * registered a second receiver over the first and bound a second listener.
- * Both managers that use it, Internet and Wi-Fi Direct, accept STARTING in `stop()`.
+ * RUNNING, and when it is STARTING too. Every enable branch that restarts a
+ * manager (Internet, Wi-Fi Direct, Reticulum, Nostr) asks this one question,
+ * and each of those managers accepts STARTING in `stop()`.
+ *
+ * STARTING is not a moment, it is a state a manager rests in. Reticulum and
+ * Nostr stay in it until their connect answers, and their `start()` refuses
+ * STARTING, so an enable with a new daemon or new relays during a connect
+ * applied the new configuration and then failed with `AlreadyRunning`.
+ * Wi-Fi Direct's `start()` checks only for RUNNING, so without the stop a
+ * second start ran over what the first had brought up: a second broadcast
+ * receiver over the first, and a second listener. BLE is not here: its enable starts a
+ * stopped manager and never restarts one.
  */
 internal fun stopsBeforeEnable(state: TransportState): Boolean =
     state == TransportState.RUNNING || state == TransportState.STARTING
