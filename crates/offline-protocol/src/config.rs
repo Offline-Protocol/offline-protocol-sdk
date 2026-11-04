@@ -945,24 +945,6 @@ pub struct ProtocolConfig {
 
     /// Service subscriptions; see [`ServiceSubscriptionConfig`].
     pub service_subscriptions: ServiceSubscriptionConfig,
-
-    /// This application's publisher public key, an Ed25519 key of 32 bytes,
-    /// or `None` (the default).
-    ///
-    /// With a key, this node runs the membership exchange of [ADR 0037] as a
-    /// member of the application the key and [`Self::app_id`] name: it
-    /// derives the application key from both, and a neighbour that presents
-    /// a certificate signed by this key, for its own address, becomes
-    /// visible. Without one the node still runs the exchange, answering every
-    /// neighbour with random bytes of the same sizes, so a configured node and
-    /// an unconfigured one look alike on the air.
-    ///
-    /// The engine never holds the publisher's private key. A member's own
-    /// certificate comes from
-    /// [`crate::OfflineProtocol::set_app_membership`].
-    ///
-    /// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
-    pub app_publisher_key: Option<[u8; 32]>,
 }
 
 impl ProtocolConfig {
@@ -988,7 +970,6 @@ impl ProtocolConfig {
             data: DataConfig::default(),
             custody: CustodyConfig::default(),
             service_subscriptions: ServiceSubscriptionConfig::default(),
-            app_publisher_key: None,
         }
     }
 
@@ -1470,13 +1451,6 @@ impl ProtocolConfigBuilder {
     /// Configures transports.
     pub fn transport(mut self, config: TransportConfig) -> Self {
         self.config.transport = config;
-        self
-    }
-
-    /// Sets this application's publisher public key
-    /// ([`ProtocolConfig::app_publisher_key`]).
-    pub fn app_publisher_key(mut self, key: [u8; 32]) -> Self {
-        self.config.app_publisher_key = Some(key);
         self
     }
 

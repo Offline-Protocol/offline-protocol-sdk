@@ -9,7 +9,6 @@ mod ephemeral;
 #[cfg(feature = "file-store")]
 mod file_stores;
 mod leaf_pairing;
-mod membership;
 mod mesh_session;
 mod nostr_cold_contact;
 mod per_send_app_id;
@@ -23583,6 +23582,45 @@ fn a_membership_frame_is_consumed_and_never_answered() {
         sent.sent_messages().len(),
         before,
         "a membership frame is never answered"
+    );
+}
+
+/// No node sends `__MEMBER__` on its own, and above all not on discovery.
+///
+/// A build that does not reserve the prefix rejects the frame with a security
+/// warning to its application, or shows it to the user as a text message when
+/// it accepts plaintext, and such builds are in the field. ADR 0037 is parked;
+/// whoever resumes it sends the hello only to a neighbour that advertised
+/// support (`docs/spec/control-messages.md`, "Application membership"), and
+/// this test is the reminder.
+#[test]
+fn discovering_a_neighbour_sends_no_membership_frame() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let radio = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let neighbour = id("alice");
+    radio.add_connected_peer(neighbour.clone(), -55);
+    protocol.on_neighbor_discovered(&neighbour);
+    protocol.on_neighbor_lost(&neighbour);
+    protocol.on_neighbor_discovered(&neighbour);
+
+    let member_frames: Vec<String> = radio
+        .peer_sends()
+        .into_iter()
+        .map(|(_, message)| message.content)
+        .chain(radio.sent_messages().into_iter().map(|m| m.content))
+        .filter(|content| content.starts_with(internal_prefixes::MEMBER))
+        .collect();
+    assert!(
+        member_frames.is_empty(),
+        "discovery put a membership frame on the air, which an older build \
+         rejects or shows as text: {member_frames:?}"
     );
 }
 

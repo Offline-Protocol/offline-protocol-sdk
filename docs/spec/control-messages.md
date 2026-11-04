@@ -315,6 +315,14 @@ to its application as text; the release that reserves it is the floor for
 sharing a radio neighbourhood cleanly. A receiver that reserves the prefix and
 does not run the exchange MUST consume the frame and MUST NOT answer it.
 
+No engine sends this frame today: the decision is parked (see the ADR's
+status). An implementation that does send it MUST first know that the
+neighbour reserves the prefix, from a capability the neighbour advertised in
+its key package, and MUST NOT send it to any other neighbour. A build that
+does not reserve `__MEMBER__` rejects the frame as plaintext and raises a
+security warning to its application under the default encryption policy, and
+shows it to its user as a text message when `require_encryption` is off.
+
 The layouts are owned by `offline-protocol-sealed` (`membership`), and the
 vectors in `crates/offline-protocol-sealed/tests/data/app-membership-v1.vectors.json`
 pin them. Every field has a fixed size and an address is always its 21-byte
