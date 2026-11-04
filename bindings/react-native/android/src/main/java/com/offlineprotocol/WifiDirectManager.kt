@@ -400,6 +400,25 @@ class WifiDirectManager(
             "deviceId" to deviceId
         ))
 
+        // Bind the peer-stream port before anything below that would need
+        // unwinding. The LAN advert carries the port it got, so a start with
+        // no port fails, and it must fail here: a throw after the channel,
+        // the receiver and discovery are up leaves all three behind, and the
+        // next enable, which stops only a RUNNING manager, registers a second
+        // receiver over them. A bind is a local call with no network round
+        // trip, so it may run on the transport thread.
+        val listener = PeerStreamListener.bind()
+            ?: throw TransportException.StartFailed("no port to listen for peer streams on")
+        // The accept timeout is set here too, not in the accept task: a stop()
+        // that closes the socket before that task runs would make the setter
+        // throw there and report a start failure that never happened.
+        try {
+            listener.socket.soTimeout = SOCKET_TIMEOUT_MS
+        } catch (e: IOException) {
+            listener.socket.close()
+            throw TransportException.StartFailed("peer stream listener: ${e.message ?: "unknown"}")
+        }
+
         updateState(TransportState.STARTING)
 
         // An explicit start() means "run": a pause() from a previous session
@@ -450,11 +469,7 @@ class WifiDirectManager(
         // Start peer discovery
         startPeerDiscovery()
 
-        // Start server socket. Bound here, before the LAN advert below,
-        // because the record carries the port it got. A bind is a local call
-        // with no network round trip, so it may run on the transport thread.
-        val listener = PeerStreamListener.bind()
-            ?: throw TransportException.StartFailed("no port to listen for peer streams on")
+        // Start server socket on the port bound above.
         startServerSocket(listener)
 
         updateState(TransportState.RUNNING)
@@ -1324,8 +1339,6 @@ class WifiDirectManager(
             // starts closes it too, and one leaked would hold the port and
             // fail the next start() with BindException.
             try {
-                server.soTimeout = SOCKET_TIMEOUT_MS
-
                 emitDiagnostic("info", "Server socket started on port ${server.localPort}", mapOf(
                     "ownsGroupPort" to listener.ownsGroupPort,
                 ))

@@ -140,9 +140,11 @@ frames always carry the configured one. A receiver MUST NOT drop or
 authorize a frame by its `app_id`: it reports the id with the delivered
 message and leaves routing to whoever serves the applications.
 
-A forwarder MUST NOT read `app_id` either: it carries a frame for an
-application it does not run exactly as it carries one for its own, and hands
-it on with the `app_id` it arrived with. The network is therefore every
+A forwarder MUST NOT decide anything on `app_id` either: it carries a frame
+for an application it does not run exactly as it carries one for its own, and
+hands it on with the `app_id` it arrived with. Reading the field to re-encode
+the frame, or counting its bytes against a size budget, is not a decision on
+it. The network is therefore every
 install of the protocol, not one application's. A forwarding decision taken on
 the id would be one any carrier can steer by rewriting it, and a filter for
 "my application's frames only" would split the network into one per

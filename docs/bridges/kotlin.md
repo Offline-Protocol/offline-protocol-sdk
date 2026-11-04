@@ -184,6 +184,13 @@ framework refuses outright counts), and why a device that heard no record still 
 owner it sees, at most once a minute. And two groups can form at once, so an owner whose group
 stays empty for a randomised 30 to 60 seconds dissolves it and joins before creating again.
 
+A device whose peer-stream listener did not get the group port 8988, because another SDK
+application on the phone holds it, never creates a group: a group's clients know only the owner's
+address and dial 8988, so they would reach that other application. It listens on a port of its
+own, advertises that port in its LAN record, and where the rules say create it joins a nearby owner
+or waits. The cost is formation time when it is the lowest address its peers hear: they form the
+group only through their takeover, three joins on the backoff, so three to four minutes.
+
 A device alone keeps looking, but less often: service discovery backs off from 15 to 60 seconds
 while it hears no record, and the owner probe from one to four minutes while probes find no group
 (a Wi-Fi Direct printer or television is an owner no probe joins). Both start over when a record,
