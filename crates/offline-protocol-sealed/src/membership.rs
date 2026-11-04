@@ -172,6 +172,64 @@ pub const MEMBER_PROOF_META_KEY: &str = "__member_proof";
 /// this exists to blank.
 pub const WIRE_APP_ID: &str = "offline";
 
+/// HKDF `info` for the key a configured node seals a service discovery body
+/// under: `k = HKDF-SHA256(ikm = K_app, salt, info)`, with a fresh
+/// [`DISCOVERY_SALT_LEN`]-byte salt per body.
+///
+/// Apart from every other label here, so a discovery body key is never also
+/// a proof key or an exchange key: the same salt under one label would make
+/// the two one key, and both seal under a zero nonce.
+pub const DISCOVERY_SEAL_INFO: &[u8] = b"offline-app-svc-v1";
+
+/// Length of a sealed discovery body's salt, in bytes. The body travels as
+/// `salt || ChaCha20-Poly1305(k, nonce = 0, aad = empty, plaintext)`.
+pub const DISCOVERY_SALT_LEN: usize = 16;
+
+/// What a configured node writes in the cleartext `service_id` of a
+/// discovery query and response, whose real fields travel sealed.
+///
+/// It names no service: it begins with `__`, which a service id may not
+/// (`offline_protocol_core::ServiceId` refuses it), so no provider can
+/// register it and an unconfigured provider matches nothing against it. The
+/// field cannot simply be left out: an absent `service_id` in a query means
+/// "every service" to an unconfigured provider, which would then answer
+/// every configured query with its whole service list. It does not end in
+/// `__`, so it is not shaped like a reserved frame prefix and the prefix
+/// registry never reads it as one.
+pub const DISCOVERY_SEALED_SERVICE_ID: &str = "__sealed";
+
+/// The bytes an end-to-end proof binds for a service discovery query
+/// ([`ProofKind::DiscoveryQuery`]) or response
+/// ([`ProofKind::DiscoveryResponse`]), passed as `frame_body` to
+/// [`e2e_proof_signing_payload`]:
+/// `u16be(len(query_id)) || query_id || originator(21) || sealed`.
+///
+/// A discovery frame is re-serialised at every hop (its hop budget goes down
+/// by one), so its content is not a stable body to hash; these are the
+/// fields no hop changes. `query_id` is the one variable field before the
+/// end and carries its length, and `sealed` (the body's salt and
+/// ciphertext, which covers the service, the provider and the originator's
+/// clock) is last, so the layout has one parse. The hop budget is not bound:
+/// it is a routing field every forwarder rewrites.
+///
+/// # Errors
+///
+/// [`SealedError::Deserialization`] for a `query_id` longer than
+/// `u16::MAX` bytes.
+pub fn discovery_bound_body(
+    query_id: &str,
+    originator: &Address,
+    sealed: &[u8],
+) -> Result<Vec<u8>> {
+    let len = u16::try_from(query_id.len()).map_err(|_| invalid("query id too long"))?;
+    let mut out = Vec::with_capacity(2 + query_id.len() + Address::PAYLOAD_LEN + sealed.len());
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(query_id.as_bytes());
+    out.extend_from_slice(&originator.payload());
+    out.extend_from_slice(sealed);
+    Ok(out)
+}
+
 /// The version byte every `__MEMBER__` frame body begins with.
 pub const MEMBER_FRAME_VERSION: u8 = 1;
 
@@ -516,11 +574,12 @@ pub enum ProofKind {
 /// proof: `MEMBER_E2E_DOMAIN || recipient(21) || kind(1) ||
 /// SHA-256(frame_body)(32)`.
 ///
-/// `frame_body` is the package, the Welcome or the discovery payload with the
-/// proof field absent. A discovery query is gossip and has no single
-/// recipient, so its recipient field is 21 zero bytes, which no address
-/// payload is (the version byte is never zero); the query is bound through
-/// its body, which carries its `query_id` and `originator`.
+/// `frame_body` is the package or the Welcome (the frame's content after its
+/// prefix), or, for a discovery query or response, [`discovery_bound_body`].
+/// A discovery query is gossip and has no single recipient, so its recipient
+/// field is 21 zero bytes, which no address payload is (the version byte is
+/// never zero); the query is bound through its body, which carries its
+/// `query_id` and `originator`.
 ///
 /// # Errors
 ///
@@ -699,7 +758,7 @@ mod tests {
     /// signature or key from one step stand in for another.
     #[test]
     fn the_labels_are_pinned_and_distinct() {
-        let labels: [&[u8]; 12] = [
+        let labels: [&[u8]; 13] = [
             APP_KEY_INFO,
             MEMBER_CERT_DOMAIN,
             MEMBER_HELLO_LABEL,
@@ -712,6 +771,7 @@ mod tests {
             WIFI_DIRECT_NETWORK_INFO,
             WIFI_DIRECT_PASSPHRASE_INFO,
             WEB_NEARBY_INFO,
+            DISCOVERY_SEAL_INFO,
         ];
         assert_eq!(BLE_APP_TAG_LABEL, b"offline-app-ble-tag-v1");
         assert_eq!(WIFI_DIRECT_APP_INFO, b"offline-app-wifi-direct-record-v1");
@@ -724,6 +784,7 @@ mod tests {
             b"offline-app-wifi-direct-passphrase-v1"
         );
         assert_eq!(WEB_NEARBY_INFO, b"offline-app-web-nearby-v1");
+        assert_eq!(DISCOVERY_SEAL_INFO, b"offline-app-svc-v1");
         assert_eq!(APP_KEY_INFO, b"offline-protocol-app-v1");
         assert_eq!(MEMBER_CERT_DOMAIN, b"offline-app-member-v1");
         assert_eq!(MEMBER_HELLO_LABEL, b"offline-app-member-hello-v1");
@@ -947,6 +1008,35 @@ mod tests {
         assert!(offline_protocol_core::AppId::new(WIRE_APP_ID).is_ok());
     }
 
+    /// The sentinel is a wire constant, and it must be something no service
+    /// id can be: a provider that could register it would answer every
+    /// configured query in the clear.
+    #[test]
+    fn the_sealed_service_id_names_no_service() {
+        assert_eq!(DISCOVERY_SEALED_SERVICE_ID, "__sealed");
+        assert!(offline_protocol_core::ServiceId::new(DISCOVERY_SEALED_SERVICE_ID).is_err());
+        assert_eq!(DISCOVERY_SALT_LEN, 16);
+    }
+
+    /// Each field of the bound body has one place: moving bytes between the
+    /// query id and the sealed body changes the length prefix, so two frames
+    /// that differ in either never bind the same bytes.
+    #[test]
+    fn the_discovery_bound_body_has_one_parse() {
+        let a = addr(1);
+        let body = discovery_bound_body("q1", &a, b"xyz").unwrap();
+        assert_eq!(&body[..2], &[0, 2]);
+        assert_eq!(&body[2..4], b"q1");
+        assert_eq!(&body[4..4 + Address::PAYLOAD_LEN], &a.payload());
+        assert_eq!(&body[4 + Address::PAYLOAD_LEN..], b"xyz");
+        assert_ne!(
+            discovery_bound_body("q1x", &a, b"yz").unwrap(),
+            discovery_bound_body("q1", &a, b"xyz").unwrap()
+        );
+        assert_ne!(discovery_bound_body("q1", &addr(2), b"xyz").unwrap(), body);
+        assert!(discovery_bound_body(&"q".repeat(70_000), &a, b"").is_err());
+    }
+
     /// A proof for one kind of frame must not verify as another over the same
     /// bytes: a key package's proof replayed onto a Welcome.
     #[test]
@@ -1038,6 +1128,7 @@ mod vectors {
             "proof",
             "provision",
             "identifiers",
+            "discovery",
         ] {
             assert!(v[block].is_object(), "{block} is present");
         }
@@ -1186,6 +1277,21 @@ mod vectors {
             field(query, &["signing_payload_hex"])
         );
 
+        let response = &v["proof"]["discovery_response"];
+        assert_eq!(
+            response["kind"].as_u64(),
+            Some(ProofKind::DiscoveryResponse as u64)
+        );
+        assert_eq!(
+            hex(&e2e_proof_signing_payload(
+                Some(&address(&v, "a")),
+                ProofKind::DiscoveryResponse,
+                &unhex(field(response, &["frame_body_hex"]))
+            )
+            .expect("a payload")),
+            field(response, &["signing_payload_hex"])
+        );
+
         let salt = unhex(field(&v, &["proof", "salt_hex"]));
         let k_app = unhex(field(&v, &["app_key", "k_app_hex"]));
         assert_eq!(
@@ -1280,6 +1386,36 @@ mod vectors {
                 "[{name}] parsed"
             );
         }
+    }
+
+    #[test]
+    fn the_discovery_body_matches() {
+        let v = vectors();
+        let d = &v["discovery"];
+        assert_eq!(
+            field(d, &["sealed_service_id"]),
+            DISCOVERY_SEALED_SERVICE_ID
+        );
+        assert_eq!(field(d, &["key_info"]).as_bytes(), DISCOVERY_SEAL_INFO);
+        let salt = unhex(field(d, &["salt_hex"]));
+        assert_eq!(salt.len(), DISCOVERY_SALT_LEN);
+        let k_app = unhex(field(&v, &["app_key", "k_app_hex"]));
+        assert_eq!(
+            hex(&hkdf(&k_app, Some(&salt), DISCOVERY_SEAL_INFO)),
+            field(d, &["key_hex"])
+        );
+        let originator: Address = field(d, &["originator"]).parse().expect("an address");
+        let bound = discovery_bound_body(
+            field(d, &["query_id"]),
+            &originator,
+            &unhex(field(d, &["sealed_hex"])),
+        )
+        .expect("a bound body");
+        assert_eq!(hex(&bound), field(d, &["bound_body_hex"]));
+        assert_eq!(
+            field(d, &["bound_body_hex"]),
+            field(&v, &["proof", "discovery_query", "frame_body_hex"])
+        );
     }
 
     #[test]

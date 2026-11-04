@@ -1812,9 +1812,19 @@ def build_app_membership_vectors() -> dict:
 
     body = b'{"example":"key package payload"}'
     e2e_kp = b"offline-app-member-e2e-v1" + b + bytes([1]) + hashlib.sha256(body).digest()
-    query = b'{"query_id":"q1","originator":"' + addr_a.encode("ascii") + b'"}'
+    # Service discovery: the body travels sealed under a key derived from
+    # K_app and a fresh salt, and the proof binds the fields no hop rewrites.
+    svc_query_id = "q1"
+    svc_salt = bytes([0x3C]) * 16
+    svc_sealed = svc_salt + bytes([0xCD]) * 40
+    query = (
+        len(svc_query_id).to_bytes(2, "big") + svc_query_id.encode("utf-8") + a + svc_sealed
+    )
     e2e_query = (
         b"offline-app-member-e2e-v1" + bytes(21) + bytes([4]) + hashlib.sha256(query).digest()
+    )
+    e2e_response = (
+        b"offline-app-member-e2e-v1" + a + bytes([5]) + hashlib.sha256(query).digest()
     )
     proof_salt = bytes([0x5A]) * 16
 
@@ -1909,10 +1919,18 @@ def build_app_membership_vectors() -> dict:
             },
             "discovery_query": {
                 "note": "Gossip names no single recipient: 21 zero bytes, which "
-                "no address payload is.",
+                "no address payload is. frame_body is the discovery bound body.",
                 "kind": 4,
                 "frame_body_hex": query.hex(),
                 "signing_payload_hex": e2e_query.hex(),
+            },
+            "discovery_response": {
+                "note": "Bound to the originator (a), over a bound body of the "
+                "same layout as the query's.",
+                "recipient": addr_a,
+                "kind": 5,
+                "frame_body_hex": query.hex(),
+                "signing_payload_hex": e2e_response.hex(),
             },
             "salt_hex": proof_salt.hex(),
             "key_hex": hkdf(k_app, proof_salt, b"offline-app-member-e2e-key-v1").hex(),
@@ -1939,6 +1957,19 @@ def build_app_membership_vectors() -> dict:
                 "scope": nearby_network,
                 "topic_hex": nearby_topic.hex(),
             },
+        },
+        "discovery": {
+            "note": "A configured node's discovery body: salt || "
+            "ChaCha20-Poly1305(k, nonce = 0, aad = empty, plaintext). The bound "
+            "body is u16be(len(query_id)) || query_id || originator payload || sealed.",
+            "sealed_service_id": "__sealed",
+            "key_info": "offline-app-svc-v1",
+            "salt_hex": svc_salt.hex(),
+            "key_hex": hkdf(k_app, svc_salt, b"offline-app-svc-v1").hex(),
+            "query_id": svc_query_id,
+            "originator": addr_a,
+            "sealed_hex": svc_sealed.hex(),
+            "bound_body_hex": query.hex(),
         },
         "rejects": [
             {"name": "version_2", "body": base64.b64encode(bytes([2, 1]) + bytes(32)).decode()},

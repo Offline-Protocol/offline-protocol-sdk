@@ -62,10 +62,17 @@
       "signing_payload_hex": "6f66666c696e652d6170702d6d656d6265722d6532652d763101dac073e0123bdea59dd9b3bda9cf6037f63aca8201449715279bedf3a327fd4a13d3b69f7e97f540e858b2ebf3fbed93d3940f1946"
     },
     "discovery_query": {
-      "note": "Gossip names no single recipient: 21 zero bytes, which no address payload is.",
+      "note": "Gossip names no single recipient: 21 zero bytes, which no address payload is. frame_body is the discovery bound body.",
       "kind": 4,
-      "frame_body_hex": "7b2271756572795f6964223a227131222c226f726967696e61746f72223a226f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a387230227d",
-      "signing_payload_hex": "6f66666c696e652d6170702d6d656d6265722d6532652d763100000000000000000000000000000000000000000004bb0fd8a3884e5cd6c5bb5bbec7fd79a58df594d6b9125c65a4efc8a3f5a86f3f"
+      "frame_body_hex": "000271310139f713d0a644253f04529421b9f51b9b08979d083c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3ccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "signing_payload_hex": "6f66666c696e652d6170702d6d656d6265722d6532652d763100000000000000000000000000000000000000000004aeb6af84a79117ba87fb1b4fd794983fe5b2fd1e982864fc5d424161f21e3e48"
+    },
+    "discovery_response": {
+      "note": "Bound to the originator (a), over a bound body of the same layout as the query's.",
+      "recipient": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+      "kind": 5,
+      "frame_body_hex": "000271310139f713d0a644253f04529421b9f51b9b08979d083c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3ccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "signing_payload_hex": "6f66666c696e652d6170702d6d656d6265722d6532652d76310139f713d0a644253f04529421b9f51b9b08979d0805aeb6af84a79117ba87fb1b4fd794983fe5b2fd1e982864fc5d424161f21e3e48"
     },
     "salt_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
     "key_hex": "168ab14402b4425a73089cc0c1b0dbc90b689847926c210f1de4e4cbd6e268d2",
@@ -89,6 +96,17 @@
       "scope": "v4/203.0.113.7",
       "topic_hex": "80a19a5eafffc8b1d9150102afc1f0d5"
     }
+  },
+  "discovery": {
+    "note": "A configured node's discovery body: salt || ChaCha20-Poly1305(k, nonce = 0, aad = empty, plaintext). The bound body is u16be(len(query_id)) || query_id || originator payload || sealed.",
+    "sealed_service_id": "__sealed",
+    "key_info": "offline-app-svc-v1",
+    "salt_hex": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+    "key_hex": "09cb6e8f886e189dea2c3823a68ef350825928585eeffbdbeb5fcdfcc693ddf7",
+    "query_id": "q1",
+    "originator": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+    "sealed_hex": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3ccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "bound_body_hex": "000271310139f713d0a644253f04529421b9f51b9b08979d083c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3ccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
   },
   "rejects": [
     {

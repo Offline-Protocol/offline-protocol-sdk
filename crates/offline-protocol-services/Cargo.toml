@@ -20,6 +20,12 @@ workspace = true
 
 [dependencies]
 offline-protocol-core = { workspace = true }
+# The discovery layouts a configured node seals and proves (ADR 0037): the
+# sentinel service id, the bound body and the proof kinds. Their one home is
+# the sealed layer (ADR 0022); the cryptography itself is the engine's,
+# lent through `DiscoverySealer`, so this crate links no cipher.
+offline-protocol-sealed = { workspace = true }
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

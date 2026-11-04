@@ -8,6 +8,10 @@ use crate::payloads::{
     MAX_SERVICE_PAYLOAD_SIZE, SVC_DISCOVER_QUERY, SVC_DISCOVER_RESPONSE, SVC_REQUEST, SVC_RESPONSE,
     VALID_SERVICE_STATUSES,
 };
+use crate::sealing::{
+    is_fresh, open_query, open_response, seal_query, seal_response, DiscoverySealer,
+    DISCOVERY_QUERY_LIFETIME_SECS,
+};
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{MessagePriority, ServiceDescriptor};
 use std::collections::{HashMap, VecDeque};
@@ -77,11 +81,29 @@ pub enum ServiceAction {
 /// receives a response it did not originate forwards it as a unicast toward
 /// the originator (see `try_handle_discover_response`) and emits no event of
 /// its own; only the originator emits `ServiceDiscovered`.
+///
+/// ## On a configured node
+///
+/// With a [`DiscoverySealer`] (the application configured a publisher key,
+/// ADR 0037), the calls ending in `_sealed` run the rules of
+/// [`crate::sealing`]: the body is sealed and proven, a provider answers
+/// only a proven, fresh query, once, and addresses its answer to the
+/// `originator` (the proof binds it, so it cannot be spoofed, and answering
+/// the direct sender would hand a replayer a frame addressed to itself), and
+/// only a proven response is reported. Forwarding is the same either way:
+/// every query within its hop budget, every response toward its originator,
+/// whatever this node made of it.
 pub struct MeshServices {
     local_services: HashMap<String, ServiceDescriptor>,
     seen_discovery_queries: HashMap<String, Instant>,
     /// Insertion-order index for O(1) oldest-entry eviction.
     seen_discovery_order: VecDeque<String>,
+    /// Queries this configured provider answered, each with the Unix second
+    /// past which it is stale anyway. Kept apart from the dedup map, which
+    /// forgets on its own clock and at its cap: a replay the dedup map no
+    /// longer remembers must still find its answer here while the query is
+    /// fresh, or the provider would answer one capture twice.
+    answered_queries: HashMap<String, u64>,
 }
 
 impl MeshServices {
@@ -91,6 +113,7 @@ impl MeshServices {
             local_services: HashMap::new(),
             seen_discovery_queries: HashMap::new(),
             seen_discovery_order: VecDeque::new(),
+            answered_queries: HashMap::new(),
         }
     }
 
@@ -129,6 +152,8 @@ impl MeshServices {
             originator: user_id.to_string(),
             service_id: service_id.map(|s| s.to_string()),
             remaining_hops: DISCOVERY_QUERY_DEFAULT_MAX_HOPS,
+            sealed: None,
+            member_proof: None,
         };
         let serialized = serde_json::to_string(&payload)
             .map_err(|e| ServiceError::Serialization(e.to_string()))?;
@@ -154,6 +179,57 @@ impl MeshServices {
             .collect();
 
         info!(query_id = %query_id, service_id = ?service_id, peer_count = messages.len(), "Broadcast service discovery query");
+        Ok(DiscoverResult { query_id, messages })
+    }
+
+    /// [`Self::discover_services`] on a configured node: the query names
+    /// the sentinel in the clear, carries `service_id` and the issue time
+    /// sealed under the application key, and proves this node's membership.
+    ///
+    /// `neighbours` are the targets, and the caller takes them from the mesh
+    /// carriers only: gossip targets chosen from peers the application
+    /// admitted would make discovery one network per application.
+    ///
+    /// # Errors
+    ///
+    /// [`ServiceError::Other`] when the sealer has no identity key or cannot
+    /// seal, and [`ServiceError::Serialization`] as for the unconfigured call.
+    pub fn discover_services_sealed(
+        &mut self,
+        user_id: &str,
+        neighbours: &[String],
+        service_id: Option<&str>,
+        sealer: &dyn DiscoverySealer,
+    ) -> Result<DiscoverResult, ServiceError> {
+        let query_id = uuid::Uuid::new_v4().to_string();
+        let payload = seal_query(
+            sealer,
+            &query_id,
+            user_id,
+            service_id,
+            DISCOVERY_QUERY_DEFAULT_MAX_HOPS,
+        )
+        .ok_or_else(|| ServiceError::Other("could not seal the discovery query".to_string()))?;
+        let serialized = serde_json::to_string(&payload)
+            .map_err(|e| ServiceError::Serialization(e.to_string()))?;
+        let content = format!("{}{}", SVC_DISCOVER_QUERY, serialized);
+
+        self.record_seen_query(query_id.clone());
+        let messages: Vec<OutboundMessage> = select_fanout_peers(
+            neighbours,
+            DISCOVERY_INITIAL_BROADCAST_MAX,
+            &query_id,
+            user_id,
+        )
+        .into_iter()
+        .map(|peer| OutboundMessage {
+            recipient: peer,
+            content: content.clone(),
+            priority: MessagePriority::Medium,
+        })
+        .collect();
+
+        info!(query_id = %query_id, peer_count = messages.len(), "Broadcast sealed service discovery query");
         Ok(DiscoverResult { query_id, messages })
     }
 
@@ -255,12 +331,28 @@ impl MeshServices {
         user_id: &str,
         known_peers: &[String],
     ) -> ServiceAction {
+        self.handle_incoming_message_sealed(content, sender, hop_count, user_id, known_peers, None)
+    }
+
+    /// [`Self::handle_incoming_message`], with the configured node's
+    /// discovery rules when `sealer` is given (see
+    /// [the configured node](MeshServices#on-a-configured-node)). With
+    /// `None` it is exactly [`Self::handle_incoming_message`].
+    pub fn handle_incoming_message_sealed(
+        &mut self,
+        content: &str,
+        sender: &str,
+        hop_count: u8,
+        user_id: &str,
+        known_peers: &[String],
+        sealer: Option<&dyn DiscoverySealer>,
+    ) -> ServiceAction {
         if let Some(action) =
-            self.try_handle_discover_query(content, sender, hop_count, user_id, known_peers)
+            self.try_handle_discover_query(content, sender, hop_count, user_id, known_peers, sealer)
         {
             return action;
         }
-        if let Some(action) = self.try_handle_discover_response(content, sender, user_id) {
+        if let Some(action) = self.try_handle_discover_response(content, sender, user_id, sealer) {
             return action;
         }
         if let Some(action) = self.try_handle_request(content, sender) {
@@ -291,6 +383,14 @@ impl MeshServices {
         &self.seen_discovery_queries
     }
 
+    /// Forgets every query id the dedup map holds, as its window passing
+    /// would, so a test can replay a query the dedup map no longer stops.
+    #[cfg(test)]
+    pub(crate) fn forget_seen_queries(&mut self) {
+        self.seen_discovery_queries.clear();
+        self.seen_discovery_order.clear();
+    }
+
     /// Inserts a query ID into the dedup map, evicting the oldest entry if at capacity.
     fn record_seen_query(&mut self, query_id: String) {
         if self.seen_discovery_queries.len() >= DISCOVERY_QUERY_MAX_DEDUP_ENTRIES {
@@ -313,6 +413,7 @@ impl MeshServices {
         hop_count: u8,
         user_id: &str,
         known_peers: &[String],
+        sealer: Option<&dyn DiscoverySealer>,
     ) -> Option<ServiceAction> {
         let data = content.strip_prefix(SVC_DISCOVER_QUERY)?;
 
@@ -345,45 +446,16 @@ impl MeshServices {
         }
         self.record_seen_query(payload.query_id.clone());
 
-        let mut messages = Vec::new();
+        let mut messages = match sealer {
+            Some(sealer) => self.answer_sealed_query(sealer, &payload, hop_count, user_id),
+            None => self.answer_query(&payload, sender, hop_count, user_id),
+        };
+        let answered = messages.len();
 
-        // Check local services for matches
-        let matches: Vec<_> = self
-            .local_services
-            .values()
-            .filter(|svc| {
-                payload
-                    .service_id
-                    .as_ref()
-                    .is_none_or(|q| q == svc.service_id.as_str())
-            })
-            .cloned()
-            .collect();
-
-        // Send discovery responses back to the *sender* (not the originator) to
-        // prevent a spoofed originator field from leaking our service list to an
-        // arbitrary peer. The sender relays the response back along the path.
-        for svc in &matches {
-            let response = ServiceDiscoveryResponsePayload {
-                query_id: payload.query_id.clone(),
-                service_id: svc.service_id.as_str().to_string(),
-                version: svc.version.clone(),
-                provider_peer_id: user_id.to_string(),
-                capabilities: svc.capabilities.clone(),
-                hop_count,
-                originator: payload.originator.clone(),
-            };
-            if let Ok(serialized) = serde_json::to_string(&response) {
-                let resp_content = format!("{}{}", SVC_DISCOVER_RESPONSE, serialized);
-                messages.push(OutboundMessage {
-                    recipient: sender.to_string(),
-                    content: resp_content,
-                    priority: MessagePriority::Medium,
-                });
-            }
-        }
-
-        // Forward query to other known peers (gossip) if hops remain
+        // Forward query to other known peers (gossip) if hops remain. On a
+        // configured node too, whatever it made of the query: forwarding is
+        // carriage, and a node that forwarded only what it could open would
+        // stop every other application's discovery at itself.
         let forwarded_count = if payload.remaining_hops > 0 {
             let mut fwd_payload = payload.clone();
             fwd_payload.remaining_hops -= 1;
@@ -423,7 +495,7 @@ impl MeshServices {
 
         debug!(
             query_id = %payload.query_id,
-            matches = matches.len(),
+            answered,
             forwarded_to = forwarded_count,
             "Processed service discovery query"
         );
@@ -434,11 +506,145 @@ impl MeshServices {
         })
     }
 
+    /// An unconfigured node's answers to a query: one response per matching
+    /// service, to the query's direct sender.
+    fn answer_query(
+        &self,
+        payload: &ServiceDiscoveryQueryPayload,
+        sender: &str,
+        hop_count: u8,
+        user_id: &str,
+    ) -> Vec<OutboundMessage> {
+        let matches: Vec<_> = self
+            .local_services
+            .values()
+            .filter(|svc| {
+                payload
+                    .service_id
+                    .as_ref()
+                    .is_none_or(|q| q == svc.service_id.as_str())
+            })
+            .cloned()
+            .collect();
+
+        // Send discovery responses back to the *sender* (not the originator) to
+        // prevent a spoofed originator field from leaking our service list to an
+        // arbitrary peer. The sender relays the response back along the path.
+        let mut messages = Vec::new();
+        for svc in &matches {
+            let response = ServiceDiscoveryResponsePayload {
+                query_id: payload.query_id.clone(),
+                service_id: svc.service_id.as_str().to_string(),
+                version: svc.version.clone(),
+                provider_peer_id: user_id.to_string(),
+                capabilities: svc.capabilities.clone(),
+                hop_count,
+                originator: payload.originator.clone(),
+                sealed: None,
+                member_proof: None,
+            };
+            if let Ok(serialized) = serde_json::to_string(&response) {
+                let resp_content = format!("{}{}", SVC_DISCOVER_RESPONSE, serialized);
+                messages.push(OutboundMessage {
+                    recipient: sender.to_string(),
+                    content: resp_content,
+                    priority: MessagePriority::Medium,
+                });
+            }
+        }
+        messages
+    }
+
+    /// A configured provider's answers to a query: none unless the body
+    /// opened, the proof verifies for the originator, the query is fresh and
+    /// was not answered before; then one sealed, proven response per
+    /// matching service, addressed to the originator.
+    ///
+    /// A cleartext query (an unconfigured node's) is never answered here:
+    /// its originator is not of this application, and an answer would be
+    /// this node's service list in the clear to a stranger.
+    fn answer_sealed_query(
+        &mut self,
+        sealer: &dyn DiscoverySealer,
+        payload: &ServiceDiscoveryQueryPayload,
+        hop_count: u8,
+        user_id: &str,
+    ) -> Vec<OutboundMessage> {
+        if payload.originator == user_id {
+            return Vec::new();
+        }
+        let Some(body) = open_query(sealer, payload) else {
+            debug!(query_id = %payload.query_id, "Discovery query not proven to this application; carried only");
+            return Vec::new();
+        };
+        let now = sealer.now_unix();
+        if !is_fresh(body.issued_at, now) {
+            debug!(query_id = %payload.query_id, issued_at = body.issued_at, now, "Stale discovery query; not answered");
+            return Vec::new();
+        }
+        if !self.claim_answer(&payload.query_id, body.issued_at, now) {
+            debug!(query_id = %payload.query_id, "Discovery query already answered");
+            return Vec::new();
+        }
+
+        let mut messages = Vec::new();
+        for svc in self.local_services.values().filter(|svc| {
+            body.service_id
+                .as_ref()
+                .is_none_or(|q| q == svc.service_id.as_str())
+        }) {
+            let Some(response) = seal_response(
+                sealer,
+                &payload.query_id,
+                &payload.originator,
+                user_id,
+                svc.service_id.as_str(),
+                &svc.version,
+                &svc.capabilities,
+                hop_count,
+            ) else {
+                continue;
+            };
+            if let Ok(serialized) = serde_json::to_string(&response) {
+                messages.push(OutboundMessage {
+                    recipient: payload.originator.clone(),
+                    content: format!("{}{}", SVC_DISCOVER_RESPONSE, serialized),
+                    priority: MessagePriority::Medium,
+                });
+            }
+        }
+        messages
+    }
+
+    /// Records that `query_id` is answered now, or refuses when it already
+    /// was. The entry stays until the query is stale (`issued_at` plus the
+    /// lifetime), so it outlives every moment the query could be judged
+    /// fresh. At the cap, with nothing stale to drop, it refuses: a dropped
+    /// fresh entry would let a replay be answered twice, and a refusal
+    /// costs a result, never a leak.
+    fn claim_answer(&mut self, query_id: &str, issued_at: u64, now: u64) -> bool {
+        if self.answered_queries.contains_key(query_id) {
+            return false;
+        }
+        if self.answered_queries.len() >= DISCOVERY_QUERY_MAX_DEDUP_ENTRIES {
+            self.answered_queries.retain(|_, until| *until >= now);
+            if self.answered_queries.len() >= DISCOVERY_QUERY_MAX_DEDUP_ENTRIES {
+                return false;
+            }
+        }
+        self.answered_queries.insert(
+            query_id.to_string(),
+            issued_at.saturating_add(DISCOVERY_QUERY_LIFETIME_SECS),
+        );
+        true
+    }
+
     fn try_handle_discover_response(
         &self,
         content: &str,
         sender: &str,
         user_id: &str,
+        sealer: Option<&dyn DiscoverySealer>,
     ) -> Option<ServiceAction> {
         let data = content.strip_prefix(SVC_DISCOVER_RESPONSE)?;
 
@@ -487,16 +693,37 @@ impl MeshServices {
             });
         }
 
-        Some(ServiceAction::Consumed {
-            messages_to_send: vec![],
-            events_to_emit: vec![ServiceEvent::ServiceDiscovered {
+        let event = match sealer {
+            None => Some(ServiceEvent::ServiceDiscovered {
                 query_id: payload.query_id,
                 service_id: payload.service_id,
                 version: payload.version,
                 provider_peer_id: payload.provider_peer_id,
                 capabilities: payload.capabilities,
                 hop_count: payload.hop_count,
-            }],
+            }),
+            // Reported only when the provider proved membership. A cleartext
+            // response is a stranger's: a configured node never asks in the
+            // clear, so nothing of its own is answered that way.
+            Some(sealer) => match open_response(sealer, &payload, sender, user_id) {
+                Some(body) => Some(ServiceEvent::ServiceDiscovered {
+                    query_id: payload.query_id,
+                    service_id: body.service_id,
+                    version: body.version,
+                    provider_peer_id: body.provider,
+                    capabilities: body.capabilities,
+                    hop_count: body.hop_count,
+                }),
+                None => {
+                    debug!(query_id = %payload.query_id, sender = %sender, "Discovery response not proven; not reported");
+                    None
+                }
+            },
+        };
+
+        Some(ServiceAction::Consumed {
+            messages_to_send: vec![],
+            events_to_emit: event.into_iter().collect(),
         })
     }
 
@@ -818,6 +1045,8 @@ mod tests {
             originator: "alice".to_string(),
             service_id: Some("weather".to_string()),
             remaining_hops: 5,
+            sealed: None,
+            member_proof: None,
         };
         let content = format!(
             "{}{}",
@@ -853,6 +1082,8 @@ mod tests {
             originator: "alice".to_string(),
             service_id: None,
             remaining_hops: 5,
+            sealed: None,
+            member_proof: None,
         };
         let content = format!(
             "{}{}",
@@ -881,6 +1112,8 @@ mod tests {
             capabilities: HashMap::new(),
             hop_count: 1,
             originator: "user1".to_string(),
+            sealed: None,
+            member_proof: None,
         };
         let content = format!(
             "{}{}",
@@ -1050,6 +1283,8 @@ mod tests {
             originator: "alice".to_string(),
             service_id: None,
             remaining_hops: 5,
+            sealed: None,
+            member_proof: None,
         };
         let content = format!(
             "{}{}",
@@ -1107,6 +1342,8 @@ mod tests {
             originator: "alice".to_string(),
             service_id: None,
             remaining_hops: 0,
+            sealed: None,
+            member_proof: None,
         };
         let content = format!(
             "{}{}",
@@ -1263,6 +1500,8 @@ mod tests {
             originator: "alice".to_string(),
             service_id: Some("weather".to_string()),
             remaining_hops: 5,
+            sealed: None,
+            member_proof: None,
         };
         let content = format!(
             "{}{}",
@@ -1356,6 +1595,8 @@ mod tests {
             capabilities: HashMap::new(),
             hop_count: 2,
             originator: "original_requester".to_string(),
+            sealed: None,
+            member_proof: None,
         };
         let content = format!(
             "{}{}",
@@ -1395,6 +1636,8 @@ mod tests {
             capabilities: HashMap::new(),
             hop_count: 1,
             originator: "me".to_string(),
+            sealed: None,
+            member_proof: None,
         };
         let content = format!(
             "{}{}",

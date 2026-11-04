@@ -2669,7 +2669,9 @@ dependencies = [
 name = "offline-protocol-services"
 version = "0.31.0"
 dependencies = [
+ "base64 0.22.1",
  "offline-protocol-core",
+ "offline-protocol-sealed",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

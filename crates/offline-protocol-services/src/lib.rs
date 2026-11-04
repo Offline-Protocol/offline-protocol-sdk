@@ -8,6 +8,9 @@ pub mod error;
 /// Event types emitted by mesh service operations.
 pub mod events;
 pub(crate) mod payloads;
+/// Service discovery on a node whose application configured a publisher key
+/// (ADR 0037): sealed bodies, membership proofs and fresh answers.
+pub mod sealing;
 /// Core service registry and message handling logic.
 pub mod services;
 /// Subscriptions: a consumer's lease on a provider's topic, and the updates
@@ -30,6 +33,10 @@ pub use payloads::{
     DISCOVERY_QUERY_DEFAULT_MAX_HOPS, DISCOVERY_QUERY_MAX_DEDUP_ENTRIES, MAX_SERVICE_BODY_SIZE,
     MAX_SERVICE_METHOD_LEN, MAX_SERVICE_PAYLOAD_SIZE, SVC_DISCOVER_QUERY, SVC_DISCOVER_RESPONSE,
     SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE, VALID_SERVICE_STATUSES,
+};
+pub use sealing::{
+    discovery_response_ends_at, discovery_response_is_proven, DiscoverySealer, ProofKind,
+    DISCOVERY_QUERY_LIFETIME_SECS, DISCOVERY_SEALED_SERVICE_ID,
 };
 pub use services::{
     DiscoverResult, MeshServices, OutboundMessage, SendRequestResult, SendResponseResult,

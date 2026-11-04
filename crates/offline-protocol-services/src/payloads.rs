@@ -46,6 +46,19 @@ pub(crate) struct ServiceDiscoveryQueryPayload {
     pub service_id: Option<String>,
     #[serde(default = "default_discovery_max_hops")]
     pub remaining_hops: u8,
+    /// A configured originator's sealed body (base64 of
+    /// `salt || ciphertext`), which carries the real `service_id`; the
+    /// cleartext one is then the sentinel. Absent from an unconfigured
+    /// node's query, so that query is byte for byte what it was. Carried
+    /// unchanged by every forwarder, configured or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<String>,
+    /// The originator's end-to-end membership proof (base64), next to the
+    /// body it binds. In the payload rather than the frame metadata, because
+    /// every forwarder builds a new frame and the metadata would not survive
+    /// the first hop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_proof: Option<String>,
 }
 
 /// Wire-format payload for a service discovery response.
@@ -57,9 +70,17 @@ pub(crate) struct ServiceDiscoveryResponsePayload {
     pub provider_peer_id: String,
     pub capabilities: HashMap<String, String>,
     pub hop_count: u8,
-    /// The original query originator — used for multi-hop response routing.
+    /// The original query originator, used for multi-hop response routing.
     #[serde(default)]
     pub originator: String,
+    /// A configured provider's sealed body (base64): the provider, service,
+    /// version, capabilities and hop count. The cleartext fields are then
+    /// the sentinel and empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<String>,
+    /// The provider's end-to-end membership proof (base64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_proof: Option<String>,
 }
 
 /// Wire-format payload for a service request.
