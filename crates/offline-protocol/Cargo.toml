@@ -43,7 +43,7 @@ test-utils = []
 # keystore. Default on, like `data`, so the FFI entry that exposes them cannot
 # become a checksum mismatch; a mobile build that never calls them opts out
 # with `default-features = false` and drops the HKDF, HMAC and lock code.
-file-store = ["dep:hkdf", "dep:hmac", "dep:rustix"]
+file-store = ["dep:rustix"]
 
 [dependencies]
 offline-protocol-core = { workspace = true }
@@ -96,12 +96,12 @@ sha2 = "0.10"
 chacha20poly1305 = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
-# The built-in sealed file store for MLS material derives its sealing and
-# naming keys from the operator's store key (HKDF) and names its files with a
-# keyed digest (HMAC), so a stolen directory does not confirm which peers and
-# groups it holds. Both are already in the graph through the transport crate.
-hkdf = { workspace = true, optional = true }
-hmac = { workspace = true, optional = true }
+# The application membership exchange (ADR 0037) derives its keys with HKDF
+# and tags its hello with HMAC, on every build. The built-in sealed file store
+# uses both too, for its sealing and naming keys. Both are already in the
+# graph through the transport crate.
+hkdf = { workspace = true }
+hmac = { workspace = true }
 
 # The built-in file stores hold an exclusive `flock` on their directory for
 # their lifetime, so a second store over it is refused rather than diverging

@@ -322,7 +322,11 @@ pin them. Every field has a fixed size and an address is always its 21-byte
 prefix: a concatenation of fixed-size fields has one parse.
 
 **Primitives.** HKDF-SHA256, HMAC-SHA256 truncated to 16 bytes, Ed25519, and
-ChaCha20-Poly1305 with a 12-byte zero nonce under a key used exactly once.
+ChaCha20-Poly1305 with a 12-byte zero nonce and no associated data, under a key
+used exactly once. The associated data is empty in every seal and open below,
+and the vectors cannot show it (they do not pin the AEAD output), so an
+implementation that binds anything there fails every exchange as "not a
+member" rather than with an error.
 
 **The application key.**
 
@@ -348,6 +352,35 @@ K_app = HKDF(ikm = publisher_public_key, salt = none,
 
 Any other version, step, or payload size is refused before anything else runs.
 
+**Carriage.** Both frames go straight onto the neighbour's link over a mesh
+carrier (BLE or Wi-Fi Direct), never through an outbox, the internet relay, a
+gateway or a forwarder, with a TTL of one and `requires_ack = false`. A
+receiver MUST ignore one that arrived over any other carrier, after a hop
+(`hop_count > 0`), unsigned, or addressed to another node, and MUST NOT
+acknowledge any `__MEMBER__` frame: an acknowledgement is an answer whose
+presence would depend on the receiver, and a relay mailbox would hold a hello
+for days and deliver it to a node that is no longer a neighbour.
+
+**When it runs.** A node starts the exchange when it discovers a neighbour it
+holds no current exchange with, and starts it again no sooner than five
+minutes later. That interval is the only condition: a node MUST NOT skip the
+exchange because it already sees the neighbour as a member, since whether a
+hello goes out would then depend on membership, and anyone who presents a
+recorded address on a link of its own would learn from one connection whether
+this node holds that address as a member. A node that receives its own
+certificate after meeting its neighbours starts a fresh exchange with each of
+them at once. A hello that names a nonce
+the node already answered is a duplicate or a replay and is not answered
+again, since a second answer under the same two nonces would seal a second
+plaintext under a key already used. A hello with a new nonce after an answer
+means the peer restarted: the node sends its own hello again, with the same
+nonce, then answers. The same nonce, because a fresh one would read to the peer
+as this node restarting, and two nodes answering that with fresh nonces would
+never settle. The one exception is a bound: after answering eight nonces of
+one peer under one nonce of its own, a node starts over with a fresh nonce, so
+the set of answered nonces stays bounded. Both sides then answer once more and
+settle, since a fresh nonce on either side makes every key new.
+
 **Step 1.** Each side sends a fresh nonce and
 
 ```
@@ -366,7 +399,7 @@ salt = nonce of the side whose address payload sorts lower || the other nonce
 k    = HKDF(ikm = K_app, salt, info = "offline-app-member-exchange-v1" || addr_sender)
 sig  = Ed25519_identity("offline-app-member-transcript-v1" ||
          addr_signer || addr_peer || nonce_signer || nonce_peer)
-response = ChaCha20-Poly1305(k, nonce = 0, cert || sig)
+response = ChaCha20-Poly1305(k, nonce = 0, aad = empty, cert || sig)
 ```
 
 On a mismatch it is 173 random bytes, produced after the same signature and
@@ -388,11 +421,14 @@ field in the frame that opens a session across the mesh:
 
 ```
 salt  = random(16)
-k     = HKDF(ikm = K_app, salt, info = "offline-app-member-e2e-v1")
+k     = HKDF(ikm = K_app, salt, info = "offline-app-member-e2e-key-v1")
 sig   = Ed25519_identity("offline-app-member-e2e-v1" || recipient(21) || kind(1)
           || SHA-256(frame_body))
-proof = salt || ChaCha20-Poly1305(k, nonce = 0, cert || sig)
+proof = salt || ChaCha20-Poly1305(k, nonce = 0, aad = empty, cert || sig)
 ```
+
+The key label and the signing domain differ, so no byte string is both an HKDF
+`info` and a signature domain.
 
 | `kind` | Frame | `recipient` |
 |--------|-------|-------------|
@@ -405,6 +441,14 @@ proof = salt || ChaCha20-Poly1305(k, nonce = 0, cert || sig)
 `frame_body` is the frame's payload with the `member_proof` field absent. The
 salt is fresh per proof because `K_app` is shared by every install of the
 application, and a fixed key with a fixed nonce would repeat across installs.
+
+A verifier opens the proof, then checks the certificate under the publisher
+key, `not_after`, and the identity signature, and **checks the certificate's
+address against the party the frame speaks for**: the frame's sender for kinds
+1, 2, 3 and 5, and the body's `originator` for kind 4, since a discovery query
+reaches a provider through gossip and its direct sender is any relay. Without
+that check a member's proof, recorded once, would carry any other node's frame
+of the same kind and body hash.
 
 ## Document sync frames
 

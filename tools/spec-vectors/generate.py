@@ -1759,8 +1759,9 @@ def build_app_membership_vectors() -> dict:
     HKDF and HMAC are computed here from RFC 5869 and RFC 2104 over hashlib,
     not by any library the Rust side uses. The AEAD output is not pinned:
     ChaCha20-Poly1305 carries its own vectors in RFC 8439, and what is
-    specific to this protocol is the key, the nonce and the plaintext, which
-    are.
+    specific to this protocol is the key, the nonce, the plaintext and the
+    empty associated data, of which the first three are pinned here and the
+    last is stated in the chapter.
     """
     import base64
     import hmac as _hmac
@@ -1891,7 +1892,7 @@ def build_app_membership_vectors() -> dict:
                 "signing_payload_hex": e2e_query.hex(),
             },
             "salt_hex": proof_salt.hex(),
-            "key_hex": hkdf(k_app, proof_salt, b"offline-app-member-e2e-v1").hex(),
+            "key_hex": hkdf(k_app, proof_salt, b"offline-app-member-e2e-key-v1").hex(),
             "bytes_hex": (proof_salt + sealed).hex(),
         },
         "rejects": [
