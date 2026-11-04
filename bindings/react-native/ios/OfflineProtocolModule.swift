@@ -479,8 +479,16 @@ class OfflineProtocolModule: RCTEventEmitter {
         // transition) — and onto the same serial queue, which is what keeps
         // the false/true pair from reordering. No background assertion here:
         // the app is becoming active, not losing its runtime.
-        processQueue.async {
-            try? proto.wifiDirectStatusChanged(isConnected: true)
+        //
+        // Only when the peer-stream transport is running. The background edge
+        // reports the layer down unconditionally, which is always true; this
+        // edge used to report it up unconditionally too, so a transport that
+        // was disabled, stopped or had failed to start was restated as up on
+        // every foreground. The manager reports its own start and stop.
+        if wifiDirectManager?.state == .running {
+            processQueue.async {
+                try? proto.wifiDirectStatusChanged(isConnected: true)
+            }
         }
         // On `telemetryQueue`, not `processQueue`: it has to be the same queue
         // the background edge used, or `.active` could be delivered while the
@@ -1099,12 +1107,21 @@ class OfflineProtocolModule: RCTEventEmitter {
                     
                     //  Ensure bleStatusChanged(true) is called immediately and as backup
                     // This ensures BLE transport is marked as Available for message sending
-                    do {
-                        try protocolInstance?.bleStatusChanged(isAvailable: true)
-                        print("[OfflineProtocolModule] ✅ Called protocol.bleStatusChanged(true) immediately")
-                        emitDiagnostic(level: "info", message: "BLE status set to available")
-                    } catch {
-                        print("[OfflineProtocolModule] Immediate bleStatusChanged failed: \(error.localizedDescription)")
+                    //
+                    // Never over a radio the manager has reported down. A
+                    // powered-off, unauthorized or unsupported radio moves the
+                    // manager to `.unavailable` and reports false; the backup
+                    // below used to land a second later and report true over
+                    // it, so the core routed sends to a radio that was off
+                    // until the next radio state change.
+                    if manager.state != .unavailable {
+                        do {
+                            try protocolInstance?.bleStatusChanged(isAvailable: true)
+                            print("[OfflineProtocolModule] ✅ Called protocol.bleStatusChanged(true) immediately")
+                            emitDiagnostic(level: "info", message: "BLE status set to available")
+                        } catch {
+                            print("[OfflineProtocolModule] Immediate bleStatusChanged failed: \(error.localizedDescription)")
+                        }
                     }
                     
                     // Backup call in case timing is off. Held in a work item so
@@ -1122,7 +1139,11 @@ class OfflineProtocolModule: RCTEventEmitter {
                     // a backup that already started running, which a
                     // main-queue backup could dodge.
                     bleStatusBackupWorkItem?.cancel()
-                    let backup = DispatchWorkItem { [weak self] in
+                    let backup = DispatchWorkItem { [weak self, weak manager] in
+                        guard let manager, manager.state != .unavailable else {
+                            self?.emitDiagnostic(level: "info", message: "Backup bleStatusChanged(true) skipped: the radio is unavailable")
+                            return
+                        }
                         print("[OfflineProtocolModule] Backup bleStatusChanged(true) call")
                         self?.emitDiagnostic(level: "info", message: "Backup call to protocol.bleStatusChanged(true)")
                         try? self?.protocolInstance?.bleStatusChanged(isAvailable: true)

@@ -106,6 +106,38 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **An iPhone with Bluetooth off no longer tells the engine Bluetooth is up.**
+  `start()` reported Bluetooth available at once and again a second later,
+  whatever the radio's state. With Bluetooth off, unauthorized or unsupported,
+  the Bluetooth manager reports it down, and the second report then marked it
+  up again, so the engine routed sends to a radio that was off until the
+  radio next changed state. Neither report is made while the radio is
+  unavailable. Coming to the foreground likewise restated the Wi-Fi Direct
+  layer up when that transport was disabled, stopped or had failed to start;
+  it now does so only while the transport runs.
+
+- **An event callback may replace itself, and one that throws no longer
+  costs the polling queue an event.** Events the bindings raise themselves
+  (neighbor discovered and lost, signal strength, carrier status) reached the
+  callback with its slot locked and no isolation, unlike events from the
+  engine: a callback that called `set_event_callback` deadlocked, and one
+  that threw skipped the polling queue. Both kinds are now delivered the same
+  way.
+
+- **Deleting a 1:1 session drops the Welcome still waiting for it.**
+  `mls_get_pending_welcome` kept returning, after the session was deleted, an
+  invitation to the group that no longer existed.
+
+- **A browser Bluetooth link-up refused before `initialize` leaves no link
+  behind.** The address stayed recorded as linked, so its fragments were
+  accepted and the next link-up was taken for a relink and never announced
+  the peer.
+
+- **Android `start()` with no protocol created rejects instead of putting up
+  the mesh service.** It started the foreground service over no engine, which
+  a sticky restart then kept alive. The JavaScript wrapper never does this; a
+  direct caller of the native module could.
+
 - **A second SDK app on an Android phone gets its own LAN streams.** The
   peer-stream listener bound the fixed port 8988, so a second app on the
   same phone failed to bind it and still advertised 8988 on the LAN: every

@@ -1020,6 +1020,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun start(promise: Promise) {
         try {
+            // Refused before anything below runs. start() used to call
+            // protocol?.start() and then startForegroundService() regardless,
+            // so a start with no protocol put "Mesh Active" up and registered a
+            // host over no engine, which a sticky restart then read as
+            // KEEP_ALIVE. The JavaScript wrapper never does this; a caller of
+            // the native module directly could.
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+
             // A one-shot event held from the *previous* mesh session is moot the
             // moment a new one comes up, and redelivering it would be the bug
             // this whole mechanism exists to prevent, inverted: an app told
@@ -1058,7 +1066,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // for the previous session belongs to whatever identity ran it.
             inboundEvents.beginSession()
             emitDiagnostic("info", "Starting protocol")
-            protocol?.start()
+            proto.start()
             emitDiagnostic("info", "Protocol core started")
 
             // Start foreground service to protect the process from being killed

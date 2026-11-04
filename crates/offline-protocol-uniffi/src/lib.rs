@@ -294,6 +294,52 @@ fn recover_rwlock_read<'a, T>(
     })
 }
 
+/// How many delivered events the polling queue keeps; the oldest goes first.
+const EVENT_QUEUE_CAPACITY: usize = 1000;
+
+/// Hands one event to the binding's callback and to the polling queue.
+///
+/// Every event the binding sees goes through here, whether the core engine
+/// raised it or the wrapper did. There used to be two copies, and the wrapper's
+/// called the callback while holding the slot's read guard and without
+/// isolating a throw: a callback that called `set_event_callback` deadlocked,
+/// and a throwing one unwound into the wrapper and skipped the queue.
+///
+/// The callback is cloned out of the slot before it is called, so it may
+/// re-enter the engine. A foreign callback that throws reaches here as a
+/// panic, because UniFFI has no error type for a void callback's exception;
+/// it is caught so the queue still gets the event, and the miss is named by
+/// type (#514).
+fn deliver_event(
+    callback_slot: &RwLock<Option<Arc<dyn EventCallback>>>,
+    queue: &Mutex<VecDeque<String>>,
+    event: &crate::CoreEvent,
+) {
+    let Ok(event_json) = event.to_json() else {
+        return;
+    };
+    let callback = recover_rwlock_read(callback_slot, "event_callback")
+        .as_ref()
+        .cloned();
+    if let Some(callback) = callback {
+        let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback.on_event(event_json.clone());
+        }));
+        if delivered.is_err() {
+            tracing::error!(
+                event = event.telemetry_name(),
+                "EventCallback.on_event threw; the binding missed this event",
+            );
+        }
+    }
+
+    let mut queue = recover_mutex(queue, "event_queue");
+    queue.push_back(event_json);
+    if queue.len() > EVENT_QUEUE_CAPACITY {
+        queue.pop_front();
+    }
+}
+
 fn recover_rwlock_write<'a, T>(
     lock: &'a RwLock<T>,
     name: &str,
@@ -2809,40 +2855,7 @@ impl OfflineProtocol {
         // Register event handler with core protocol to forward all events
         // This bridges events from the core protocol to JavaScript
         protocol.on_event(move |event| {
-            // Convert event to JSON
-            if let Ok(event_json) = event.to_json() {
-                // Clone callback Arc outside the lock to avoid holding the
-                // RwLock during callback invocation (prevents deadlock if the
-                // callback re-enters the protocol).
-                let callback_arc = recover_rwlock_read(&event_callback_clone, "event_callback")
-                    .as_ref()
-                    .cloned();
-                if let Some(callback) = callback_arc {
-                    // A foreign callback that throws reaches here as a panic:
-                    // UniFFI has no error type to lift a void callback's
-                    // exception into. Isolated here rather than left to the
-                    // engine's own isolation so the polling queue below still
-                    // gets the event, and the miss is named by type (#514).
-                    let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        callback.on_event(event_json.clone());
-                    }));
-                    if delivered.is_err() {
-                        tracing::error!(
-                            event = event.telemetry_name(),
-                            "EventCallback.on_event threw; the binding missed this event",
-                        );
-                    }
-                }
-
-                // Add to event queue for polling
-                let mut queue = recover_mutex(&event_queue_clone, "event_queue");
-                queue.push_back(event_json);
-
-                // Limit queue size to prevent memory issues
-                if queue.len() > 1000 {
-                    queue.pop_front();
-                }
-            }
+            deliver_event(&event_callback_clone, &event_queue_clone, &event);
         });
 
         Ok(Self {
@@ -3261,24 +3274,7 @@ impl OfflineProtocol {
 
     /// Internal: Emit an event through the callback
     fn emit_event(&self, event: crate::CoreEvent) {
-        // Convert event to JSON
-        if let Ok(event_json) = event.to_json() {
-            // Call the callback if set
-            if let Some(callback) =
-                recover_rwlock_read(&self.event_callback, "event_callback").as_ref()
-            {
-                callback.on_event(event_json.clone());
-            }
-
-            // Also queue it for polling
-            let mut queue = recover_mutex(&self.event_queue, "event_queue");
-            queue.push_back(event_json);
-
-            // Limit queue size to prevent memory issues
-            if queue.len() > 1000 {
-                queue.pop_front();
-            }
-        }
+        deliver_event(&self.event_callback, &self.event_queue, &event);
     }
 
     /// Internal: single seam for all carrier-level reachability signals
@@ -9521,6 +9517,72 @@ mod tests {
 
         protocol.ble_peer_lost("peer1".to_string()).unwrap();
         assert_eq!(protocol.ble_get_peer_count(), 1);
+    }
+
+    /// An event the wrapper raises itself (here `NeighborDiscovered`) reaches
+    /// the callback with the slot released, so the callback may replace
+    /// itself. The wrapper's own path used to hold the read guard across the
+    /// call, and `set_event_callback` from inside it deadlocked.
+    #[test]
+    fn a_callback_may_replace_itself_from_a_wrapper_raised_event() {
+        use std::sync::mpsc;
+        use std::sync::Weak;
+
+        struct Noop;
+        impl EventCallback for Noop {
+            fn on_event(&self, _event_json: String) {}
+        }
+        struct ReplacesItself(Weak<OfflineProtocol>);
+        impl EventCallback for ReplacesItself {
+            fn on_event(&self, _event_json: String) {
+                if let Some(protocol) = self.0.upgrade() {
+                    protocol.set_event_callback(Box::new(Noop));
+                }
+            }
+        }
+
+        let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
+        protocol.set_event_callback(Box::new(ReplacesItself(Arc::downgrade(&protocol))));
+
+        // On a thread with a deadline, so a regression fails instead of hanging.
+        let (done, finished) = mpsc::channel();
+        let raiser = protocol.clone();
+        std::thread::spawn(move || {
+            let result = raiser.ble_peer_discovered("peer1".to_string(), -50);
+            let _ = done.send(result.is_ok());
+        });
+        assert_eq!(
+            finished.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "set_event_callback from inside the callback deadlocked"
+        );
+    }
+
+    /// A callback that throws on a wrapper-raised event does not unwind into
+    /// the wrapper, and the polling queue still gets the event.
+    #[test]
+    fn a_throwing_callback_does_not_cost_the_polling_queue_a_wrapper_raised_event() {
+        struct Throws;
+        impl EventCallback for Throws {
+            fn on_event(&self, _event_json: String) {
+                panic!("the binding's listener threw");
+            }
+        }
+
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.set_event_callback(Box::new(Throws));
+        protocol
+            .ble_peer_discovered("peer1".to_string(), -50)
+            .unwrap();
+
+        let events = drained_events(&protocol);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("neighbor_discovered")
+                    || event.contains("NeighborDiscovered")),
+            "the queue lost the event: {events:?}"
+        );
     }
 
     #[test]

@@ -1215,11 +1215,25 @@ impl MlsManager {
     /// still there, because callers clean up their own state for the peer
     /// only once this succeeds. Deleting the session first and then failing
     /// on the stamp left a peer recorded as confirmed with no session.
+    ///
+    /// A Welcome still pending for the peer goes last, and only after the
+    /// session is gone. It invites the peer into the group just deleted, so
+    /// leaving it let `get_pending_welcome` hand out an invitation to a group
+    /// this device no longer has. Clearing it is best-effort: by then the
+    /// session is deleted, and an `Err` here would claim it was not.
     pub fn delete_session(&self, other_user_id: &str) -> Result<()> {
         let session_id = self.session_manager.get_session_id(other_user_id)?;
         self.storage
             .delete(StorageKeyType::GroupMetadata.as_str(), session_id.as_str())?;
-        self.session_manager.delete_session(other_user_id)
+        self.session_manager.delete_session(other_user_id)?;
+        if let Err(error) = self.clear_pending_welcome(other_user_id) {
+            warn!(
+                other_user_id = %other_user_id,
+                error = %error,
+                "Session deleted but its pending Welcome could not be cleared"
+            );
+        }
+        Ok(())
     }
 
     // ========================================================================
@@ -4339,6 +4353,26 @@ mod tests {
         // of the new session.
         alice.note_acknowledged_seal(&bob, crate::session::SealMark { index: 99, ..first });
         assert_eq!(alice.unacknowledged_seals(&bob), 0);
+    }
+
+    /// A Welcome stored for a session must not outlive it: it invites the
+    /// peer into the group that was just deleted.
+    #[test]
+    fn deleting_a_session_drops_its_pending_welcome() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+
+        // The FFI path creates the session on first send and parks its Welcome.
+        alice.encrypt_for_user(&addr("bob"), b"hello").unwrap();
+        assert!(alice.get_pending_welcome(&addr("bob")).unwrap().is_some());
+
+        alice.delete_session(&addr("bob")).unwrap();
+        assert!(!alice.has_session(&addr("bob")).unwrap());
+        assert!(alice.get_pending_welcome(&addr("bob")).unwrap().is_none());
     }
 
     /// RFC 8032 §7.1 TEST 1 Ed25519 public key.

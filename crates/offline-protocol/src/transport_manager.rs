@@ -31,7 +31,15 @@ pub struct TransportManager {
     /// serializing sends against status/metrics reads.
     transports: HashMap<TransportType, Arc<dyn Transport>>,
 
-    /// Current active transport.
+    /// The transport that last carried a frame, by any path.
+    ///
+    /// This is not the selector's current transport, and the two are allowed
+    /// to differ. The selector's copy is the DORS hysteresis anchor, and
+    /// setting it restarts the switch cooldown. A direct send to a mesh
+    /// neighbour (`send_via_transport`) updates this field only: moving the
+    /// anchor there would let every neighbour send reset the cooldown and pin
+    /// DORS to the mesh. A removed transport is cleared here; the selector
+    /// drops it on its next selection because it is no longer available.
     current_transport: Option<TransportType>,
 
     /// Transport selector (DORS).

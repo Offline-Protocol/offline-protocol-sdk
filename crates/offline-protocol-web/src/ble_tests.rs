@@ -496,3 +496,41 @@ fn two_browsers_reach_each_other_through_a_peripheral_that_notifies_everyone() {
         "a broadcasting peripheral stopped delivery"
     );
 }
+
+/// A link-up refused because the node has no Bluetooth transport yet leaves
+/// no trace: the address is not linked, so its fragments are refused, and
+/// once the node is initialized the next link-up announces the peer.
+#[test]
+fn a_link_up_refused_before_initialize_leaves_the_address_unlinked() {
+    let mut phone = side("phone");
+    let options = NodeOptions {
+        ble: true,
+        ..Default::default()
+    };
+    let mut early = Node::with_options("web-ble-test", "early", options).expect("node");
+    let identity = phone.node.ble_hello().expect("identity");
+
+    let proved = early
+        .ble_verify(phone.address.as_bytes(), &identity)
+        .expect("verifying needs no identity of our own");
+    assert!(early.ble_link_up(&proved, 244).is_err());
+    assert!(
+        early.ble_fragment_received(&proved, &[0u8; 4]).is_err(),
+        "a refused link-up left the address linked"
+    );
+
+    early.initialize().expect("initialize");
+    early.start().expect("start");
+    let proved = early
+        .ble_verify(phone.address.as_bytes(), &identity)
+        .expect("verify again");
+    early.ble_link_up(&proved, 244).expect("link up");
+    early.process().expect("process");
+    let mut announced = false;
+    while let Some(json) = early.poll_event() {
+        let event: Value = serde_json::from_str(&json).expect("event json");
+        announced |= event.to_string().contains(&phone.address)
+            && event.to_string().to_lowercase().contains("neighbor");
+    }
+    assert!(announced, "the peer was never announced after initialize");
+}
