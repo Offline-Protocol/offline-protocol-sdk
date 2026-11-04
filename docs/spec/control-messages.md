@@ -362,15 +362,24 @@ presence would depend on the receiver, and a relay mailbox would hold a hello
 for days and deliver it to a node that is no longer a neighbour.
 
 **When it runs.** A node starts the exchange when it discovers a neighbour it
-holds no current exchange with and does not already see as a member, and
-starts it again no sooner than five minutes later. A hello that names a nonce
+holds no current exchange with, and starts it again no sooner than five
+minutes later. That interval is the only condition: a node MUST NOT skip the
+exchange because it already sees the neighbour as a member, since whether a
+hello goes out would then depend on membership, and anyone who presents a
+recorded address on a link of its own would learn from one connection whether
+this node holds that address as a member. A node that receives its own
+certificate after meeting its neighbours starts a fresh exchange with each of
+them at once. A hello that names a nonce
 the node already answered is a duplicate or a replay and is not answered
 again, since a second answer under the same two nonces would seal a second
 plaintext under a key already used. A hello with a new nonce after an answer
 means the peer restarted: the node sends its own hello again, with the same
 nonce, then answers. The same nonce, because a fresh one would read to the peer
 as this node restarting, and two nodes answering that with fresh nonces would
-never settle.
+never settle. The one exception is a bound: after answering eight nonces of
+one peer under one nonce of its own, a node starts over with a fresh nonce, so
+the set of answered nonces stays bounded. Both sides then answer once more and
+settle, since a fresh nonce on either side makes every key new.
 
 **Step 1.** Each side sends a fresh nonce and
 

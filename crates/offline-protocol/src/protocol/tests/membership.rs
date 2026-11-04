@@ -395,6 +395,95 @@ fn a_rediscovery_within_the_interval_sends_nothing() {
     assert!(alice.take_member_frames().is_empty());
 }
 
+/// Past the interval a rediscovery runs the exchange again, for a member
+/// exactly as for a stranger. Skipping it for a peer already visible would
+/// make the hello an answer to "is that address a member here", readable by
+/// anyone who presents a recorded address on a link of its own.
+#[test]
+fn a_member_rediscovered_after_the_interval_is_greeted_like_anyone() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::member("bob", &key);
+    let mut carol = Node::member("carol", &publisher(2));
+    meet(&mut alice, &mut bob);
+    meet(&mut alice, &mut carol);
+    assert!(alice.sees(&bob));
+    assert!(!alice.sees(&carol));
+
+    alice.protocol.expire_member_exchanges();
+    alice.protocol.on_neighbor_discovered(&bob.address);
+    alice.protocol.on_neighbor_discovered(&carol.address);
+    let sent = alice.take_member_frames();
+    let hello_to = |peer: &Node| {
+        sent.iter()
+            .filter(|(to, m)| *to == peer.address && matches!(frame(m), MemberFrame::Hello(_)))
+            .count()
+    };
+    assert_eq!(hello_to(&bob), 1, "a visible member is greeted again");
+    assert_eq!(hello_to(&carol), 1, "as a stranger is");
+
+    // And the member stays recognised through the new exchange.
+    for (to, message) in sent {
+        if to == bob.address {
+            bob.receive_from(message, &alice.address);
+        }
+    }
+    run(&mut alice, &mut bob);
+    assert!(alice.sees(&bob));
+    assert!(bob.sees(&alice));
+}
+
+/// A certificate the publisher signed for the presenter's own address, but
+/// expired: it opens and verifies, and still does not make its presenter
+/// visible.
+///
+/// Two checks hold this: the exchange refuses an expired certificate, and
+/// `is_member_visible` compares the cached `not_after` with the clock. Either
+/// alone keeps the test green, and removing both fails it; the second is what
+/// ages out a certificate that was current when it verified.
+#[test]
+fn an_expired_certificate_in_the_exchange_is_not_visible() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut mallory = Node::launch("mallory", Some(key.verifying_key().to_bytes()));
+    let address: Address = mallory.address.parse().unwrap();
+    mallory.protocol.set_app_membership_unchecked(MemberCert {
+        address: address.clone(),
+        not_after: 1,
+        signature: key
+            .sign(&MemberCert::signing_payload(&address, 1))
+            .to_bytes(),
+    });
+    meet(&mut alice, &mut mallory);
+
+    assert!(!alice.sees(&mallory));
+    assert!(
+        mallory.sees(&alice),
+        "the positive control: the pair did run"
+    );
+}
+
+/// The application's backend issues the certificate after the node has met
+/// its neighbours. Supplying it starts a fresh exchange with each of them, so
+/// they learn now rather than on some later discovery.
+#[test]
+fn a_certificate_supplied_after_meeting_is_presented_at_once() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::launch("bob", Some(key.verifying_key().to_bytes()));
+    meet(&mut alice, &mut bob);
+    assert!(!alice.sees(&bob), "no certificate yet");
+
+    let cert = certificate(&key, &bob.address);
+    bob.protocol
+        .set_app_membership(&cert.to_bytes())
+        .expect("bob's own certificate");
+    run(&mut alice, &mut bob);
+
+    assert!(alice.sees(&bob));
+    assert!(bob.sees(&alice));
+}
+
 #[test]
 fn set_app_membership_refuses_what_would_never_verify() {
     let key = publisher(1);
@@ -604,6 +693,41 @@ mod by_hand {
         ChaCha20Poly1305::new(Key::from_slice(&opening))
             .decrypt(Nonce::from_slice(&[0u8; 12]), sealed.as_slice())
             .is_ok()
+    }
+
+    /// A peer that keeps sending fresh nonces is answered under one nonce of
+    /// this node's for eight of them, and the ninth starts this node over
+    /// with a fresh nonce, so the answered set stays bounded and no key
+    /// repeats.
+    #[test]
+    fn the_ninth_fresh_hello_restarts_with_a_fresh_nonce() {
+        let key = publisher(1);
+        let k_app = k_app(&key);
+        let mut carol = Node::member("carol", &key);
+        let mut alice = Node::member("alice", &key);
+        carol
+            .transport
+            .add_connected_peer(alice.address.clone(), -55);
+
+        let mut carol_nonces = Vec::new();
+        for i in 0..9u8 {
+            let nonce = [i + 1; 16];
+            let hello = MemberFrame::Hello(MemberHello {
+                nonce,
+                tag: tag(&k_app, &nonce, &alice, &carol),
+            });
+            let hello = signed_frame(&mut alice, &carol, &hello);
+            carol.receive_from(hello, &alice.address);
+            let sent = carol.take_member_frames();
+            assert_eq!(sent.len(), 2, "hello {i}: carol's hello, then the answer");
+            assert!(matches!(frame(&sent[1].1), MemberFrame::Response(_)));
+            carol_nonces.push(hello_nonce(&sent[0].1));
+        }
+        assert!(
+            carol_nonces[..8].iter().all(|n| *n == carol_nonces[0]),
+            "the same nonce while the peer restarts, so the two settle"
+        );
+        assert_ne!(carol_nonces[8], carol_nonces[0], "a fresh one past eight");
     }
 
     /// A member seals its credential only for a hello whose tag proves the

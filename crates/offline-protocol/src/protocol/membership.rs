@@ -48,7 +48,7 @@ use offline_protocol_sealed::membership::{
 use offline_protocol_transport::TransportType;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::types::CTRL_PK_META_KEY;
 use super::{base64_decode, internal_prefixes, OfflineProtocol};
@@ -140,10 +140,13 @@ fn hkdf32(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     // 32 bytes is far below HKDF-SHA256's 8160-byte ceiling, so expand
     // cannot fail; the fallback keeps the function total without a panic.
+    // It is logged, because a random `K_app` would turn a member into a
+    // stranger to every peer with nothing else to say why.
     if Hkdf::<Sha256>::new(salt, ikm)
         .expand(info, &mut out)
         .is_err()
     {
+        error!("HKDF-SHA256 refused a 32-byte expand; membership keys are random");
         out = random_array();
     }
     out
@@ -228,7 +231,29 @@ impl OfflineProtocol {
             "Application membership certificate set"
         );
         self.membership.cert = Some(cert);
+        self.restart_member_exchanges();
         Ok(())
+    }
+
+    /// Starts a fresh exchange with every current mesh neighbour.
+    ///
+    /// A certificate that arrives after this node met its neighbours (the
+    /// backend issues it once the application is running) would otherwise
+    /// reach none of them: every standing exchange already answered with
+    /// random bytes, and holds off a new one for
+    /// [`MEMBER_EXCHANGE_INTERVAL`]. Each neighbour sees a fresh nonce, which
+    /// reads as a restart, and answers it.
+    fn restart_member_exchanges(&mut self) {
+        self.membership.exchanges.clear();
+        let neighbours: Vec<String> = self
+            .transport_manager
+            .mesh_neighbors()
+            .into_iter()
+            .map(|n| n.peer_id)
+            .collect();
+        for peer in neighbours {
+            self.start_member_exchange(&peer);
+        }
     }
 
     /// Installs a certificate without the checks of
@@ -239,11 +264,29 @@ impl OfflineProtocol {
         self.membership.cert = Some(cert);
     }
 
+    /// Ages every standing exchange past [`MEMBER_EXCHANGE_INTERVAL`], so a
+    /// test can ask what the next discovery does once the interval is over.
+    #[cfg(test)]
+    pub(crate) fn expire_member_exchanges(&mut self) {
+        for exchange in self.membership.exchanges.values_mut() {
+            if let Some(earlier) = Instant::now().checked_sub(MEMBER_EXCHANGE_INTERVAL) {
+                exchange.started = earlier;
+            }
+        }
+    }
+
     /// Whether `peer` has proven, in a membership exchange, that it belongs to
     /// this node's application, and its certificate is still current.
     ///
     /// Always `false` with no publisher key configured. Nothing in the engine
     /// acts on it yet.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the visibility gate of a later step reads it; until then only tests do"
+        )
+    )]
     pub(crate) fn is_member_visible(&self, peer: &str) -> bool {
         self.membership
             .visible
@@ -252,15 +295,20 @@ impl OfflineProtocol {
     }
 
     /// Starts the exchange with a neighbour discovery just reported, unless
-    /// one is standing or the neighbour is already visible.
+    /// one is standing.
     ///
     /// Called for every node, configured or not: an unconfigured node's hello
     /// is random bytes of the same size, so sending it reveals nothing.
+    ///
+    /// Never skipped because the neighbour is already visible. Whether a
+    /// hello goes out would then depend on membership: a node that labels
+    /// its own link with a recorded address (R16) would learn, from one
+    /// connection, whether this node holds that address as a member, and a
+    /// passive listener would see member pairs fall silent on a rediscovery.
+    /// The visible set decides [`Self::is_member_visible`] and nothing that
+    /// goes on the air.
     pub(super) fn start_member_exchange(&mut self, peer: &str) {
         if self.mls_manager.is_none() || peer.parse::<Address>().is_err() {
-            return;
-        }
-        if self.is_member_visible(peer) {
             return;
         }
         if let Some(standing) = self.membership.exchanges.get(peer) {
@@ -540,9 +588,10 @@ impl OfflineProtocol {
             return;
         };
 
-        // The same signature and seal on both paths, so neither the size nor
-        // the cost of the answer says which one ran. On a mismatch the key is
-        // random, which makes the sealed bytes random to everyone.
+        // The same signature, derivation and seal on both paths, so neither
+        // the size nor the cost of the answer says which one ran. On a
+        // mismatch the key is derived from random input keying material,
+        // which makes the sealed bytes random to everyone.
         let transcript = transcript_signing_payload(&local, ours, &peer_addr, &hello.nonce);
         let signature = match self.sign_with_identity(&transcript) {
             Some(signature) => signature,
@@ -553,7 +602,14 @@ impl OfflineProtocol {
                 hkdf32(app_key, Some(&salt), &exchange_key_info(&local)),
                 Some(cert.to_bytes()),
             ),
-            None => (random_array(), None),
+            None => (
+                hkdf32(
+                    &random_array::<32>(),
+                    Some(&salt),
+                    &exchange_key_info(&local),
+                ),
+                None,
+            ),
         };
         let mut plaintext = [0u8; MEMBER_CREDENTIAL_LEN];
         if let Some(cert_bytes) = cert_bytes {
