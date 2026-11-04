@@ -42,7 +42,7 @@ The attacker is one of three parties:
 |---|---|---|
 | 1. Honest application B | the SDK | sees nothing of A |
 | 2. Modified application B | the SDK source, any radio | sees "an SDK node with address X" and nothing that names or groups A's users; cannot pass as A |
-| 3. A modified application holding A's binary | A's publisher public key | recognises an A node one connection at a time; cannot forge membership |
+| 3. A modified application holding A's binary | A's publisher public key | recognises an A node one connection at a time; cannot forge membership, but can enrol through A's backend as any user can (below) |
 
 Party 3's recognition is inherent: whoever holds what A's users use to
 recognise each other can recognise them too. Forgery is what this decision
@@ -57,8 +57,9 @@ removes.
    relay path, and no relay decision may ever read membership.
 2. **Visibility requires proof.** With a publisher key configured, a peer is
    reported to the application, and the application's automatic side effects
-   run for it, only once it has proven membership of the same application. A
-   missing proof means "not visible", never "pass" (the shape of
+   run for it, only once it is **admitted** (below): it has proven membership
+   of the same application, or the application or a trusted group vouched for
+   it. A missing proof means "not admitted", never "pass" (the shape of
    [ADR 0010](0010-unconditional-leaf-identity-binding.md)).
 3. **A member answers no stranger end to end.** A configured node sends no
    end-to-end answer to a peer that is not admitted (below), and the stranger
@@ -94,7 +95,11 @@ The engine never generates or stores the publisher private key. Two issuing
 modes produce the same certificate:
 
 - **Backend** (recommended): the integrator's server signs the address the
-  application sends it.
+  application sends it. Anyone who can run the application can ask for a
+  certificate for an address of their own, so party 3 holding A's binary
+  enrols rather than forges. In this mode the boundary is the backend's
+  enrolment policy (who it signs for, and whom it stops renewing), not the
+  signature, and the integrator guide and the threat model say so.
 - **Embedded**: the application ships the private key and calls a pure helper,
   `sign_app_membership(private_key, address, not_after)`, which keeps no state
   and never logs, stores or transmits the key. This hands party 3 forgery for
@@ -114,7 +119,9 @@ which the frame already carries, so no new exemption class is needed.
    A node with no publisher key, or with a different one, sends 32 random
    bytes. Every SDK node sends this frame, so sending it reveals nothing.
 2. A receiver checks the tag with its own `K_app`, and **always** sends the
-   second frame, of one fixed size, whatever the result. On a match it is
+   second frame, of one fixed size, whatever the result. A node with no
+   publisher key sends it too, as random bytes, so a configured node and an
+   unconfigured one cannot be told apart by it. On a match it is
    `AEAD(HKDF(K_app, nonce_lo || nonce_hi), cert || sig_identity(transcript))`,
    where `nonce_lo` is the nonce of the side whose address sorts lower, so
    both ends derive the same key. On a mismatch it is random bytes of the
@@ -125,9 +132,15 @@ which the frame already carries, so no new exemption class is needed.
 3. A receiver verifies the certificate against `publisher_pk`, its address
    against the frame's sender, `not_after`, and the transcript signature. A
    pass makes the peer **visible**, cached per address until `not_after`.
+   The cache is cleared whenever `app_publisher_key` changes, so a rotated
+   key pair makes every old member a stranger at once rather than at its
+   certificate's expiry.
 
-**Nothing observable depends on the match.** A receiver that stopped on a
-mismatch would be an oracle. The hello is a signed control frame, the
+**Nothing observable depends on the match.** Neither size nor cost: on a
+mismatch the receiver still performs one signature and one AEAD seal over
+dummy input before emitting the random bytes, so the two paths take the same
+work and a timing measurement does not separate them. A receiver that stopped
+on a mismatch would be an oracle. The hello is a signed control frame, the
 deduplicator forgets its id after an hour while the freshness window admits
 it for thirty days ([ADR 0023](0023-a-control-frame-states-when-it-was-made.md)),
 and R16 lets party 2 label its own link with X's address. Party 2 could then
@@ -153,7 +166,11 @@ peer: `NeighborDiscovered`, `NeighborLost`, `PeerRssi`, `presence_updated` on
 receipt, the key-package push, subscription renewal and the data-sync kick in
 `on_neighbor_discovered`. The emission decision moves into the core, and the
 FFI choke point (`notify_neighbor_reachable`) and the browser engine's
-emission sites ask it.
+emission sites ask it. The emission gate and the inbound gate ask **one
+predicate, admitted** (below); visibility is one of its sources, not the gate
+itself. Gating emission on visibility alone would break the leaf pairing
+described next, and would cut presence and neighbour events for every
+existing contact the release the key is turned on.
 
 It does not cover an action the application takes toward an address it
 supplied: an explicit send, pair call or session request, or a scanned
@@ -199,7 +216,7 @@ admitted when one of these holds:
 
 | Frame from a sender not admitted | Processed | Answered |
 |---|---|---|
-| Key package, Welcome, connection request, service subscription | No: dropped before any state changes, so no session, no pending package and no subscription forms | No |
+| Key package, 1:1 Welcome, group Welcome (`__GRP_MLS_WELCOME__`), connection request, service subscription | No: dropped before any state changes, so no session, no group, no pending package and no subscription forms | No |
 | Data frame under a session or group this node holds | Not applicable: holding the session or being on the roster admits the sender | Not applicable |
 | Anything else addressed to this node | No | No |
 | A frame addressed to someone else | Relayed as before | Not applicable |
@@ -214,10 +231,15 @@ proof and the request arrive, retry and expire together and no ordering
 between two frames is assumed:
 
 - in the **key package payload**, binding that package;
-- in the **Welcome**, binding that Welcome, for the path where the initiator
-  built a session from a package it fetched (a Nostr username lookup) and the
-  recipient's first frame from it is a Welcome with no key package of the
-  sender's to hash.
+- in the **1:1 Welcome**, binding that Welcome, for the path where the
+  initiator built a session from a package it fetched (a Nostr username
+  lookup) and the recipient's first frame from it is a Welcome with no key
+  package of the sender's to hash;
+- in the **group Welcome** (`__GRP_MLS_WELCOME__`), binding that Welcome, for
+  the path where an admin invites an address whose key package it fetched the
+  same way. The invitee holds no session with the inviter and, until it
+  joins, no roster that names it, so without the proof a group invite to a
+  member never met would be dropped.
 
 ```
 salt  = random(16)
@@ -226,13 +248,13 @@ proof = salt || AEAD_k(nonce = 0, cert || sig_identity(
           "offline-app-member-e2e-v1" || addr_recipient || kind || hash(frame_body)))
 ```
 
-`kind` is one byte naming key package or Welcome, and `frame_body` is the
-package or the Welcome with the proof field absent. `K_app` is shared by every
+`kind` is one byte naming key package, 1:1 Welcome or group Welcome, and
+`frame_body` is the package or the Welcome with the proof field absent. `K_app` is shared by every
 install of the application, so the AEAD key is derived per proof from a fresh
 salt and is used once; a fixed nonce under a fleet-shared key would repeat
 across installs. Binding the recipient, the kind and the body stops a captured
 proof from being replayed to another member, onto another package or onto
-another Welcome. A relay that does not hold `K_app` (party 2) sees random
+another Welcome of either kind. A relay that does not hold `K_app` (party 2) sees random
 bytes. A relay that does (party 3) can decrypt every proof it carries and
 learns which address is opening a session to which: party 3's recognition
 residual, extended from one connection to the proofs it happens to carry.
@@ -299,11 +321,14 @@ with no certificate behaves as today.
 - **The contracts move:** a UDL change (one config field, three functions),
   so every binding is regenerated; a new reserved prefix; an optional field in
   the sealed rich payload; an optional `member_proof` field in the key package
-  payload and in the Welcome, both in `offline-protocol-sealed`; a new
+  payload, the 1:1 Welcome and the group Welcome payload, all in
+  `offline-protocol-sealed`, and the group Welcome handler among the receive
+  sites the source guard enumerates; a new
   derivation for the app tag and a new instance-selection rule in the BLE
   framing chapter and its three mirrors; R15, R17 and R22 are rewritten, and
   a new threat-model entry states party 3's residual, including what it reads
-  from the proofs it carries, and embedded mode's forgery.
+  from the proofs it carries, backend mode's enrolment boundary, and embedded
+  mode's forgery.
 
 ## Alternatives considered
 
@@ -346,8 +371,12 @@ A reply path added to the engine (a new acknowledgement, error or capability
 answer) that does not ask the inbound predicate. It confirms to a stranger
 that an address is live, which is the last thing invariant 3 protects.
 
-A second exchange frame sent only on a match, or sized by the result. That
-reopens the replay oracle the unconditional step 2 closes.
+A second exchange frame sent only on a match, sized by the result, or cheaper
+to produce on a mismatch. That reopens the replay oracle the unconditional
+step 2 closes.
+
+An emission site that asks visibility instead of admission. Leaf pairing and
+every existing contact's presence break the release the key is turned on.
 
 Weakening a property this design rests on without naming it: the control-plane
 signature gate ([ADR 0004](0004-control-plane-signature-gate.md)), which makes
