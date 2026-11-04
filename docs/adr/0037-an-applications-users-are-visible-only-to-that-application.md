@@ -121,16 +121,19 @@ like every other control frame. The signature proves only the sender address,
 which the frame already carries, so no new exemption class is needed.
 
 1. Each side sends `nonce(16) || tag(16)`, where
-   `tag = HMAC(K_app, "hello" || nonce_self || addr_self || addr_peer)[0..16]`.
+   `tag = HMAC(K_app, "offline-app-member-hello-v1" || nonce_self || addr_self || addr_peer)[0..16]`.
    A node with no publisher key, or with a different one, sends 32 random
    bytes. Every SDK node sends this frame, so sending it reveals nothing.
 2. A receiver checks the tag with its own `K_app`, and **always** sends the
    second frame, of one fixed size, whatever the result. A node with no
    publisher key sends it too, as random bytes, so a configured node and an
    unconfigured one cannot be told apart by it. On a match it is
-   `AEAD(HKDF(K_app, nonce_lo || nonce_hi), cert || sig_identity(transcript))`,
+   `AEAD(HKDF(K_app, salt = nonce_lo || nonce_hi, info = ... || addr_sender), cert || sig_identity(transcript))`,
    where `nonce_lo` is the nonce of the side whose address sorts lower, so
-   both ends derive the same key. On a mismatch it is random bytes of the
+   both ends derive the same salt. The sender's address is in the key because
+   both sides send a response from the same two nonces, and one key for both
+   would seal two plaintexts under one key and one nonce. The exact layouts
+   are in the [control-message chapter](../spec/control-messages.md#application-membership). On a mismatch it is random bytes of the
    same length. The transcript signature ties the certificate to this live
    exchange, so a recorded frame does not replay
    ([R16](../security/threat-model.md#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier)

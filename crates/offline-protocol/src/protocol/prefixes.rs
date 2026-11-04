@@ -1,6 +1,6 @@
 //! Internal message prefix definitions and base64 utilities.
 //!
-//! Six of the prefixes below are defined in `offline-protocol-sealed` and
+//! Seven of the prefixes below are defined in `offline-protocol-sealed` and
 //! named here rather than spelled out: the ones a leaf node also emits and
 //! parses, with a different MLS implementation. Reservation still happens
 //! here, because `INTERNAL_PREFIXES` is what refuses application content that
@@ -83,6 +83,15 @@ define_internal_prefixes! {
     /// `decrypt_success`) converges. Consumed on receipt, never surfaced to the
     /// app. Defined in `offline-protocol-sealed`.
     SESSION_CONFIRM_ENCRYPTED = offline_protocol_sealed::prefixes::SESSION_CONFIRM_ENCRYPTED,
+    /// Prefix for the application membership exchange (ADR 0037), hop 0
+    /// and never relayed. Reserved ahead of the exchange on the terms
+    /// `DATA_V1` was, so that the release which carries it is the floor for
+    /// a radio neighbourhood shared cleanly: a build that does not reserve
+    /// it delivers the frame to its application as text. Not in
+    /// `DATA_PLANE_PREFIXES`, so it is signature-gated by construction.
+    /// Consumed on receipt until the exchange is implemented. Defined in
+    /// `offline-protocol-sealed`.
+    MEMBER = offline_protocol_sealed::prefixes::MEMBER,
     /// Prefix for the sealed rich payload (`RichPayloadV1` JSON) inside a
     /// decrypted MLS plaintext. Only ever travels INSIDE an `ENCRYPTED`
     /// envelope, negotiated via `rich_versions` in the key package; listed

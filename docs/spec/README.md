@@ -47,6 +47,7 @@ the crate whose code they pin, so a packaged build carries its own vectors:
 | `crates/offline-protocol-sealed/tests/data/mls-envelope-v1.vectors.json` | [Encryption envelopes](encryption-envelopes.md) |
 | `crates/offline-protocol-sealed/tests/data/key-package-v1.vectors.json` | [Capability negotiation](capability-negotiation.md) |
 | `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md#the-identity-assertion) |
+| `crates/offline-protocol-sealed/tests/data/app-membership-v1.vectors.json` | [Control messages](control-messages.md#application-membership) |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) |
 | `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json` | [Custody](custody.md) |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) |

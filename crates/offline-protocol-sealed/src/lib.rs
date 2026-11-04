@@ -29,6 +29,9 @@
 //!   its address with is a peer one platform can verify and another cannot,
 //!   and the symptom is a link that carries frames the receiving core then
 //!   refuses as unattributed.
+//! - [`membership`]: a second copy of a membership layout is a MAC, a key or
+//!   a signature over different bytes, and it fails as "not a member", which
+//!   is exactly what the exchange is built to look like, so nobody sees it.
 //!
 //! # Why this is not part of `offline-protocol-core`
 //!
@@ -61,6 +64,7 @@ pub mod error;
 pub mod freshness;
 pub mod identity_assertion;
 pub mod keypackage;
+pub mod membership;
 pub mod prefixes;
 
 pub use canonical::{
@@ -91,6 +95,9 @@ pub use identity_assertion::{
 pub use keypackage::{
     KeyPackagePayload, ACK_COALESCED_V1, ACK_UNDECRYPTABLE_V1, CTRL_SIGN_V2,
     MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1, SVC_SUB_V1,
+};
+pub use membership::{
+    MemberCert, MemberCredential, MemberFrame, MemberHello, MemberProof, ProofKind,
 };
 
 #[cfg(all(test, feature = "std"))]

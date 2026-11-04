@@ -61,5 +61,10 @@ sha2 = { version = "0.10", default-features = false }
 offline-protocol-core = { path = "../offline-protocol-core", version = "0.31.0", default-features = false }
 
 [dev-dependencies]
+# Test-only, to check the membership vectors' derived keys and tag
+# (src/membership.rs). The library itself links no HKDF or HMAC (ADR 0022), and
+# a dev-dependency never reaches a bare-metal build of it.
+hkdf = { workspace = true }
+hmac = { workspace = true }
 
 [lib]

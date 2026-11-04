@@ -1,0 +1,100 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for application membership, from",
+    "docs/spec/control-messages.md (Application membership) and ADR 0037.",
+    "",
+    "Computed from the construction stated in that chapter, not by",
+    "running the codec they pin. HKDF-SHA256 and HMAC-SHA256 are computed",
+    "here over hashlib; the AEAD output is not pinned, since RFC 8439",
+    "carries its own vectors.",
+    "",
+    "Both signatures are placeholders (counting bytes): what is specific",
+    "to this protocol is which bytes are signed, and that is what these pin.",
+    "The publisher key and both addresses trace to RFC 8032 section 7.1",
+    "test vectors 1, 2 and 3."
+  ],
+  "app_key": {
+    "publisher_public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "app_id": "com.example.chat",
+    "info_hex": "6f66666c696e652d70726f746f636f6c2d6170702d7631636f6d2e6578616d706c652e63686174",
+    "k_app_hex": "bfddef4421e9539c3bebe6b8dd00a11bdd45b33cf42c5641e75ed22b343a9687"
+  },
+  "addresses": {
+    "a": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+    "a_payload_hex": "0139f713d0a644253f04529421b9f51b9b08979d08",
+    "b": "off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk",
+    "b_payload_hex": "01dac073e0123bdea59dd9b3bda9cf6037f63aca82",
+    "lower": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0"
+  },
+  "certificate": {
+    "address": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+    "not_after": 1800000000,
+    "signing_payload_hex": "6f66666c696e652d6170702d6d656d6265722d76310139f713d0a644253f04529421b9f51b9b08979d08000000006b49d200",
+    "signature_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "bytes_hex": "0139f713d0a644253f04529421b9f51b9b08979d08000000006b49d200000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+  },
+  "hello": {
+    "note": "a sends to b. The receiver recomputes the input with itself as addr_peer, so the same nonce on another link is another tag.",
+    "nonce_hex": "000102030405060708090a0b0c0d0e0f",
+    "tag_input_hex": "6f66666c696e652d6170702d6d656d6265722d68656c6c6f2d7631000102030405060708090a0b0c0d0e0f0139f713d0a644253f04529421b9f51b9b08979d0801dac073e0123bdea59dd9b3bda9cf6037f63aca82",
+    "tag_hex": "58be05d3e4ec66593b9f20f4baf417f9",
+    "body": "AQEAAQIDBAUGBwgJCgsMDQ4PWL4F0+TsZlk7nyD0uvQX+Q=="
+  },
+  "exchange": {
+    "note": "Each side's response is sealed under a key derived with its own address in the info. One key for both directions would seal two plaintexts under one key and one zero nonce.",
+    "nonce_a_hex": "000102030405060708090a0b0c0d0e0f",
+    "nonce_b_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "salt_hex": "000102030405060708090a0b0c0d0e0ff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "key_info_a_hex": "6f66666c696e652d6170702d6d656d6265722d65786368616e67652d76310139f713d0a644253f04529421b9f51b9b08979d08",
+    "key_info_b_hex": "6f66666c696e652d6170702d6d656d6265722d65786368616e67652d763101dac073e0123bdea59dd9b3bda9cf6037f63aca82",
+    "key_a_hex": "104a52d597c53932593cc6e20533de13479dd5525788d240d44a8d258e4cd8af",
+    "key_b_hex": "05194e00e733b78005a87f2720c4b4d29a0cdc54d4331366b07ce9022422e7ed",
+    "transcript_a_hex": "6f66666c696e652d6170702d6d656d6265722d7472616e7363726970742d76310139f713d0a644253f04529421b9f51b9b08979d0801dac073e0123bdea59dd9b3bda9cf6037f63aca82000102030405060708090a0b0c0d0e0ff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "credential_hex": "0139f713d0a644253f04529421b9f51b9b08979d08000000006b49d200000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "response_sealed_hex": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+    "response_body": "AQKrq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urqw=="
+  },
+  "proof": {
+    "key_package": {
+      "recipient": "off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk",
+      "kind": 1,
+      "frame_body_hex": "7b226578616d706c65223a226b6579207061636b616765207061796c6f6164227d",
+      "signing_payload_hex": "6f66666c696e652d6170702d6d656d6265722d6532652d763101dac073e0123bdea59dd9b3bda9cf6037f63aca8201449715279bedf3a327fd4a13d3b69f7e97f540e858b2ebf3fbed93d3940f1946"
+    },
+    "discovery_query": {
+      "note": "Gossip names no single recipient: 21 zero bytes, which no address payload is.",
+      "kind": 4,
+      "frame_body_hex": "7b2271756572795f6964223a227131222c226f726967696e61746f72223a226f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a387230227d",
+      "signing_payload_hex": "6f66666c696e652d6170702d6d656d6265722d6532652d763100000000000000000000000000000000000000000004bb0fd8a3884e5cd6c5bb5bbec7fd79a58df594d6b9125c65a4efc8a3f5a86f3f"
+    },
+    "salt_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    "key_hex": "55ff6b504ff80c976887b083d0ee8bf968bbdda48311c7f5bdd8580a80f24acb",
+    "bytes_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+  },
+  "rejects": [
+    {
+      "name": "version_2",
+      "body": "AgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "name": "step_3",
+      "body": "AQMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "name": "hello_short",
+      "body": "AQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "hello_size_as_response",
+      "body": "AQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "name": "response_long",
+      "body": "AQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    },
+    {
+      "name": "empty",
+      "body": ""
+    }
+  ]
+}

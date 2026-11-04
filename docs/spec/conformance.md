@@ -116,6 +116,7 @@ are computed independently of that code.
 | `crates/offline-protocol-sealed/tests/data/mls-envelope-v1.vectors.json` | [Encryption envelopes](encryption-envelopes.md) | Both |
 | `crates/offline-protocol-sealed/tests/data/key-package-v1.vectors.json` | [Capability negotiation](capability-negotiation.md) | Parse |
 | `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md#the-identity-assertion) | Both |
+| `crates/offline-protocol-sealed/tests/data/app-membership-v1.vectors.json` | [Control messages](control-messages.md#application-membership) | Both |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) | Both |
 | `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json` | [Custody](custody.md) | Both |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) | Both |

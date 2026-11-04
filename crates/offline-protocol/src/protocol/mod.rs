@@ -3685,6 +3685,16 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // A step of the application membership exchange (ADR 0037). Past the
+        // control gate like every signed frame. Reserved before the exchange
+        // exists, so it is consumed and nothing else: never delivered as
+        // text, and never answered, since an answer would depend on whether
+        // this node is a member and the exchange's privacy is that nothing
+        // observable does.
+        if content.starts_with(internal_prefixes::MEMBER) {
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // --- Group (mesh/MLS) messages ---
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_MSG) {
