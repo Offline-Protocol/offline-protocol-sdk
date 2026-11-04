@@ -140,6 +140,7 @@ pause
 process
 process_file_chunk
 protocol_lock_diagnostics
+provision_leaf_membership
 receive_message
 reject_connection_request
 rekey_session

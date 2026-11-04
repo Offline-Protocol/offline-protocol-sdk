@@ -319,6 +319,10 @@ PLATFORM: frozenset[str] = frozenset(
         "set_app_membership",
         "app_membership_status",
         "sign_app_membership",
+        # provisioning a paired leaf hands it the application's publisher key
+        # and a certificate in the one identity's session: the same
+        # operator-held configuration, acted on toward a device
+        "provision_leaf_membership",
     }
 )
 

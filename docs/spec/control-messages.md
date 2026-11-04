@@ -304,6 +304,7 @@ travels exactly one hop.
 | Prefix | Direction | Body |
 |--------|-----------|------|
 | `__MEMBER__` | neighbour to neighbour, hop 0, never relayed | One step of the membership exchange, base64 (standard, padded) of a fixed-size binary body. Signature-gated like every control frame |
+| `__MEMBER_PROVISION__` | phone to its paired leaf, only inside an `__MLS_ENC__` 1:1 session | A leaf's membership provisioning: base64 of a fixed body carrying the publisher key, the leaf's certificate and the phone's clock. Never a frame of its own; consumed wherever else it is found |
 
 The frame belongs to the visibility rule of
 [ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md):
@@ -457,6 +458,21 @@ address against the party the frame speaks for**: the frame's sender for kinds
 reaches a provider through gossip and its direct sender is any relay. Without
 that check a member's proof, recorded once, would carry any other node's frame
 of the same kind and body hash.
+
+**Leaf provisioning.** A leaf cannot fetch a certificate, so its paired phone
+hands it one inside their 1:1 session, as the plaintext of an ordinary sealed
+message: `__MEMBER_PROVISION__` followed by base64 (standard, padded) of
+`version(1) = 1 || kind(1) = 3 || publisher_key(32) || cert(93) ||
+u64be(supplied_time)`, 135 bytes. `kind` 3 is no `__MEMBER__` step, so neither
+body parses as the other. The vectors' `provision` block pins it. Being opened
+in that session is the whole authorization; the prefix is reserved so
+application text cannot carry it, and a node that finds it anywhere but a
+decrypted 1:1 message, or that is not a leaf, consumes it and acts on nothing.
+The leaf stores what it carries before acknowledging, checks every
+`not_after` against the latest time it was supplied, and from then on runs this
+exchange like any node and stamps `app_id` `"offline"` on everything it sends.
+What a leaf owes is in
+[Leaf node provisioning](leaf-provisioning.md#application-membership).
 
 **Admitted.** With a publisher key configured, one predicate decides what the
 application is told and what the node answers. A peer is admitted when it is

@@ -41,6 +41,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   The end-to-end proof's sealing key now has its own label,
   `offline-app-member-e2e-key-v1`, apart from the signing domain.
 
+- **A leaf takes part in application membership.** A phone provisions its
+  paired leaf with `provision_leaf_membership(peer_id, cert)`, which seals the
+  publisher key, the leaf's certificate and the phone's clock inside the pair's
+  1:1 session under the new reserved prefix `__MEMBER_PROVISION__`. The leaf
+  stores them before acknowledging, then runs the `__MEMBER__` exchange with
+  every neighbour firmware reports (`LeafDevice::neighbor_discovered`), checks
+  certificates against the latest time it was supplied rather than a clock,
+  and stamps the constant wire `app_id` `"offline"`. A leaf nobody provisions
+  is unchanged. `LeafEvent` gains `MembershipProvisioned` and `MemberVisible`,
+  and `LeafError` gains `MembershipRefused`
+  ([leaf provisioning](docs/spec/leaf-provisioning.md#application-membership)).
+
 - **A browser node's start can be aborted.** `OfflineNode.start({ signal })`
   ends the worker of a start that has not finished, and with it the
   account's lock or its place in the queue for one, and rejects with the

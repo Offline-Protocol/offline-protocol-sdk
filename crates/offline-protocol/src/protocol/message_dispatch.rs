@@ -1623,9 +1623,20 @@ impl OfflineProtocol {
                             "Dropping a sealed service frame that is not a request or response"
                         );
                     }
+                    // Leaf provisioning (ADR 0037) is what a phone seals to
+                    // its paired leaf. An engine is never provisioned this
+                    // way, so one sealed to it is consumed, never surfaced.
+                    let member_provision = text.starts_with(internal_prefixes::MEMBER_PROVISION);
+                    if member_provision {
+                        debug!(
+                            sender = %sender_owned,
+                            "Consumed a sealed membership provisioning frame; an engine takes its certificate from the application"
+                        );
+                    }
                     let surfaced = if is_session_confirm
                         || sealed_service_frame.is_some()
                         || unroutable_service_frame
+                        || member_provision
                     {
                         Some(InternalMessageResult::Consumed)
                     } else if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {

@@ -122,6 +122,7 @@ public interface OfflineProtocolInterface {
     public void process() throws ProtocolException;
     public void processFileChunk(java.lang.String fileId, int chunkIndex, int totalChunks, long fileSize, java.lang.String fileName, java.lang.String fileChecksum, java.util.List<java.lang.Byte> data) throws ProtocolException;
     public ProtocolLockDiagnostics protocolLockDiagnostics();
+    public java.lang.String provisionLeafMembership(java.lang.String peerId, java.util.List<java.lang.Byte> cert) throws ProtocolException;
     public java.lang.String receiveMessage();
     public java.lang.String rejectConnectionRequest(java.lang.String recipient) throws ProtocolException;
     public boolean rekeySession(java.lang.String peerId) throws ProtocolException;

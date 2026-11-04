@@ -1209,6 +1209,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_provision_leaf_membership(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request(
@@ -1753,6 +1755,8 @@ internal object UniffiLib {
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(`ptr`: Long,`fileId`: RustBuffer.ByValue,`chunkIndex`: Int,`totalChunks`: Int,`fileSize`: Long,`fileName`: RustBuffer.ByValue,`fileChecksum`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_provision_leaf_membership(`ptr`: Long,`peerId`: RustBuffer.ByValue,`cert`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2541,6 +2545,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() and 0xFFFF) != 63421) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_provision_leaf_membership() and 0xFFFF) != 63566) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() and 0xFFFF) != 24572) {
@@ -4941,6 +4948,8 @@ public interface OfflineProtocolInterface {
     
     fun `protocolLockDiagnostics`(): ProtocolLockDiagnostics
     
+    fun `provisionLeafMembership`(`peerId`: kotlin.String, `cert`: List<kotlin.UByte>): kotlin.String
+    
     fun `receiveMessage`(): kotlin.String?
     
     fun `rejectConnectionRequest`(`recipient`: kotlin.String): kotlin.String
@@ -6868,6 +6877,22 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `provisionLeafMembership`(`peerId`: kotlin.String, `cert`: List<kotlin.UByte>): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_provision_leaf_membership(
+        it,
+        
+        FfiConverterString.lower(`peerId`),
+        FfiConverterSequenceUByte.lower(`cert`),_status)
 }
     }
     )

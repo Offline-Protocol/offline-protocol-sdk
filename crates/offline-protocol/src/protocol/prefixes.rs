@@ -1,6 +1,6 @@
 //! Internal message prefix definitions and base64 utilities.
 //!
-//! Seven of the prefixes below are defined in `offline-protocol-sealed` and
+//! Eight of the prefixes below are defined in `offline-protocol-sealed` and
 //! named here rather than spelled out: the ones a leaf node also emits and
 //! parses, with a different MLS implementation. Reservation still happens
 //! here, because `INTERNAL_PREFIXES` is what refuses application content that
@@ -92,6 +92,14 @@ define_internal_prefixes! {
     /// Consumed on receipt until the exchange is implemented. Defined in
     /// `offline-protocol-sealed`.
     MEMBER = offline_protocol_sealed::prefixes::MEMBER,
+    /// Prefix for the membership provisioning a phone seals to its paired
+    /// leaf (ADR 0037, "Leaves"): the publisher key, the leaf's certificate
+    /// and the time. Only ever travels INSIDE an `ENCRYPTED` envelope of the
+    /// pair's 1:1 session; reserved so application text sent into that
+    /// session can never provision the device. An engine is never
+    /// provisioned this way, so it consumes the frame wherever it finds it.
+    /// Defined in `offline-protocol-sealed`.
+    MEMBER_PROVISION = offline_protocol_sealed::prefixes::MEMBER_PROVISION,
     /// Prefix for the sealed rich payload (`RichPayloadV1` JSON) inside a
     /// decrypted MLS plaintext. Only ever travels INSIDE an `ENCRYPTED`
     /// envelope, negotiated via `rich_versions` in the key package; listed

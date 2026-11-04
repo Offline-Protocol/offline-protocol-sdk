@@ -47,12 +47,13 @@ use chrono::Utc;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use offline_protocol_core::time::{Duration, Instant};
-use offline_protocol_core::{Address, Message, MessagePriority, TTL};
+use offline_protocol_core::{Address, ContentType, Message, MessageId, MessagePriority, TTL};
 use offline_protocol_sealed::membership::{
     app_key_info, e2e_proof_signing_payload, exchange_key_info, exchange_salt, hello_tag_input,
     transcript_signing_payload, MemberCert, MemberCredential, MemberFrame, MemberHello,
-    MemberProof, ProofKind, APP_KEY_LEN, MEMBER_CREDENTIAL_LEN, MEMBER_E2E_KEY_INFO,
-    MEMBER_NONCE_LEN, MEMBER_PROOF_META_KEY, MEMBER_SEALED_LEN, MEMBER_TAG_LEN,
+    MemberProof, MemberProvision, ProofKind, APP_KEY_LEN, MEMBER_CREDENTIAL_LEN,
+    MEMBER_E2E_KEY_INFO, MEMBER_NONCE_LEN, MEMBER_PROOF_META_KEY, MEMBER_SEALED_LEN,
+    MEMBER_TAG_LEN,
 };
 use offline_protocol_transport::TransportType;
 use rand_core::{OsRng, RngCore};
@@ -60,7 +61,7 @@ use sha2::Sha256;
 use tracing::{debug, error, info, warn};
 
 use super::types::{storage_keys, CTRL_PK_META_KEY};
-use super::{base64_decode, internal_prefixes, OfflineProtocol};
+use super::{base64_decode, internal_prefixes, OfflineProtocol, OutboxReseal};
 use crate::events::Event;
 use crate::{Error, Result};
 
@@ -359,6 +360,97 @@ impl OfflineProtocol {
                 .map(|cert| cert.not_after),
             visible_members: u32::try_from(visible).unwrap_or(u32::MAX),
         }
+    }
+
+    /// Provisions a paired leaf with this application's membership: the
+    /// publisher key, the leaf's own certificate, and this node's clock
+    /// (ADR 0037, "Leaves").
+    ///
+    /// The frame is sealed inside the established 1:1 session with `peer`,
+    /// so only the phone that paired the device can provision it, and it
+    /// rides the ordinary reliable ladder: the leaf stores what it carries
+    /// durably before it acknowledges, so an acknowledged frame is a
+    /// provisioned leaf. Sent again later with the same certificate it
+    /// refreshes the leaf's time, which is the only clock it checks
+    /// certificates against.
+    ///
+    /// The certificate is checked before anything is sealed, against the
+    /// same rules the leaf applies: it must name `peer`, verify under
+    /// [`crate::ProtocolConfig::app_publisher_key`] and be current. A leaf
+    /// handed one that fails would refuse it, and nothing on the phone would
+    /// say why. It comes from the application's backend, or from
+    /// `sign_app_membership` in embedded mode.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfiguration`] with no publisher key configured;
+    /// [`Error::InvalidArgument`] for a peer that is not an address or a
+    /// certificate that is malformed, names another address, does not
+    /// verify, or has expired; [`Error::SessionNotReady`] (or the MLS error
+    /// behind it) when no confirmed session with `peer` exists. Never starts
+    /// one: provisioning outside the pair's session is exactly what this
+    /// frame must not be.
+    pub fn provision_leaf_membership(&mut self, peer: &str, cert: &[u8]) -> Result<MessageId> {
+        let Some(publisher_key) = self.membership.publisher_key else {
+            return Err(Error::InvalidConfiguration(
+                "provision_leaf_membership needs ProtocolConfig.app_publisher_key".to_string(),
+            ));
+        };
+        let leaf: Address = peer
+            .parse()
+            .map_err(|e| Error::InvalidArgument(format!("The leaf is not an address: {e}")))?;
+        let cert = MemberCert::from_bytes(cert).map_err(|e| {
+            Error::InvalidArgument(format!("Malformed membership certificate: {e}"))
+        })?;
+        if cert.address != leaf {
+            return Err(Error::InvalidArgument(
+                "The membership certificate names another address than the leaf".to_string(),
+            ));
+        }
+        if !cert_verifies(&publisher_key, &cert) {
+            return Err(Error::InvalidArgument(
+                "The membership certificate does not verify under the publisher key".to_string(),
+            ));
+        }
+        let now = unix_now();
+        if !cert.is_current(now) {
+            return Err(Error::InvalidArgument(
+                "The membership certificate has expired".to_string(),
+            ));
+        }
+        let content = format!(
+            "{}{}",
+            internal_prefixes::MEMBER_PROVISION,
+            MemberProvision {
+                publisher_key,
+                cert,
+                supplied_time: now,
+            }
+            .to_body()
+        );
+        let priority = MessagePriority::High;
+        let sealed = self.encrypt_content_for_recipient_strict(peer, &content)?;
+        let reseal = OutboxReseal {
+            content,
+            priority,
+            reply_to_msg: None,
+            forwarded_from: None,
+            content_type: ContentType::Text,
+            media_metadata: None,
+            rich: None,
+            seal_mark: None,
+        };
+        let id = self.send_sealed_internal_message(peer, sealed, priority, Some(reseal))?;
+        info!(peer = %peer, "Sealed application membership to a paired leaf");
+        // A leaf runs no exchange until it is provisioned, so the hello this
+        // node sent when it met the leaf went unanswered, and the exchange
+        // standing on it would hold off a new one for the whole interval. A
+        // fresh hello now lets both ends prove membership as soon as the
+        // provisioning lands. It follows an explicit call by the application,
+        // so it says nothing about membership a discovery would not.
+        self.membership.exchanges.remove(peer);
+        self.start_member_exchange(peer);
+        Ok(id)
     }
 
     /// Starts a fresh exchange with every current mesh neighbour.

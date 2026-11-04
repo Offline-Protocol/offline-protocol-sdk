@@ -127,6 +127,9 @@ pub const MEMBER_PROOF_META_KEY: &str = "__member_proof";
 /// the wire (ADR 0037). The real id travels inside the sealed rich payload,
 /// which is authoritative on receipt, so the cleartext field names no
 /// application. A valid `AppId`, so an older receiver still decodes it.
+/// One constant, here, so the engine and a leaf stamp the same string: two
+/// spellings would split configured nodes into two groups by the very field
+/// this exists to blank.
 pub const WIRE_APP_ID: &str = "offline";
 
 /// The version byte every `__MEMBER__` frame body begins with.
@@ -139,16 +142,6 @@ const STEP_RESPONSE: u8 = 2;
 /// [`MemberFrame::parse`] is an unknown step, and a membership frame handed
 /// to [`MemberProvision::parse`] is the wrong kind.
 const KIND_PROVISION: u8 = 3;
-
-/// The wire `app_id` every frame of a node holding a membership
-/// certificate carries, whatever application it runs.
-///
-/// The real id is not on the wire, because an id in the clear groups every
-/// user of one application for anyone listening (ADR 0037, "Nothing in the
-/// clear"). One constant, here, so the engine and a leaf stamp the same
-/// string: two spellings would split configured nodes into two groups by
-/// the very field this exists to blank.
-pub const CONFIGURED_WIRE_APP_ID: &str = "offline";
 
 /// The version byte a provisioning body begins with.
 pub const MEMBER_PROVISION_VERSION: u8 = 1;
@@ -884,8 +877,8 @@ mod tests {
 
     #[test]
     fn the_configured_wire_app_id_is_pinned() {
-        assert_eq!(CONFIGURED_WIRE_APP_ID, "offline");
-        assert!(offline_protocol_core::AppId::new(CONFIGURED_WIRE_APP_ID).is_ok());
+        assert_eq!(WIRE_APP_ID, "offline");
+        assert!(offline_protocol_core::AppId::new(WIRE_APP_ID).is_ok());
     }
 
     /// A proof for one kind of frame must not verify as another over the same

@@ -3736,6 +3736,14 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // Leaf provisioning travels only inside a sealed 1:1 session, and an
+        // engine is never provisioned by one. Found bare on the wire it is a
+        // frame nothing honest sends: consumed, never delivered as text.
+        if content.starts_with(internal_prefixes::MEMBER_PROVISION) {
+            debug!(sender = %sender, "Consumed a membership provisioning frame outside a session");
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // --- Group (mesh/MLS) messages ---
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_MSG) {

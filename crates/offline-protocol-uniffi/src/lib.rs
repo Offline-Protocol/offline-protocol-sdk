@@ -6926,6 +6926,20 @@ impl OfflineProtocol {
         protocol.app_membership_status().into()
     }
 
+    /// Provisions a paired leaf with this application's membership, sealed
+    /// inside the pair's session (ADR 0037, "Leaves").
+    pub fn provision_leaf_membership(
+        &self,
+        peer_id: String,
+        cert: Vec<u8>,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.lock_inner_recovering();
+        protocol
+            .provision_leaf_membership(&peer_id, &cert)
+            .map(|id| id.as_str().to_string())
+            .map_err(ProtocolError::from)
+    }
+
     /// Gets the number of pending ACKs.
     pub fn get_pending_ack_count(&self) -> u64 {
         let protocol = self.lock_inner_recovering();

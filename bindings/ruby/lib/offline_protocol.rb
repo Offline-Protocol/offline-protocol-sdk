@@ -7399,6 +7399,10 @@ module UniFFILib
     [:uint64, RustCallStatus.by_ref],
     RustBuffer.by_value
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_provision_leaf_membership,
+    [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message,
     [:uint64, RustCallStatus.by_ref],
     RustBuffer.by_value
@@ -8600,6 +8604,10 @@ module UniFFILib
     :uint16
   
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_provision_leaf_membership,
     [],
     :uint16
   
@@ -12658,6 +12666,14 @@ end
   def protocol_lock_diagnostics()
     result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics,uniffi_clone_handle(),)
     return result.consume_into_TypeProtocolLockDiagnostics
+  end
+  def provision_leaf_membership(peer_id, cert)
+        peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
+        
+        cert = cert.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
+        RustBuffer.check_lower_Sequenceu8(cert)
+    result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_provision_leaf_membership,uniffi_clone_handle(),RustBuffer.alloc_from_string(peer_id),RustBuffer.alloc_from_Sequenceu8(cert))
+    return result.consume_into_string
   end
   def receive_message()
     result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message,uniffi_clone_handle(),)

@@ -1781,6 +1781,20 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     void set_app_membership(sequence<u8> cert);
     AppMembershipStatus app_membership_status();
+    // Provisions a paired leaf device with this application's membership
+    // (ADR 0037, "Leaves"): the publisher key, the leaf's own 93-byte
+    // certificate (from the backend or sign_app_membership, over the leaf's
+    // address) and this node's clock, sealed inside the established 1:1
+    // session with `peer_id`, so only the phone that paired the device can
+    // provision it. The leaf stores it before it acknowledges, so the
+    // returned message id settles like any message's. Calling it again with
+    // the same certificate refreshes the leaf's time, the only clock it
+    // checks certificates against. Throws InvalidConfiguration with no
+    // publisher key, InvalidArgument for a certificate that does not name
+    // `peer_id`, verify or is expired, and SessionNotReady with no confirmed
+    // session: it never starts one.
+    [Throws=ProtocolError]
+    string provision_leaf_membership(string peer_id, sequence<u8> cert);
     
     // ========================================================================
     // MLS (END-TO-END ENCRYPTION) OPERATIONS

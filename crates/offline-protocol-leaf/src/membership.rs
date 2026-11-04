@@ -55,8 +55,7 @@ use offline_protocol_core::{Address, AppId, Message, MessagePriority, TTL};
 use offline_protocol_sealed::membership::{
     app_key_info, exchange_key_info, exchange_salt, hello_tag_input, transcript_signing_payload,
     MemberCert, MemberCredential, MemberFrame, MemberHello, MemberProvision, APP_KEY_LEN,
-    CONFIGURED_WIRE_APP_ID, MEMBER_CREDENTIAL_LEN, MEMBER_NONCE_LEN, MEMBER_SEALED_LEN,
-    MEMBER_TAG_LEN,
+    MEMBER_CREDENTIAL_LEN, MEMBER_NONCE_LEN, MEMBER_SEALED_LEN, MEMBER_TAG_LEN, WIRE_APP_ID,
 };
 use offline_protocol_sealed::{prefixes, CTRL_PK_META_KEY};
 
@@ -186,7 +185,7 @@ impl LeafDevice {
     /// opened with before.
     pub(crate) fn wire_app_id(&self) -> AppId {
         if self.membership.is_provisioned() {
-            AppId::new(CONFIGURED_WIRE_APP_ID).unwrap_or_else(|_| self.app_id.clone())
+            AppId::new(WIRE_APP_ID).unwrap_or_else(|_| self.app_id.clone())
         } else {
             self.app_id.clone()
         }

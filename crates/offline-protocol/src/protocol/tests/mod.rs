@@ -8,6 +8,7 @@ mod data_sync_group;
 mod ephemeral;
 #[cfg(feature = "file-store")]
 mod file_stores;
+mod leaf_membership;
 mod leaf_pairing;
 mod membership;
 mod mesh_session;

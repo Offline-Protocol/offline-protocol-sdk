@@ -3120,6 +3120,13 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             let result = target.app_membership_status();
             Ok(result.encode())
         }
+        "provision_leaf_membership" => {
+            let arg_peer_id = args.take("peer_id")?;
+            let arg_cert = args.take("cert")?;
+            args.finish()?;
+            let result = target.provision_leaf_membership(arg_peer_id, arg_cert)?;
+            Ok(result.encode())
+        }
         "initialize_mls_with_file_stores" => {
             let arg_mls_root = args.take("mls_root")?;
             let arg_state_root = args.take("state_root")?;

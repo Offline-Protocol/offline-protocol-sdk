@@ -1765,6 +1765,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func protocolLockDiagnostics()  -> ProtocolLockDiagnostics
     
+    func provisionLeafMembership(peerId: String, cert: [UInt8]) throws  -> String
+    
     func receiveMessage()  -> String?
     
     func rejectConnectionRequest(recipient: String) throws  -> String
@@ -3099,6 +3101,17 @@ open func protocolLockDiagnostics() -> ProtocolLockDiagnostics  {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func provisionLeafMembership(peerId: String, cert: [UInt8])throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_provision_leaf_membership(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),
+        FfiConverterSequenceUInt8.lower(cert),uniffiCallStatus
     )
 })
 }
@@ -11777,6 +11790,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 63421) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_provision_leaf_membership() != 63566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 24572) {
