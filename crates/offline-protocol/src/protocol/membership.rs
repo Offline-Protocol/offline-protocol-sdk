@@ -49,16 +49,17 @@ use hmac::{Hmac, Mac};
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{Address, Message, MessagePriority, TTL};
 use offline_protocol_sealed::membership::{
-    app_key_info, exchange_key_info, exchange_salt, hello_tag_input, transcript_signing_payload,
-    MemberCert, MemberCredential, MemberFrame, MemberHello, APP_KEY_LEN, MEMBER_CREDENTIAL_LEN,
-    MEMBER_NONCE_LEN, MEMBER_SEALED_LEN, MEMBER_TAG_LEN,
+    app_key_info, e2e_proof_signing_payload, exchange_key_info, exchange_salt, hello_tag_input,
+    transcript_signing_payload, MemberCert, MemberCredential, MemberFrame, MemberHello,
+    MemberProof, ProofKind, APP_KEY_LEN, MEMBER_CREDENTIAL_LEN, MEMBER_E2E_KEY_INFO,
+    MEMBER_NONCE_LEN, MEMBER_PROOF_META_KEY, MEMBER_SEALED_LEN, MEMBER_TAG_LEN,
 };
 use offline_protocol_transport::TransportType;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use tracing::{debug, error, info, warn};
 
-use super::types::CTRL_PK_META_KEY;
+use super::types::{storage_keys, CTRL_PK_META_KEY};
 use super::{base64_decode, internal_prefixes, OfflineProtocol};
 use crate::events::Event;
 use crate::{Error, Result};
@@ -79,6 +80,11 @@ pub(crate) const MAX_MEMBER_EXCHANGES: usize = 512;
 
 /// Peers held visible. The one whose certificate ends soonest goes first.
 pub(crate) const MAX_VISIBLE_MEMBERS: usize = 1024;
+
+/// Addresses held in the named set. Past this the least recently named
+/// address with no session goes; one with a live session is admitted by its
+/// session anyway, so it goes last.
+pub(crate) const MAX_NAMED_PEERS: usize = 4096;
 
 /// Nonces of one peer answered under one nonce of ours. Past this the
 /// exchange starts over with a fresh nonce of ours, so the set stays bounded
@@ -161,6 +167,9 @@ pub(crate) struct Membership {
     /// Neighbours reported to the application, so that only those are
     /// reported lost.
     reported: HashSet<String>,
+    /// The named set: addresses the application itself acted toward, with
+    /// the Unix second each was last named. Persisted.
+    named: HashMap<String, u64>,
 }
 
 struct Exchange {
@@ -377,10 +386,11 @@ impl OfflineProtocol {
     }
 
     /// Whether the application may be told about `peer`, and the automatic
-    /// effects of discovering it may run: always with no publisher key
-    /// configured, otherwise only once `peer` is visible.
+    /// effects of discovering it may run: whether it is admitted (visible,
+    /// named, in session or on a held group's roster), and always with no
+    /// publisher key configured.
     pub fn app_sees_peer(&self, peer: &str) -> bool {
-        self.membership.publisher_key.is_none() || self.is_member_visible(peer)
+        self.admitted(peer)
     }
 
     /// A carrier reports `peer` reachable: runs discovery, and returns
@@ -400,7 +410,7 @@ impl OfflineProtocol {
         if self.membership.publisher_key.is_none() {
             return true;
         }
-        if self.is_member_visible(peer) {
+        if self.admitted(peer) {
             self.membership.reported.insert(peer.to_string());
             return true;
         }
@@ -445,6 +455,329 @@ impl OfflineProtocol {
             rssi: None,
         });
         self.push_key_package_on_discovery(peer);
+    }
+
+    /// Whether `peer` is **admitted** ([ADR 0037]): what both the emission
+    /// gate and the inbound gate ask. Always with no publisher key
+    /// configured; otherwise when `peer` is visible, in the named set, holds
+    /// a 1:1 session with this node, or is on the roster of a group this
+    /// node holds.
+    ///
+    /// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
+    pub(crate) fn admitted(&self, peer: &str) -> bool {
+        self.membership.publisher_key.is_none()
+            || self.is_member_visible(peer)
+            || self.membership.named.contains_key(peer)
+            || matches!(self.has_mls_session(peer), Ok(true))
+            || self
+                .group_mesh
+                .members
+                .values()
+                .any(|members| members.iter().any(|m| m == peer))
+    }
+
+    /// Adds `peer` to the named set: the application acted toward it (a
+    /// send, a pair or session request, a connection request or answer, a
+    /// group invitation). Written only by those calls, never by anything a
+    /// frame carries. Nothing with no publisher key configured.
+    pub(crate) fn name_peer(&mut self, peer: &str) {
+        if self.membership.publisher_key.is_none()
+            || peer == self.local_id
+            || peer.parse::<Address>().is_err()
+        {
+            return;
+        }
+        let now = unix_now();
+        if !self.membership.named.contains_key(peer)
+            && self.membership.named.len() >= MAX_NAMED_PEERS
+        {
+            self.evict_one_named_peer();
+        }
+        self.membership.named.insert(peer.to_string(), now);
+        self.persist_named_peer(peer, now);
+    }
+
+    /// Drops the least recently named address that holds no session, or,
+    /// when every one holds a session, the least recently named of all: a
+    /// session holder stays admitted through its session.
+    fn evict_one_named_peer(&mut self) {
+        let mut by_age: Vec<(String, u64)> = self
+            .membership
+            .named
+            .iter()
+            .map(|(peer, at)| (peer.clone(), *at))
+            .collect();
+        by_age.sort_by_key(|(_, at)| *at);
+        let victim = by_age
+            .iter()
+            .find(|(peer, _)| !matches!(self.has_mls_session(peer), Ok(true)))
+            .or_else(|| by_age.first())
+            .map(|(peer, _)| peer.clone());
+        if let Some(victim) = victim {
+            self.membership.named.remove(&victim);
+            if let Some(storage) = &self.protocol_state_storage {
+                if let Err(e) = storage.delete(storage_keys::NAMED_PEERS, &victim) {
+                    warn!(error = %e, "Failed to delete an evicted named peer");
+                }
+            }
+        }
+    }
+
+    fn persist_named_peer(&self, peer: &str, named_at: u64) {
+        let Some(storage) = &self.protocol_state_storage else {
+            return;
+        };
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::NAMED_PEERS,
+            peer,
+            &named_at.to_be_bytes(),
+        ) {
+            warn!(error = %e, "Failed to persist a named peer");
+        }
+    }
+
+    /// Restores the named set, then backfills it from every peer that holds
+    /// a session with this node, so turning membership on cuts off no
+    /// existing contact. Also loads the group rosters [`Self::admitted`]
+    /// reads. Runs on every launch with a publisher key configured; with
+    /// none it does nothing, and nothing is admitted against it.
+    pub(crate) fn restore_named_peers(&mut self) {
+        if self.membership.publisher_key.is_none() {
+            return;
+        }
+        if let Some(storage) = self.protocol_state_storage.clone() {
+            match Self::list_state_keys(storage.as_ref(), storage_keys::NAMED_PEERS) {
+                Ok(peers) => {
+                    for peer in peers.into_iter().take(MAX_NAMED_PEERS) {
+                        if peer.parse::<Address>().is_err() || peer == self.local_id {
+                            continue;
+                        }
+                        let named_at = self
+                            .read_state_record(storage.as_ref(), storage_keys::NAMED_PEERS, &peer)
+                            .ok()
+                            .flatten()
+                            .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+                            .map_or(0, u64::from_be_bytes);
+                        self.membership.named.insert(peer, named_at);
+                    }
+                }
+                Err(e) => warn!(error = %e, "Failed to list the named set"),
+            }
+        }
+        let sessions = self
+            .mls_manager
+            .as_ref()
+            .and_then(|mls| mls.read().ok().and_then(|m| m.list_sessions().ok()))
+            .unwrap_or_default();
+        for peer in sessions {
+            if !self.membership.named.contains_key(&peer) {
+                self.name_peer(&peer);
+            }
+        }
+        if let Ok(groups) = self.list_groups() {
+            for group_id in groups {
+                if !self.group_mesh.members.contains_key(&group_id) {
+                    if let Err(e) = self.refresh_group_members(&group_id) {
+                        debug!(group_id = %group_id, error = %e, "Group roster unreadable for admission");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The inbound gate ([ADR 0037]): whether a frame addressed to this node
+    /// is processed at all. A frame from a sender that is not admitted is
+    /// consumed with no answer of any kind and no event, exactly as for a
+    /// blocked sender, so a stranger observes what it observes for an
+    /// address nobody holds.
+    ///
+    /// Passed whatever the sender: a membership frame (the exchange runs with
+    /// everyone), a relay server's answer, a custody receipt (carriage), and
+    /// the group data plane (it opens only under a group this node holds, so
+    /// a stranger cannot produce one). A key package, a 1:1 Welcome or a
+    /// group Welcome from a sender not otherwise admitted passes only with a
+    /// valid end-to-end membership proof.
+    ///
+    /// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
+    pub(crate) fn inbound_admitted(
+        &self,
+        message: &Message,
+        arrival: Option<TransportType>,
+    ) -> bool {
+        if self.membership.publisher_key.is_none() {
+            return true;
+        }
+        let sender = message.sender.as_str();
+        let content = message.content.as_str();
+        if sender == self.local_id
+            || message.recipient.as_str() != self.local_id
+            || content.starts_with(internal_prefixes::MEMBER)
+            || content.starts_with(internal_prefixes::CUSTODY_RECEIPT)
+            || Self::is_unsignable_relay_answer(message, arrival)
+            || Self::is_group_data_plane(content)
+            || Self::is_service_discovery(content)
+            || self.admitted(sender)
+        {
+            return true;
+        }
+        let proven = self.frame_carries_member_proof(message);
+        if !proven {
+            debug!(sender = %sender, "Dropped a frame from a sender this application has not admitted");
+        }
+        proven
+    }
+
+    fn is_group_data_plane(content: &str) -> bool {
+        content.starts_with("__GRP_") && !content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+    }
+
+    /// Discovery gossip is carriage until its own membership rules land
+    /// (step 7c); it never answers a stranger with anything but a provider
+    /// answer, which those rules gate.
+    fn is_service_discovery(content: &str) -> bool {
+        content.starts_with("__SVC_DISC")
+    }
+
+    /// The proof kind a frame of this content would carry, with the body
+    /// the proof binds (the content after the prefix), or `None` for a frame
+    /// that never carries one.
+    pub(crate) fn proof_kind_of(content: &str) -> Option<(ProofKind, &str)> {
+        if let Some(body) = content.strip_prefix(internal_prefixes::KEY_PACKAGE) {
+            Some((ProofKind::KeyPackage, body))
+        } else if let Some(body) = content.strip_prefix(internal_prefixes::WELCOME) {
+            Some((ProofKind::Welcome, body))
+        } else {
+            content
+                .strip_prefix(internal_prefixes::GROUP_MLS_WELCOME)
+                .map(|body| (ProofKind::GroupWelcome, body))
+        }
+    }
+
+    /// Whether a key package, 1:1 Welcome or group Welcome carries a proof
+    /// that verifies for its sender, this node and this frame's body.
+    fn frame_carries_member_proof(&self, message: &Message) -> bool {
+        let Some((kind, body)) = Self::proof_kind_of(&message.content) else {
+            return false;
+        };
+        let Some(proof) = message
+            .metadata
+            .get(MEMBER_PROOF_META_KEY)
+            .and_then(|p| base64_decode(p).ok())
+        else {
+            return false;
+        };
+        let identity_key = message
+            .metadata
+            .get(CTRL_PK_META_KEY)
+            .and_then(|pk| base64_decode(pk).ok());
+        self.verify_member_proof(
+            &proof,
+            message.sender.as_str(),
+            identity_key.as_deref(),
+            kind,
+            body.as_bytes(),
+        )
+    }
+
+    /// Attaches a proof to an outgoing key package, 1:1 Welcome or group
+    /// Welcome, when this node holds a certificate. Called before the frame
+    /// is signed. Every such frame carries one, whether or not the recipient
+    /// needs it: whether a proof goes out must not depend on what this node
+    /// knows of the recipient.
+    pub(crate) fn attach_member_proof(&self, message: &mut Message) {
+        let Some((kind, body)) = Self::proof_kind_of(&message.content) else {
+            return;
+        };
+        if let Some(proof) =
+            self.member_proof_for(message.recipient.as_str(), kind, body.as_bytes())
+        {
+            message.metadata.insert(
+                MEMBER_PROOF_META_KEY.to_string(),
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, proof),
+            );
+        }
+    }
+
+    /// A proof for a frame of `kind` with `body` toward `recipient`, when
+    /// this node holds a certificate; `None` otherwise, and the frame goes
+    /// without one.
+    pub(crate) fn member_proof_for(
+        &self,
+        recipient: &str,
+        kind: ProofKind,
+        body: &[u8],
+    ) -> Option<Vec<u8>> {
+        let app_key = self.membership.app_key?;
+        let cert = self.membership.cert.clone()?;
+        let recipient: Address = recipient.parse().ok()?;
+        let payload = e2e_proof_signing_payload(Some(&recipient), kind, body).ok()?;
+        let signature = self.sign_with_identity(&payload)?;
+        let credential = MemberCredential { cert, signature };
+        let salt: [u8; 16] = random_array();
+        let key = hkdf32(&app_key, Some(&salt), MEMBER_E2E_KEY_INFO);
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let sealed = cipher
+            .encrypt(
+                Nonce::from_slice(&[0u8; 12]),
+                credential.to_bytes().as_slice(),
+            )
+            .ok()?;
+        let sealed = <[u8; MEMBER_SEALED_LEN]>::try_from(sealed.as_slice()).ok()?;
+        Some(MemberProof { salt, sealed }.to_bytes().to_vec())
+    }
+
+    /// Verifies a proof from `signer` toward this node: it opens under
+    /// `K_app`, its certificate names `signer`, verifies under the publisher
+    /// key and is current, and `signer`'s identity key signed this node's
+    /// address, `kind` and `body`.
+    fn verify_member_proof(
+        &self,
+        proof: &[u8],
+        signer: &str,
+        identity_key: Option<&[u8]>,
+        kind: ProofKind,
+        body: &[u8],
+    ) -> bool {
+        let (Some(app_key), Some(publisher_key), Some(identity_key)) = (
+            self.membership.app_key,
+            self.membership.publisher_key,
+            identity_key,
+        ) else {
+            return false;
+        };
+        let (Ok(proof), Ok(local), Ok(signer_addr)) = (
+            MemberProof::from_bytes(proof),
+            self.local_id.parse::<Address>(),
+            signer.parse::<Address>(),
+        ) else {
+            return false;
+        };
+        let key = hkdf32(&app_key, Some(&proof.salt), MEMBER_E2E_KEY_INFO);
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let Ok(plaintext) = cipher.decrypt(Nonce::from_slice(&[0u8; 12]), proof.sealed.as_slice())
+        else {
+            return false;
+        };
+        let Ok(credential) = MemberCredential::from_bytes(&plaintext) else {
+            return false;
+        };
+        let cert = &credential.cert;
+        if cert.address != signer_addr
+            || !cert_verifies(&publisher_key, cert)
+            || !cert.is_current(unix_now())
+        {
+            return false;
+        }
+        let Ok(payload) = e2e_proof_signing_payload(Some(&local), kind, body) else {
+            return false;
+        };
+        offline_protocol_mls::MlsManager::verify_signature(
+            identity_key,
+            &payload,
+            &credential.signature,
+        )
+        .unwrap_or(false)
     }
 
     /// Whether `peer` has proven, in a membership exchange, that it belongs to
@@ -719,6 +1052,13 @@ impl OfflineProtocol {
             }
         }
         visible.insert(peer.to_string(), not_after);
+    }
+
+    /// Drops the named set from memory only, so a test can show
+    /// [`Self::restore_named_peers`] brings it back from storage.
+    #[cfg(test)]
+    pub(crate) fn forget_named_peers_in_memory(&mut self) {
+        self.membership.named.clear();
     }
 
     /// How many neighbours have an exchange in memory.

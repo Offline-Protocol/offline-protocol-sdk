@@ -134,6 +134,10 @@ impl OfflineProtocol {
     /// Returns `Err` when MLS is initialized but signing fails, so the caller
     /// can decide whether to abort the send.
     pub(super) fn sign_control_message(&self, message: &mut Message) -> Result<()> {
+        // A key package or Welcome carries this node's membership proof
+        // (ADR 0037) when it holds a certificate. Before the signature, so
+        // the frame is signed as it goes out.
+        self.attach_member_proof(message);
         let mls = match self.mls_manager.as_ref() {
             Some(m) => m,
             None => {
@@ -794,7 +798,7 @@ impl OfflineProtocol {
     ///
     /// A peer sending one of these prefixes over the mesh, or over the relay
     /// with an attributed identity, is therefore still required to sign it.
-    fn is_unsignable_relay_answer(
+    pub(crate) fn is_unsignable_relay_answer(
         message: &Message,
         arrival_transport: Option<TransportType>,
     ) -> bool {

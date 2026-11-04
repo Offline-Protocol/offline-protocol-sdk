@@ -1634,6 +1634,7 @@ impl OfflineProtocol {
             self.restore_dedup_seen(&mut inbound_prunes);
             self.restore_encryption_capable_peers();
             self.restore_blocked_users()?;
+            self.restore_named_peers();
             self.restore_session_states_from_manager(manager.clone(), &mut advisory_prunes)?;
             self.restore_peer_key_packages(&manager, &mut advisory_prunes)?;
             // Must precede start(): flush_restored_confirmed_pending_messages
@@ -3204,6 +3205,7 @@ impl OfflineProtocol {
         if self.is_user_blocked(peer_id) {
             return Err(Error::UserBlocked(peer_id.to_string()));
         }
+        self.name_peer(peer_id);
 
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
 
@@ -3400,6 +3402,7 @@ impl OfflineProtocol {
     /// This entrypoint is for bindings that expose low-level MLS APIs. It must
     /// still keep protocol-level session lifecycle state in sync with MLS state.
     pub fn manual_mls_create_session(&mut self, peer_id: &str) -> Result<WelcomeMessage> {
+        self.name_peer(peer_id);
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
         let welcome = {
             let manager = mls

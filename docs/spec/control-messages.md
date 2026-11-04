@@ -416,8 +416,16 @@ then verifies the certificate under the publisher key, its address against the
 frame's sender, `not_after`, and the transcript signature under the sender's
 identity key. A pass makes the sender visible until `not_after`.
 
-**The end-to-end proof**, 189 bytes, carried as an optional `member_proof`
-field in the frame that opens a session across the mesh:
+**The end-to-end proof**, 189 bytes, carried in the metadata of the frame that
+opens a session across the mesh, under the key `__member_proof`, base64
+(standard, padded). It rides in the metadata rather than inside the payload so
+that `frame_body` is the payload exactly as it travels, the frame's content
+after its prefix, and no verifier re-serialises anything to hash it. The
+metadata is outside the control signature, which costs nothing: the proof
+signs the recipient, the kind and the body itself, so stripping it fails
+closed and moving it onto another frame fails to verify. Every key package,
+1:1 Welcome and group Welcome a node with a certificate sends carries one,
+whatever it knows of the recipient:
 
 ```
 salt  = random(16)
@@ -438,7 +446,7 @@ The key label and the signing domain differ, so no byte string is both an HKDF
 | 4 | Service discovery query | 21 zero bytes: gossip names no single recipient, and the query is bound through its body, which carries `query_id` and `originator`. No address payload is all zero, since the version byte is never zero |
 | 5 | Service discovery response | The query originator's address payload |
 
-`frame_body` is the frame's payload with the `member_proof` field absent. The
+`frame_body` is the frame's content after its prefix, byte for byte. The
 salt is fresh per proof because `K_app` is shared by every install of the
 application, and a fixed key with a fixed nonce would repeat across installs.
 
@@ -450,18 +458,40 @@ reaches a provider through gossip and its direct sender is any relay. Without
 that check a member's proof, recorded once, would carry any other node's frame
 of the same kind and body hash.
 
-**What visibility gates.** With a publisher key configured, a node reports a
-neighbour to its application, and runs the automatic effects of discovering
-it, only once the neighbour is visible. Concretely:
+**Admitted.** With a publisher key configured, one predicate decides what the
+application is told and what the node answers. A peer is admitted when it is
+visible; when it is in the **named set**, the addresses the application itself
+sent to, paired with, requested a session or connection with, or invited
+(persisted, at most 4096, the least recently named address with no session
+evicted first, written only by those calls and never by anything a frame
+carries, and backfilled on every launch from every peer that holds a session,
+so turning membership on cuts off no contact); when it holds a 1:1 session
+with this node; or when it is on the roster of a group this node holds. With
+no publisher key every peer is admitted.
 
-- `NeighborDiscovered` is held for a neighbour that is not visible yet, and
+**What admission gates.** A node reports a neighbour to its application, and
+runs the automatic effects of discovering it, only once the neighbour is
+admitted. Concretely:
+
+- `NeighborDiscovered` is held for a neighbour that is not admitted yet, and
   reported, naming the carrier that found it, when the exchange makes it
-  visible. A neighbour that never proves membership is never reported.
+  visible. A neighbour that is never admitted is never reported.
 - `NeighborLost` is reported only for a neighbour whose discovery was.
-- `PeerRssi` and a received `__PRESENCE__` are reported only for a visible
+- `PeerRssi` and a received `__PRESENCE__` are reported only for an admitted
   peer.
-- The automatic key package push on discovery waits for visibility. It is the
+- The automatic key package push on discovery waits for admission. It is the
   one discovery effect that answers a stranger with this node's key material.
+
+**The inbound gate.** A frame addressed to this node from a sender that is not
+admitted is consumed as a blocked sender's is: not processed, not answered
+(no acknowledgement of any kind, no key package, Welcome, reset or
+`no_session` reply), no event. The sender observes what it observes for an
+address nobody holds, and its retries run to expiry. A key package, 1:1
+Welcome or group Welcome passes when it carries a valid end-to-end proof
+(below). Passed whatever the sender: a `__MEMBER__` frame, a relay server's
+answer, a custody receipt, the group data plane (it opens only under a group
+this node holds), and service discovery gossip, which has its own rules. A
+frame addressed to someone else is relayed as before.
 
 Carriage is not gated: relay targets, the outbox flush to that peer and
 custody redelivery run for every neighbour. Neither is an effect the

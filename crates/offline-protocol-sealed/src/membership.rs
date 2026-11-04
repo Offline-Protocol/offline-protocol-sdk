@@ -110,6 +110,18 @@ pub const MEMBER_PROOF_SALT_LEN: usize = 16;
 /// Length of an end-to-end proof: salt and sealed credential.
 pub const MEMBER_PROOF_LEN: usize = MEMBER_PROOF_SALT_LEN + MEMBER_SEALED_LEN;
 
+/// The frame metadata key an end-to-end membership proof travels under,
+/// base64 (standard, padded) of its [`MEMBER_PROOF_LEN`] bytes.
+///
+/// In the frame's metadata rather than inside the payload, so `frame_body`
+/// is the payload exactly as it travels (the content after the prefix) and
+/// no verifier has to re-serialise anything to hash it. The metadata is not
+/// covered by the control signature, which costs nothing here: the proof
+/// carries its own signature over the recipient, the kind and the body, so
+/// stripping it fails closed and moving it onto another frame fails to
+/// verify.
+pub const MEMBER_PROOF_META_KEY: &str = "__member_proof";
+
 /// The version byte every `__MEMBER__` frame body begins with.
 pub const MEMBER_FRAME_VERSION: u8 = 1;
 

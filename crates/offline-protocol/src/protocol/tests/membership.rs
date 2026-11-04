@@ -1190,3 +1190,175 @@ fn presence_from_a_peer_the_application_does_not_see_is_not_reported() {
         .collect();
     assert_eq!(reported, vec![bob.address.clone()]);
 }
+
+// --- The inbound gate (step 7b) -----------------------------------------------
+
+/// Every frame `node` handed to its transport for `peer`, by either send
+/// path, then clears both records.
+fn take_frames_to(node: &Node, peer: &Node) -> Vec<Message> {
+    let mut out: Vec<Message> = node
+        .transport
+        .peer_sends()
+        .into_iter()
+        .map(|(_, m)| m)
+        .chain(node.transport.sent_messages())
+        .filter(|m| m.recipient.as_str() == peer.address)
+        .collect();
+    out.dedup_by(|a, b| a.id == b.id);
+    node.transport.clear_peer_sends();
+    node.transport.clear_sent_messages();
+    out
+}
+
+/// Answers other than the membership exchange itself.
+fn answers(frames: &[Message]) -> Vec<&Message> {
+    frames
+        .iter()
+        .filter(|m| !m.content.starts_with(internal_prefixes::MEMBER))
+        .collect()
+}
+
+/// `from` pushes its key package to `to`, which receives it.
+fn push_key_package(from: &mut Node, to: &mut Node) -> Message {
+    from.transport.add_connected_peer(to.address.clone(), -55);
+    to.transport.add_connected_peer(from.address.clone(), -55);
+    take_frames_to(from, to);
+    from.protocol
+        .push_key_package(&to.address, false, true)
+        .expect("a key package goes out");
+    let frame = take_frames_to(from, to)
+        .into_iter()
+        .find(|m| m.content.starts_with(internal_prefixes::KEY_PACKAGE))
+        .expect("the key package frame");
+    take_frames_to(to, from);
+    to.receive_from(frame.clone(), &from.address.clone());
+    frame
+}
+
+fn member_with_auto_kx(label: &str, key: &SigningKey) -> Node {
+    let mut node = Node::launch_with(label, Some(key.verifying_key().to_bytes()), true);
+    let cert = certificate(key, &node.address);
+    node.protocol
+        .set_app_membership(&cert.to_bytes())
+        .expect("own certificate");
+    node
+}
+
+#[test]
+fn a_strangers_key_package_to_a_member_gets_nothing_back() {
+    let mut alice = member_with_auto_kx("alice", &publisher(1));
+    let mut carol = member_with_auto_kx("carol", &publisher(2));
+    push_key_package(&mut carol, &mut alice);
+    assert!(
+        answers(&take_frames_to(&alice, &carol)).is_empty(),
+        "no key package, Welcome, acknowledgement or reset to a stranger"
+    );
+}
+
+#[test]
+fn a_stranger_the_application_named_is_answered() {
+    let mut alice = member_with_auto_kx("alice", &publisher(1));
+    let mut carol = member_with_auto_kx("carol", &publisher(2));
+    alice.protocol.name_peer(&carol.address);
+    push_key_package(&mut carol, &mut alice);
+    assert!(
+        !answers(&take_frames_to(&alice, &carol)).is_empty(),
+        "a named peer's key package is answered"
+    );
+}
+
+#[test]
+fn an_unconfigured_node_answers_as_before() {
+    let mut alice = Node::launch_with("alice", None, true);
+    let mut carol = member_with_auto_kx("carol", &publisher(2));
+    push_key_package(&mut carol, &mut alice);
+    assert!(!answers(&take_frames_to(&alice, &carol)).is_empty());
+}
+
+#[test]
+fn two_members_who_never_met_converge_on_the_proof() {
+    let key = publisher(1);
+    let mut alice = member_with_auto_kx("alice", &key);
+    let mut bob = member_with_auto_kx("bob", &key);
+    let frame = push_key_package(&mut bob, &mut alice);
+    assert!(
+        frame
+            .metadata
+            .contains_key(offline_protocol_sealed::membership::MEMBER_PROOF_META_KEY),
+        "a member's key package carries its proof"
+    );
+    assert!(!alice.sees(&bob), "never neighbours: no exchange ran");
+    assert!(
+        !answers(&take_frames_to(&alice, &bob)).is_empty(),
+        "the proof admits bob, so alice answers"
+    );
+}
+
+#[test]
+fn a_proof_made_for_one_member_does_not_admit_its_sender_at_another() {
+    let key = publisher(1);
+    let mut alice = member_with_auto_kx("alice", &key);
+    let mut bob = member_with_auto_kx("bob", &key);
+    let mut dave = member_with_auto_kx("dave", &key);
+    // An outsider holding no certificate: its key packages carry no proof.
+    let mut mallory = Node::launch_with("mallory", Some(key.verifying_key().to_bytes()), true);
+
+    // bob's proof, recorded on its way to alice.
+    let to_alice = push_key_package(&mut bob, &mut alice);
+    let stolen = to_alice
+        .metadata
+        .get(offline_protocol_sealed::membership::MEMBER_PROOF_META_KEY)
+        .cloned()
+        .expect("a proof");
+
+    // bob's own frame to dave, carrying the proof made for alice instead of
+    // its own. The metadata is outside the control signature, so the frame
+    // passes the gate; the proof binds alice and alice's package.
+    bob.transport.add_connected_peer(dave.address.clone(), -55);
+    dave.transport.add_connected_peer(bob.address.clone(), -55);
+    take_frames_to(&bob, &dave);
+    bob.protocol
+        .push_key_package(&dave.address, false, true)
+        .expect("a key package");
+    let mut to_dave = take_frames_to(&bob, &dave)
+        .into_iter()
+        .find(|m| m.content.starts_with(internal_prefixes::KEY_PACKAGE))
+        .expect("the frame");
+    to_dave.metadata.insert(
+        offline_protocol_sealed::membership::MEMBER_PROOF_META_KEY.to_string(),
+        stolen,
+    );
+    dave.receive_from(to_dave, &bob.address.clone());
+    assert!(answers(&take_frames_to(&dave, &bob)).is_empty());
+
+    // And a node with the key but no certificate proves nothing.
+    push_key_package(&mut mallory, &mut dave);
+    assert!(answers(&take_frames_to(&dave, &mallory)).is_empty());
+}
+
+#[test]
+fn the_named_set_survives_a_restart_and_an_explicit_send_writes_it() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let carol = Node::member("carol", &publisher(2));
+    assert!(!alice.protocol.app_sees_peer(&carol.address));
+
+    alice
+        .transport
+        .add_connected_peer(carol.address.clone(), -55);
+    let _ = alice
+        .protocol
+        .send_typing_indicator(&carol.address, "c", true);
+    assert!(
+        alice.protocol.app_sees_peer(&carol.address),
+        "named by the app's own call"
+    );
+
+    alice.protocol.forget_named_peers_in_memory();
+    assert!(!alice.protocol.app_sees_peer(&carol.address));
+    alice.protocol.restore_named_peers();
+    assert!(
+        alice.protocol.app_sees_peer(&carol.address),
+        "restored from storage"
+    );
+}

@@ -71,6 +71,10 @@ pub(crate) enum StateCategory {
     SessionStates,
     WelcomeLifecycles,
     BlockedUsers,
+    /// The application membership named set. Post-split only, like
+    /// [`Self::NostrWatermark`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    NamedPeers,
     BothCreateAwaitingDecrypt,
     LamportClock,
     /// The deduplicator's seen set. Post-split only, like
@@ -134,6 +138,7 @@ impl StateCategory {
             storage_keys::SESSION_STATES => Self::SessionStates,
             storage_keys::WELCOME_LIFECYCLES => Self::WelcomeLifecycles,
             storage_keys::BLOCKED_USERS => Self::BlockedUsers,
+            storage_keys::NAMED_PEERS => Self::NamedPeers,
             storage_keys::BOTH_CREATE_AWAITING_DECRYPT => Self::BothCreateAwaitingDecrypt,
             storage_keys::LAMPORT_CLOCK => Self::LamportClock,
             storage_keys::DEDUP_SEEN_IDS => Self::DedupSeenIds,
@@ -174,6 +179,7 @@ impl StateCategory {
         Self::SessionStates,
         Self::WelcomeLifecycles,
         Self::BlockedUsers,
+        Self::NamedPeers,
         Self::BothCreateAwaitingDecrypt,
         Self::LamportClock,
         Self::DedupSeenIds,
@@ -206,6 +212,7 @@ impl StateCategory {
             Self::SessionStates => storage_keys::SESSION_STATES,
             Self::WelcomeLifecycles => storage_keys::WELCOME_LIFECYCLES,
             Self::BlockedUsers => storage_keys::BLOCKED_USERS,
+            Self::NamedPeers => storage_keys::NAMED_PEERS,
             Self::BothCreateAwaitingDecrypt => storage_keys::BOTH_CREATE_AWAITING_DECRYPT,
             Self::LamportClock => storage_keys::LAMPORT_CLOCK,
             Self::DedupSeenIds => storage_keys::DEDUP_SEEN_IDS,
@@ -323,6 +330,7 @@ impl StateCategory {
             | Self::DataSpaces
             | Self::DataSync
             | Self::DataDocMeta
+            | Self::NamedPeers
             | Self::DedupSeenIds => true,
             Self::PeerCapabilities
             | Self::SessionStates
@@ -1156,7 +1164,7 @@ impl OfflineProtocol {
     /// emptiness, not failure. Every restore propagates a listing error, so
     /// without this a provider honoring that contract fails restore and rolls
     /// `initialize_mls` back over a store that is merely empty.
-    fn list_state_keys(
+    pub(crate) fn list_state_keys(
         storage: &dyn ProtocolStateStorage,
         key_type: &str,
     ) -> ProtocolStateResult<Vec<String>> {

@@ -146,6 +146,12 @@ impl OfflineProtocol {
                     // that blocked users cannot advance our Lamport clock,
                     // leak our presence via re-ACK, or trigger any processing.
                     let sender_blocked = self.is_user_blocked(message.sender.as_str());
+                    // The membership inbound gate (ADR 0037): a sender this
+                    // application has not admitted is treated as a blocked
+                    // one, with no answer and no event, so it observes what
+                    // it would for an address nobody holds.
+                    let sender_blocked =
+                        sender_blocked || !self.inbound_admitted(&message, Some(transport_used));
 
                     // Merge Lamport clock for every non-blocked received message
                     // — including duplicates, ACKs, and internal protocol

@@ -3323,6 +3323,7 @@ impl OfflineProtocol {
     /// removed" — the wrong direction for a moderation control.
     pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
         Self::validate_outbound_recipient(invitee_user_id)?;
+        self.name_peer(invitee_user_id);
 
         // Admin check
         let self_id = self.local_id.clone();

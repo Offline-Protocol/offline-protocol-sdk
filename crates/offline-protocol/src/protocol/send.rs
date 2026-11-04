@@ -130,6 +130,7 @@ impl OfflineProtocol {
         let content_str: String = content.into();
         let priority = options.priority.unwrap_or(MessagePriority::Medium);
         Self::validate_outbound_recipient(&recipient_str)?;
+        self.name_peer(&recipient_str);
         // Parsed first, before anything can queue the send or tick the
         // Lamport clock: a bad id must leave no durable trace.
         let app_id = Self::parse_send_app_id(options.app_id.as_deref())?;
@@ -286,6 +287,7 @@ impl OfflineProtocol {
         let recipient_str: String = new_recipient.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
         Self::validate_outbound_recipient(&recipient_str)?;
+        self.name_peer(&recipient_str);
 
         if self.is_user_blocked(&recipient_str) {
             return Err(Error::UserBlocked(recipient_str));
@@ -2673,6 +2675,7 @@ impl OfflineProtocol {
         let file_name_str: String = file_name.into();
         let media_metadata = options.media_metadata;
         Self::validate_outbound_recipient(&recipient_str)?;
+        self.name_peer(&recipient_str);
         // Before any transfer state exists, like the recipient check.
         let app_id = Self::parse_send_app_id(options.app_id.as_deref())?;
 
@@ -5638,6 +5641,7 @@ impl OfflineProtocol {
         inbound_transport: TransportType,
     ) {
         if inbound_transport != TransportType::Internet
+            || !self.admitted(message.sender.as_str())
             || !message.requires_ack
             || !self
                 .peer_undecryptable_ack
@@ -5683,6 +5687,11 @@ impl OfflineProtocol {
         inbound_transport: TransportType,
         status: Option<&str>,
     ) -> Result<()> {
+        // No acknowledgement of any kind to a sender this application has
+        // not admitted (ADR 0037).
+        if !self.admitted(message.sender.as_str()) {
+            return Ok(());
+        }
         if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {
             return Ok(());
         }
@@ -6476,6 +6485,7 @@ impl OfflineProtocol {
         initial_message: Option<String>,
     ) -> Result<MessageId> {
         Self::validate_outbound_recipient(recipient)?;
+        self.name_peer(recipient);
         if let Some(msg) = initial_message.as_deref() {
             if msg.len() > MAX_INITIAL_MESSAGE_BYTES {
                 return Err(Error::InvalidArgument(format!(
@@ -6558,6 +6568,7 @@ impl OfflineProtocol {
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
         Self::validate_outbound_recipient(recipient)?;
+        self.name_peer(recipient);
         // Accept messages are internal control messages (not user content),
         // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
@@ -6594,6 +6605,7 @@ impl OfflineProtocol {
     /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
         Self::validate_outbound_recipient(recipient)?;
+        self.name_peer(recipient);
         // Reject messages are internal control messages (not user content),
         // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
@@ -6621,6 +6633,7 @@ impl OfflineProtocol {
     /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn cancel_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
         Self::validate_outbound_recipient(recipient)?;
+        self.name_peer(recipient);
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -6647,6 +6660,7 @@ impl OfflineProtocol {
         status: PresenceStatus,
     ) -> Result<MessageId> {
         Self::validate_outbound_recipient(recipient)?;
+        self.name_peer(recipient);
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -6682,6 +6696,7 @@ impl OfflineProtocol {
         is_typing: bool,
     ) -> Result<MessageId> {
         Self::validate_outbound_recipient(recipient)?;
+        self.name_peer(recipient);
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -6718,6 +6733,7 @@ impl OfflineProtocol {
         message_ids: Vec<String>,
     ) -> Result<MessageId> {
         Self::validate_outbound_recipient(recipient)?;
+        self.name_peer(recipient);
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }

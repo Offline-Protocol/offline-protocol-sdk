@@ -2255,6 +2255,11 @@ pub(crate) mod storage_keys {
     pub const ENCRYPTION_CAPABLE_PEERS: &str = "encryption_capable_peers";
     /// Key type for persisted blocked user entries.
     pub const BLOCKED_USERS: &str = "blocked_users";
+    /// Key type for the application membership named set (ADR 0037): the
+    /// addresses the application itself sent to, paired with or invited,
+    /// each with the Unix second it was last named. A contact list, so it is
+    /// sealed.
+    pub const NAMED_PEERS: &str = "named_peers";
     /// Key type for the persistent per-install telemetry scrub secret.
     pub const SCRUB_SECRET: &str = "scrub_secret";
     /// Key ID for the single scrub-secret entry.
