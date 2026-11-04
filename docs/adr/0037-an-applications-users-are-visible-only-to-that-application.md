@@ -1,6 +1,39 @@
 # 0037. An application's users are visible only to that application
 
-**Status:** Proposed
+**Status:** Proposed. Parked on 2026-11-04: build it when a customer needs it.
+
+## Status note: why this is parked
+
+The invariant stands: carriage is never gated, only visibility. What is
+parked is this mechanism. Only the reserved `__MEMBER__` prefix and the frame
+layouts in `offline-protocol-sealed` are on `main`; no engine runs the
+exchange. A review found the cost too high for a property no customer has
+asked for yet:
+
+- **The recognition key ships in every copy of the application.** `K_app` is
+  derived from the publisher public key and the application id, and both are
+  in the binary. Anyone who installs the application can recognise its users,
+  so the protection is weaker than the decision below claims.
+- **It fails closed while offline, and silently.** A certificate that expires
+  offline, or a clock that drifts past the discovery window, splits a group
+  with nothing shown to the user. Turning it on also splits an application's
+  users until every install has updated.
+- **Older builds misread the frame.** A build that does not reserve
+  `__MEMBER__` rejects every hello with a security warning, or shows it as a
+  text message when `require_encryption` is off, and applications in the
+  field ship such builds.
+- **Every new neighbour costs a signature, a seal and two frames.** On cheap
+  phones in a crowd that is real CPU and battery, and a configured
+  application's discovery stops working over the internet.
+
+If it is picked up again, these change first:
+
+1. The backend issues the recognition key with the certificate, instead of
+   every install deriving it from public values.
+2. A node sends `__MEMBER__` only to a neighbour that advertised support in
+   its key package ([control messages](../spec/control-messages.md#application-membership)).
+3. It rolls out over two releases: send proofs first, enforce them later.
+4. Embedded-key mode is for managed devices only.
 
 ## Context
 
