@@ -15,6 +15,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **`__MEMBER__` is reserved, and the application membership layouts exist.**
+  The control frame of the membership exchange
+  ([ADR 0037](docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md))
+  is reserved and consumed on receipt, never delivered as text or answered,
+  ahead of the exchange itself. A build that does not reserve it delivers the
+  frame to its application as text, so this release is the floor for sharing a
+  radio neighbourhood cleanly. `offline-protocol-sealed` gains `membership`:
+  the certificate, the two exchange frames and the end-to-end proof, each at
+  one fixed size, with their signing payloads and key derivation inputs,
+  pinned by `app-membership-v1.vectors.json`
+  ([control messages](docs/spec/control-messages.md#application-membership)).
+  Nothing is gated on membership yet.
+
 - **A browser node's start can be aborted.** `OfflineNode.start({ signal })`
   ends the worker of a start that has not finished, and with it the
   account's lock or its place in the queue for one, and rejects with the

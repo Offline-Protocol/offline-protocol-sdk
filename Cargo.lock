@@ -2656,6 +2656,8 @@ name = "offline-protocol-sealed"
 version = "0.31.0"
 dependencies = [
  "base64 0.22.1",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
  "offline-protocol-core",
  "serde",
  "serde_json",

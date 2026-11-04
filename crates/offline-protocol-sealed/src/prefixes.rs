@@ -1,9 +1,10 @@
 //! The control-frame prefixes a 1:1 sealed conversation is carried on.
 //!
-//! A frame's type is the reserved prefix its content begins with. The six
+//! A frame's type is the reserved prefix its content begins with. The seven
 //! here are the ones both ends of a pair speak: everything needed to
 //! establish a session, carry sealed payloads over it, and confirm it came
-//! up. They live in this crate because a leaf node emits and parses them
+//! up, and the membership exchange a leaf with a certificate runs like any
+//! other node. They live in this crate because a leaf node emits and parses them
 //! with a different MLS implementation than the engine, and two ends that
 //! disagree about a prefix byte do not have a conversation at all.
 //!
@@ -62,6 +63,13 @@ pub const SESSION_CONFIRM_ACK: &str = "__MLS_CONFIRM_ACK__";
 /// sent. The receiver consumes this marker and never surfaces it.
 pub const SESSION_CONFIRM_ENCRYPTED: &str = "__MLS_ENC_CONFIRM__";
 
+/// Carries one step of the application membership exchange, a
+/// [`MemberFrame`]. Signed on the control plane, sent to a direct neighbour
+/// only, and never relayed.
+///
+/// [`MemberFrame`]: crate::MemberFrame
+pub const MEMBER: &str = "__MEMBER__";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +89,7 @@ mod tests {
         assert_eq!(SESSION_CONFIRM_PROBE, "__MLS_CONFIRM_PROBE__");
         assert_eq!(SESSION_CONFIRM_ACK, "__MLS_CONFIRM_ACK__");
         assert_eq!(SESSION_CONFIRM_ENCRYPTED, "__MLS_ENC_CONFIRM__");
+        assert_eq!(MEMBER, "__MEMBER__");
     }
 
     /// No prefix may be a prefix of another.
@@ -99,6 +108,7 @@ mod tests {
             SESSION_CONFIRM_PROBE,
             SESSION_CONFIRM_ACK,
             SESSION_CONFIRM_ENCRYPTED,
+            MEMBER,
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {

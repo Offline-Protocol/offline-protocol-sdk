@@ -1752,6 +1752,159 @@ def build_custody_receipt_vectors() -> dict:
     }
 
 
+def build_app_membership_vectors() -> dict:
+    """The application membership layouts, from docs/spec/control-messages.md
+    ("Application membership").
+
+    HKDF and HMAC are computed here from RFC 5869 and RFC 2104 over hashlib,
+    not by any library the Rust side uses. The AEAD output is not pinned:
+    ChaCha20-Poly1305 carries its own vectors in RFC 8439, and what is
+    specific to this protocol is the key, the nonce and the plaintext, which
+    are.
+    """
+    import base64
+    import hmac as _hmac
+
+    def hkdf(ikm: bytes, salt: bytes, info: bytes, length: int = 32) -> bytes:
+        prk = _hmac.new(salt or bytes(32), ikm, hashlib.sha256).digest()
+        out, block, counter = b"", b"", 1
+        while len(out) < length:
+            block = _hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+            out += block
+            counter += 1
+        return out[:length]
+
+    def payload(addr: str) -> bytes:
+        return b"\x01" + address_hash(addr)
+
+    publisher_pk = bytes.fromhex(RFC8032_TV1_PK)
+    app_id = "com.example.chat"
+    app_info = b"offline-protocol-app-v1" + app_id.encode("utf-8")
+    k_app = hkdf(publisher_pk, b"", app_info)
+
+    addr_a = derive_address(bytes.fromhex(RFC8032_TV2_PK))
+    addr_b = derive_address(bytes.fromhex(RFC8032_TV3_PK))
+    a, b = payload(addr_a), payload(addr_b)
+    lo, hi = (addr_a, addr_b) if a < b else (addr_b, addr_a)
+
+    not_after = 1_800_000_000
+    cert_payload = b"offline-app-member-v1" + a + not_after.to_bytes(8, "big")
+    # A placeholder, not a signature: these pin the bytes around it.
+    publisher_sig = bytes(range(64))
+    cert = a + not_after.to_bytes(8, "big") + publisher_sig
+
+    nonce_a = bytes(range(16))
+    nonce_b = bytes(range(0xF0, 0x100))
+    tag_input = b"offline-app-member-hello-v1" + nonce_a + a + b
+    tag = _hmac.new(k_app, tag_input, hashlib.sha256).digest()[:16]
+    hello_body = base64.b64encode(bytes([1, 1]) + nonce_a + tag).decode("ascii")
+
+    nonces = {addr_a: nonce_a, addr_b: nonce_b}
+    salt = nonces[lo] + nonces[hi]
+    info_a = b"offline-app-member-exchange-v1" + a
+    info_b = b"offline-app-member-exchange-v1" + b
+    transcript_a = b"offline-app-member-transcript-v1" + a + b + nonce_a + nonce_b
+    identity_sig = bytes(range(64, 128))
+    credential = cert + identity_sig
+    sealed = bytes([0xAB]) * 173
+    response_body = base64.b64encode(bytes([1, 2]) + sealed).decode("ascii")
+
+    body = b'{"example":"key package payload"}'
+    e2e_kp = b"offline-app-member-e2e-v1" + b + bytes([1]) + hashlib.sha256(body).digest()
+    query = b'{"query_id":"q1","originator":"' + addr_a.encode("ascii") + b'"}'
+    e2e_query = (
+        b"offline-app-member-e2e-v1" + bytes(21) + bytes([4]) + hashlib.sha256(query).digest()
+    )
+    proof_salt = bytes([0x5A]) * 16
+
+    return {
+        "_comment": [
+            "Frozen conformance vectors for application membership, from",
+            "docs/spec/control-messages.md (Application membership) and ADR 0037.",
+            "",
+            "Computed from the construction stated in that chapter, not by",
+            "running the codec they pin. HKDF-SHA256 and HMAC-SHA256 are computed",
+            "here over hashlib; the AEAD output is not pinned, since RFC 8439",
+            "carries its own vectors.",
+            "",
+            "Both signatures are placeholders (counting bytes): what is specific",
+            "to this protocol is which bytes are signed, and that is what these pin.",
+            "The publisher key and both addresses trace to RFC 8032 section 7.1",
+            "test vectors 1, 2 and 3.",
+        ],
+        "app_key": {
+            "publisher_public_key_hex": publisher_pk.hex(),
+            "app_id": app_id,
+            "info_hex": app_info.hex(),
+            "k_app_hex": k_app.hex(),
+        },
+        "addresses": {
+            "a": addr_a,
+            "a_payload_hex": a.hex(),
+            "b": addr_b,
+            "b_payload_hex": b.hex(),
+            "lower": lo,
+        },
+        "certificate": {
+            "address": addr_a,
+            "not_after": not_after,
+            "signing_payload_hex": cert_payload.hex(),
+            "signature_hex": publisher_sig.hex(),
+            "bytes_hex": cert.hex(),
+        },
+        "hello": {
+            "note": "a sends to b. The receiver recomputes the input with "
+            "itself as addr_peer, so the same nonce on another link is another tag.",
+            "nonce_hex": nonce_a.hex(),
+            "tag_input_hex": tag_input.hex(),
+            "tag_hex": tag.hex(),
+            "body": hello_body,
+        },
+        "exchange": {
+            "note": "Each side's response is sealed under a key derived with "
+            "its own address in the info. One key for both directions would "
+            "seal two plaintexts under one key and one zero nonce.",
+            "nonce_a_hex": nonce_a.hex(),
+            "nonce_b_hex": nonce_b.hex(),
+            "salt_hex": salt.hex(),
+            "key_info_a_hex": info_a.hex(),
+            "key_info_b_hex": info_b.hex(),
+            "key_a_hex": hkdf(k_app, salt, info_a).hex(),
+            "key_b_hex": hkdf(k_app, salt, info_b).hex(),
+            "transcript_a_hex": transcript_a.hex(),
+            "credential_hex": credential.hex(),
+            "response_sealed_hex": sealed.hex(),
+            "response_body": response_body,
+        },
+        "proof": {
+            "key_package": {
+                "recipient": addr_b,
+                "kind": 1,
+                "frame_body_hex": body.hex(),
+                "signing_payload_hex": e2e_kp.hex(),
+            },
+            "discovery_query": {
+                "note": "Gossip names no single recipient: 21 zero bytes, which "
+                "no address payload is.",
+                "kind": 4,
+                "frame_body_hex": query.hex(),
+                "signing_payload_hex": e2e_query.hex(),
+            },
+            "salt_hex": proof_salt.hex(),
+            "key_hex": hkdf(k_app, proof_salt, b"offline-app-member-e2e-v1").hex(),
+            "bytes_hex": (proof_salt + sealed).hex(),
+        },
+        "rejects": [
+            {"name": "version_2", "body": base64.b64encode(bytes([2, 1]) + bytes(32)).decode()},
+            {"name": "step_3", "body": base64.b64encode(bytes([1, 3]) + bytes(32)).decode()},
+            {"name": "hello_short", "body": base64.b64encode(bytes([1, 1]) + bytes(31)).decode()},
+            {"name": "hello_size_as_response", "body": base64.b64encode(bytes([1, 2]) + bytes(32)).decode()},
+            {"name": "response_long", "body": base64.b64encode(bytes([1, 2]) + bytes(174)).decode()},
+            {"name": "empty", "body": ""},
+        ],
+    }
+
+
 FILES = [
     (CORE_DATA / "wire-v1.vectors.json", build_wire_vectors),
     (CORE_DATA / "address-v1.vectors.json", build_address_vectors),
@@ -1761,6 +1914,7 @@ FILES = [
     (SEALED_DATA / "mls-envelope-v1.vectors.json", build_envelope_vectors),
     (SEALED_DATA / "key-package-v1.vectors.json", build_key_package_vectors),
     (SEALED_DATA / "identity-assertion-v1.vectors.json", build_identity_assertion_vectors),
+    (SEALED_DATA / "app-membership-v1.vectors.json", build_app_membership_vectors),
     (TRANSPORT_DATA / "stream-framing-v1.vectors.json", build_stream_framing_vectors),
     (PROTOCOL_DATA / "custody-receipt-v1.vectors.json", build_custody_receipt_vectors),
 ]

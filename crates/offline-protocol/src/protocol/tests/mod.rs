@@ -23553,6 +23553,38 @@ fn test_send_message_via_transport_rejects_internal_prefixes() {
     }
 }
 
+/// `__MEMBER__` is reserved before the membership exchange exists (ADR 0037):
+/// a signed frame on it is consumed, never delivered as application text and
+/// never answered. An answer would depend on whether this node is a member,
+/// and the exchange's privacy is that nothing observable does.
+#[test]
+fn a_membership_frame_is_consumed_and_never_answered() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let sent = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+    let before = sent.sent_messages().len();
+
+    let hello = offline_protocol_sealed::MemberFrame::Hello(offline_protocol_sealed::MemberHello {
+        nonce: [1; offline_protocol_sealed::membership::MEMBER_NONCE_LEN],
+        tag: [2; offline_protocol_sealed::membership::MEMBER_TAG_LEN],
+    });
+    let content = format!("{}{}", internal_prefixes::MEMBER, hello.to_body());
+    let message = signed_frame(&id("alice"), "user123", &content);
+
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    assert_eq!(
+        sent.sent_messages().len(),
+        before,
+        "a membership frame is never answered"
+    );
+}
+
 #[test]
 fn test_send_message_allows_normal_content() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();

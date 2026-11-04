@@ -299,6 +299,113 @@ The deposit itself is not a frame and has no prefix. It is the depositor's own
 forwarder strips from a third-party frame before transmitting it, so a deposit
 travels exactly one hop.
 
+### Application membership
+
+| Prefix | Direction | Body |
+|--------|-----------|------|
+| `__MEMBER__` | neighbour to neighbour, hop 0, never relayed | One step of the membership exchange, base64 (standard, padded) of a fixed-size binary body. Signature-gated like every control frame |
+
+The frame belongs to the visibility rule of
+[ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md):
+an application that configures a publisher key makes its users visible only to
+each other while every node still carries every application's traffic. The
+prefix is reserved before the exchange is implemented, on the terms
+`__DATA_V1__` was, because a build that does not reserve it delivers the frame
+to its application as text; the release that reserves it is the floor for
+sharing a radio neighbourhood cleanly. A receiver that reserves the prefix and
+does not run the exchange MUST consume the frame and MUST NOT answer it.
+
+The layouts are owned by `offline-protocol-sealed` (`membership`), and the
+vectors in `crates/offline-protocol-sealed/tests/data/app-membership-v1.vectors.json`
+pin them. Every field has a fixed size and an address is always its 21-byte
+`version || hash` payload, never its text rendering, so no layout needs a length
+prefix: a concatenation of fixed-size fields has one parse.
+
+**Primitives.** HKDF-SHA256, HMAC-SHA256 truncated to 16 bytes, Ed25519, and
+ChaCha20-Poly1305 with a 12-byte zero nonce under a key used exactly once.
+
+**The application key.**
+
+```
+K_app = HKDF(ikm = publisher_public_key, salt = none,
+             info = "offline-protocol-app-v1" || app_id_utf8)          32 bytes
+```
+
+**The certificate**, 93 bytes:
+
+| Field | Size | Value |
+|-------|------|-------|
+| `address` | 21 | The member's address payload |
+| `not_after` | 8 | Unix seconds, big-endian; current while `now <= not_after` |
+| `signature` | 64 | The publisher's Ed25519 signature over `"offline-app-member-v1" \|\| address \|\| not_after` |
+
+**The frame body** is `version(1) || step(1) || payload`, version 1:
+
+| Step | Payload | Size |
+|------|---------|------|
+| 1, hello | `nonce(16) \|\| tag(16)` | 32 |
+| 2, response | A sealed credential | 173 |
+
+Any other version, step, or payload size is refused before anything else runs.
+
+**Step 1.** Each side sends a fresh nonce and
+
+```
+tag = HMAC(K_app, "offline-app-member-hello-v1" || nonce_self || addr_self || addr_peer)[0..16]
+```
+
+A node with no publisher key, or with another application's, sends 32 random
+bytes. A receiver recomputes the tag with its own address as `addr_peer`, so a
+hello recorded on one link proves nothing on another.
+
+**Step 2.** Every receiver of a hello sends a response, whatever the result,
+always 173 bytes. On a match it is the credential `cert(93) || sig(64)`, sealed:
+
+```
+salt = nonce of the side whose address payload sorts lower || the other nonce
+k    = HKDF(ikm = K_app, salt, info = "offline-app-member-exchange-v1" || addr_sender)
+sig  = Ed25519_identity("offline-app-member-transcript-v1" ||
+         addr_signer || addr_peer || nonce_signer || nonce_peer)
+response = ChaCha20-Poly1305(k, nonce = 0, cert || sig)
+```
+
+On a mismatch it is 173 random bytes, produced after the same signature and
+seal over dummy input, so neither size nor cost separates the two. **The
+sender's address is in the key's `info` because both sides send a response from
+the same two nonces**: one key for both directions would seal two plaintexts
+under one key and one nonce, which under ChaCha20-Poly1305 reveals their XOR and
+the one-time authentication key. A node never runs the exchange with its own
+address; the salt is undefined for equal addresses and an implementation MUST
+refuse it.
+
+A receiver opens the response with the key derived for the *sender's* address,
+then verifies the certificate under the publisher key, its address against the
+frame's sender, `not_after`, and the transcript signature under the sender's
+identity key. A pass makes the sender visible until `not_after`.
+
+**The end-to-end proof**, 189 bytes, carried as an optional `member_proof`
+field in the frame that opens a session across the mesh:
+
+```
+salt  = random(16)
+k     = HKDF(ikm = K_app, salt, info = "offline-app-member-e2e-v1")
+sig   = Ed25519_identity("offline-app-member-e2e-v1" || recipient(21) || kind(1)
+          || SHA-256(frame_body))
+proof = salt || ChaCha20-Poly1305(k, nonce = 0, cert || sig)
+```
+
+| `kind` | Frame | `recipient` |
+|--------|-------|-------------|
+| 1 | Key package payload | The recipient's address payload |
+| 2 | 1:1 Welcome | The recipient's address payload |
+| 3 | Group Welcome (`__GRP_MLS_WELCOME__`) | The invitee's address payload |
+| 4 | Service discovery query | 21 zero bytes: gossip names no single recipient, and the query is bound through its body, which carries `query_id` and `originator`. No address payload is all zero, since the version byte is never zero |
+| 5 | Service discovery response | The query originator's address payload |
+
+`frame_body` is the frame's payload with the `member_proof` field absent. The
+salt is fresh per proof because `K_app` is shared by every install of the
+application, and a fixed key with a fixed nonce would repeat across installs.
+
 ## Document sync frames
 
 `__DATA_V1__` frames replicate documents. They are specified in their own
