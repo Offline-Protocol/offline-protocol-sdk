@@ -60,9 +60,14 @@ removes.
    run for it, only once it has proven membership of the same application. A
    missing proof means "not visible", never "pass" (the shape of
    [ADR 0010](0010-unconditional-leaf-identity-binding.md)).
-3. **A member answers no stranger.** A configured node sends nothing back to a
-   peer that is neither visible nor named by its own application, and the
-   stranger observes what it observes for an address nobody holds.
+3. **A member answers no stranger end to end.** A configured node sends no
+   end-to-end answer to a peer that is not admitted (below), and the stranger
+   observes what it observes for an address nobody holds. An end-to-end
+   answer is any frame the engine sends because a frame addressed to this
+   node, as its final recipient, arrived. Carriage-level answers, such as a
+   `__CUSTODY_RECEIPT__` to a depositor
+   ([custody](../spec/custody.md)), are outside this invariant: they reveal
+   only that an SDK node is live here, which party 2 may learn.
 4. **Nothing names the application in the clear.** Every value a carrier or a
    connecting party can read is either constant across applications or
    derived from a key that party 2 does not hold.
@@ -108,20 +113,38 @@ which the frame already carries, so no new exemption class is needed.
    `tag = HMAC(K_app, "hello" || nonce_self || addr_self || addr_peer)[0..16]`.
    A node with no publisher key, or with a different one, sends 32 random
    bytes. Every SDK node sends this frame, so sending it reveals nothing.
-2. A receiver checks the tag with its own `K_app`. On a mismatch it stops,
-   silently. On a match it sends
-   `AEAD(HKDF(K_app, nonce_a || nonce_b), cert || sig_identity(transcript))`.
-   The transcript signature ties the certificate to this live exchange, so a
-   recorded frame does not replay
+2. A receiver checks the tag with its own `K_app`, and **always** sends the
+   second frame, of one fixed size, whatever the result. On a match it is
+   `AEAD(HKDF(K_app, nonce_lo || nonce_hi), cert || sig_identity(transcript))`,
+   where `nonce_lo` is the nonce of the side whose address sorts lower, so
+   both ends derive the same key. On a mismatch it is random bytes of the
+   same length. The transcript signature ties the certificate to this live
+   exchange, so a recorded frame does not replay
    ([R16](../security/threat-model.md#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier)
    stays a property of the identity assertion only).
 3. A receiver verifies the certificate against `publisher_pk`, its address
    against the frame's sender, `not_after`, and the transcript signature. A
    pass makes the peer **visible**, cached per address until `not_after`.
 
+**Nothing observable depends on the match.** A receiver that stopped on a
+mismatch would be an oracle. The hello is a signed control frame, the
+deduplicator forgets its id after an hour while the freshness window admits
+it for thirty days ([ADR 0023](0023-a-control-frame-states-when-it-was-made.md)),
+and R16 lets party 2 label its own link with X's address. Party 2 could then
+replay X's hello to Y and learn, from whether Y answered, whether Y runs X's
+application: a grouping of A's users, which the attacker table says party 2
+cannot get. Because step 2 is sent unconditionally and at one size, the
+replay shows party 2 nothing, and the design does not rest on the
+deduplicator or the window for this property.
+
 Party 3 completes steps 1 and 2, since it holds `K_app`, and fails step 3,
 since it has no certificate. Party 2 fails step 1 and learns that the peer is
 an SDK node, which it knew.
+
+The visible cache is keyed by address, and R16 lets a stranger present a
+visible address on a link of its own. That stranger still cannot send
+anything as X, because every control frame is signed and every data frame is
+sealed, so this is R16's existing presence-spoof exposure, not a new one.
 
 ### What the gate covers
 
@@ -135,7 +158,10 @@ emission sites ask it.
 It does not cover an action the application takes toward an address it
 supplied: an explicit send, pair call or session request, or a scanned
 invitation anchor. Those addresses join a persisted, bounded **named set**,
-written only by those calls and never by anything a frame carries. Without
+written only by those calls and never by anything a frame carries. The bound
+evicts the least recently named address that holds no session; an address
+with a live session is never evicted, so the cap can cost only a contact the
+application has not used and is not talking to. Without
 this exception, pairing an unprovisioned leaf breaks: a phone may start it by
 pushing a key package on discovery
 ([leaf provisioning](../spec/leaf-provisioning.md)), and a leaf with no
@@ -143,22 +169,73 @@ certificate never becomes visible.
 
 ### Inbound requests
 
-A configured node answers a sender, with an acknowledgement of any kind, a
-key package, a Welcome or a reset, only when one of these holds:
+One predicate, **admitted**, sits in front of every end-to-end answer the
+engine sends: every acknowledgement (delivery, group, undecryptable), key
+package, Welcome, reset or `no_session` reply, confirmation probe or
+acknowledgement, connection answer, service answer (`__SVC_SUB_R__` and the
+rest) and data-sync reply. It is stated as covering every reactive send, not
+as a list of kinds, and the source guard enumerates the send sites, so a new
+reply path is added to the guard, never exempted from it. A sender is
+admitted when one of these holds:
 
 - the sender is **visible**;
 - the sender is in the **named set**, which is backfilled once, at
   configuration, from every peer that already holds a session with this node,
   so turning membership on does not cut off existing contacts;
-- the request carries an **end-to-end membership proof**, sent ahead of the
-  key package:
-  `AEAD_{K_app}(cert || sig_identity("offline-app-member-e2e-v1" || addr_recipient || key_package_hash))`.
+- the sender **holds a 1:1 session with this node**. Only an admitted peer can
+  open one, since a stranger's key package and Welcome are dropped (below),
+  so a session outlives the visible entry that let it form, and a contact met
+  as a neighbour stays answerable after its cache entry lapses;
+- the sender is on the **roster of a group this node holds**, as the MLS
+  group state has it after an authorised commit. A roster comes from the
+  group, not from a frame's claim: a member added by another member's commit
+  was admitted by someone this node already trusts with the group, and
+  without this source every group member who was never a neighbour would
+  have its messages go unacknowledged and its sends run to expiry;
+- the request carries a valid **end-to-end membership proof** (below).
 
-The third case exists because the exchange is hop 0. Two members several hops
-apart never see each other as neighbours, and without the proof they could
-open a session only if one typed the other's address. Binding the recipient
-and the key package stops a captured proof from being replayed to another
-member or with another package. A relay sees random bytes.
+**What happens to a stranger's frame.** Admission decides what the node
+*answers*, never what it *carries*, and it is judged per frame class:
+
+| Frame from a sender not admitted | Processed | Answered |
+|---|---|---|
+| Key package, Welcome, connection request, service subscription | No: dropped before any state changes, so no session, no pending package and no subscription forms | No |
+| Data frame under a session or group this node holds | Not applicable: holding the session or being on the roster admits the sender | Not applicable |
+| Anything else addressed to this node | No | No |
+| A frame addressed to someone else | Relayed as before | Not applicable |
+
+### The end-to-end membership proof
+
+The exchange is hop 0, so two members several hops apart never see each
+other as neighbours. Without a proof they could open a session only if one
+typed the other's address. The initiator therefore carries a proof **inside**
+the frame that opens the session, as an optional `member_proof` field, so the
+proof and the request arrive, retry and expire together and no ordering
+between two frames is assumed:
+
+- in the **key package payload**, binding that package;
+- in the **Welcome**, binding that Welcome, for the path where the initiator
+  built a session from a package it fetched (a Nostr username lookup) and the
+  recipient's first frame from it is a Welcome with no key package of the
+  sender's to hash.
+
+```
+salt  = random(16)
+k     = HKDF(ikm = K_app, salt = salt, info = "offline-app-member-e2e-v1")
+proof = salt || AEAD_k(nonce = 0, cert || sig_identity(
+          "offline-app-member-e2e-v1" || addr_recipient || kind || hash(frame_body)))
+```
+
+`kind` is one byte naming key package or Welcome, and `frame_body` is the
+package or the Welcome with the proof field absent. `K_app` is shared by every
+install of the application, so the AEAD key is derived per proof from a fresh
+salt and is used once; a fixed nonce under a fleet-shared key would repeat
+across installs. Binding the recipient, the kind and the body stops a captured
+proof from being replayed to another member, onto another package or onto
+another Welcome. A relay that does not hold `K_app` (party 2) sees random
+bytes. A relay that does (party 3) can decrypt every proof it carries and
+learns which address is opening a session to which: party 3's recognition
+residual, extended from one connection to the proofs it happens to carry.
 
 ### Nothing in the clear
 
@@ -169,7 +246,18 @@ member or with another package. A relay sees random bytes.
   acknowledgements carry only the constant. This is the fix R17 names.
 - **The Bluetooth LE app tag** becomes `HMAC(K_app, instance_address)[0..8]`:
   different per phone and per identity, so it groups nothing for party 2, and
-  computable by a same-application central from the address it has just read.
+  computable by a same-application central from that instance's address.
+  This changes the selection procedure. Today a central chooses an instance
+  by App tag *before* it reads Device id
+  ([BLE framing](../spec/ble-framing.md#several-instances-behind-one-link)),
+  and the new tag cannot be checked without the address. A configured central
+  that finds more than one instance reads Device id and App tag on each,
+  takes the first whose tag equals `HMAC(K_app, device_id)[0..8]`, and
+  otherwise falls back to the existing rules 2 and 3; it then reads Identity
+  and verifies it on the chosen instance only. Device id is unauthenticated
+  until that verification, so a match only chooses an instance and grants
+  nothing. A central with one instance, or with no publisher key, behaves as
+  today.
 - **The Android Wi-Fi Direct group** name, passphrase and `app` TXT key, and
   **the browser's nearby room key**, are derived from `K_app`.
 
@@ -190,8 +278,8 @@ with no certificate behaves as today.
 - **The shared network keeps its density.** Every node still carries every
   application's traffic, and B's users relay A's messages without ever
   learning A is there.
-- **Two small frames per new neighbour**, plus one proof per session started
-  across the mesh. Cached per address until `not_after`; bounded by the
+- **Two small frames each way per new neighbour**, sent whatever the result,
+  plus one proof field per session started across the mesh. Cached per address until `not_after`; bounded by the
   per-link relay bucket.
 - **A stranger's message to a member goes unanswered** and runs its retry
   queue to expiry, as for an absent peer. That is the intended observable,
@@ -210,9 +298,12 @@ with no certificate behaves as today.
   cut off by rotating the key pair, which makes every old member a stranger.
 - **The contracts move:** a UDL change (one config field, three functions),
   so every binding is regenerated; a new reserved prefix; an optional field in
-  the sealed rich payload; a new derivation for the app tag in three mirrors;
-  R15, R17 and R22 are rewritten, and a new threat-model entry states party
-  3's residual and embedded mode's forgery.
+  the sealed rich payload; an optional `member_proof` field in the key package
+  payload and in the Welcome, both in `offline-protocol-sealed`; a new
+  derivation for the app tag and a new instance-selection rule in the BLE
+  framing chapter and its three mirrors; R15, R17 and R22 are rewritten, and
+  a new threat-model entry states party 3's residual, including what it reads
+  from the proofs it carries, and embedded mode's forgery.
 
 ## Alternatives considered
 
@@ -254,6 +345,21 @@ the guard, never exempted from it.
 A reply path added to the engine (a new acknowledgement, error or capability
 answer) that does not ask the inbound predicate. It confirms to a stranger
 that an address is live, which is the last thing invariant 3 protects.
+
+A second exchange frame sent only on a match, or sized by the result. That
+reopens the replay oracle the unconditional step 2 closes.
+
+Weakening a property this design rests on without naming it: the control-plane
+signature gate ([ADR 0004](0004-control-plane-signature-gate.md)), which makes
+a frame's sender its signer; the freshness window
+([ADR 0023](0023-a-control-frame-states-when-it-was-made.md)); and the
+transport-sender check that refuses a hop-0 frame whose sender is not the
+link's proved peer. Each is why a stranger holding a visible address on a
+link of its own still cannot speak as that address.
+
+A roster source read from anything other than the MLS group state after an
+authorised commit. A roster a frame can assert is a named set a frame can
+write.
 
 Writing to the named set from anything a frame carries. The set is the one
 input that bypasses proof, and it must stay in the application's hands.
