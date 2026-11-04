@@ -2990,4 +2990,113 @@ mod tests {
         // ordinary path; a neighbor nobody has charged still admits one.
         assert!(gov.admit_held(frame(), "frank", now).is_ok());
     }
+
+    fn frame_for_app(app_id: &str) -> Message {
+        Message::builder(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new(app_id).unwrap(),
+        )
+        .content("hello")
+        .build()
+    }
+
+    #[test]
+    fn rotating_the_app_id_buys_a_neighbor_no_more_than_its_link_allows() {
+        // The application id is cleartext and unsigned (R17), so any sender
+        // can write a fresh one on every frame. A share keyed on it would be
+        // a share a flooder mints at will; the share is the arrival link's,
+        // and a new id on each frame changes nothing about how much of it
+        // one neighbor gets.
+        let mut gov = governor();
+        let accepted = (0..200)
+            .filter(|i| {
+                gov.admit(&frame_for_app(&format!("app-{i}")), Some("noisy"), 3)
+                    == RelayAdmission::Queued
+            })
+            .count();
+        assert!(
+            accepted <= DEFAULT_RELAY_PEER_BURST as usize + 2,
+            "accepted {accepted} frames from one neighbor across 200 app ids"
+        );
+        assert_eq!(
+            gov.admit(&frame_for_app("app-0"), Some("quiet"), 3),
+            RelayAdmission::Queued,
+            "a different link still gets its own share"
+        );
+    }
+
+    #[test]
+    fn a_frame_for_an_application_this_device_does_not_run_is_carried_unchanged() {
+        // Every SDK app carries every other's traffic: that is what makes the
+        // network as dense as all the installs together rather than one app's.
+        // The governor's own id belongs to no application, and the frame
+        // leaves with the id it arrived with.
+        let mut gov = governor();
+        let msg = frame_for_app("some-other-app");
+        assert_eq!(gov.admit(&msg, Some("b"), 3), RelayAdmission::Queued);
+        let due = gov.take_due(Instant::now());
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].message.app_id.as_str(), "some-other-app");
+    }
+
+    /// The source of `name`, a method at four spaces of indentation, up to
+    /// its closing brace.
+    fn method_source<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{name} is not in the file"));
+        let end = source[start..]
+            .find("\n    }\n")
+            .unwrap_or_else(|| panic!("{name} has no closing brace"));
+        &source[start..start + end]
+    }
+
+    #[test]
+    fn the_forwarding_path_never_reads_the_application_id() {
+        // The forwarding half of the carriage rule (docs/spec/wire-format.md):
+        // a device carries a frame whatever application it names. The id is
+        // cleartext and rewritable, so any decision taken on it is one a
+        // carrier can steer, and an "only my app's frames" filter would split
+        // the network into one per application. Nothing on the path reads it,
+        // which is what this holds.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol");
+        let read = |file: &str| std::fs::read_to_string(dir.join(file)).expect(file);
+
+        let governor = read("mesh_relay.rs");
+        let governor = governor
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("the governor has a body");
+        let receive = read("receive.rs");
+        let custodian = read("custodian.rs");
+        let custodian = custodian
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("the custodian has a body");
+
+        let path = [
+            ("mesh_relay.rs", governor),
+            ("custodian.rs", custodian),
+            (
+                "receive.rs try_relay_message",
+                method_source(&receive, "try_relay_message"),
+            ),
+            (
+                "receive.rs flush_mesh_relays_at",
+                method_source(&receive, "flush_mesh_relays_at"),
+            ),
+        ];
+        for (name, source) in path {
+            // A slice that lost its body would pass vacuously.
+            assert!(
+                source.contains("mesh_relay") || source.contains("MeshRelay"),
+                "{name}: the guard is not reading the forwarding path"
+            );
+            assert!(
+                !source.contains("app_id"),
+                "{name} reads the application id on the forwarding path"
+            );
+        }
+    }
 }

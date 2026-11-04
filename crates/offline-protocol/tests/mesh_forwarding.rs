@@ -886,6 +886,52 @@ fn a_device_that_carries_nothing_still_gets_its_own_answer_out() {
 }
 
 #[test]
+fn a_device_running_another_application_carries_the_message_both_ways() {
+    // The network is every SDK install, not one application's: bob runs a
+    // different app from alice and carol, and he is the only way between
+    // them. He must carry the message out and the acknowledgement back, and
+    // hand each on with the application id it arrived with.
+    let mut net = Neighborhood::new(&["alice", "carol"]);
+    let mut bob = default_config("bob");
+    bob.app_id = "another-app".to_string();
+    net.add_node("bob", bob);
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+
+    let msg_id = net.send("alice", "carol", "carried by a stranger");
+
+    net.run_until_quiet(12);
+
+    assert_eq!(
+        net.inbox("carol"),
+        vec!["carried by a stranger".to_string()]
+    );
+    assert_eq!(net.deliveries_to("carol", &msg_id), 1);
+    let carried: Vec<&Message> = net
+        .frames
+        .iter()
+        .filter(|(from, _, _)| from == "bob")
+        .map(|(_, _, frame)| frame)
+        .collect();
+    assert!(
+        carried.iter().any(|frame| frame.id.as_str() == msg_id),
+        "bob must have carried the message"
+    );
+    assert!(
+        net.transmissions
+            .iter()
+            .any(|(from, to, _)| from == "bob" && to == "alice"),
+        "and carol's answer back to alice"
+    );
+    assert!(
+        carried
+            .iter()
+            .all(|frame| frame.app_id.as_str() == "mesh-test"),
+        "a carrier hands a frame on under the id it arrived with"
+    );
+}
+
+#[test]
 fn an_answer_is_carried_even_when_a_transport_accepts_a_peer_it_cannot_reach() {
     // Only BLE refuses a recipient it holds no link to. Wi-Fi Direct and
     // Reticulum enqueue for anyone and return `Ok`, so a frame handed to them
