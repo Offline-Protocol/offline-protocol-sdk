@@ -191,6 +191,14 @@ own, advertises that port in its LAN record, and where the rules say create it j
 or waits. The cost is formation time when it is the lowest address its peers hear: they form the
 group only through their takeover, three joins on the backoff, so three to four minutes.
 
+The listener is bound first in `start()`, before the channel, the receiver and discovery, and a
+start that throws after the bind unwinds: it stops what it brought up and closes the listener. A
+socket stranded by a failed start would hold 8988 for the life of the process, so every later start
+would land on a port of its own and this device would never own a group again. The same holds one
+level up: an enable stops a manager that is STARTING, not only one that is RUNNING, because a start
+over a STARTING manager registers a second receiver and binds a second listener
+(`WifiDirectManagerStartUnwindTest`, `stopsBeforeEnable`).
+
 A device alone keeps looking, but less often: service discovery backs off from 15 to 60 seconds
 while it hears no record, and the owner probe from one to four minutes while probes find no group
 (a Wi-Fi Direct printer or television is an owner no probe joins). Both start over when a record,

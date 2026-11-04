@@ -402,11 +402,9 @@ class WifiDirectManager(
 
         // Bind the peer-stream port before anything below that would need
         // unwinding. The LAN advert carries the port it got, so a start with
-        // no port fails, and it must fail here: a throw after the channel,
-        // the receiver and discovery are up leaves all three behind, and the
-        // next enable, which stops only a RUNNING manager, registers a second
-        // receiver over them. A bind is a local call with no network round
-        // trip, so it may run on the transport thread.
+        // no port fails, and it fails here, where there is nothing to undo
+        // yet: no channel, no receiver, no discovery. A bind is a local call
+        // with no network round trip, so it may run on the transport thread.
         val listener = PeerStreamListener.bind()
             ?: throw TransportException.StartFailed("no port to listen for peer streams on")
         // The accept timeout is set here too, not in the accept task: a stop()
@@ -419,6 +417,40 @@ class WifiDirectManager(
             throw TransportException.StartFailed("peer stream listener: ${e.message ?: "unknown"}")
         }
 
+        // Everything after the bind unwinds on a throw. The listener is not
+        // in [serverSocket] until [startServerSocket], so [stopUnsafe] alone
+        // would not close it: a throw before then (a state listener, the
+        // receiver registration, discovery) stranded the socket for the life
+        // of the process, still holding the group port, so every later start
+        // landed on an ephemeral port with `canOwn = false` and this device
+        // never formed a group again. The channel, receiver and discovery a
+        // partial start brought up are undone by [stopUnsafe], which accepts
+        // STARTING.
+        //
+        // [stopUnsafe] runs first and the listener is closed after it. Once
+        // [startServerSocket] has run, the accept task may be in accept():
+        // closing the socket while `serverRunning` is still true makes it
+        // report an "Error accepting connection" that never happened, and
+        // [stopUnsafe] clears the flag before it closes the socket. The close
+        // below covers a throw before the socket was published, and a
+        // [stopUnsafe] that itself throws, which is why it is in `finally`.
+        try {
+            startBound(p2p, listener)
+        } catch (e: Throwable) {
+            try {
+                stopUnsafe()
+            } catch (cleanup: Throwable) {
+                e.addSuppressed(cleanup)
+            } finally {
+                try { listener.socket.close() } catch (_: IOException) {}
+            }
+            throw e
+        }
+    }
+
+    /** The part of [startUnsafe] after the bind; [startUnsafe] unwinds it on a throw. */
+    @SuppressLint("MissingPermission")
+    private fun startBound(p2p: Boolean, listener: PeerStreamListener.Bound) {
         updateState(TransportState.STARTING)
 
         // An explicit start() means "run": a pause() from a previous session
@@ -480,7 +512,10 @@ class WifiDirectManager(
         p2pUp = p2p
         reportLayer()
 
-        lan = LanPeerDiscovery(
+        // Assigned before it starts, so a throw from start() leaves it where
+        // the unwind in [startUnsafe] can stop it; `.also { it.start() }`
+        // assigned only after start() returned.
+        val discovery = LanPeerDiscovery(
             context = context,
             handler = transportHandler,
             executor = socketExecutor,
@@ -490,7 +525,9 @@ class WifiDirectManager(
             running = { state == TransportState.RUNNING },
             networkChanged = ::lanNetworkChanged,
             diagnostic = ::emitDiagnostic,
-        ).also { it.start() }
+        )
+        lan = discovery
+        discovery.start()
         sockets.onLost = { address ->
             transportHandler.post {
                 lan?.peerLost(address)
