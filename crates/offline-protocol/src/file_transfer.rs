@@ -1100,7 +1100,18 @@ impl OutboundTransferState {
 
     /// Records that a chunk was ACKed. Returns `true` if this was an in-flight
     /// chunk (i.e. the window has room for more).
+    ///
+    /// An acknowledgement only counts for a chunk this window has handed out.
+    /// Counting any index let a stray or duplicated index fill `acked` up to
+    /// `chunks.len()`, so `is_fully_acked` reported a transfer complete while
+    /// real chunks were still unacknowledged.
     pub fn on_chunk_ack(&mut self, chunk_index: u32) -> bool {
+        let handed_out = self.chunks[..self.next_unsent]
+            .iter()
+            .any(|chunk| chunk.chunk_index == chunk_index);
+        if !handed_out {
+            return false;
+        }
         self.acked.insert(chunk_index);
         self.in_flight.remove(&chunk_index)
     }
@@ -2256,5 +2267,34 @@ mod tests {
             }]
         );
         assert!(manager.get_progress("file1").is_none());
+    }
+
+    #[test]
+    fn an_ack_for_a_chunk_never_handed_out_does_not_count() {
+        let make = |index: u32| FileChunk {
+            chunk_index: index,
+            total_chunks: 3,
+            ..sample_chunk()
+        };
+        let mut window = OutboundTransferState::new(vec![make(0), make(1), make(2)], 1);
+        let sent = window.next_chunks_to_send();
+        assert_eq!(sent.len(), 1);
+
+        // Out of range, and in range but not yet sent: neither counts.
+        assert!(!window.on_chunk_ack(7));
+        assert!(!window.on_chunk_ack(2));
+        assert_eq!(window.acked_count(), 0);
+
+        // The chunk that was sent counts once, however often it is acked.
+        assert!(window.on_chunk_ack(0));
+        assert!(!window.on_chunk_ack(0));
+        assert_eq!(window.acked_count(), 1);
+        assert!(!window.is_fully_acked());
+
+        for chunk in [1, 2] {
+            assert_eq!(window.next_chunks_to_send().len(), 1);
+            assert!(window.on_chunk_ack(chunk));
+        }
+        assert!(window.is_fully_acked());
     }
 }
