@@ -1,5 +1,6 @@
 //! Main protocol engine.
 
+mod app_identifiers;
 mod blocking;
 mod config_accessors;
 mod custodian;
@@ -29,6 +30,7 @@ pub(crate) mod state_crypto;
 mod storage;
 mod types;
 
+pub use app_identifiers::{AppIdentifiers, WifiDirectIdentifiers};
 pub use custody::{CustodyRefusal, CustodyStats};
 pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;

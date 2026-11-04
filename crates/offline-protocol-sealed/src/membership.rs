@@ -83,6 +83,46 @@ pub const MEMBER_E2E_DOMAIN: &[u8] = b"offline-app-member-e2e-v1";
 /// shape that lets an output of one stand in for an input of the other.
 pub const MEMBER_E2E_KEY_INFO: &[u8] = b"offline-app-member-e2e-key-v1";
 
+/// HMAC label of the Bluetooth LE App tag a configured application serves.
+///
+/// `tag = HMAC-SHA256(K_app, ble_app_tag_input(device_id))[..8]`. The other
+/// identifiers below are HKDF outputs; this one is a MAC because a central
+/// recomputes it for each Device id it reads.
+pub const BLE_APP_TAG_LABEL: &[u8] = b"offline-app-ble-tag-v1";
+
+/// Length of the Bluetooth LE App tag, in bytes, keyed or not.
+pub const BLE_APP_TAG_LEN: usize = 8;
+
+/// HKDF `info` of the value a configured application advertises under the
+/// `app` key of its Android Wi-Fi Direct service record.
+pub const WIFI_DIRECT_APP_INFO: &[u8] = b"offline-app-wifi-direct-record-v1";
+
+/// HKDF `info` of a configured application's Android Wi-Fi Direct group name.
+pub const WIFI_DIRECT_NETWORK_INFO: &[u8] = b"offline-app-wifi-direct-network-v1";
+
+/// HKDF `info` of a configured application's Android Wi-Fi Direct group
+/// passphrase.
+pub const WIFI_DIRECT_PASSPHRASE_INFO: &[u8] = b"offline-app-wifi-direct-passphrase-v1";
+
+/// HKDF `info` of the secret a configured application's browser nearby room
+/// is derived from, in place of the application id.
+pub const WEB_NEARBY_INFO: &[u8] = b"offline-app-web-nearby-v1";
+
+/// The HMAC input of a configured application's Bluetooth LE App tag:
+/// [`BLE_APP_TAG_LABEL`] followed by the instance's Device id, the `off1…`
+/// address exactly as the Device id characteristic serves it (UTF-8).
+///
+/// The rendering, not the 21-byte payload, because a central computes the tag
+/// from the bytes it just read, before anything has proved or parsed them; a
+/// Device id that is not an address simply matches no tag. The label is fixed
+/// and the Device id last, so the concatenation has one parse.
+pub fn ble_app_tag_input(device_id: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BLE_APP_TAG_LABEL.len() + device_id.len());
+    out.extend_from_slice(BLE_APP_TAG_LABEL);
+    out.extend_from_slice(device_id.as_bytes());
+    out
+}
+
 /// Length of an exchange nonce, in bytes.
 pub const MEMBER_NONCE_LEN: usize = 16;
 
@@ -659,7 +699,7 @@ mod tests {
     /// signature or key from one step stand in for another.
     #[test]
     fn the_labels_are_pinned_and_distinct() {
-        let labels: [&[u8]; 7] = [
+        let labels: [&[u8]; 12] = [
             APP_KEY_INFO,
             MEMBER_CERT_DOMAIN,
             MEMBER_HELLO_LABEL,
@@ -667,7 +707,23 @@ mod tests {
             MEMBER_TRANSCRIPT_DOMAIN,
             MEMBER_E2E_DOMAIN,
             MEMBER_E2E_KEY_INFO,
+            BLE_APP_TAG_LABEL,
+            WIFI_DIRECT_APP_INFO,
+            WIFI_DIRECT_NETWORK_INFO,
+            WIFI_DIRECT_PASSPHRASE_INFO,
+            WEB_NEARBY_INFO,
         ];
+        assert_eq!(BLE_APP_TAG_LABEL, b"offline-app-ble-tag-v1");
+        assert_eq!(WIFI_DIRECT_APP_INFO, b"offline-app-wifi-direct-record-v1");
+        assert_eq!(
+            WIFI_DIRECT_NETWORK_INFO,
+            b"offline-app-wifi-direct-network-v1"
+        );
+        assert_eq!(
+            WIFI_DIRECT_PASSPHRASE_INFO,
+            b"offline-app-wifi-direct-passphrase-v1"
+        );
+        assert_eq!(WEB_NEARBY_INFO, b"offline-app-web-nearby-v1");
         assert_eq!(APP_KEY_INFO, b"offline-protocol-app-v1");
         assert_eq!(MEMBER_CERT_DOMAIN, b"offline-app-member-v1");
         assert_eq!(MEMBER_HELLO_LABEL, b"offline-app-member-hello-v1");
@@ -683,6 +739,16 @@ mod tests {
                 assert!(!a.starts_with(b) && !b.starts_with(a));
             }
         }
+    }
+
+    #[test]
+    fn the_ble_app_tag_input_is_the_label_then_the_device_id_as_read() {
+        use alloc::string::ToString;
+        let device_id = addr(3).to_string();
+        let input = ble_app_tag_input(&device_id);
+        assert_eq!(&input[..BLE_APP_TAG_LABEL.len()], BLE_APP_TAG_LABEL);
+        assert_eq!(&input[BLE_APP_TAG_LABEL.len()..], device_id.as_bytes());
+        assert_eq!(ble_app_tag_input(""), BLE_APP_TAG_LABEL);
     }
 
     #[test]
@@ -971,6 +1037,7 @@ mod vectors {
             "exchange",
             "proof",
             "provision",
+            "identifiers",
         ] {
             assert!(v[block].is_object(), "{block} is present");
         }
@@ -1129,6 +1196,51 @@ mod vectors {
         let proof = MemberProof::from_bytes(&bytes).expect("a proof");
         assert_eq!(proof.salt.to_vec(), salt);
         assert_eq!(proof.to_bytes().to_vec(), bytes);
+    }
+
+    /// The labels and inputs of what a configured application shows on the
+    /// air. The engine and the browser crate run the primitives; this pins
+    /// what they run them over.
+    #[test]
+    fn the_identifiers_match() {
+        let v = vectors();
+        let k_app = unhex(field(&v, &["app_key", "k_app_hex"]));
+        for key in ["a", "b"] {
+            let input = ble_app_tag_input(field(&v, &["addresses", key]));
+            assert_eq!(
+                hex(&input),
+                field(
+                    &v,
+                    &["identifiers", "ble_app_tag", &format!("{key}_input_hex")]
+                )
+            );
+            let mut mac = hmac::Hmac::<Sha256>::new_from_slice(&k_app).expect("any key length");
+            mac.update(&input);
+            assert_eq!(
+                hex(&mac.finalize().into_bytes()[..BLE_APP_TAG_LEN]),
+                field(
+                    &v,
+                    &["identifiers", "ble_app_tag", &format!("{key}_tag_hex")]
+                )
+            );
+        }
+        let wd = |info: &[u8], n: usize| hex(&hkdf(&k_app, None, info)[..n]);
+        assert_eq!(
+            wd(WIFI_DIRECT_APP_INFO, 4),
+            field(&v, &["identifiers", "wifi_direct", "record_app"])
+        );
+        assert_eq!(
+            format!("DIRECT-op-{}", wd(WIFI_DIRECT_NETWORK_INFO, 4)),
+            field(&v, &["identifiers", "wifi_direct", "network_name"])
+        );
+        assert_eq!(
+            wd(WIFI_DIRECT_PASSPHRASE_INFO, 16),
+            field(&v, &["identifiers", "wifi_direct", "passphrase"])
+        );
+        assert_eq!(
+            hex(&hkdf(&k_app, None, WEB_NEARBY_INFO)),
+            field(&v, &["identifiers", "web_nearby", "secret_hex"])
+        );
     }
 
     #[test]

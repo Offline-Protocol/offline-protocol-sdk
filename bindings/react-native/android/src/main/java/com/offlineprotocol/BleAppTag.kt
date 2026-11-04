@@ -33,6 +33,16 @@ import java.security.MessageDigest
  * app co-installed on the peer's phone that serves someone else's tag is the
  * malicious-application adversary (A5 in the threat model), which the SDK does
  * not defend an application against.
+ *
+ * ## With a publisher key
+ *
+ * This digest names the application to anyone who knows its `appId`. An
+ * application with a publisher key (ADR 0037) serves the engine's
+ * `OfflineProtocol.bleAppTag(address)` instead, `HMAC(K_app, address)[0..8]`:
+ * per instance, so it names and groups nothing for another application's
+ * developer. Its central reads Device id on each tagged instance and asks the
+ * engine for the tag over it ([BleServiceInstanceSelection.selectKeyed]).
+ * Nothing here computes that tag: the engine is its one implementation.
  */
 object BleAppTag {
 

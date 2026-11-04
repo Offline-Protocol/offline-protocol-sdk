@@ -103,6 +103,57 @@ final class BleServiceInstanceSelectionTests: XCTestCase {
         )
     }
 
+    // MARK: With a publisher key (ADR 0037)
+
+    /// A stand-in for the engine's keyed tag: per Device id.
+    private lazy var keyedTags: [String: Data] = ["off1ours": ours, "off1chat": chat]
+
+    private func keyed(_ tag: Data?, _ deviceId: String?, canHandshake: Bool = true) -> BleServiceInstanceSelection.Candidate {
+        BleServiceInstanceSelection.Candidate(tag: tag, canHandshake: canHandshake, deviceId: deviceId)
+    }
+
+    private func selectKeyed(_ candidates: [BleServiceInstanceSelection.Candidate]) -> BleServiceInstanceSelection.Selection {
+        let tags = keyedTags
+        return BleServiceInstanceSelection.selectKeyed(candidates) { tags[$0] }
+    }
+
+    /// Ours is the instance whose tag is the keyed tag over its OWN Device id.
+    func testKeyedPicksTheInstanceWhoseTagMatchesItsOwnDeviceId() {
+        XCTAssertEqual(
+            selectKeyed([keyed(game, "off1game"), keyed(ours, "off1ours")]),
+            .init(index: 1, reason: BleServiceInstanceSelection.Reason.sameApp)
+        )
+    }
+
+    /// A tag that is ours for another Device id does not match: the tag binds
+    /// the instance that serves it, so a copied tag chooses nothing.
+    func testKeyedTagServedUnderAnotherDeviceIdIsNotOurs() {
+        XCTAssertEqual(
+            selectKeyed([keyed(chat, "off1game"), keyed(ours, "off1chat")]),
+            .init(index: 0, reason: BleServiceInstanceSelection.Reason.firstInstance)
+        )
+    }
+
+    /// No Device id read (it failed, or timed out): nothing to check, not ours.
+    func testKeyedInstanceWithNoDeviceIdIsNotOurs() {
+        XCTAssertEqual(
+            selectKeyed([keyed(ours, nil), keyed(nil, nil)]),
+            .init(index: 1, reason: BleServiceInstanceSelection.Reason.soleUntagged)
+        )
+        XCTAssertEqual(
+            selectKeyed([keyed(ours, nil), keyed(chat, "off1game")]),
+            .init(index: 0, reason: BleServiceInstanceSelection.Reason.firstInstance)
+        )
+    }
+
+    /// The unkeyed rule ignores Device ids entirely, as before.
+    func testUnkeyedIgnoresDeviceIds() {
+        XCTAssertEqual(
+            select([keyed(chat, "off1ours"), keyed(ours, "off1game")]),
+            .init(index: 1, reason: BleServiceInstanceSelection.Reason.sameApp)
+        )
+    }
+
     /// The reason strings are shared with Kotlin; a rename on one side only
     /// would split the diagnostics.
     func testReasonStringsAreStable() {

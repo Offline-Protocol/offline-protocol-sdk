@@ -44,6 +44,35 @@ impl Codec for Vec<crate::AppMembershipStatus> {
     }
 }
 
+impl Codec for crate::WifiDirectIdentifiers {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "WifiDirectIdentifiers")?;
+        let out = Self {
+            record_app: f.take("record_app")?,
+            network_name: f.take("network_name")?,
+            passphrase: f.take("passphrase")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("record_app", self.record_app.encode()),
+            ("network_name", self.network_name.encode()),
+            ("passphrase", self.passphrase.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::WifiDirectIdentifiers> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
 impl Codec for crate::InviteInfo {
     fn decode(value: &Value, at: &str) -> Decoded<Self> {
         let mut f = Fields::new(value, at, "InviteInfo")?;
@@ -3125,6 +3154,17 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             let arg_cert = args.take("cert")?;
             args.finish()?;
             let result = target.provision_leaf_membership(arg_peer_id, arg_cert)?;
+            Ok(result.encode())
+        }
+        "ble_app_tag" => {
+            let arg_device_id = args.take("device_id")?;
+            args.finish()?;
+            let result = target.ble_app_tag(arg_device_id);
+            Ok(result.encode())
+        }
+        "wifi_direct_identifiers" => {
+            args.finish()?;
+            let result = target.wifi_direct_identifiers();
             Ok(result.encode())
         }
         "initialize_mls_with_file_stores" => {

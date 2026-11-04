@@ -33,7 +33,6 @@ import init, {
   signalEvent,
   signalOpen,
   parseInvite,
-  NearbyRoomKeys,
   bleAppTag,
 } from "../pkg/offline_protocol_web.js";
 import { openDurableStore } from "./store.js";
@@ -305,7 +304,9 @@ const handlers = {
   // sockets and the STUN lookup; these derive, seal and open.
   nearbyOpen({ network, label = "" }) {
     if (nearby.size >= MAX_NEARBY_ROOMS) throw new Error(`${MAX_NEARBY_ROOMS} nearby rooms are already open`);
-    const room = new NearbyRoomKeys(startedAppId, network, label);
+    // From the engine, which derives the room from the application key when
+    // the application has a publisher key, and from its id otherwise.
+    const room = engine.nearbyRoom(network, label);
     const id = nextNearby++;
     nearby.set(id, room);
     return { id, key: room.key };
@@ -337,6 +338,14 @@ const handlers = {
   },
   bleAppTag() {
     return bleAppTag(startedAppId);
+  },
+  // With a publisher key the tag is per instance, over its Device id
+  // (ADR 0037); the engine is its one implementation.
+  bleAppTagIsKeyed() {
+    return engine.bleAppTagIsKeyed();
+  },
+  bleKeyedAppTag({ deviceId }) {
+    return engine.bleKeyedAppTag(deviceId) ?? null;
   },
   bleVerify({ deviceId, identity }) {
     return engine.bleVerify(deviceId, identity);

@@ -177,6 +177,34 @@ pub fn sign_app_membership(
         .map_err(ProtocolError::from)
 }
 
+/// See the UDL dictionary. `Debug` leaves the passphrase out.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WifiDirectIdentifiers {
+    pub record_app: String,
+    pub network_name: String,
+    pub passphrase: String,
+}
+
+impl std::fmt::Debug for WifiDirectIdentifiers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WifiDirectIdentifiers")
+            .field("record_app", &self.record_app)
+            .field("network_name", &self.network_name)
+            .field("passphrase", &"<redacted>")
+            .finish()
+    }
+}
+
+impl From<offline_protocol::WifiDirectIdentifiers> for WifiDirectIdentifiers {
+    fn from(ids: offline_protocol::WifiDirectIdentifiers) -> Self {
+        Self {
+            record_app: ids.record_app,
+            network_name: ids.network_name,
+            passphrase: ids.passphrase,
+        }
+    }
+}
+
 /// See the UDL dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppMembershipStatus {
@@ -2719,6 +2747,10 @@ pub struct OfflineProtocol {
     /// Which transports this instance was configured with, so they can be
     /// rebuilt against the derived address once `initialize_mls` knows it.
     enabled_transports: EnabledTransports,
+    /// What this application shows on the air (ADR 0037), copied out of the
+    /// engine at construction. The configuration fixes it, and the GATT and
+    /// Wi-Fi Direct paths that read it must not wait on [`Self::inner`].
+    app_identifiers: offline_protocol::AppIdentifiers,
     /// Transport callbacks held here rather than only on the transport
     /// object, so `rebuild_transports_for_identity` can re-apply them.
     ///
@@ -2895,8 +2927,10 @@ impl OfflineProtocol {
             }
         });
 
+        let app_identifiers = protocol.app_identifiers();
         Ok(Self {
             inner: Mutex::new(protocol),
+            app_identifiers,
             lock_telemetry: LockTelemetry::default(),
             state: RwLock::new(ProtocolState::Stopped),
             event_callback,
@@ -6940,6 +6974,25 @@ impl OfflineProtocol {
             .map_err(ProtocolError::from)
     }
 
+    /// The Bluetooth LE App tag this application's instance at `device_id`
+    /// serves, keyed by `K_app`; `None` without a publisher key (ADR 0037).
+    ///
+    /// Read from the copy taken at construction, never through the engine
+    /// lock: the Android peripheral answers its App tag read on a binder
+    /// thread, where waiting on the engine stalls every GATT operation in the
+    /// process.
+    pub fn ble_app_tag(&self, device_id: String) -> Option<Vec<u8>> {
+        self.app_identifiers
+            .ble_app_tag(&device_id)
+            .map(|tag| tag.to_vec())
+    }
+
+    /// The Android Wi-Fi Direct identifiers keyed by `K_app`; `None` without
+    /// a publisher key (ADR 0037). Lock-free, as [`Self::ble_app_tag`].
+    pub fn wifi_direct_identifiers(&self) -> Option<WifiDirectIdentifiers> {
+        self.app_identifiers.wifi_direct().map(Into::into)
+    }
+
     /// Gets the number of pending ACKs.
     pub fn get_pending_ack_count(&self) -> u64 {
         let protocol = self.lock_inner_recovering();
@@ -9372,6 +9425,42 @@ mod tests {
         config.app_publisher_key = Some(vec![7u8; 32]);
         let protocol = OfflineProtocol::new(config).expect("a 32-byte key is accepted");
         assert!(protocol.app_membership_status().configured);
+    }
+
+    /// Without a publisher key nothing is derived and every bridge keeps the
+    /// application id's values; with one, the FFI hands out the engine's own
+    /// derivation, and answers while another thread holds the engine lock.
+    #[test]
+    fn the_app_identifiers_cross_the_ffi_only_when_configured() {
+        let protocol = OfflineProtocol::new(create_test_config()).expect("a protocol");
+        assert_eq!(protocol.ble_app_tag("off1anything".to_string()), None);
+        assert_eq!(protocol.wifi_direct_identifiers(), None);
+
+        let key = [7u8; 32];
+        let mut config = create_test_config();
+        let app_id = config.app_id.clone();
+        config.app_publisher_key = Some(key.to_vec());
+        let protocol = OfflineProtocol::new(config).expect("a protocol");
+        let expected = offline_protocol::AppIdentifiers::new(Some(&key), &app_id);
+        let device_id = derive_address(vec![1u8; 32]).expect("an address");
+
+        let _held = protocol.inner.lock().expect("the engine lock");
+        let tag = protocol
+            .ble_app_tag(device_id.clone())
+            .expect("a keyed tag");
+        assert_eq!(tag.len(), 8);
+        assert_eq!(
+            Some(tag.as_slice()),
+            expected.ble_app_tag(&device_id).as_ref().map(|t| &t[..])
+        );
+        let wd = protocol
+            .wifi_direct_identifiers()
+            .expect("keyed Wi-Fi Direct identifiers");
+        assert_eq!(
+            Some(wd.clone()),
+            expected.wifi_direct().map(WifiDirectIdentifiers::from)
+        );
+        assert!(!format!("{wd:?}").contains(&wd.passphrase));
     }
 
     #[test]
@@ -16273,6 +16362,51 @@ mod tests {
                 .count(),
             1,
             "CentralGattClient.kt must choose an instance in exactly one place"
+        );
+
+        // --- 4. A keyed tag is the engine's, served and checked per instance --
+        //
+        // With a publisher key (ADR 0037) the tag is HMAC(K_app, device_id),
+        // and the engine is its one implementation: a hand mirror of an HMAC
+        // on a bridge is a third copy no vector would catch drifting before a
+        // member reads its own application's phone as a stranger's.
+        let tag_mirrors = [
+            rn_source_code_only("ios/BleAppTag.swift"),
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/BleAppTag.kt"),
+        ];
+        for mirror in &tag_mirrors {
+            assert!(
+                !mirror.contains("HMAC") && !mirror.contains("Mac.getInstance"),
+                "BleAppTag must not compute the keyed tag: the bridges ask the engine \
+                 (`bleAppTag`), which derives it from K_app"
+            );
+        }
+        assert!(
+            swift.contains("protocolInstance.bleAppTag(deviceId:")
+                && swift.contains("keyedAppTag(for: advertisedAddress)")
+                && swift.contains("BleServiceInstanceSelection.selectKeyed("),
+            "BleManager.swift must serve the engine's keyed tag over its own advertised address \
+             and choose with selectKeyed when the application has a publisher key"
+        );
+        assert!(
+            facade.contains("protocol.bleAppTag(") && facade.contains("keyedAppTag = keyedAppTag"),
+            "BleTransportFacade.kt must take the keyed tag from the engine and hand it to the \
+             central client"
+        );
+        assert!(
+            kotlin.contains("BleServiceInstanceSelection.selectKeyed(")
+                && kotlin.contains(
+                    "charUuid == deviceIdCharUuid && serviceInstanceProbes.containsKey(address)"
+                ),
+            "CentralGattClient.kt must read each tagged instance's DEVICE_ID while choosing with \
+             a keyed tag, route that read to the choice rather than the handshake, and choose \
+             with selectKeyed"
+        );
+        assert!(
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt")
+                .contains("protocol.wifiDirectIdentifiers()"),
+            "WifiDirectManager.kt must take a configured application's group name, passphrase \
+             and record value from the engine (ADR 0037), not from the application id"
         );
     }
 

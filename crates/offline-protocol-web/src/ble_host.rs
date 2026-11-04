@@ -80,6 +80,25 @@ pub(crate) struct BleHost {
 }
 
 impl Node {
+    /// The App tag an instance of this application serves when its Device id
+    /// is `device_id`, keyed by the application key ([ADR 0037]); `None`
+    /// without a publisher key, when the page compares [`app_tag`] instead.
+    ///
+    /// The page reads a peripheral's Device id on each tagged instance only
+    /// when the tag is keyed, because then the tag cannot be checked without
+    /// it.
+    ///
+    /// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
+    pub fn ble_keyed_app_tag(&self, device_id: &str) -> Option<[u8; APP_TAG_BYTES]> {
+        self.protocol.app_identifiers().ble_app_tag(device_id)
+    }
+
+    /// Whether [`Self::ble_keyed_app_tag`] answers: the application has a
+    /// publisher key.
+    pub fn ble_app_tag_is_keyed(&self) -> bool {
+        self.protocol.app_identifiers().is_keyed()
+    }
+
     /// This device's identity assertion, for the page to write to a
     /// peripheral's Hello characteristic.
     pub fn ble_hello(&self) -> NodeResult<Vec<u8>> {
@@ -280,6 +299,49 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Without a publisher key nothing is keyed and the page compares the
+    /// application id's tag; with one the node answers the engine's keyed
+    /// tag for any Device id, the one the membership vectors pin.
+    #[test]
+    fn the_keyed_app_tag_is_the_engines_and_only_with_a_publisher_key() {
+        let unkeyed = Node::new("web-ble-test", "unkeyed").expect("node");
+        assert!(!unkeyed.ble_app_tag_is_keyed());
+        assert_eq!(unkeyed.ble_keyed_app_tag("off1anything"), None);
+
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../offline-protocol-sealed/tests/data/app-membership-v1.vectors.json"
+        ))
+        .unwrap();
+        let text = |path: &[&str]| -> String {
+            path.iter()
+                .fold(&v, |v, key| &v[*key])
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let pk = text(&["app_key", "publisher_public_key_hex"]);
+        let pk: [u8; 32] = (0..32)
+            .map(|i| u8::from_str_radix(&pk[2 * i..2 * i + 2], 16).unwrap())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let options = crate::node::NodeOptions {
+            ble: true,
+            app_publisher_key: Some(pk),
+            ..Default::default()
+        };
+        let keyed =
+            Node::with_options(&text(&["app_key", "app_id"]), "keyed", options).expect("node");
+        assert!(keyed.ble_app_tag_is_keyed());
+        let tag = keyed
+            .ble_keyed_app_tag(&text(&["addresses", "a"]))
+            .expect("keyed");
+        assert_eq!(
+            hex(&tag),
+            text(&["identifiers", "ble_app_tag", "a_tag_hex"])
+        );
     }
 
     /// The vectors iOS and Android pin (`BleAppTagTests.swift`,

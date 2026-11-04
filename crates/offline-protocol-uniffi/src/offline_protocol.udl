@@ -96,6 +96,18 @@ dictionary AppMembershipStatus {
     u32 visible_members;
 };
 
+// What a configured application advertises over Android Wi-Fi Direct in
+// place of the values derived from its application id (ADR 0037). One per
+// application: every member forms and joins the same group.
+dictionary WifiDirectIdentifiers {
+    // The value under the service record's `app` key: eight hex digits.
+    string record_app;
+    // The group name: DIRECT-op- and eight hex digits.
+    string network_name;
+    // The group passphrase: 32 hex digits. A secret: never log it.
+    string passphrase;
+};
+
 // A decoded and verified invite.
 dictionary InviteInfo {
     // The address this invite reaches, canonical "off1...".
@@ -1795,6 +1807,20 @@ interface OfflineProtocol {
     // session: it never starts one.
     [Throws=ProtocolError]
     string provision_leaf_membership(string peer_id, sequence<u8> cert);
+    // The Bluetooth LE App tag an instance of this application serves when
+    // its Device id is device_id (8 bytes), keyed by the application key:
+    // a peripheral serves it over its own address, and a central that finds
+    // several instances on one link takes the first whose App tag equals it
+    // over that instance's Device id. Null without
+    // ProtocolConfig.app_publisher_key: serve and compare the application
+    // id's tag, as before. Fixed by the configuration and answered without
+    // the engine lock, so a GATT read callback may call it.
+    sequence<u8>? ble_app_tag(string device_id);
+    // The Android Wi-Fi Direct group name, passphrase and record value,
+    // keyed by the application key. Null without
+    // ProtocolConfig.app_publisher_key: derive them from the application id,
+    // as before. Answered without the engine lock.
+    WifiDirectIdentifiers? wifi_direct_identifiers();
     
     // ========================================================================
     // MLS (END-TO-END ENCRYPTION) OPERATIONS

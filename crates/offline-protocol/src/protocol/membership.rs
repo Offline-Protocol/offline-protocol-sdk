@@ -60,6 +60,7 @@ use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use tracing::{debug, error, info, warn};
 
+use super::app_identifiers::AppIdentifiers;
 use super::types::{storage_keys, CTRL_PK_META_KEY};
 use super::{base64_decode, internal_prefixes, OfflineProtocol, OutboxReseal};
 use crate::events::Event;
@@ -203,13 +204,25 @@ impl Membership {
     /// The state for a configuration: `K_app` from the publisher key and the
     /// application id, or nothing to derive when there is no key.
     pub(crate) fn new(publisher_key: Option<[u8; 32]>, app_id: &str) -> Self {
-        let app_key = publisher_key.map(|pk| hkdf32(&pk, None, &app_key_info(app_id)));
+        let app_key = publisher_key.map(|pk| derive_app_key(&pk, app_id));
         Self {
             app_key,
             publisher_key,
             ..Self::default()
         }
     }
+
+    /// What this application shows on the air, keyed by the same `K_app`.
+    pub(crate) fn app_identifiers(&self) -> AppIdentifiers {
+        AppIdentifiers::from_app_key(self.app_key)
+    }
+}
+
+/// `K_app = HKDF-SHA256(ikm = publisher_pk, salt = none, info =
+/// app_key_info(app_id))`. The one derivation: the exchange and every
+/// identifier in [`AppIdentifiers`] use it.
+pub(crate) fn derive_app_key(publisher_key: &[u8; 32], app_id: &str) -> [u8; APP_KEY_LEN] {
+    hkdf32(publisher_key, None, &app_key_info(app_id))
 }
 
 fn random_array<const N: usize>() -> [u8; N] {
@@ -451,6 +464,16 @@ impl OfflineProtocol {
         self.membership.exchanges.remove(peer);
         self.start_member_exchange(peer);
         Ok(id)
+    }
+
+    /// What this application shows on the air in place of its application
+    /// id: the Bluetooth LE App tag, the Wi-Fi Direct group and the browser's
+    /// nearby room, keyed by `K_app` when a publisher key is configured and
+    /// absent otherwise ([`AppIdentifiers`]). Fixed by the configuration, so
+    /// a binding takes one copy at construction and reads it without the
+    /// engine.
+    pub fn app_identifiers(&self) -> AppIdentifiers {
+        self.membership.app_identifiers()
     }
 
     /// Starts a fresh exchange with every current mesh neighbour.

@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "e48caac6d20ce4f12b1da7266242a64ce6841e712bdcb9116970aa417b51df1a"
+UDL_SHA256 = "566d18829172017f77b41f7141c0a886177cf118df8bb898a0d4148b89c5854d"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',
@@ -224,6 +224,7 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                                                 ('key_package', 'sequence<u8>?')),
                                                                'string'),
                                  'app_membership_status': ((), 'AppMembershipStatus'),
+                                 'ble_app_tag': ((('device_id', 'string'),), 'sequence<u8>?'),
                                  'ble_clear_peer_mtu': ((('peer_id', 'string'),), 'void'),
                                  'ble_fragment_fallback_count': ((), 'u64'),
                                  'ble_fragment_received': ((('sender_id', 'string'),
@@ -565,6 +566,7 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                                              ('signature', 'bytes')),
                                                             'boolean'),
                                  'wifi_direct_get_next_message': ((), 'WifiDirectMessage?'),
+                                 'wifi_direct_identifiers': ((), 'WifiDirectIdentifiers?'),
                                  'wifi_direct_message_received': ((('sender_id', 'string'),
                                                                    ('data', 'sequence<u8>')),
                                                                   'void'),
@@ -938,5 +940,8 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                   ('drop_rate', 'f32?', False),
                                   ('average_hop_count', 'f32?', False),
                                   ('energy_cost', 'f32?', False)),
+             'WifiDirectIdentifiers': (('record_app', 'string', False),
+                                       ('network_name', 'string', False),
+                                       ('passphrase', 'string', False)),
              'WifiDirectMessage': (('recipient_id', 'string', False),
                                    ('data', 'sequence<u8>', False))}}

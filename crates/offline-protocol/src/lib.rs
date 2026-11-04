@@ -68,6 +68,7 @@ pub use offline_protocol_services::{
 pub use protocol::custody::{CustodyRefusal, CustodyStats};
 pub use protocol::mesh_relay::{MeshRelayConfig, MeshRelayStats};
 pub use protocol::{sign_app_membership, AppMembershipStatus};
+pub use protocol::{AppIdentifiers, WifiDirectIdentifiers};
 pub use protocol::{
     GatewayCarrier, MediaSendOptions, OfflineProtocol, PublishReport, SendMessageOptions,
 };

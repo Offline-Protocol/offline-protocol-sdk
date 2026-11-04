@@ -105,10 +105,27 @@ the second has learned nothing.
 
 **App tag** names the application behind this instance of the service. It MAY
 be absent: a device running one application loses nothing by omitting it. When
-present it MUST be readable and carries eight bytes, the first eight of
-`SHA-256("offline-protocol-ble-app-tag-v1" || 0x00 || app_id)`, where `app_id`
-is the application id of [the wire format](wire-format.md) as UTF-8. It proves
-nothing, and is read only to choose between instances, below.
+present it MUST be readable and carries eight bytes. It proves nothing, and is
+read only to choose between instances, below. Which eight bytes depends on
+whether the application has a publisher key
+([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md)):
+
+- **Without one**, the first eight of
+  `SHA-256("offline-protocol-ble-app-tag-v1" || 0x00 || app_id)`, where
+  `app_id` is the application id of [the wire format](wire-format.md) as
+  UTF-8. One value per application, so anyone who knows the id can read
+  which phones run it.
+- **With one**, the first eight of
+  `HMAC-SHA256(K_app, "offline-app-ble-tag-v1" || device_id)`, where `K_app`
+  is the application key of
+  [the membership chapter](control-messages.md#application-membership) and
+  `device_id` is the instance's Device id value exactly as served (its
+  `off1…` address as UTF-8). Over the rendering rather than the address
+  payload because a central computes it from the bytes it just read, before
+  anything has proved or parsed them. One value per instance, so it names
+  and groups nothing for a party without the publisher key; a central of the
+  same application recomputes it from the Device id it reads. The vectors are
+  the `identifiers` block of `app-membership-v1.vectors.json`.
 
 **Hello** is written by a central to say who it is on the link it opened. It
 MAY be absent; when present it MUST be writable with response. The rest of
@@ -202,13 +219,24 @@ per-send application id changes the `app_id` stamped on that one frame, never
 the tag this service advertises and never the storage the identity lives in.
 
 So a central that finds more than one instance MUST choose one before it reads
-Device id or Identity, and MUST then read, subscribe and write on that instance
-only. Among the instances that expose both Device id and Identity, it takes:
+Identity, and MUST then read, subscribe and write on that instance only. Among
+the instances that expose both Device id and Identity, it takes:
 
-1. the first whose App tag equals its own;
+1. the first whose App tag equals its own: for a central without a publisher
+   key, its application's tag; for a central with one, the keyed tag over
+   that instance's own Device id, which it reads on every instance that
+   served a tag (and on no other, since an untagged instance has nothing to
+   check);
 2. otherwise, when exactly one has no App tag (absent, or its read failed),
    that one, since it is a build that predates the tag;
 3. otherwise the first.
+
+A central without a publisher key reads no Device id before it chooses. A
+Device id read while choosing is unauthenticated: a match only chooses the
+instance and grants nothing, and the central then reads Identity and
+verifies it on the chosen instance only, as on a link with one instance. A
+Device id that arrives from another instance after the choice is the
+choice's read answered late, and is never taken as the handshake's.
 
 When no instance exposes both, it takes the first, and the handshake refuses it
 for the characteristic it lacks. "First" is the order the platform reports the
@@ -234,8 +262,10 @@ another application.
 App tag is not signed. Any identity key could sign any tag, so a signature would
 prove nothing the Identity characteristic does not. An application on the peer's
 phone that serves another's tag is chosen in its place, and is still bound
-under its own proved address, never the displaced one's. That, and what the tag
-reveals to an observer, is residual risk
+under its own proved address, never the displaced one's. A keyed tag can be
+served only by a holder of `K_app`, so this takes the publisher key (party 3
+of ADR 0037), not just the application id. That, and what the tag reveals to
+an observer, is residual risk
 [R15](../security/threat-model.md#r15-the-bluetooth-le-app-tag-is-unsigned-and-readable).
 
 ### The identity assertion

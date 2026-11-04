@@ -323,6 +323,11 @@ PLATFORM: frozenset[str] = frozenset(
         # and a certificate in the one identity's session: the same
         # operator-held configuration, acted on toward a device
         "provision_leaf_membership",
+        # what the application shows on the air, keyed by the application key
+        # (ADR 0037): read by the carrier drivers the server runs, and the
+        # Wi-Fi Direct passphrase among them is a secret no client needs.
+        "ble_app_tag",
+        "wifi_direct_identifiers",
     }
 )
 

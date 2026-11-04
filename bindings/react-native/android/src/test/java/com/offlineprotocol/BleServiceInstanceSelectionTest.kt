@@ -128,6 +128,60 @@ class BleServiceInstanceSelectionTest {
         assertEquals(Selection(0, Reason.NONE_CAN_HANDSHAKE), select())
     }
 
+    // --- With a publisher key (ADR 0037) ----------------------------------
+
+    /** A stand-in for the engine's keyed tag: per Device id. */
+    private val keyedTags = mapOf("off1ours" to ours, "off1chat" to chat)
+
+    private fun keyed(tag: ByteArray?, deviceId: String?, canHandshake: Boolean = true) =
+        Candidate(tag, canHandshake, deviceId)
+
+    private fun selectKeyed(vararg candidates: Candidate): Selection =
+        BleServiceInstanceSelection.selectKeyed(candidates.toList()) { keyedTags[it] }
+
+    /** Ours is the instance whose tag is the keyed tag over its OWN Device id. */
+    @Test
+    fun `keyed - picks the instance whose tag matches its own device id`() {
+        assertEquals(
+            Selection(1, Reason.SAME_APP),
+            selectKeyed(keyed(game, "off1game"), keyed(ours, "off1ours")),
+        )
+    }
+
+    /**
+     * A tag that is ours for another Device id does not match: the tag binds
+     * the instance that serves it, so a copied tag chooses nothing.
+     */
+    @Test
+    fun `keyed - a tag served under another device id is not ours`() {
+        assertEquals(
+            Selection(0, Reason.FIRST_INSTANCE),
+            selectKeyed(keyed(chat, "off1game"), keyed(ours, "off1chat")),
+        )
+    }
+
+    /** No Device id read (it failed, or timed out): nothing to check, not ours. */
+    @Test
+    fun `keyed - an instance with no device id is not ours and rules 2 and 3 still apply`() {
+        assertEquals(
+            Selection(1, Reason.SOLE_UNTAGGED),
+            selectKeyed(keyed(ours, null), keyed(null, null)),
+        )
+        assertEquals(
+            Selection(0, Reason.FIRST_INSTANCE),
+            selectKeyed(keyed(ours, null), keyed(chat, "off1game")),
+        )
+    }
+
+    /** The unkeyed rule ignores Device ids entirely, as before. */
+    @Test
+    fun `unkeyed - a device id changes nothing`() {
+        assertEquals(
+            Selection(1, Reason.SAME_APP),
+            select(keyed(chat, "off1ours"), keyed(ours, "off1game")),
+        )
+    }
+
     /**
      * The reason strings are shared with Swift; a rename on one side only would
      * split the diagnostics.

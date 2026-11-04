@@ -474,6 +474,31 @@ exchange like any node and stamps `app_id` `"offline"` on everything it sends.
 What a leaf owes is in
 [Leaf node provisioning](leaf-provisioning.md#application-membership).
 
+**What the application shows on the air.** A configured node derives every
+identifier a carrier shows outside a frame from `K_app`, each under its own
+label, in place of the value an unconfigured node derives from the
+application id (which is unchanged):
+
+```
+ble_app_tag   = HMAC-SHA256(K_app, "offline-app-ble-tag-v1" || device_id_utf8)[..8]
+wd_record_app = hex(HKDF(ikm = K_app, salt = none, info = "offline-app-wifi-direct-record-v1")[..4])
+wd_network    = "DIRECT-op-" || hex(HKDF(ikm = K_app, salt = none,
+                                         info = "offline-app-wifi-direct-network-v1")[..4])
+wd_passphrase = hex(HKDF(ikm = K_app, salt = none, info = "offline-app-wifi-direct-passphrase-v1")[..16])
+nearby_secret = HKDF(ikm = K_app, salt = none, info = "offline-app-web-nearby-v1")       32 bytes
+```
+
+`hex` is lowercase. The App tag is the
+[Bluetooth LE chapter](ble-framing.md#the-gatt-contract)'s, over the Device id
+exactly as served, and differs per instance. The three Wi-Fi Direct values
+replace the Android group's `app` record value, group name and passphrase;
+they are one per application, since every member must find and join one
+group. `nearby_secret` replaces the application id's bytes at the front of a
+browser nearby room's input, which is otherwise unchanged. Each output is a
+prefix of a 32-byte expand, which is what HKDF-Expand of fewer bytes gives.
+The vectors are the `identifiers` block of `app-membership-v1.vectors.json`.
+
+
 **Admitted.** With a publisher key configured, one predicate decides what the
 application is told and what the node answers. A peer is admitted when it is
 visible; when it is in the **named set**, the addresses the application itself

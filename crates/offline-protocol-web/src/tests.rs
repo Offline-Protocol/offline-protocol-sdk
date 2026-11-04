@@ -801,6 +801,35 @@ fn the_bluetooth_carrier_names_the_contracts_uuids() {
     );
 }
 
+/// What a configured application shows on the air comes from the engine
+/// (ADR 0037): the carrier asks it for the keyed App tag over each tagged
+/// instance's Device id, and the worker opens a nearby room through the
+/// engine, never from the application id alone. A page that kept computing
+/// the room from the id would put a configured application in the room
+/// anyone who knows the id can find.
+#[test]
+fn the_page_takes_keyed_identifiers_from_the_engine() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let (Some(carrier), Some(worker)) = (
+        read_repo_file(&root.join("bindings/web/src/bluetooth.js")),
+        read_repo_file(&root.join("bindings/web/src/worker.js")),
+    ) else {
+        // A published .crate archive has no workspace around it.
+        return;
+    };
+    assert!(
+        carrier.contains("this.#node.bleAppTagIsKeyed()")
+            && carrier.contains("this.#node.bleKeyedAppTag(deviceId)"),
+        "bluetooth.js must ask the engine for the keyed App tag over each instance's Device id"
+    );
+    assert!(
+        worker.contains("engine.nearbyRoom(network, label)")
+            && !worker.contains("new NearbyRoomKeys("),
+        "worker.js must open a nearby room through the engine, which keys it by the \
+         application key when there is one"
+    );
+}
+
 /// No shipped file names a relay. The relays a node uses are the
 /// application's choice, through its configuration, and a URL in a doc, a
 /// doc comment or an example is a default by another name: it becomes the

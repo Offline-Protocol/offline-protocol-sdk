@@ -64,8 +64,11 @@ object BleServiceInstanceSelection {
      *   build that predates the tag) or the read failed or timed out.
      * @property canHandshake whether the instance exposes both DEVICE_ID and
      *   IDENTITY. One that lacks either can never complete the handshake.
+     * @property deviceId the DEVICE_ID value, read only by a central whose
+     *   application has a publisher key ([selectKeyed]), and only on an
+     *   instance that served a tag; null otherwise, or when the read failed.
      */
-    class Candidate(val tag: ByteArray?, val canHandshake: Boolean)
+    class Candidate(val tag: ByteArray?, val canHandshake: Boolean, val deviceId: String? = null)
 
     /**
      * @property index index into the candidates passed to [select].
@@ -82,10 +85,32 @@ object BleServiceInstanceSelection {
      * the first handshake-capable instance; else index 0.
      */
     @JvmStatic
-    fun select(candidates: List<Candidate>, ownTag: ByteArray): Selection {
+    fun select(candidates: List<Candidate>, ownTag: ByteArray): Selection =
+        select(candidates) { it.tag?.contentEquals(ownTag) == true }
+
+    /**
+     * Chooses an instance for a central whose application has a publisher
+     * key (ADR 0037). Its tag is per instance, `HMAC(K_app, device_id)[0..8]`,
+     * so rule 1 takes the first handshake-capable instance whose tag equals
+     * [tagFor] over that instance's own [Candidate.deviceId]; rules 2 and 3
+     * are [select]'s. The Device id is unproven here, so a match only chooses
+     * the instance: the handshake that follows still proves its address.
+     *
+     * @param tagFor the engine's `bleAppTag`, or null for a Device id it has
+     *   no tag for.
+     */
+    @JvmStatic
+    fun selectKeyed(candidates: List<Candidate>, tagFor: (String) -> ByteArray?): Selection =
+        select(candidates) { candidate ->
+            val tag = candidate.tag
+            val deviceId = candidate.deviceId
+            tag != null && deviceId != null && tagFor(deviceId)?.contentEquals(tag) == true
+        }
+
+    private fun select(candidates: List<Candidate>, isOurs: (Candidate) -> Boolean): Selection {
         val usable = candidates.indices.filter { candidates[it].canHandshake }
 
-        usable.firstOrNull { candidates[it].tag?.contentEquals(ownTag) == true }?.let {
+        usable.firstOrNull { isOurs(candidates[it]) }?.let {
             return Selection(it, Reason.SAME_APP)
         }
 

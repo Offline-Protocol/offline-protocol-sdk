@@ -667,6 +667,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status() != 23851:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_app_tag() != 50666:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 19884:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count() != 60784:
@@ -1029,6 +1031,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 50868:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_identifiers() != 20485:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 59107:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 38596:
@@ -1236,6 +1240,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_app_tag.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_app_tag.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu.restype = ctypes.c_uint16
@@ -1779,6 +1786,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_identifiers.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_identifiers.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received.restype = ctypes.c_uint16
@@ -2195,6 +2205,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membersh
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_app_tag.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_app_tag.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -3295,6 +3311,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_identifiers.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_identifiers.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -8237,6 +8258,48 @@ class _UniffiFfiConverterTypeTransportMetrics(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalFloat32.write(value.energy_cost, buf)
 
 @dataclass
+class WifiDirectIdentifiers:
+    def __init__(self, *, record_app:str, network_name:str, passphrase:str):
+        self.record_app = record_app
+        self.network_name = network_name
+        self.passphrase = passphrase
+        
+        
+
+    
+    def __str__(self):
+        return "WifiDirectIdentifiers(record_app={}, network_name={}, passphrase={})".format(self.record_app, self.network_name, self.passphrase)
+    def __eq__(self, other):
+        if self.record_app != other.record_app:
+            return False
+        if self.network_name != other.network_name:
+            return False
+        if self.passphrase != other.passphrase:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeWifiDirectIdentifiers(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return WifiDirectIdentifiers(
+            record_app=_UniffiFfiConverterString.read(buf),
+            network_name=_UniffiFfiConverterString.read(buf),
+            passphrase=_UniffiFfiConverterString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.record_app)
+        _UniffiFfiConverterString.check_lower(value.network_name)
+        _UniffiFfiConverterString.check_lower(value.passphrase)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.record_app, buf)
+        _UniffiFfiConverterString.write(value.network_name, buf)
+        _UniffiFfiConverterString.write(value.passphrase, buf)
+
+@dataclass
 class WifiDirectMessage:
     def __init__(self, *, recipient_id:str, data:typing.List[int]):
         self.recipient_id = recipient_id
@@ -11095,12 +11158,39 @@ class _UniffiFfiConverterOptionalTypeWifiDirectMessage(_UniffiConverterRustBuffe
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
+class _UniffiFfiConverterOptionalTypeWifiDirectIdentifiers(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeWifiDirectIdentifiers.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeWifiDirectIdentifiers.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeWifiDirectIdentifiers.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 
 class OfflineProtocolProtocol(typing.Protocol):
     
     def accept_connection_request(self, recipient: str,accepter_name: str,key_package: typing.Optional[typing.List[int]]) -> str:
         raise NotImplementedError
     def app_membership_status(self, ) -> AppMembershipStatus:
+        raise NotImplementedError
+    def ble_app_tag(self, device_id: str) -> typing.Optional[typing.List[int]]:
         raise NotImplementedError
     def ble_clear_peer_mtu(self, peer_id: str) -> None:
         raise NotImplementedError
@@ -11464,6 +11554,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def wifi_direct_get_next_message(self, ) -> typing.Optional[WifiDirectMessage]:
         raise NotImplementedError
+    def wifi_direct_identifiers(self, ) -> typing.Optional[WifiDirectIdentifiers]:
+        raise NotImplementedError
     def wifi_direct_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         raise NotImplementedError
     def wifi_direct_peer_connected(self, peer_id: str) -> None:
@@ -11538,6 +11630,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def ble_app_tag(self, device_id: str) -> typing.Optional[typing.List[int]]:
+        
+        _UniffiFfiConverterString.check_lower(device_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(device_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalSequenceUInt8.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_app_tag,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -14298,6 +14405,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def wifi_direct_identifiers(self, ) -> typing.Optional[WifiDirectIdentifiers]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalTypeWifiDirectIdentifiers.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_identifiers,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def wifi_direct_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(sender_id)
@@ -14536,6 +14655,7 @@ __all__ = [
     "TelemetryStats",
     "TransportConfig",
     "TransportMetrics",
+    "WifiDirectIdentifiers",
     "WifiDirectMessage",
     "derive_address",
     "parse_invite",

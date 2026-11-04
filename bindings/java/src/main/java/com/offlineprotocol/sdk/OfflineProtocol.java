@@ -178,6 +178,37 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public java.util.List<java.lang.Byte> bleAppTag(java.lang.String deviceId)  {
+            try {
+                return FfiConverterOptionalSequenceByte.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_app_tag(_allocator, _uniffiHandle,
+            FfiConverterString.INSTANCE.lower(deviceId), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public void bleClearPeerMtu(java.lang.String peerId) throws ProtocolException {
             try {
                 
@@ -5986,6 +6017,37 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
             return
     UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
         return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(_allocator, _uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public WifiDirectIdentifiers wifiDirectIdentifiers()  {
+            try {
+                return FfiConverterOptionalTypeWifiDirectIdentifiers.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_identifiers(_allocator, _uniffiHandle,
             _status);
     });
     } catch (java.lang.RuntimeException _uniffi_ex) {

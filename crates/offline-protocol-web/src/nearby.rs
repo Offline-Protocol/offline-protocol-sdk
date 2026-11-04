@@ -148,12 +148,31 @@ impl Nearby {
     /// `label`. Refuses an address that does not parse, a label over
     /// [`MAX_LABEL_CHARS`], and one with control characters.
     pub fn new(app_id: &str, network: &str, label: &str) -> Result<Self, String> {
+        Self::with_secret(None, app_id, network, label)
+    }
+
+    /// As [`Self::new`], for an application with a publisher key when
+    /// `secret` is set: the room is derived from that secret in place of the
+    /// application id ([ADR 0037]), so its topic and key name nothing for
+    /// another application's developer. The secret is
+    /// `AppIdentifiers::web_nearby_secret`, from the application key.
+    ///
+    /// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
+    pub fn with_secret(
+        secret: Option<&[u8; 32]>,
+        app_id: &str,
+        network: &str,
+        label: &str,
+    ) -> Result<Self, String> {
         if app_id.is_empty() {
             return Err("a nearby room needs the application id".to_string());
         }
         check_label(label)?;
         let scope = network_scope(network)?;
-        let mut ikm = app_id.as_bytes().to_vec();
+        let mut ikm = Zeroizing::new(match secret {
+            Some(secret) => secret.to_vec(),
+            None => app_id.as_bytes().to_vec(),
+        });
         ikm.push(0);
         ikm.extend_from_slice(scope.as_bytes());
         let hkdf = Hkdf::<Sha256>::new(Some(HKDF_SALT), &ikm);
@@ -433,6 +452,21 @@ pub fn now_unix_secs() -> i64 {
     signal::now_unix_secs()
 }
 
+impl crate::node::Node {
+    /// This node's room behind `network`, under `label`: from the
+    /// application key when the application has a publisher key, from its
+    /// application id otherwise ([`Nearby::with_secret`]).
+    pub fn nearby_room(&self, network: &str, label: &str) -> Result<Nearby, String> {
+        let secret = self.protocol.app_identifiers().web_nearby_secret();
+        Nearby::with_secret(
+            secret.as_deref(),
+            &self.protocol.config().app_id,
+            network,
+            label,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +499,75 @@ mod tests {
         assert!(
             a.open(&relayed(a.presence()), now()).is_none(),
             "own presence"
+        );
+    }
+
+    /// An application with no publisher key keeps the room it had: the topic
+    /// below was computed outside this crate from the application id.
+    #[test]
+    fn an_unkeyed_room_is_the_application_ids() {
+        assert_eq!(
+            room("203.0.113.7", "").topic(),
+            "c2c8272b730b83de6fc04b6bd51b4989"
+        );
+        assert_eq!(
+            Nearby::with_secret(None, APP, "203.0.113.7", "")
+                .unwrap()
+                .topic(),
+            room("203.0.113.7", "").topic()
+        );
+    }
+
+    /// With a publisher key the room comes from the application key, so its
+    /// topic is the one the membership vectors pin, and it is not the room
+    /// of the application id: another application's developer, who knows the
+    /// id, does not find it.
+    #[test]
+    fn a_keyed_room_is_the_application_keys() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../offline-protocol-sealed/tests/data/app-membership-v1.vectors.json"
+        ))
+        .unwrap();
+        let text = |path: &[&str]| -> String {
+            path.iter()
+                .fold(&v, |v, key| &v[*key])
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let unhex32 = |hex: String| -> [u8; 32] {
+            (0..32)
+                .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap())
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap()
+        };
+        let app_id = text(&["app_key", "app_id"]);
+        let secret = unhex32(text(&["identifiers", "web_nearby", "secret_hex"]));
+        let keyed = Nearby::with_secret(Some(&secret), &app_id, "203.0.113.7", "").unwrap();
+        assert_eq!(
+            keyed.topic(),
+            text(&["identifiers", "web_nearby", "topic_hex"])
+        );
+        assert_ne!(
+            keyed.topic(),
+            Nearby::new(&app_id, "203.0.113.7", "").unwrap().topic()
+        );
+
+        // The engine derives the same secret from its publisher key.
+        let options = crate::node::NodeOptions {
+            app_publisher_key: Some(unhex32(text(&["app_key", "publisher_public_key_hex"]))),
+            ..Default::default()
+        };
+        let node = crate::node::Node::with_options(&app_id, "keyed", options).unwrap();
+        assert_eq!(
+            node.nearby_room("203.0.113.7", "").unwrap().topic(),
+            keyed.topic()
+        );
+        let unkeyed = crate::node::Node::new(&app_id, "unkeyed").unwrap();
+        assert_eq!(
+            unkeyed.nearby_room("203.0.113.7", "").unwrap().topic(),
+            Nearby::new(&app_id, "203.0.113.7", "").unwrap().topic()
         );
     }
 

@@ -78,6 +78,14 @@ internal class CentralGattClient(
     private val host: Host,
     /** The peer's optional Hello characteristic, or null to write no hello. */
     private val helloCharUuid: UUID? = null,
+    /**
+     * The engine's keyed App tag for a Device id (`OfflineProtocol.bleAppTag`),
+     * or null when the application has no publisher key. Set, a link with
+     * several instances also reads each tagged instance's DEVICE_ID while it
+     * chooses, because the tag is `HMAC(K_app, device_id)[0..8]` and cannot
+     * be checked without it (ADR 0037); [appTag] is then unused.
+     */
+    private val keyedAppTag: ((String) -> ByteArray?)? = null,
     private val diagnosticEmitter: (level: String, message: String, ctx: Map<String, Any?>) -> Unit =
         { _, _, _ -> },
 ) {
@@ -330,12 +338,23 @@ internal class CentralGattClient(
      * the binder thread in `onServicesDiscovered`; every later access is on
      * the BLE thread.
      */
-    private class ServiceInstanceProbe(val instances: List<BluetoothGattService>) {
+    private class ServiceInstanceProbe(
+        val instances: List<BluetoothGattService>,
+        /** Whether each tagged instance's DEVICE_ID is read too (a keyed tag). */
+        val readsDeviceIds: Boolean,
+    ) {
         val tags = arrayOfNulls<ByteArray>(instances.size)
-        /** Index of the next instance whose tag has not been asked for. */
+        val deviceIds = arrayOfNulls<String>(instances.size)
+        /**
+         * Index of the next read: instance `next / reads`, its APP_TAG at
+         * offset 0 and, when [readsDeviceIds], its DEVICE_ID at offset 1.
+         */
         var next = 0
+        val reads: Int get() = if (readsDeviceIds) 2 else 1
         /** Index whose read is outstanding, or -1. */
         var readInFlight = -1
+        /** The characteristic of the outstanding read. */
+        var readInFlightUuid: UUID? = null
     }
 
     private val serviceInstanceProbes = ConcurrentHashMap<String, ServiceInstanceProbe>()
@@ -515,7 +534,7 @@ internal class CentralGattClient(
             clearServiceInstanceSelection(address)
             val instances = gatt.services.filter { it.uuid == serviceUuid }
             if (instances.size > 1) {
-                serviceInstanceProbes[address] = ServiceInstanceProbe(instances)
+                serviceInstanceProbes[address] = ServiceInstanceProbe(instances, keyedAppTag != null)
                 Log.i(TAG, "$address serves ${instances.size} service instances; choosing one")
                 diagnosticEmitter("info", "BLE peer serves several service instances; choosing one", mapOf(
                     "address" to address,
@@ -772,30 +791,45 @@ internal class CentralGattClient(
         }
 
         /**
-         * Issues the next APP_TAG read, one at a time. An instance without the
-         * characteristic, or whose read cannot be started, counts as having no
-         * tag. Chooses once every instance has been asked.
+         * Issues the next APP_TAG read, one at a time, and with a keyed tag the
+         * DEVICE_ID read of each instance that served one. An instance without
+         * the characteristic, or whose read cannot be started, counts as having
+         * no tag (or no Device id, which matches no keyed tag). Chooses once
+         * every instance has been asked.
          */
         private fun readNextServiceInstanceTag(gatt: BluetoothGatt, address: String) {
             val probe = serviceInstanceProbes[address] ?: return
-            while (probe.next < probe.instances.size) {
-                val index = probe.next++
-                val tagChar = probe.instances[index].getCharacteristic(appTagCharUuid) ?: continue
+            while (probe.next < probe.instances.size * probe.reads) {
+                val step = probe.next++
+                val index = step / probe.reads
+                val readsDeviceId = step % probe.reads == 1
+                // A Device id is read only to check a tag against it.
+                if (readsDeviceId && probe.tags[index] == null) continue
+                val charUuid = if (readsDeviceId) deviceIdCharUuid else appTagCharUuid
+                val char = probe.instances[index].getCharacteristic(charUuid) ?: continue
                 val started = try {
-                    gatt.readCharacteristic(tagChar)
+                    gatt.readCharacteristic(char)
                 } catch (e: SecurityException) {
-                    Log.w(TAG, "Permission denied reading app tag on $address", e)
+                    Log.w(TAG, "Permission denied reading $charUuid on $address", e)
                     false
                 }
                 if (!started) continue
                 probe.readInFlight = index
+                probe.readInFlightUuid = charUuid
                 val watchdog = Runnable {
                     if (host.isShuttingDown()) return@Runnable
-                    if (serviceInstanceProbes[address] !== probe || probe.readInFlight != index) return@Runnable
+                    if (serviceInstanceProbes[address] !== probe || probe.readInFlight != index ||
+                        probe.readInFlightUuid != charUuid) return@Runnable
                     appTagReadWatchdogs.remove(address)
                     probe.readInFlight = -1
-                    Log.w(TAG, "App tag read timed out on $address; treating the instance as untagged")
-                    diagnosticEmitter("warning", "BLE app tag read timed out", mapOf("address" to address))
+                    probe.readInFlightUuid = null
+                    if (readsDeviceId) {
+                        Log.w(TAG, "Device id read timed out on $address while choosing; the instance is not ours")
+                        diagnosticEmitter("warning", "BLE instance device id read timed out", mapOf("address" to address))
+                    } else {
+                        Log.w(TAG, "App tag read timed out on $address; treating the instance as untagged")
+                        diagnosticEmitter("warning", "BLE app tag read timed out", mapOf("address" to address))
+                    }
                     readNextServiceInstanceTag(gatt, address)
                 }
                 appTagReadWatchdogs[address] = watchdog
@@ -805,21 +839,34 @@ internal class CentralGattClient(
             finishServiceInstanceSelection(gatt, address)
         }
 
-        /** Records one APP_TAG read, then asks the next instance. An error or
-         *  an empty value counts as no tag; any other value is kept as served,
-         *  so a tag of the wrong length is simply one that is not ours. */
-        private fun handleAppTagRead(gatt: BluetoothGatt, instanceId: Int?, value: ByteArray?, status: Int) {
+        /** Records one APP_TAG (or, with a keyed tag, DEVICE_ID) read while
+         *  choosing, then asks the next. An error or an empty value counts as
+         *  none; any other tag is kept as served, so a tag of the wrong length
+         *  is simply one that is not ours. */
+        private fun handleAppTagRead(
+            gatt: BluetoothGatt,
+            instanceId: Int?,
+            charUuid: UUID,
+            value: ByteArray?,
+            status: Int,
+        ) {
             val address = gatt.device.address
             val probe = serviceInstanceProbes[address] ?: return
             val index = probe.readInFlight
-            if (index < 0 || probe.instances[index].instanceId != instanceId) return
+            if (index < 0 || probe.instances[index].instanceId != instanceId || probe.readInFlightUuid != charUuid) return
             probe.readInFlight = -1
+            probe.readInFlightUuid = null
             appTagReadWatchdogs.remove(address)?.let { bleHandler.removeCallbacks(it) }
             if (status == BluetoothGatt.GATT_SUCCESS && value != null && value.isNotEmpty()) {
-                probe.tags[index] = value
+                if (charUuid == deviceIdCharUuid) {
+                    probe.deviceIds[index] = String(value, Charsets.UTF_8)
+                } else {
+                    probe.tags[index] = value
+                }
             } else if (status != BluetoothGatt.GATT_SUCCESS) {
-                diagnosticEmitter("debug", "BLE app tag read failed; treating the instance as untagged", mapOf(
+                diagnosticEmitter("debug", "BLE instance read failed while choosing", mapOf(
                     "address" to address,
+                    "char" to charUuid.toString(),
                     "status" to status,
                 ))
             }
@@ -840,9 +887,15 @@ internal class CentralGattClient(
                     tag = probe.tags[index],
                     canHandshake = instance.getCharacteristic(deviceIdCharUuid) != null &&
                         instance.getCharacteristic(identityCharUuid) != null,
+                    deviceId = probe.deviceIds[index],
                 )
             }
-            val selection = BleServiceInstanceSelection.select(candidates, appTag)
+            val keyed = keyedAppTag
+            val selection = if (keyed != null) {
+                BleServiceInstanceSelection.selectKeyed(candidates, keyed)
+            } else {
+                BleServiceInstanceSelection.select(candidates, appTag)
+            }
             val chosen = probe.instances[selection.index]
             boundServiceInstanceIds[address] = chosen.instanceId
 
@@ -874,17 +927,29 @@ internal class CentralGattClient(
             val charUuid = characteristic.uuid
             @Suppress("DEPRECATION")
             val snapshot = characteristic.value?.copyOf()
-            if (charUuid == appTagCharUuid) {
+            val instanceId = characteristic.service?.instanceId
+            val address = gatt.device.address
+            if (charUuid == appTagCharUuid ||
+                (charUuid == deviceIdCharUuid && serviceInstanceProbes.containsKey(address))
+            ) {
                 // Read only while choosing among several instances, and never
                 // part of the handshake: a failed read means "no tag", not a
-                // refusal. The instance id travels with it so a late answer to
-                // a read already given up on cannot be credited to the next.
-                val instanceId = characteristic.service?.instanceId
+                // refusal. A DEVICE_ID read lands here only while the link is
+                // choosing, which with a keyed tag reads each instance's. The
+                // instance id travels with it so a late answer to a read
+                // already given up on cannot be credited to the next.
                 bleHandler.post {
                     if (host.isShuttingDown()) return@post
-                    handleAppTagRead(gatt, instanceId, snapshot, status)
+                    handleAppTagRead(gatt, instanceId, charUuid, snapshot, status)
                 }
                 return
+            }
+            if (charUuid == deviceIdCharUuid) {
+                // A DEVICE_ID answer from an instance other than the chosen
+                // one is a choosing read answered after the choice, never the
+                // handshake's own.
+                val bound = boundServiceInstanceIds[address]
+                if (bound != null && bound != instanceId) return
             }
             bleHandler.post {
                 if (host.isShuttingDown()) return@post

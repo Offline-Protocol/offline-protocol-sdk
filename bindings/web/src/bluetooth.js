@@ -65,6 +65,7 @@ export class BluetoothCarrier extends EventTarget {
   // peer -> link: { device, peer, message, queue, inbound, linked, announced, gone, onDisconnect, onNotify }
   #links = new Map();
   #tag = null;
+  #keyed = null;
   #released = false;
   // device -> the handshake in flight for it, which a second connect joins.
   #connecting = new Map();
@@ -244,11 +245,14 @@ export class BluetoothCarrier extends EventTarget {
 
   // The chapter's instance choice: with one instance, that one; with several,
   // among those serving both Device id and Identity, the first whose App tag
-  // is this application's, else the only untagged one, else the first.
+  // is this application's, else the only untagged one, else the first. With
+  // a publisher key "this application's" is per instance: the engine's tag
+  // over that instance's Device id, which is read only to check it.
   async #choose(services) {
     if (services.length === 0) throw new Error("the device does not offer the SDK's service");
     if (services.length === 1) return services[0];
-    this.#tag ??= await this.#node.bleAppTag();
+    this.#keyed ??= await this.#node.bleAppTagIsKeyed();
+    if (!this.#keyed) this.#tag ??= await this.#node.bleAppTag();
     const candidates = [];
     for (const service of services) {
       const chars = new Map((await characteristics(service)).map((c) => [c.uuid.toLowerCase(), c]));
@@ -259,10 +263,23 @@ export class BluetoothCarrier extends EventTarget {
       } catch {
         tag = null;
       }
-      candidates.push({ service, tag: tag?.length ? tag : null });
+      tag = tag?.length ? tag : null;
+      let ours = null;
+      if (tag && this.#keyed) {
+        try {
+          const deviceId = new TextDecoder("utf-8", { fatal: true }).decode(await chars.get(DEVICE_ID).readValue());
+          ours = await this.#node.bleKeyedAppTag(deviceId);
+        } catch {
+          ours = null;
+        }
+      } else if (tag) {
+        ours = this.#tag;
+      }
+      candidates.push({ service, tag, ours });
     }
     if (candidates.length === 0) return services[0];
-    const ours = candidates.find(({ tag }) => tag && tag.length === this.#tag.length && tag.every((b, i) => b === this.#tag[i]));
+    const same = (a, b) => a && b && a.length === b.length && a.every((x, i) => x === b[i]);
+    const ours = candidates.find(({ tag, ours }) => same(tag, ours));
     if (ours) return ours.service;
     const untagged = candidates.filter(({ tag }) => tag === null);
     if (untagged.length === 1) return untagged[0].service;

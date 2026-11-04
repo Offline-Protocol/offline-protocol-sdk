@@ -60,6 +60,10 @@ enum BleServiceInstanceSelection {
         /// Whether the instance exposes both DEVICE_ID and IDENTITY. One that
         /// lacks either can never complete the handshake.
         let canHandshake: Bool
+        /// The DEVICE_ID value, read only by a central whose application has
+        /// a publisher key (`selectKeyed`), and only on an instance that
+        /// served a tag; nil otherwise, or when the read failed.
+        var deviceId: String? = nil
     }
 
     struct Selection: Equatable {
@@ -76,9 +80,30 @@ enum BleServiceInstanceSelection {
     /// when exactly one handshake-capable instance serves no tag, that one;
     /// else the first handshake-capable instance; else index 0.
     static func select(_ candidates: [Candidate], ownTag: Data) -> Selection {
+        select(candidates) { $0.tag == ownTag }
+    }
+
+    /// Chooses an instance for a central whose application has a publisher
+    /// key (ADR 0037). Its tag is per instance, `HMAC(K_app, device_id)[0..8]`,
+    /// so rule 1 takes the first handshake-capable instance whose tag equals
+    /// `tagFor` over that instance's own `deviceId`; rules 2 and 3 are
+    /// `select`'s. The Device id is unproven here, so a match only chooses the
+    /// instance: the handshake that follows still proves its address.
+    ///
+    /// - Parameter tagFor: the engine's `bleAppTag`, or nil for a Device id
+    ///   it has no tag for.
+    static func selectKeyed(_ candidates: [Candidate], tagFor: (String) -> Data?) -> Selection {
+        select(candidates) { candidate in
+            guard let tag = candidate.tag, let deviceId = candidate.deviceId,
+                  let expected = tagFor(deviceId) else { return false }
+            return tag == expected
+        }
+    }
+
+    private static func select(_ candidates: [Candidate], isOurs: (Candidate) -> Bool) -> Selection {
         let usable = candidates.indices.filter { candidates[$0].canHandshake }
 
-        if let sameApp = usable.first(where: { candidates[$0].tag == ownTag }) {
+        if let sameApp = usable.first(where: { isOurs(candidates[$0]) }) {
             return Selection(index: sameApp, reason: Reason.sameApp)
         }
 

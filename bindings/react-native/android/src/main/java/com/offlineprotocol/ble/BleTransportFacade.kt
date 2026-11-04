@@ -199,6 +199,21 @@ class BleTransportFacade(
      * Fixed for the facade's lifetime, like the address.
      */
     private val appTag: ByteArray = BleAppTag.compute(appId)
+
+    /**
+     * The engine's App tag for a Device id when the application has a
+     * publisher key (ADR 0037): `HMAC(K_app, device_id)[0..8]`, per instance,
+     * so it names and groups nothing for another application. Null without a
+     * publisher key, and [appTag] is served and matched exactly as before.
+     * The engine answers it without its lock, so the binder thread that
+     * serves the App tag read may ask.
+     */
+    private val keyedAppTag: ((String) -> ByteArray?)? =
+        if (keyedBleAppTag(protocol, deviceId) != null) {
+            { id -> keyedBleAppTag(protocol, id) }
+        } else {
+            null
+        }
     
     // MARK: - TransportManager Implementation
     
@@ -521,6 +536,7 @@ class BleTransportFacade(
             appTagCharUuid = APP_TAG_CHAR_UUID,
             appTag = appTag,
             helloCharUuid = HELLO_CHAR_UUID,
+            keyedAppTag = keyedAppTag,
             host = object : CentralGattClient.Host {
                 override val protocol: OfflineProtocol get() = this@BleTransportFacade.protocol
                 override val connections: MeshConnectionRegistry get() = this@BleTransportFacade.connections
@@ -4646,9 +4662,16 @@ class BleTransportFacade(
 
         override fun provideAppTagBytes(device: BluetoothDevice): ByteArray? {
             if (shuttingDown) return null
-            // Computed once from `appId` at construction; a copy so a caller
-            // that mutates the buffer cannot change what the next central reads.
-            return appTag.copyOf()
+            val keyed = keyedAppTag
+                // Computed once from `appId` at construction; a copy so a
+                // caller that mutates the buffer cannot change what the next
+                // central reads.
+                ?: return appTag.copyOf()
+            // Keyed: over the Device id this instance serves, so a central of
+            // this application can check it against what it read there. Null
+            // until the address exists, as the Device id read is.
+            val address = cachedLocalAddress ?: return null
+            return keyed(address)
         }
     }
 
@@ -4947,3 +4970,7 @@ class BleTransportFacade(
     }
 
 }
+
+/** The engine's keyed App tag for [deviceId], or null without a publisher key. */
+private fun keyedBleAppTag(protocol: OfflineProtocol, deviceId: String): ByteArray? =
+    protocol.bleAppTag(deviceId)?.map { it.toByte() }?.toByteArray()

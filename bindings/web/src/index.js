@@ -320,6 +320,14 @@ export class OfflineNode extends EventTarget {
     return this.#call("bleAppTag");
   }
 
+  bleAppTagIsKeyed() {
+    return this.#call("bleAppTagIsKeyed");
+  }
+
+  bleKeyedAppTag(deviceId) {
+    return this.#call("bleKeyedAppTag", { deviceId });
+  }
+
   bleVerify(deviceId, identity) {
     return this.#call("bleVerify", { deviceId, identity });
   }

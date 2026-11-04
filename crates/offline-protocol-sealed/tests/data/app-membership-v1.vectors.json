@@ -71,6 +71,25 @@
     "key_hex": "168ab14402b4425a73089cc0c1b0dbc90b689847926c210f1de4e4cbd6e268d2",
     "bytes_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
   },
+  "identifiers": {
+    "note": "What a configured application shows on the air in place of anything derived from its application id. The Bluetooth LE App tag is per instance, over the Device id exactly as served; the others are one per application.",
+    "ble_app_tag": {
+      "a_input_hex": "6f66666c696e652d6170702d626c652d7461672d76316f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a387230",
+      "a_tag_hex": "dc5068c949f8ebd5",
+      "b_input_hex": "6f66666c696e652d6170702d626c652d7461672d76316f6666317138647671756c717a676161616676616d78656d6d32773076716d6c76776b327367787678306c6b",
+      "b_tag_hex": "d909530d6fca379f"
+    },
+    "wifi_direct": {
+      "record_app": "cab8bc31",
+      "network_name": "DIRECT-op-c2509ed0",
+      "passphrase": "f2643519ea972fc2f6ec30d05ff24c45"
+    },
+    "web_nearby": {
+      "secret_hex": "b0c14541d221131d3cba1c8ce23d3accb033aa5c13019f30e8e6b1d6b6324a66",
+      "scope": "v4/203.0.113.7",
+      "topic_hex": "80a19a5eafffc8b1d9150102afc1f0d5"
+    }
+  },
   "rejects": [
     {
       "name": "version_2",

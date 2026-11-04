@@ -25,6 +25,14 @@ import java.security.MessageDigest
  * proves its peer with the identity preamble before it carries anything, and
  * every message is end to end encrypted above it.
  *
+ * An application with a publisher key (ADR 0037) does not use the three
+ * application-id derivations here ([appTag], [networkName], [passphrase]): the
+ * engine derives all three from the application key
+ * (`OfflineProtocol.wifiDirectIdentifiers`), which another application's
+ * developer cannot compute, so neither the record nor the group names the
+ * application. They are still one per application, so a device in range sees
+ * which devices share a record. The rules below are the same either way.
+ *
  * ## Why the name is the application's and not the owner's
  *
  * Discovery is asymmetric on real phones. A device that is a group owner, or

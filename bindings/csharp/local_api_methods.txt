@@ -1,5 +1,6 @@
 accept_connection_request
 app_membership_status
+ble_app_tag
 ble_clear_peer_mtu
 ble_fragment_fallback_count
 ble_fragment_received
@@ -214,6 +215,7 @@ verify_identity_assertion
 verify_signature
 verify_signature_bytes
 wifi_direct_get_next_message
+wifi_direct_identifiers
 wifi_direct_message_received
 wifi_direct_peer_connected
 wifi_direct_peer_disconnected

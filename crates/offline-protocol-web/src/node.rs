@@ -122,6 +122,12 @@ pub struct NodeOptions {
     pub nostr: Option<NostrOptions>,
     /// The Bluetooth LE slot, driven from the page over Web Bluetooth.
     pub ble: bool,
+    /// The application's publisher key ([ADR 0037]): the Bluetooth LE App
+    /// tag and the nearby room are then derived from the application key.
+    /// Not yet reachable from the page, which configures no membership.
+    ///
+    /// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
+    pub app_publisher_key: Option<[u8; 32]>,
 }
 
 struct Link {
@@ -177,6 +183,7 @@ impl Node {
             config.transport.nostr_username_discovery_enabled = nostr.username_discovery;
         }
         config.transport.wifi_direct_enabled = true;
+        config.app_publisher_key = options.app_publisher_key;
 
         let mut protocol = OfflineProtocol::new(config)?;
         // A placeholder id until `initialize` derives the address, exactly as

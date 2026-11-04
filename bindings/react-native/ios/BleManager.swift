@@ -93,6 +93,12 @@ public class BleManager: NSObject, TransportManager {
     /// matched against a remote phone's instances when it runs several SDK
     /// apps. Fixed for the instance's lifetime, like the address.
     private let appTag: Data
+    /// Whether the application has a publisher key (ADR 0037). Then the App
+    /// tag is the engine's `bleAppTag(deviceId:)`, `HMAC(K_app, address)[0..8]`:
+    /// served over this instance's own address, and checked against each
+    /// remote instance's Device id, so `appTag` is neither served nor matched.
+    /// The engine answers it without its lock.
+    private let keyedAppTags: Bool
     private let meshController: MeshController
     
     // Central (scanner/client) components
@@ -208,10 +214,21 @@ public class BleManager: NSObject, TransportManager {
         var canHandshake: [ObjectIdentifier: Bool] = [:]
         var tags: [ObjectIdentifier: Data] = [:]
         var pendingTagReads: Set<ObjectIdentifier> = []
+        /// With a keyed App tag only: each tagged instance's DEVICE_ID, the
+        /// value its tag is checked against.
+        var deviceIds: [ObjectIdentifier: String] = [:]
+        var pendingDeviceIdReads: Set<ObjectIdentifier> = []
 
         var isComplete: Bool {
             characteristicsKnown.count == instances.count && pendingTagReads.isEmpty
+                && pendingDeviceIdReads.isEmpty
         }
+    }
+
+    /// The engine's keyed App tag for a Device id, or nil without a publisher
+    /// key.
+    private func keyedAppTag(for deviceId: String) -> Data? {
+        protocolInstance.bleAppTag(deviceId: deviceId).map { Data($0) }
     }
     private var serviceInstanceProbes: [UUID: ServiceInstanceProbe] = [:]
     private var serviceInstanceDeadlines: [UUID: DispatchWorkItem] = [:]
@@ -670,6 +687,7 @@ public class BleManager: NSObject, TransportManager {
         self.protocolInstance = protocolInstance
         self.deviceId = deviceId
         self.appTag = BleAppTag.compute(appId: appId)
+        self.keyedAppTags = protocolInstance.bleAppTag(deviceId: deviceId) != nil
         self.meshController = MeshController(selfId: deviceId)
         super.init()
         meshController.markPeerActive(deviceId)
@@ -1798,10 +1816,15 @@ public class BleManager: NSObject, TransportManager {
         // service behind one link, so a peer running one SDK app never costs
         // it a read. Static like DEVICE_ID: `appId` is fixed for the lifetime
         // of this manager.
+        //
+        // With a publisher key the tag is over the address DEVICE_ID serves
+        // (ADR 0037), so a central of this application checks it against
+        // what it read there, and an observer learns nothing that groups this
+        // application's phones.
         appTagCharacteristic = CBMutableCharacteristic(
             type: APP_TAG_CHAR_UUID,
             properties: [.read],
-            value: appTag,
+            value: keyedAppTags ? keyedAppTag(for: advertisedAddress) : appTag,
             permissions: [.readable]
         )
 
@@ -3968,6 +3991,19 @@ extension BleManager: CBPeripheralDelegate {
             recordServiceInstanceTag(from: characteristic, error: error, on: peripheral)
             return
         }
+        // With a keyed App tag a link that is choosing reads each tagged
+        // instance's DEVICE_ID too. That read is the choice's, never the
+        // handshake's, and neither is an answer from an instance other than
+        // the chosen one that lands after the choice.
+        if characteristic.uuid == DEVICE_ID_CHAR_UUID {
+            if recordServiceInstanceDeviceId(from: characteristic, error: error, on: peripheral) {
+                return
+            }
+            if case .bound(let bound)? = serviceInstanceBinding(for: peripheral.identifier),
+               characteristic.service !== bound {
+                return
+            }
+        }
 
         if let error = error {
             print("[BleManager] Error reading characteristic: \(error)")
@@ -4362,11 +4398,38 @@ extension BleManager: CBPeripheralDelegate {
             ])
         } else if let tag = characteristic.value, !tag.isEmpty {
             probe.tags[key] = tag
+            // A keyed tag is checked against the instance's own Device id.
+            if keyedAppTags,
+               let deviceIdCharacteristic = service.characteristics?.first(where: { $0.uuid == DEVICE_ID_CHAR_UUID }) {
+                probe.pendingDeviceIdReads.insert(key)
+                peripheral.readValue(for: deviceIdCharacteristic)
+            }
         }
         serviceInstanceProbes[identifier] = probe
         if probe.isComplete {
             finishServiceInstanceSelection(on: peripheral, timedOut: false)
         }
+    }
+
+    /// Records one instance's DEVICE_ID read while its link is choosing with
+    /// a keyed App tag. True if the read was the choice's; false for any other
+    /// DEVICE_ID read, which goes on to the handshake. An error or a value
+    /// that is not UTF-8 leaves the instance with no Device id, which matches
+    /// no keyed tag.
+    private func recordServiceInstanceDeviceId(from characteristic: CBCharacteristic, error: Error?, on peripheral: CBPeripheral) -> Bool {
+        let identifier = peripheral.identifier
+        guard var probe = serviceInstanceProbes[identifier],
+              let service = characteristic.service else { return false }
+        let key = ObjectIdentifier(service)
+        guard probe.pendingDeviceIdReads.remove(key) != nil else { return false }
+        if error == nil, let value = characteristic.value, let deviceId = String(data: value, encoding: .utf8) {
+            probe.deviceIds[key] = deviceId
+        }
+        serviceInstanceProbes[identifier] = probe
+        if probe.isComplete {
+            finishServiceInstanceSelection(on: peripheral, timedOut: false)
+        }
+        return true
     }
 
     /// Chooses the instance, binds the link to it, and re-issues its
@@ -4381,10 +4444,13 @@ extension BleManager: CBPeripheralDelegate {
             let key = ObjectIdentifier(instance)
             return BleServiceInstanceSelection.Candidate(
                 tag: probe.tags[key],
-                canHandshake: probe.canHandshake[key] ?? false
+                canHandshake: probe.canHandshake[key] ?? false,
+                deviceId: probe.deviceIds[key]
             )
         }
-        let selection = BleServiceInstanceSelection.select(candidates, ownTag: appTag)
+        let selection = keyedAppTags
+            ? BleServiceInstanceSelection.selectKeyed(candidates) { [weak self] in self?.keyedAppTag(for: $0) }
+            : BleServiceInstanceSelection.select(candidates, ownTag: appTag)
         let chosen = probe.instances[selection.index]
         setServiceInstanceBinding(.bound(chosen), for: identifier)
 

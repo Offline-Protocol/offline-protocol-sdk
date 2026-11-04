@@ -228,6 +228,10 @@ export class OfflineNode extends EventTarget {
   /** BluetoothCarrier's half in the worker (W14). */
   bleHello(): Promise<Uint8Array>;
   bleAppTag(): Promise<Uint8Array>;
+  /** Whether the App tag is keyed by the application's publisher key (ADR 0037). */
+  bleAppTagIsKeyed(): Promise<boolean>;
+  /** The keyed App tag an instance with this Device id serves; null without a publisher key. */
+  bleKeyedAppTag(deviceId: string): Promise<Uint8Array | null>;
   bleVerify(deviceId: Uint8Array, identity: Uint8Array): Promise<string>;
   bleLinkUp(peer: string, maxPayload: number): Promise<void>;
   bleFragmentReceived(peer: string, bytes: Uint8Array): Promise<void>;

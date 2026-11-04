@@ -17,6 +17,7 @@ import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import androidx.core.content.ContextCompat
 import uniffi.offline_protocol.OfflineProtocol
+import uniffi.offline_protocol.WifiDirectIdentifiers
 import uniffi.offline_protocol.verifyIdentityAssertion
 import java.io.*
 import java.net.InetAddress
@@ -268,8 +269,17 @@ class WifiDirectManager(
     // The device address of the owner of the application's group this device
     // is a client of, so a leave knows whom to avoid.
     private var appGroupOwnerDevice: String? = null
-    private val appTag: String by lazy { WifiDirectGroupFormation.appTag(appId) }
-    private val appNetwork: String by lazy { WifiDirectGroupFormation.networkName(appId) }
+    // With a publisher key the engine derives all three from the application
+    // key instead (ADR 0037), so neither the record nor the group names the
+    // application to another application's developer; without one they come
+    // from `appId` exactly as before. The engine answers without its lock.
+    private val keyedIdentifiers: WifiDirectIdentifiers? by lazy { protocol.wifiDirectIdentifiers() }
+    private val appTag: String by lazy {
+        keyedIdentifiers?.recordApp ?: WifiDirectGroupFormation.appTag(appId)
+    }
+    private val appNetwork: String by lazy {
+        keyedIdentifiers?.networkName ?: WifiDirectGroupFormation.networkName(appId)
+    }
     
     // State tracking. Volatile: written on the transport thread, read by the
     // socket thread that decides whether a client reconnects.
@@ -1129,7 +1139,9 @@ class WifiDirectManager(
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         return WifiP2pConfig.Builder()
             .setNetworkName(network)
-            .setPassphrase(WifiDirectGroupFormation.passphrase(appId, network))
+            // Keyed, the passphrase is the application key's and `network` is
+            // always [appNetwork], derived from the same key.
+            .setPassphrase(keyedIdentifiers?.passphrase ?: WifiDirectGroupFormation.passphrase(appId, network))
             .enablePersistentMode(false)
             .build()
     }

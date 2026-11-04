@@ -95,7 +95,7 @@ class CentralGattClientInstanceSelectionTest {
         return Link(gatt, shadow)
     }
 
-    private fun client(): CentralGattClient = CentralGattClient(
+    private fun client(keyedAppTag: ((String) -> ByteArray?)? = null): CentralGattClient = CentralGattClient(
         bleHandler = Handler(Looper.getMainLooper()),
         serviceUuid = serviceUuid,
         messageCharUuid = messageUuid,
@@ -105,7 +105,12 @@ class CentralGattClientInstanceSelectionTest {
         appTag = ourTag,
         host = FakeHost(),
         diagnosticEmitter = { _, message, ctx -> diagnostics += message to ctx },
+        keyedAppTag = keyedAppTag,
     )
+
+    /** A stand-in for the engine's keyed tag (ADR 0037): one per Device id. */
+    private fun keyedTag(deviceId: String): ByteArray =
+        BleAppTag.compute("keyed:$deviceId")
 
     private fun idle() = shadowOf(Looper.getMainLooper()).idle()
     private fun idleFor(ms: Long) = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms))
@@ -313,6 +318,71 @@ class CentralGattClientInstanceSelectionTest {
         client.callback.onConnectionStateChange(link.gatt, BluetoothGatt.GATT_SUCCESS, BluetoothProfile.STATE_CONNECTED)
         assertEquals("the binding is dropped with the old connection: back to the first instance until a new choice",
             1, client.handshakeService(link.gatt)?.instanceId)
+    }
+
+    // --- With a publisher key (ADR 0037) -------------------------------------
+
+    @Test
+    fun `keyed - each tagged instance's device id is read and the instance whose tag is ours over it is chosen`() {
+        val first = instance(instanceId = 1, deviceId = "peer-first", tag = keyedTag("peer-other"))
+        val untagged = instance(instanceId = 2, deviceId = "peer-untagged", tag = null)
+        val third = instance(instanceId = 3, deviceId = "peer-third", tag = keyedTag("peer-third"))
+        val link = link(first, untagged, third)
+        val client = client(keyedAppTag = ::keyedTag)
+
+        client.callback.onServicesDiscovered(link.gatt, BluetoothGatt.GATT_SUCCESS)
+        client.callback.onMtuChanged(link.gatt, 247, BluetoothGatt.GATT_SUCCESS)
+        idle()
+        assertSame(first.appTag, link.shadow.reads.last())
+        answerLastRead(client, link)
+        assertSame("a tagged instance's device id is read to check its tag", first.deviceId, link.shadow.reads.last())
+        answerLastRead(client, link)
+        answerLastRead(client, link) // the third instance's tag
+        assertSame(third.deviceId, link.shadow.reads.last())
+        answerLastRead(client, link)
+
+        assertEquals(2, chosen()["index"])
+        assertEquals("same_app", chosen()["reason"])
+        assertEquals(
+            "an untagged instance has nothing to check, so its device id is never read while choosing",
+            listOf(first.appTag, first.deviceId, third.appTag, third.deviceId, third.deviceId),
+            link.shadow.reads,
+        )
+        assertEquals(3, client.handshakeService(link.gatt)?.instanceId)
+        assertTrue(!link.shadow.closed)
+    }
+
+    @Test
+    fun `keyed - a tag that is ours for another device id is not ours`() {
+        val first = instance(instanceId = 1, deviceId = "peer-first", tag = keyedTag("peer-second"))
+        val second = instance(instanceId = 2, deviceId = "peer-second", tag = keyedTag("peer-first"))
+        val link = link(first, second)
+        val client = client(keyedAppTag = ::keyedTag)
+
+        client.callback.onServicesDiscovered(link.gatt, BluetoothGatt.GATT_SUCCESS)
+        client.callback.onMtuChanged(link.gatt, 247, BluetoothGatt.GATT_SUCCESS)
+        idle()
+        repeat(4) { answerLastRead(client, link) }
+
+        assertEquals("first_instance", chosen()["reason"])
+        assertEquals(0, chosen()["index"])
+        assertSame(first.deviceId, link.shadow.reads.last())
+    }
+
+    @Test
+    fun `unkeyed - no device id is read while choosing`() {
+        val first = instance(instanceId = 1, deviceId = "peer-first", tag = otherTag)
+        val second = instance(instanceId = 2, deviceId = "peer-second", tag = ourTag)
+        val link = link(first, second)
+        val client = client()
+
+        client.callback.onServicesDiscovered(link.gatt, BluetoothGatt.GATT_SUCCESS)
+        client.callback.onMtuChanged(link.gatt, 247, BluetoothGatt.GATT_SUCCESS)
+        idle()
+        answerLastRead(client, link)
+        answerLastRead(client, link)
+
+        assertEquals(listOf(first.appTag, second.appTag, second.deviceId), link.shadow.reads)
     }
 
     // --- One instance -------------------------------------------------------

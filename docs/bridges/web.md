@@ -455,6 +455,15 @@ lists the others it has heard within 15 s, and links over WebRTC to one its
 person picks. The relays carry only the setup; the link runs on the local
 network.
 
+**The engine opens the room.** The worker asks the engine for it
+(`nearbyRoom`), which derives it from the application key in place of the
+application id when the application has a publisher key
+([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md)),
+so the topic names nothing to someone who knows only the id. Without a
+publisher key the room is the application id's, as before. The page does not
+yet configure a publisher key, so a page's room is the id's today; the
+derivation is in place for when it does.
+
 **The room key is public.** Anyone can derive it from an address, so it
 seals only presences, and a presence holds a key used for this room and the
 application's label. Because the room key authenticates nothing, a presence
@@ -541,6 +550,9 @@ attribute a write, and one it cannot attribute is dropped. The iOS, Android
 and Python peripherals serve Hello. With several instances of the service
 behind one device, the carrier binds the one carrying this application's
 App tag, else the only untagged one, else the first, as the chapter says.
+With a publisher key the tag is per instance, so the carrier reads Device id
+on each tagged instance and asks the engine for the tag over it
+(`bleKeyedAppTag`); JavaScript computes no tag.
 
 **The hello is required, where the chapter makes it optional.** The
 chapter lets a central skip Hello, and keep a link whose hello was

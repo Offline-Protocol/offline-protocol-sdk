@@ -395,6 +395,7 @@ fn liveness_reported_before_an_address_is_not_kept() {
     let options = NodeOptions {
         ble: false,
         nostr: Some(NostrOptions::default()),
+        ..Default::default()
     };
     let mut node = Node::with_options("web-nostr-test", "early", options).expect("node");
     assert!(node.nostr_status_changed(true).is_err());
@@ -548,6 +549,7 @@ fn nostr_node(cold_contact: bool, username_discovery: bool, profile: &str) -> No
             cold_contact,
             username_discovery,
         }),
+        ..Default::default()
     };
     let mut node = Node::with_options("web-nostr-test", profile, options).expect("node");
     node.initialize().expect("initialize");

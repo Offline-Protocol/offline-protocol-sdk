@@ -240,6 +240,7 @@ impl WebEngine {
                 username_discovery,
             }),
             ble,
+            ..NodeOptions::default()
         };
         Ok(Self {
             node: Node::with_options(app_id, profile, options).map_err(js)?,
@@ -499,6 +500,36 @@ impl WebEngine {
     #[wasm_bindgen(js_name = bleHello)]
     pub fn ble_hello(&self) -> Result<Vec<u8>, JsError> {
         self.node.ble_hello().map_err(js)
+    }
+
+    /// Whether this application's App tag is keyed by its publisher key
+    /// (ADR 0037): then a central with several instances to choose from
+    /// reads each tagged instance's Device id and compares its tag with
+    /// [`WebEngine::ble_keyed_app_tag`] over it, in place of [`ble_app_tag`].
+    #[wasm_bindgen(js_name = bleAppTagIsKeyed)]
+    pub fn ble_app_tag_is_keyed(&self) -> bool {
+        self.node.ble_app_tag_is_keyed()
+    }
+
+    /// The App tag this application's instance with Device id `device_id`
+    /// serves, keyed by the application key; `undefined` without a publisher
+    /// key.
+    #[wasm_bindgen(js_name = bleKeyedAppTag)]
+    pub fn ble_keyed_app_tag(&self, device_id: &str) -> Option<Vec<u8>> {
+        self.node
+            .ble_keyed_app_tag(device_id)
+            .map(|tag| tag.to_vec())
+    }
+
+    /// Joins the nearby room behind `network` for this engine's application
+    /// (W13), under `label`: from the application key when the application
+    /// has a publisher key (ADR 0037), from the application id otherwise.
+    #[wasm_bindgen(js_name = nearbyRoom)]
+    pub fn nearby_room(&self, network: &str, label: &str) -> Result<WebNearby, JsError> {
+        self.node
+            .nearby_room(network, label)
+            .map(|inner| WebNearby { inner })
+            .map_err(|e| JsError::new(&e))
     }
 
     /// Checks a peripheral's Device id and Identity values; returns the

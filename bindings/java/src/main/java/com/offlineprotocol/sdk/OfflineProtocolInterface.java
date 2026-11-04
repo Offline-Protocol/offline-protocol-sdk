@@ -3,6 +3,7 @@ package com.offlineprotocol.sdk;
 public interface OfflineProtocolInterface {
     public java.lang.String acceptConnectionRequest(java.lang.String recipient, java.lang.String accepterName, java.util.List<java.lang.Byte> keyPackage) throws ProtocolException;
     public AppMembershipStatus appMembershipStatus();
+    public java.util.List<java.lang.Byte> bleAppTag(java.lang.String deviceId);
     public void bleClearPeerMtu(java.lang.String peerId) throws ProtocolException;
     public long bleFragmentFallbackCount();
     public void bleFragmentReceived(java.lang.String senderId, java.util.List<java.lang.Byte> fragment) throws ProtocolException;
@@ -184,6 +185,7 @@ public interface OfflineProtocolInterface {
     public boolean verifySignature(java.util.List<java.lang.Byte> publicKey, java.util.List<java.lang.Byte> data, java.util.List<java.lang.Byte> signature) throws ProtocolException;
     public boolean verifySignatureBytes(byte[] publicKey, byte[] data, byte[] signature) throws ProtocolException;
     public WifiDirectMessage wifiDirectGetNextMessage();
+    public WifiDirectIdentifiers wifiDirectIdentifiers();
     public void wifiDirectMessageReceived(java.lang.String senderId, java.util.List<java.lang.Byte> data) throws ProtocolException;
     public void wifiDirectPeerConnected(java.lang.String peerId) throws ProtocolException;
     public void wifiDirectPeerDisconnected(java.lang.String peerId) throws ProtocolException;

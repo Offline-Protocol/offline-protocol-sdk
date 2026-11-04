@@ -1469,6 +1469,27 @@ private_constant :UniffiHandleMap
     end
   end
 
+  # The Record type WifiDirectIdentifiers.
+
+  def self.check_lower_TypeWifiDirectIdentifiers(v)
+    
+    
+    
+  end
+
+  def self.alloc_from_TypeWifiDirectIdentifiers(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_TypeWifiDirectIdentifiers(v)
+      return builder.finalize
+    end
+  end
+
+  def consume_into_TypeWifiDirectIdentifiers
+    consumeWithStream do |stream|
+      return stream.read_TypeWifiDirectIdentifiers
+    end
+  end
+
   # The Record type WifiDirectMessage.
 
   def self.check_lower_TypeWifiDirectMessage(v)
@@ -2326,6 +2347,27 @@ private_constant :UniffiHandleMap
   def consume_into_OptionalTypeTransportMetrics
     consumeWithStream do |stream|
       return stream.read_OptionalTypeTransportMetrics
+    end
+  end
+
+  # The Optional<T> type for TypeWifiDirectIdentifiers.
+
+  def self.check_lower_OptionalTypeWifiDirectIdentifiers(v)
+    if !v.nil?
+      RustBuffer.check_lower_TypeWifiDirectIdentifiers(v)
+    end
+  end
+
+  def self.alloc_from_OptionalTypeWifiDirectIdentifiers(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_OptionalTypeWifiDirectIdentifiers(v)
+      return builder.finalize()
+    end
+  end
+
+  def consume_into_OptionalTypeWifiDirectIdentifiers
+    consumeWithStream do |stream|
+      return stream.read_OptionalTypeWifiDirectIdentifiers
     end
   end
 
@@ -3467,6 +3509,16 @@ class RustBufferStream
     )
   end
 
+  # The Record type WifiDirectIdentifiers.
+
+  def read_TypeWifiDirectIdentifiers
+    WifiDirectIdentifiers.new(
+      record_app: read_string,
+      network_name: read_string,
+      passphrase: read_string
+    )
+  end
+
   # The Record type WifiDirectMessage.
 
   def read_TypeWifiDirectMessage
@@ -4428,6 +4480,21 @@ class RustBufferStream
   end
 
   
+  # The Optional<T> type for TypeWifiDirectIdentifiers.
+
+  def read_OptionalTypeWifiDirectIdentifiers
+    flag = unpack_from 1, 'c'
+
+    if flag == 0
+      return nil
+    elsif flag == 1
+      return read_TypeWifiDirectIdentifiers
+    else
+      raise InternalError, 'Unexpected flag byte for OptionalTypeWifiDirectIdentifiers'
+    end
+  end
+
+  
   # The Optional<T> type for TypeWifiDirectMessage.
 
   def read_OptionalTypeWifiDirectMessage
@@ -5382,6 +5449,14 @@ class RustBufferBuilder
     self.write_Optionalf32(v.energy_cost)
   end
 
+  # The Record type WifiDirectIdentifiers.
+
+  def write_TypeWifiDirectIdentifiers(v)
+    self.write_string(v.record_app)
+    self.write_string(v.network_name)
+    self.write_string(v.passphrase)
+  end
+
   # The Record type WifiDirectMessage.
 
   def write_TypeWifiDirectMessage(v)
@@ -6083,6 +6158,17 @@ class RustBufferBuilder
     else
       pack_into(1, 'c', 1)
       self.write_TypeTransportMetrics(v)
+    end
+  end
+
+  # The Optional<T> type for TypeWifiDirectIdentifiers.
+
+  def write_OptionalTypeWifiDirectIdentifiers(v)
+    if v.nil?
+      pack_into(1, 'c', 0)
+    else
+      pack_into(1, 'c', 1)
+      self.write_TypeWifiDirectIdentifiers(v)
     end
   end
 
@@ -6923,6 +7009,10 @@ module UniFFILib
     [:uint64, RustCallStatus.by_ref],
     RustBuffer.by_value
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_app_tag,
+    [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu,
     [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
@@ -7647,6 +7737,10 @@ module UniFFILib
     [:uint64, RustCallStatus.by_ref],
     RustBuffer.by_value
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_identifiers,
+    [:uint64, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received,
     [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
@@ -8128,6 +8222,10 @@ module UniFFILib
     :uint16
   
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_app_tag,
     [],
     :uint16
   
@@ -8852,6 +8950,10 @@ module UniFFILib
     :uint16
   
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_identifiers,
     [],
     :uint16
   
@@ -11285,6 +11387,32 @@ class TransportMetrics
   
 end
   
+  # Record type WifiDirectIdentifiers
+class WifiDirectIdentifiers
+  attr_reader :record_app, :network_name, :passphrase
+
+  def initialize(record_app:, network_name:, passphrase:)
+    @record_app = record_app
+    @network_name = network_name
+    @passphrase = passphrase
+  end
+
+  def ==(other)
+    if @record_app != other.record_app
+      return false
+    end
+    if @network_name != other.network_name
+      return false
+    end
+    if @passphrase != other.passphrase
+      return false
+    end
+
+    true
+  end
+  
+end
+  
   # Record type WifiDirectMessage
 class WifiDirectMessage
   attr_reader :recipient_id, :data
@@ -11986,6 +12114,12 @@ end
   def app_membership_status()
     result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status,uniffi_clone_handle(),)
     return result.consume_into_TypeAppMembershipStatus
+  end
+  def ble_app_tag(device_id)
+        device_id = ::OfflineProtocol::uniffi_utf8(device_id)
+        
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_app_tag,uniffi_clone_handle(),RustBuffer.alloc_from_string(device_id))
+    return result.consume_into_OptionalSequenceu8
   end
   def ble_clear_peer_mtu(peer_id)
         peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
@@ -13100,6 +13234,10 @@ end
   def wifi_direct_get_next_message()
     result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message,uniffi_clone_handle(),)
     return result.consume_into_OptionalTypeWifiDirectMessage
+  end
+  def wifi_direct_identifiers()
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_identifiers,uniffi_clone_handle(),)
+    return result.consume_into_OptionalTypeWifiDirectIdentifiers
   end
   def wifi_direct_message_received(sender_id, data)
         sender_id = ::OfflineProtocol::uniffi_utf8(sender_id)

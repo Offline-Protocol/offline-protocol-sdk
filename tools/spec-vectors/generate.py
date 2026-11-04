@@ -1829,6 +1829,17 @@ def build_app_membership_vectors() -> dict:
 
     def provision_reject(raw: bytes) -> str:
         return base64.b64encode(raw).decode("ascii")
+    # The identifiers a configured application shows on the air (ADR 0037,
+    # "Nothing in the clear"), each from K_app under its own label.
+    tag_inputs = {k: b"offline-app-ble-tag-v1" + v.encode("utf-8") for k, v in (("a", addr_a), ("b", addr_b))}
+    ble_tags = {k: _hmac.new(k_app, v, hashlib.sha256).digest()[:8] for k, v in tag_inputs.items()}
+    wd_record = hkdf(k_app, b"", b"offline-app-wifi-direct-record-v1")[:4].hex()
+    wd_network = "DIRECT-op-" + hkdf(k_app, b"", b"offline-app-wifi-direct-network-v1")[:4].hex()
+    wd_passphrase = hkdf(k_app, b"", b"offline-app-wifi-direct-passphrase-v1")[:16].hex()
+    nearby_secret = hkdf(k_app, b"", b"offline-app-web-nearby-v1")
+    nearby_network = "v4/203.0.113.7"
+    nearby_ikm = nearby_secret + b"\x00" + nearby_network.encode("ascii")
+    nearby_topic = hkdf(nearby_ikm, b"offline-protocol web nearby v1", b"topic", 16)
 
     return {
         "_comment": [
@@ -1906,6 +1917,28 @@ def build_app_membership_vectors() -> dict:
             "salt_hex": proof_salt.hex(),
             "key_hex": hkdf(k_app, proof_salt, b"offline-app-member-e2e-key-v1").hex(),
             "bytes_hex": (proof_salt + sealed).hex(),
+        },
+        "identifiers": {
+            "note": "What a configured application shows on the air in place of "
+            "anything derived from its application id. The Bluetooth LE App tag "
+            "is per instance, over the Device id exactly as served; the others "
+            "are one per application.",
+            "ble_app_tag": {
+                "a_input_hex": tag_inputs["a"].hex(),
+                "a_tag_hex": ble_tags["a"].hex(),
+                "b_input_hex": tag_inputs["b"].hex(),
+                "b_tag_hex": ble_tags["b"].hex(),
+            },
+            "wifi_direct": {
+                "record_app": wd_record,
+                "network_name": wd_network,
+                "passphrase": wd_passphrase,
+            },
+            "web_nearby": {
+                "secret_hex": nearby_secret.hex(),
+                "scope": nearby_network,
+                "topic_hex": nearby_topic.hex(),
+            },
         },
         "rejects": [
             {"name": "version_2", "body": base64.b64encode(bytes([2, 1]) + bytes(32)).decode()},
