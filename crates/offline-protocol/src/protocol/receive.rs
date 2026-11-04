@@ -64,6 +64,17 @@ impl OfflineProtocol {
                     if let Some(content_type) = rich.content_type {
                         message.content_type = content_type;
                     }
+                    // The sealed application id is authoritative over the
+                    // wire's, which a configured sender stamps with a
+                    // constant (ADR 0037). A value that is not a valid id
+                    // leaves the outer one standing.
+                    if let Some(app_id) = rich
+                        .app_id
+                        .as_deref()
+                        .and_then(|id| offline_protocol_core::AppId::new(id).ok())
+                    {
+                        message.app_id = app_id;
+                    }
                 }
                 None => {
                     message.content = plaintext;

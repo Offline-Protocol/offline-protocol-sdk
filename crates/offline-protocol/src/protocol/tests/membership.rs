@@ -1362,3 +1362,98 @@ fn the_named_set_survives_a_restart_and_an_explicit_send_writes_it() {
         "restored from storage"
     );
 }
+
+// --- Nothing names the application in the clear (step 9) ---------------------
+
+/// A real 1:1 session between `a` and `b`, both advertising the sealed rich
+/// payload, as a completed key package exchange would leave them.
+fn session(a: &mut Node, b: &mut Node) {
+    use crate::protocol::types::SessionState;
+    let b_kp = {
+        let manager = b.protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let manager = a.protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(&b.address, &b_kp.key_package_data)
+            .unwrap();
+        manager.create_session(&b.address).unwrap()
+    };
+    {
+        let manager = b.protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.join_session(&welcome).unwrap();
+    }
+    let (a_addr, b_addr) = (a.address.clone(), b.address.clone());
+    for (node, peer) in [(&mut *a, b_addr), (&mut *b, a_addr)] {
+        node.protocol.record_encryption_capable(&peer);
+        node.protocol
+            .persist_session_state(&peer, SessionState::Confirmed, "test")
+            .unwrap();
+        node.protocol.confirmed_sessions.insert(peer.clone());
+        node.protocol.peer_rich_payload.insert(peer.clone());
+        node.transport.add_connected_peer(peer, -55);
+    }
+}
+
+fn received_app_ids(events: &Mutex<Vec<Event>>) -> Vec<String> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageReceived { app_id, .. } => Some(app_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_configured_node_stamps_the_constant_and_seals_the_real_application_id() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::member("bob", &key);
+    session(&mut alice, &mut bob);
+    let events = record_events(&mut bob);
+    take_frames_to(&alice, &bob);
+
+    alice
+        .protocol
+        .send_message(&bob.address, "hello", None, None::<String>)
+        .expect("sent");
+    let frames = take_frames_to(&alice, &bob);
+    let dm = frames
+        .iter()
+        .find(|m| !m.content.starts_with(internal_prefixes::MEMBER))
+        .expect("the message went out")
+        .clone();
+    assert_eq!(
+        dm.app_id.as_str(),
+        offline_protocol_sealed::membership::WIRE_APP_ID,
+        "the wire names no application"
+    );
+    assert!(
+        !dm.content.contains(APP),
+        "nor does the ciphertext's outside"
+    );
+
+    bob.receive_from(dm, &alice.address.clone());
+    assert_eq!(received_app_ids(&events), vec![APP.to_string()]);
+}
+
+#[test]
+fn an_unconfigured_node_stamps_its_own_application_id_as_before() {
+    let mut alice = Node::launch("alice", None);
+    let mut bob = Node::launch("bob", None);
+    session(&mut alice, &mut bob);
+    take_frames_to(&alice, &bob);
+    alice
+        .protocol
+        .send_message(&bob.address, "hello", None, None::<String>)
+        .expect("sent");
+    let frames = take_frames_to(&alice, &bob);
+    assert!(frames
+        .iter()
+        .filter(|m| !m.content.starts_with(internal_prefixes::MEMBER))
+        .all(|m| m.app_id.as_str() == APP));
+}

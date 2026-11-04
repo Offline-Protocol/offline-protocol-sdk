@@ -323,6 +323,22 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// Whether a publisher key is configured.
+    pub(crate) fn membership_configured(&self) -> bool {
+        self.membership.publisher_key.is_some()
+    }
+
+    /// The application id to seal in a rich body: the per-message override
+    /// or the configured id, only when a publisher key is configured, since
+    /// only then does the wire carry the constant instead (ADR 0037).
+    pub(crate) fn sealed_app_id(
+        &self,
+        per_message: Option<&offline_protocol_core::AppId>,
+    ) -> Option<String> {
+        self.membership.publisher_key?;
+        Some(per_message.map_or_else(|| self.config.app_id.clone(), |id| id.as_str().to_string()))
+    }
+
     /// This node's membership configuration: whether a publisher key is set,
     /// its own certificate's expiry, and how many neighbours are visible.
     pub fn app_membership_status(&self) -> AppMembershipStatus {

@@ -122,6 +122,12 @@ pub const MEMBER_PROOF_LEN: usize = MEMBER_PROOF_SALT_LEN + MEMBER_SEALED_LEN;
 /// verify.
 pub const MEMBER_PROOF_META_KEY: &str = "__member_proof";
 
+/// The application id every frame a configured node originates carries on
+/// the wire (ADR 0037). The real id travels inside the sealed rich payload,
+/// which is authoritative on receipt, so the cleartext field names no
+/// application. A valid `AppId`, so an older receiver still decodes it.
+pub const WIRE_APP_ID: &str = "offline";
+
 /// The version byte every `__MEMBER__` frame body begins with.
 pub const MEMBER_FRAME_VERSION: u8 = 1;
 

@@ -140,6 +140,17 @@ frames always carry the configured one. A receiver MUST NOT drop or
 authorize a frame by its `app_id`: it reports the id with the delivered
 message and leaves routing to whoever serves the applications.
 
+A node configured with an application publisher key
+([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md)) names no
+application on the wire. Every frame it originates carries the constant
+`offline`, and the real id rides inside the sealed rich payload
+(`RichPayloadV1.app_id`), where only the recipient reads it. A receiver that
+opens a sealed payload naming a valid application id reports that id and not
+the wire one. Frames that carry no sealed payload (acknowledgements, control
+frames, plaintext sends) say only `offline`. The constant is stamped on frames
+the node originates and on no other: a frame it forwards keeps the `app_id`
+its origin gave it, so an unconfigured origin stays as visible as it was.
+
 A forwarder MUST NOT decide anything on `app_id` either: it carries a frame
 for an application it does not run exactly as it carries one for its own, and
 hands it on with the `app_id` it arrived with. Reading the field to re-encode

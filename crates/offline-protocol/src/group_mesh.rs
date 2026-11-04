@@ -4154,11 +4154,14 @@ impl OfflineProtocol {
             media_metadata,
             forward_info: forward_info.clone(),
         };
-        let wants_seal = extras.is_any() || content_type != ContentType::Text;
+        let sealed_app_id = self.sealed_app_id(None);
+        let wants_seal =
+            extras.is_any() || content_type != ContentType::Text || sealed_app_id.is_some();
         let sealed = wants_seal && self.group_rich_seal_active(&members);
         let sealed_body;
         let plaintext: &str = if sealed {
-            sealed_body = Self::seal_rich_payload(content, &extras, content_type)?;
+            sealed_body =
+                Self::seal_rich_payload(content, &extras, content_type, sealed_app_id.as_deref())?;
             &sealed_body
         } else {
             // Members holding the gate closed (empty when the local kill

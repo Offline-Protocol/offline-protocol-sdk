@@ -11565,6 +11565,7 @@ fn group_relay_path_restores_sealed_media() {
             forward_info: Some(offline_protocol_core::ForwardInfo::from_message(&original)),
         },
         original.content_type,
+        None,
     )
     .unwrap();
     let encrypted = {
@@ -11716,6 +11717,7 @@ fn group_sealed_body_ignores_injected_payload_attribution() {
             forward_info: None,
         },
         original.content_type,
+        None,
     )
     .unwrap();
     let encrypted = {
@@ -11787,6 +11789,7 @@ fn group_buffered_drain_restores_sealed_media() {
             forward_info: Some(offline_protocol_core::ForwardInfo::from_message(&original)),
         },
         original.content_type,
+        None,
     )
     .unwrap();
     let encrypted = {

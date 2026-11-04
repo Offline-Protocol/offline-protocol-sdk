@@ -10,7 +10,7 @@ use crate::telemetry::routing::{RoutingDecision, RoutingPhase, RoutingReasonCode
 use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::time::Instant;
-use offline_protocol_core::{Message, Username, WireCodec};
+use offline_protocol_core::{AppId, Message, Username, WireCodec};
 use offline_protocol_router::{
     display_routing_score, DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
 };
@@ -65,6 +65,10 @@ pub struct TransportManager {
     /// package). Messages addressed to a listed peer are stamped
     /// [`WireCodec::BinaryV1`] at send; all others stay JSON.
     peer_binary_wire: HashSet<String>,
+    /// With an application publisher key configured (ADR 0037): this node's
+    /// address and the constant wire application id every frame it
+    /// originates carries. Frames it forwards for others keep theirs.
+    wire_app_id: Option<(String, AppId)>,
 
     /// Host-reported battery level for this device, if the platform publishes
     /// one. Merged into every transport's metrics that does not report its own
@@ -235,6 +239,7 @@ impl TransportManager {
             routing_diagnostic: false,
             last_escalation_trigger_emitted: None,
             peer_binary_wire: HashSet::new(),
+            wire_app_id: None,
             device_battery: None,
             device_is_charging: false,
         }
@@ -1138,14 +1143,33 @@ impl TransportManager {
     /// silently downgrades a binary-capable peer to JSON — a regression with no
     /// error and no event, visible only as larger frames on the wire.
     fn stamp_negotiated_wire_codec(&self, message: &Message) -> Option<Message> {
-        if message.wire_codec() == WireCodec::BinaryV1
-            || !self.peer_binary_wire.contains(message.recipient.as_str())
-        {
+        let codec = message.wire_codec() != WireCodec::BinaryV1
+            && self.peer_binary_wire.contains(message.recipient.as_str());
+        let app_id = self.wire_app_id_for(message);
+        if !codec && app_id.is_none() {
             return None;
         }
         let mut stamped = message.clone();
-        stamped.set_wire_codec(WireCodec::BinaryV1);
+        if codec {
+            stamped.set_wire_codec(WireCodec::BinaryV1);
+        }
+        if let Some(app_id) = app_id {
+            stamped.app_id = app_id;
+        }
         Some(stamped)
+    }
+
+    /// Sets the constant wire application id for frames `local` originates
+    /// (ADR 0037), or clears it with `None`.
+    pub fn set_wire_app_id(&mut self, wire: Option<(String, AppId)>) {
+        self.wire_app_id = wire;
+    }
+
+    /// The constant to stamp on `message`, when this node originated it and
+    /// it does not carry the constant already.
+    fn wire_app_id_for(&self, message: &Message) -> Option<AppId> {
+        let (local, constant) = self.wire_app_id.as_ref()?;
+        (message.sender.as_str() == local && message.app_id != *constant).then(|| constant.clone())
     }
 
     /// The mesh carrier holding a live link straight to `peer_id`, if any.
@@ -1326,6 +1350,16 @@ impl TransportManager {
     ///
     /// Returns the transport the frame went out on.
     pub fn send_to_neighbor(&self, peer_id: &str, message: &Message) -> Result<TransportType> {
+        let own_frame;
+        let message = match self.wire_app_id_for(message) {
+            Some(app_id) => {
+                let mut m = message.clone();
+                m.app_id = app_id;
+                own_frame = m;
+                &own_frame
+            }
+            None => message,
+        };
         let stamped;
         let message = if message.wire_codec() != WireCodec::BinaryV1
             && self.peer_binary_wire.contains(peer_id)
@@ -1698,6 +1732,40 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].wire_codec(), WireCodec::Json);
         assert_eq!(sent[1].wire_codec(), WireCodec::BinaryV1);
+    }
+
+    #[test]
+    fn the_wire_app_id_is_stamped_only_on_frames_this_node_originates() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+        manager.set_wire_app_id(Some(("alice".into(), AppId::new("offline").unwrap())));
+
+        // alice's own frame takes the constant; a frame she relays for carol
+        // keeps carol's id. What a frame names is its origin's decision, and a
+        // relay that rewrote it would also hide an unconfigured origin.
+        manager.send(&create_test_message()).unwrap();
+        let relayed = Message::new(
+            UserId::new("carol").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "relayed",
+        );
+        manager.send(&relayed).unwrap();
+
+        let mock = manager
+            .transports
+            .get(&TransportType::BLE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<MockTransport>()
+            .unwrap();
+        let sent = mock.sent_messages();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].app_id.as_str(), "offline");
+        assert_eq!(sent[1].app_id.as_str(), "test");
     }
 
     #[test]

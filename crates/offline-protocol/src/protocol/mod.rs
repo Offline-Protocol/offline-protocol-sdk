@@ -1535,6 +1535,16 @@ impl OfflineProtocol {
         // The governor took the profile at construction because no address
         // existed yet; it keys relay fan-out and jitter off the local id, so it
         // has to move to the real one here.
+        // A configured node stamps the constant application id on every
+        // frame it originates (ADR 0037); the real one is sealed.
+        if self.membership_configured() {
+            if let Ok(constant) =
+                offline_protocol_core::AppId::new(offline_protocol_sealed::membership::WIRE_APP_ID)
+            {
+                self.transport_manager
+                    .set_wire_app_id(Some((local_id.clone(), constant)));
+            }
+        }
         self.mesh_relay.set_local_id(local_id);
 
         self.secure_storage = Some(secure_storage);

@@ -3696,7 +3696,8 @@ fn attested_rich_flood_eviction_clears_at_cap() {
 fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
     let extras = sample_rich_extras();
     let sealed =
-        OfflineProtocol::seal_rich_payload("hello rich", &extras, ContentType::Image).unwrap();
+        OfflineProtocol::seal_rich_payload("hello rich", &extras, ContentType::Image, None)
+            .unwrap();
     assert!(sealed.starts_with(internal_prefixes::RICH_V1));
 
     let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
@@ -3750,7 +3751,8 @@ fn apply_decrypted_content_rich_body_is_authoritative_over_outer_fields() {
         forward_info: None,
     };
     let sealed =
-        OfflineProtocol::seal_rich_payload("bare rich", &extras, ContentType::default()).unwrap();
+        OfflineProtocol::seal_rich_payload("bare rich", &extras, ContentType::default(), None)
+            .unwrap();
 
     let mut message = signed_frame(&id("alice"), "user123", "cipher-placeholder");
     message.media_metadata = Some(sample_media_metadata(7));

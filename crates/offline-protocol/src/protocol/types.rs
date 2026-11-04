@@ -1260,6 +1260,13 @@ pub(crate) struct RichPayloadV1 {
     /// since a sealed body would wipe their outer copies on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content_type: Option<ContentType>,
+    /// The sender's real application id (ADR 0037). A node with a publisher
+    /// key configured stamps the constant `offline` on the wire and seals
+    /// the real id here; present, it is authoritative on receipt, as the
+    /// fix R17 names. Absent from bodies sealed by unconfigured senders and
+    /// older builds, in which case the outer value stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) app_id: Option<String>,
 }
 
 impl RichPayloadV1 {

@@ -1571,10 +1571,14 @@ impl OfflineProtocol {
     /// just when non-Text) so the receiver can treat the sealed copy as
     /// authoritative and a relay cannot rewrite the hint in either
     /// direction on a rich message.
+    ///
+    /// `app_id` is the real application id, sealed only by a node with a
+    /// publisher key configured (ADR 0037); `None` otherwise.
     pub(crate) fn seal_rich_payload(
         content: &str,
         extras: &RichSendExtras,
         content_type: ContentType,
+        app_id: Option<&str>,
     ) -> Result<String> {
         let payload = RichPayloadV1 {
             text: content.to_string(),
@@ -1582,6 +1586,7 @@ impl OfflineProtocol {
             media_metadata: extras.media_metadata.clone(),
             forward_info: extras.forward_info.clone(),
             content_type: Some(content_type),
+            app_id: app_id.map(str::to_string),
         };
         let serialized =
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -1745,10 +1750,19 @@ impl OfflineProtocol {
             // re-evaluates capability at flush (the key package that
             // confirms the session may be the one that advertised it).
             let rich_extras = rich.filter(|extras| extras.is_any());
+            // A configured node seals its real application id in every
+            // body toward a capable recipient, since the wire carries only
+            // the constant (ADR 0037).
+            let sealed_app_id = self.sealed_app_id(app_id);
             let sealed_body;
             let outbound: &str = match rich_extras {
                 Some(extras) if self.rich_seal_active(recipient) => {
-                    sealed_body = Self::seal_rich_payload(content, extras, content_type)?;
+                    sealed_body = Self::seal_rich_payload(
+                        content,
+                        extras,
+                        content_type,
+                        sealed_app_id.as_deref(),
+                    )?;
                     &sealed_body
                 }
                 Some(_) => {
@@ -1778,8 +1792,27 @@ impl OfflineProtocol {
                     && media_metadata.is_none()
                     && self.rich_seal_active(recipient) =>
                 {
-                    sealed_body =
-                        Self::seal_rich_payload(content, &RichSendExtras::default(), content_type)?;
+                    sealed_body = Self::seal_rich_payload(
+                        content,
+                        &RichSendExtras::default(),
+                        content_type,
+                        sealed_app_id.as_deref(),
+                    )?;
+                    &sealed_body
+                }
+                // A configured node: an id-only body, so the real
+                // application id survives the constant on the wire.
+                None if sealed_app_id.is_some()
+                    && forwarded_from.is_none()
+                    && media_metadata.is_none()
+                    && self.rich_seal_active(recipient) =>
+                {
+                    sealed_body = Self::seal_rich_payload(
+                        content,
+                        &RichSendExtras::default(),
+                        content_type,
+                        sealed_app_id.as_deref(),
+                    )?;
                     &sealed_body
                 }
                 None => content,

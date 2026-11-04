@@ -189,7 +189,8 @@ __RICH_V1__ + JSON of:
     reply_context:  optional,
     media_metadata: optional,
     forward_info:   optional,
-    content_type:   optional
+    content_type:   optional,
+    app_id:         optional
   }
 ```
 
@@ -225,6 +226,17 @@ it too.
 
 The `content_type` field is additive. Bodies sealed by older senders omit it, in
 which case the outer value stands.
+
+5. The sealed `app_id`, when present and a valid application id, overrides the
+   outer one. A node configured with an application publisher key stamps the
+   constant `offline` on the wire ([wire format](wire-format.md)), so for its
+   messages the sealed copy is the only place the real id exists.
+
+The `app_id` field is additive too. A configured node seals it on every message
+toward a capable recipient, in a body carrying only the id when nothing else
+needs sealing. Toward a recipient that has not advertised rich payload support
+the id is lost rather than sent in the clear: that recipient reports
+`offline`, under the same rule that drops every other extra.
 
 ### Parsing is unconditional, sealing is gated
 
