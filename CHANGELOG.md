@@ -28,6 +28,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   ([control messages](docs/spec/control-messages.md#application-membership)).
   Nothing is gated on membership yet.
 
+- **Every node runs the application membership exchange.** On discovering a
+  neighbour over BLE or Wi-Fi Direct, a node sends a `__MEMBER__` hello and
+  answers the neighbour's, always at the same two sizes, whether or not it is
+  configured
+  ([ADR 0037](docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md)).
+  `ProtocolConfig.app_publisher_key` and `OfflineProtocol::set_app_membership`
+  (Rust only for now) make a node a member: two members of one application
+  learn that they are, and every other pair learns nothing. Nothing is gated
+  on it yet, and the bindings do not expose it yet. An older build that does
+  not reserve `__MEMBER__` shows each hello to its application as text.
+  The end-to-end proof's sealing key now has its own label,
+  `offline-app-member-e2e-key-v1`, apart from the signing domain.
+
 - **A browser node's start can be aborted.** `OfflineNode.start({ signal })`
   ends the worker of a start that has not finished, and with it the
   account's lock or its place in the queue for one, and rejects with the

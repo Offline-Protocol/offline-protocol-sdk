@@ -68,7 +68,7 @@
       "signing_payload_hex": "6f66666c696e652d6170702d6d656d6265722d6532652d763100000000000000000000000000000000000000000004bb0fd8a3884e5cd6c5bb5bbec7fd79a58df594d6b9125c65a4efc8a3f5a86f3f"
     },
     "salt_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
-    "key_hex": "55ff6b504ff80c976887b083d0ee8bf968bbdda48311c7f5bdd8580a80f24acb",
+    "key_hex": "168ab14402b4425a73089cc0c1b0dbc90b689847926c210f1de4e4cbd6e268d2",
     "bytes_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
   },
   "rejects": [

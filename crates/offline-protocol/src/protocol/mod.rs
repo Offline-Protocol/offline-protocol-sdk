@@ -10,6 +10,7 @@ pub(crate) mod data;
 mod data_sync;
 mod decryption_queue;
 mod ephemeral;
+mod membership;
 pub(crate) mod mesh_relay;
 mod message_dispatch;
 mod nostr_discovery;
@@ -997,6 +998,11 @@ pub struct OfflineProtocol {
     /// lease, and a restart ends it on both sides.
     pub(crate) service_subscriptions: service_subscriptions::ServiceSubscriptions,
 
+    /// This node's side of the application membership exchange (ADR 0037):
+    /// the application key, its own certificate, one exchange per neighbour
+    /// and the peers verified as members. In memory only.
+    pub(crate) membership: membership::Membership,
+
     /// Bundled state for mesh group messaging (member cache, dedup, pending commits).
     pub(crate) group_mesh: crate::group_mesh::GroupMeshState,
 
@@ -1245,6 +1251,7 @@ impl OfflineProtocol {
         let telemetry_fallback_secret = *uuid::Uuid::new_v4().as_bytes();
         let service_subscriptions =
             service_subscriptions::ServiceSubscriptions::new(&config.service_subscriptions);
+        let membership = membership::Membership::new(config.app_publisher_key, &config.app_id);
 
         Ok(Self {
             transport_manager,
@@ -1366,6 +1373,7 @@ impl OfflineProtocol {
             restored_media_descriptors: HashMap::new(),
             mesh_services: MeshServices::new(),
             service_subscriptions,
+            membership,
             group_mesh: crate::group_mesh::GroupMeshState::default(),
             blocked_users: HashSet::new(),
             last_reconciliation_at: None,
@@ -2528,6 +2536,11 @@ impl OfflineProtocol {
             self.known_peers.insert(peer_id.to_string(), Instant::now());
         }
 
+        // The membership exchange (ADR 0037). Every node runs it, so a
+        // configured node and an unconfigured one look alike; it only puts
+        // frames on a mesh link, and decides nothing below yet.
+        self.start_member_exchange(peer_id);
+
         // Flush any pending outbox messages destined for this peer
         self.flush_outbox_for_peer_via(peer_id, unpark_via);
 
@@ -3686,12 +3699,13 @@ impl OfflineProtocol {
         }
 
         // A step of the application membership exchange (ADR 0037). Past the
-        // control gate like every signed frame. Reserved before the exchange
-        // exists, so it is consumed and nothing else: never delivered as
-        // text, and never answered, since an answer would depend on whether
-        // this node is a member and the exchange's privacy is that nothing
-        // observable does.
-        if content.starts_with(internal_prefixes::MEMBER) {
+        // control gate like every signed frame. Always consumed, never
+        // delivered as text, and never acknowledged: a hello is answered by
+        // every node at one size whatever the result, and a response by
+        // none, so nothing observable depends on whether this node is a
+        // member.
+        if let Some(body) = content.strip_prefix(internal_prefixes::MEMBER) {
+            self.handle_member_frame(message, body, signed, arrival_transport);
             return Some(InternalMessageResult::Consumed);
         }
 

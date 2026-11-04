@@ -9,6 +9,7 @@ mod ephemeral;
 #[cfg(feature = "file-store")]
 mod file_stores;
 mod leaf_pairing;
+mod membership;
 mod mesh_session;
 mod nostr_cold_contact;
 mod per_send_app_id;

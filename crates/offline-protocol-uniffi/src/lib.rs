@@ -8853,6 +8853,18 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
+    /// The next frame in the Wi-Fi Direct slot that is not a membership
+    /// frame. Every engine says hello to a neighbour it discovers
+    /// (ADR 0037), so a test that asks what discovery or a send queued looks
+    /// past those.
+    fn next_wifi_direct_frame_past_membership(
+        engine: &OfflineProtocol,
+    ) -> Option<WifiDirectMessage> {
+        let marker = offline_protocol_sealed::prefixes::MEMBER.as_bytes();
+        std::iter::from_fn(|| engine.wifi_direct_get_next_message())
+            .find(|m| !m.data.windows(marker.len()).any(|w| w == marker))
+    }
+
     /// Every `DataStore` method the UDL declares must be reachable from
     /// React Native, in all four places a method has to appear.
     ///
@@ -11563,8 +11575,7 @@ mod tests {
         );
 
         a.wifi_direct_status_changed(true).unwrap();
-        let outbound = a
-            .wifi_direct_get_next_message()
+        let outbound = next_wifi_direct_frame_past_membership(&a)
             .expect("the key package goes out once the layer is up");
         assert_eq!(outbound.recipient_id, b_address);
 
@@ -11701,8 +11712,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let outbound = a
-            .wifi_direct_get_next_message()
+        let outbound = next_wifi_direct_frame_past_membership(&a)
             .expect("the registered transport queued the message");
         assert_eq!(
             outbound.recipient_id, b_address,

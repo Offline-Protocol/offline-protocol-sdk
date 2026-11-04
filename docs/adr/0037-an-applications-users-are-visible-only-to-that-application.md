@@ -256,7 +256,7 @@ between two frames is assumed:
 
 ```
 salt  = random(16)
-k     = HKDF(ikm = K_app, salt = salt, info = "offline-app-member-e2e-v1")
+k     = HKDF(ikm = K_app, salt = salt, info = "offline-app-member-e2e-key-v1")
 proof = salt || AEAD_k(nonce = 0, cert || sig_identity(
           "offline-app-member-e2e-v1" || addr_recipient || kind || hash(frame_body)))
 ```

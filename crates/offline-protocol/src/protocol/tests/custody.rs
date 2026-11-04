@@ -259,6 +259,10 @@ fn topology(custody: CustodyConfig) -> (Node, Node, Node) {
     bob.link(&alice);
     // Bob knows alice parses receipts, as her key package would have said.
     bob.protocol.peer_data_custody.insert(alice.address.clone());
+    // Linking makes bob say hello for the membership exchange (ADR 0037),
+    // which every node does on discovery. Not what these tests watch: they
+    // ask what bob sends because of a deposit.
+    bob.take_peer_sends();
     (alice, bob, carol)
 }
 

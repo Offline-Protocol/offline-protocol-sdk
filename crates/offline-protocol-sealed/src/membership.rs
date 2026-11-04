@@ -31,7 +31,7 @@
 //!
 //! The primitives are fixed by the chapter: HKDF-SHA256, HMAC-SHA256
 //! truncated to [`MEMBER_TAG_LEN`] bytes, Ed25519, and ChaCha20-Poly1305 with
-//! a 12-byte zero nonce under a key used once.
+//! a 12-byte zero nonce and no associated data, under a key used once.
 //!
 //! # Why nothing here is length-prefixed
 //!
@@ -72,9 +72,15 @@ pub const MEMBER_EXCHANGE_INFO: &[u8] = b"offline-app-member-exchange-v1";
 /// Domain of the transcript signature in the exchange's second frame.
 pub const MEMBER_TRANSCRIPT_DOMAIN: &[u8] = b"offline-app-member-transcript-v1";
 
-/// HKDF `info` for the end-to-end proof's key, and the domain of the
-/// signature inside it.
+/// Domain of the identity signature inside an end-to-end proof.
 pub const MEMBER_E2E_DOMAIN: &[u8] = b"offline-app-member-e2e-v1";
+
+/// HKDF `info` for the end-to-end proof's sealing key.
+///
+/// Apart from [`MEMBER_E2E_DOMAIN`] so that no byte string is both a key
+/// derivation label and a signing domain: one label in two primitives is the
+/// shape that lets an output of one stand in for an input of the other.
+pub const MEMBER_E2E_KEY_INFO: &[u8] = b"offline-app-member-e2e-key-v1";
 
 /// Length of an exchange nonce, in bytes.
 pub const MEMBER_NONCE_LEN: usize = 16;
@@ -305,11 +311,11 @@ pub fn exchange_salt(
 /// `MEMBER_EXCHANGE_INFO || addr_sender(21)`.
 ///
 /// `k = HKDF-SHA256(ikm = K_app, salt = exchange_salt(..), info)`, 32 bytes,
-/// and the response is sealed under it with a zero nonce. The sender is in
-/// the derivation because both sides send a response from the same two
-/// nonces: one key for both would seal two plaintexts under one key and one
-/// nonce, which under ChaCha20-Poly1305 gives away their XOR and the
-/// authentication key.
+/// and the response is sealed under it with a zero nonce and no associated
+/// data. The sender is in the derivation because both sides send a response
+/// from the same two nonces: one key for both would seal two plaintexts under
+/// one key and one nonce, which under ChaCha20-Poly1305 gives away their XOR
+/// and the authentication key.
 pub fn exchange_key_info(sender: &Address) -> Vec<u8> {
     let mut out = Vec::with_capacity(MEMBER_EXCHANGE_INFO.len() + Address::PAYLOAD_LEN);
     out.extend_from_slice(MEMBER_EXCHANGE_INFO);
@@ -469,8 +475,8 @@ pub fn e2e_proof_signing_payload(
 }
 
 /// An end-to-end membership proof: a fresh salt and a credential sealed under
-/// `HKDF-SHA256(ikm = K_app, salt, info = MEMBER_E2E_DOMAIN)` with a zero
-/// nonce.
+/// `HKDF-SHA256(ikm = K_app, salt, info = MEMBER_E2E_KEY_INFO)` with a zero
+/// nonce and no associated data.
 ///
 /// The salt is fresh per proof because `K_app` is shared by every install of
 /// the application: a fixed key and a fixed nonce would repeat across
@@ -535,13 +541,14 @@ mod tests {
     /// signature or key from one step stand in for another.
     #[test]
     fn the_labels_are_pinned_and_distinct() {
-        let labels: [&[u8]; 6] = [
+        let labels: [&[u8]; 7] = [
             APP_KEY_INFO,
             MEMBER_CERT_DOMAIN,
             MEMBER_HELLO_LABEL,
             MEMBER_EXCHANGE_INFO,
             MEMBER_TRANSCRIPT_DOMAIN,
             MEMBER_E2E_DOMAIN,
+            MEMBER_E2E_KEY_INFO,
         ];
         assert_eq!(APP_KEY_INFO, b"offline-protocol-app-v1");
         assert_eq!(MEMBER_CERT_DOMAIN, b"offline-app-member-v1");
@@ -552,6 +559,7 @@ mod tests {
             b"offline-app-member-transcript-v1"
         );
         assert_eq!(MEMBER_E2E_DOMAIN, b"offline-app-member-e2e-v1");
+        assert_eq!(MEMBER_E2E_KEY_INFO, b"offline-app-member-e2e-key-v1");
         for (i, a) in labels.iter().enumerate() {
             for b in &labels[i + 1..] {
                 assert!(!a.starts_with(b) && !b.starts_with(a));
@@ -921,7 +929,7 @@ mod vectors {
         let salt = unhex(field(&v, &["proof", "salt_hex"]));
         let k_app = unhex(field(&v, &["app_key", "k_app_hex"]));
         assert_eq!(
-            hex(&hkdf(&k_app, Some(&salt), MEMBER_E2E_DOMAIN)),
+            hex(&hkdf(&k_app, Some(&salt), MEMBER_E2E_KEY_INFO)),
             field(&v, &["proof", "key_hex"])
         );
         let bytes = unhex(field(&v, &["proof", "bytes_hex"]));
