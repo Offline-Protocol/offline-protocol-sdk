@@ -457,6 +457,22 @@ plaintext frame is signature-gated, so its sender is proven, and the family is
 with whom no session necessarily exists, and every hop must read `service_id`
 to match and forward it, so there is no group to encrypt it to.
 
+**A node configured with an application publisher key** ([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md))
+seals its discovery bodies under `K_app`, which every member of its
+application derives and no other node does. The cleartext `service_id` is the
+sentinel `__sealed`, which names no service, and each query and response
+carries an end-to-end membership proof. A provider answers only a fresh query
+(within 60 seconds of the originator's clock) proven by a member, and once per
+query id; an originator reports only a response proven by the provider it
+names. A hop then reads the routing fields (`query_id`, the originator's
+address, the hop budget) and nothing that names a service or an application.
+What remains: a carrier still sees that a discovery query is in flight and
+from whom, and a member's query reaches every node within its hop budget.
+Whoever holds the application's binary also holds `K_app` and reads the bodies
+([R33](#r33-whoever-holds-an-applications-binary-can-recognise-its-users)).
+A configured provider never answers an unconfigured query, so configured and
+unconfigured nodes of one application do not discover each other's services.
+
 **Request and response bodies** are sealed inside the recipient's 1:1 MLS
 session when all of these hold: the sender's `encrypt_service_messages` is on
 (the default), the recipient advertised `svc_versions` entry 1 in a signed key
@@ -794,6 +810,18 @@ id, so an observer learns which applications a phone runs only for ids it
 already knows. It is stable and linkable, like the address beside it. The id
 itself also rides every frame in the clear ([R17](#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)).
 
+**With an application publisher key** ([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md)) the tag is
+`HMAC(K_app, label || Device id)[..8]` instead: different for every instance,
+so it neither names the application nor groups its users for an observer who
+knows the application id. A central of the same application computes it from
+the Device id it reads, and takes the first instance whose tag matches. Device
+id is unauthenticated until the Identity read that follows, so a match only
+chooses an instance, exactly as the unkeyed tag did, and the spoofing
+analysis above is unchanged. The tag is still as stable and linkable as the
+address it is computed over. Whoever holds the application's binary holds
+`K_app` and can test a tag against a Device id, one instance at a time
+([R33](#r33-whoever-holds-an-applications-binary-can-recognise-its-users)).
+
 ### R16. The identity assertion is static and replayable on every carrier
 
 A peer proves its address with one fixed value: the Bluetooth LE Identity
@@ -869,11 +897,21 @@ it to authorize anything. Acknowledgements and control frames always carry
 the instance's configured id, never a per-send one, so the id on a control
 frame says nothing about which application caused it.
 
-**What would close it:** a sealed copy that is authoritative on receive, as
-the rendering hint `content_type` already has
-([encryption envelopes](../spec/encryption-envelopes.md#restore-rules)). That protects the id
-end to end for peers that advertise the sealed rich payload, and is left for
-the local API work that first depends on it.
+**What closes it, for a configured application:** with an application
+publisher key ([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md)),
+every frame the node originates carries the constant `offline`, and the real
+id travels in the sealed rich payload, authoritative on receive, as the
+rendering hint `content_type` already is
+([encryption envelopes](../spec/encryption-envelopes.md#restore-rules)). A
+carrier then learns from the field only that the frame is an SDK frame, and
+a rewrite of it changes nothing a configured receiver reports. Three gaps
+remain. Frames that carry no sealed payload (acknowledgements, control
+frames, plaintext sends) name only the constant, so they say nothing either
+way. Toward a recipient that has not advertised the sealed rich payload the
+real id is lost rather than exposed: that recipient reports `offline`. And a
+node with no publisher key stamps its own id exactly as before, and a
+forwarder keeps the id each frame arrived with, so an unconfigured
+application stays as visible as this entry describes.
 
 ### R18. A host without a platform keystore holds the store key in the clear unless the operator supplies one
 
@@ -1047,6 +1085,17 @@ changes its address captures the device again, a few minutes per change,
 and a squatter whose signal is stronger than the honest owner's keeps
 winning the join until the takeover. The same rule covers an owner whose
 application died, since the group can outlive the process. Formation is opt-in and Android-only.
+
+**With an application publisher key** ([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md)) the group name,
+passphrase and `app` record value are derived from `K_app` instead of the
+application id, so knowing the id no longer admits a device or lets it run a
+group under the application's name. Whoever holds the application's binary
+holds `K_app` and keeps every capability this entry describes
+([R33](#r33-whoever-holds-an-applications-binary-can-recognise-its-users)).
+The three values are still one per application, since every device of it must
+find and join one group: an observer in range cannot tell which application
+a record belongs to, but can tell that devices advertising the same record
+run the same one, and can follow that record over time.
 
 ### R23. The HTTP front trusts every process that can reach it
 
@@ -1405,6 +1454,50 @@ one peer, counting those awaiting the application, and refuses rather than
 evicts at either cap, so a flood of fresh identities cannot push out the
 subscribers it already has. The default admission policy asks the
 application about every subscriber.
+
+### R33. Whoever holds an application's binary can recognise its users
+
+Application membership
+([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md))
+makes an application's users visible only to each other. Three parties
+matter, and the protection differs for each:
+
+| Party | Holds | What it gets |
+|---|---|---|
+| 1. An honest other application | The SDK | Nothing of the configured application |
+| 2. A modified other application | The SDK source, any radio | "An SDK node with address X", and nothing that names or groups the configured application's users; it cannot pass as one |
+| 3. A modified application built from the configured application's binary | Its publisher public key, so its `K_app` | Recognition of a member, one connection at a time |
+
+**Why party 3's recognition stands:** whatever a member uses to recognise
+another member, a copy of the member's application holds too. The hello tag
+and the exchange are keyed per pair and per connection, so recognition does
+not scale to a passive census: party 3 must open a link to each device it
+wants to test. It can also open the end-to-end proofs it carries for others
+(a proof is sealed under `K_app`), which tells it that the two endpoints of a
+session it relays are members.
+
+**What bounds it, by issuing mode:**
+
+- **Backend signing (recommended).** Party 3 has no certificate for its own
+  address and cannot make one, so members never see it as a member and never
+  answer it. Anyone who can run the application can ask the backend for a
+  certificate for an address of their own, so in this mode the boundary is
+  the backend's enrolment policy (who it signs for, and whom it stops
+  renewing), not the signature.
+- **Embedded signing.** An application that embeds its publisher private key
+  lets anyone holding the application binary mint members. For that
+  application, party 3 can forge, not just recognise. The boundary against
+  party 2, which does not have the binary, is unchanged.
+
+**What party 2 still learns:** addresses, which every carrier routes on, and
+traffic shape (sizes and timing) between them. It learns nothing from the
+membership exchange: a node with no publisher key sends frames of the same
+length and distribution, so the exchange does not mark a configured node.
+
+**The observable of the gate:** a member answers no stranger, so a stranger's
+message to a member runs its retry queue to expiry, as for an absent peer.
+An application cannot reach a member of another application by address
+alone, and that is intended.
 
 ## Network egress
 

@@ -38,6 +38,7 @@ before changing behaviour, not before using the SDK.
 | [Replicated Documents](data.md) | Offline-first shared state: spaces, collections, how edits merge, attachments, storage |
 | [MLS Encryption](mls-integration.md) | End-to-end encryption with auto-encryption and manual MLS APIs |
 | [Service Discovery](service-discovery.md) | Decentralized service registration, discovery, and request/response |
+| [Application Membership](app-membership.md) | Make your application's users visible only to each other on the shared network: the publisher key, certificates, rotation |
 | [Telemetry](telemetry.md) | Enable the SDK's own telemetry with a portal key: what leaves the device, when, and the controls |
 | [Privacy](privacy.md) | The app-store disclosures telemetry carries, and the one opt-in that changes them |
 | [Transport Architecture](transport-architecture.md) | Transport abstraction layer and how to add new transports |

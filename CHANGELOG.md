@@ -36,10 +36,34 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `ProtocolConfig.app_publisher_key` and `OfflineProtocol::set_app_membership`
   (Rust only for now) make a node a member: two members of one application
   learn that they are, and every other pair learns nothing. Nothing is gated
-  on it yet, and the bindings do not expose it yet. An older build that does
+  on it by itself; the next entry is what gates. An older build that does
   not reserve `__MEMBER__` shows each hello to its application as text.
   The end-to-end proof's sealing key now has its own label,
   `offline-app-member-e2e-key-v1`, apart from the signing domain.
+
+- **An application's users are visible only to that application.** With
+  `app_publisher_key` set and a certificate handed to `set_app_membership`,
+  `neighbor_discovered`, `neighbor_lost`, RSSI readings and presence report
+  only peers that proved membership or that the application already has a
+  relation with. A frame from any other sender is dropped before anything is
+  done with it: no acknowledgement, no event, no reply. Relaying for everyone
+  is unchanged. Sessions across the mesh carry an end-to-end membership
+  proof, attached by the SDK. Every frame a configured node originates names
+  the application `offline` on the wire, and the real id travels sealed and
+  is what `message_received` reports. The Bluetooth LE App tag, the Android
+  Wi-Fi Direct group name, passphrase and record, and the browser's nearby
+  room are derived from the application key instead of the application id,
+  and service discovery bodies are sealed under it, answered only for a
+  proven member of the same application. The bindings gain
+  `sign_app_membership`, `set_app_membership`, `app_membership_status`,
+  `ble_app_tag`, `wifi_direct_identifiers` and the config field, every binding regenerated. A new guide,
+  [Application membership](docs/app-membership.md), covers the publisher key,
+  backend and embedded signing, and rotation
+  ([ADR 0037](docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md),
+  [threat model R33](docs/security/threat-model.md#r33-whoever-holds-an-applications-binary-can-recognise-its-users)).
+  A configured build and an unconfigured build of the same application are
+  strangers to each other, so an application turns the key on in one release.
+  With no publisher key nothing changes.
 
 - **A leaf takes part in application membership.** A phone provisions its
   paired leaf with `provision_leaf_membership(peer_id, cert)`, which seals the
@@ -49,7 +73,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   every neighbour firmware reports (`LeafDevice::neighbor_discovered`), checks
   certificates against the latest time it was supplied rather than a clock,
   and stamps the constant wire `app_id` `"offline"`. A leaf nobody provisions
-  is unchanged. `LeafEvent` gains `MembershipProvisioned` and `MemberVisible`,
+  is unchanged. A configured phone pairs only a leaf its application named,
+  by asking for a session with the address the out-of-band anchor verified
+  (`establish_secure_session`). `LeafEvent` gains `MembershipProvisioned` and `MemberVisible`,
   and `LeafError` gains `MembershipRefused`
   ([leaf provisioning](docs/spec/leaf-provisioning.md#application-membership)).
 
