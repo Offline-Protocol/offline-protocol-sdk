@@ -871,6 +871,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash(
@@ -966,6 +968,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_unsubscribe_service(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu(
     ): Int
@@ -1269,6 +1273,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state(
@@ -1507,6 +1513,8 @@ internal object UniffiLib {
     external fun uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`accepterName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1810,6 +1818,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_indicator(`ptr`: Long,`recipient`: RustBuffer.ByValue,`conversationId`: RustBuffer.ByValue,`isTyping`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership(`ptr`: Long,`cert`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(`ptr`: Long,`level`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state(`ptr`: Long,`level`: Byte,`isCharging`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1893,6 +1903,8 @@ internal object UniffiLib {
     external fun uniffi_offline_protocol_uniffi_fn_func_parse_invite(`blob`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_func_sign_app_membership(`publisherPrivateKey`: RustBuffer.ByValue,`address`: RustBuffer.ByValue,`notAfter`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(`assertion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2022,6 +2034,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() and 0xFFFF) != 20699) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership() and 0xFFFF) != 8870) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() and 0xFFFF) != 61480) {
@@ -2166,6 +2181,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() and 0xFFFF) != 50880) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status() and 0xFFFF) != 23851) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() and 0xFFFF) != 19884) {
@@ -2619,6 +2637,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() and 0xFFFF) != 7836) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership() and 0xFFFF) != 46858) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() and 0xFFFF) != 44179) {
@@ -4680,6 +4701,8 @@ public interface OfflineProtocolInterface {
     
     fun `acceptConnectionRequest`(`recipient`: kotlin.String, `accepterName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
     
+    fun `appMembershipStatus`(): AppMembershipStatus
+    
     fun `bleClearPeerMtu`(`peerId`: kotlin.String)
     
     fun `bleFragmentFallbackCount`(): kotlin.ULong
@@ -4982,6 +5005,8 @@ public interface OfflineProtocolInterface {
     
     fun `sendTypingIndicator`(`recipient`: kotlin.String, `conversationId`: kotlin.String, `isTyping`: kotlin.Boolean): kotlin.String
     
+    fun `setAppMembership`(`cert`: List<kotlin.UByte>)
+    
     fun `setBatteryLevel`(`level`: kotlin.UByte)
     
     fun `setBatteryState`(`level`: kotlin.UByte, `isCharging`: kotlin.Boolean)
@@ -5170,6 +5195,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         FfiConverterString.lower(`recipient`),
         FfiConverterString.lower(`accepterName`),
         FfiConverterOptionalSequenceUByte.lower(`keyPackage`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `appMembershipStatus`(): AppMembershipStatus {
+            return FfiConverterTypeAppMembershipStatus.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status(
+        it,
+        _status)
 }
     }
     )
@@ -7321,6 +7359,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `setAppMembership`(`cert`: List<kotlin.UByte>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership(
+        it,
+        
+        FfiConverterSequenceUByte.lower(`cert`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(ProtocolException::class)override fun `setBatteryLevel`(`level`: kotlin.UByte)
         = 
     callWithHandle {
@@ -7841,6 +7893,49 @@ public object FfiConverterTypeAckConfig: FfiConverterRustBuffer<AckConfig> {
     override fun write(value: AckConfig, buf: ByteBuffer) {
             FfiConverterULong.write(value.`defaultTimeoutMs`, buf)
             FfiConverterULong.write(value.`maxPendingAcks`, buf)
+    }
+}
+
+
+
+data class AppMembershipStatus (
+    var `configured`: kotlin.Boolean
+    , 
+    var `certificateNotAfter`: kotlin.ULong?
+    , 
+    var `visibleMembers`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAppMembershipStatus: FfiConverterRustBuffer<AppMembershipStatus> {
+    override fun read(buf: ByteBuffer): AppMembershipStatus {
+        return AppMembershipStatus(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AppMembershipStatus) = (
+            FfiConverterBoolean.allocationSize(value.`configured`) +
+            FfiConverterOptionalULong.allocationSize(value.`certificateNotAfter`) +
+            FfiConverterUInt.allocationSize(value.`visibleMembers`)
+    )
+
+    override fun write(value: AppMembershipStatus, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`configured`, buf)
+            FfiConverterOptionalULong.write(value.`certificateNotAfter`, buf)
+            FfiConverterUInt.write(value.`visibleMembers`, buf)
     }
 }
 
@@ -9828,6 +9923,8 @@ data class ProtocolConfig (
     , 
     var `controlFreshnessEnforced`: kotlin.Boolean = true 
     , 
+    var `appPublisherKey`: List<kotlin.UByte>? = null 
+    , 
     var `encryptServiceMessages`: kotlin.Boolean = true 
     
 ){
@@ -9879,6 +9976,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterOptionalTypeCustodyConfig.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalSequenceUByte.read(buf),
             FfiConverterBoolean.read(buf),
         )
     }
@@ -9918,6 +10016,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterOptionalTypeCustodyConfig.allocationSize(value.`custody`) +
             FfiConverterBoolean.allocationSize(value.`dataEnabled`) +
             FfiConverterBoolean.allocationSize(value.`controlFreshnessEnforced`) +
+            FfiConverterOptionalSequenceUByte.allocationSize(value.`appPublisherKey`) +
             FfiConverterBoolean.allocationSize(value.`encryptServiceMessages`)
     )
 
@@ -9956,6 +10055,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterOptionalTypeCustodyConfig.write(value.`custody`, buf)
             FfiConverterBoolean.write(value.`dataEnabled`, buf)
             FfiConverterBoolean.write(value.`controlFreshnessEnforced`, buf)
+            FfiConverterOptionalSequenceUByte.write(value.`appPublisherKey`, buf)
             FfiConverterBoolean.write(value.`encryptServiceMessages`, buf)
     }
 }
@@ -13605,6 +13705,20 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
         
         FfiConverterTypeProtocolStateStorageProvider.lower(`storage`),_status)
+}
+    )
+    }
+    
+
+    @Throws(ProtocolException::class) fun `signAppMembership`(`publisherPrivateKey`: List<kotlin.UByte>, `address`: kotlin.String, `notAfter`: kotlin.ULong): List<kotlin.UByte> {
+            return FfiConverterSequenceUByte.lift(
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_func_sign_app_membership(
+    
+        
+        FfiConverterSequenceUByte.lower(`publisherPrivateKey`),
+        FfiConverterString.lower(`address`),
+        FfiConverterULong.lower(`notAfter`),_status)
 }
     )
     }

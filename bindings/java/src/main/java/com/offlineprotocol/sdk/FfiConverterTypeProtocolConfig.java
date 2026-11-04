@@ -41,6 +41,7 @@ public enum FfiConverterTypeProtocolConfig implements FfiConverterRustBuffer<Pro
       FfiConverterOptionalTypeCustodyConfig.INSTANCE.read(buf),
       FfiConverterBoolean.INSTANCE.read(buf),
       FfiConverterBoolean.INSTANCE.read(buf),
+      FfiConverterOptionalSequenceByte.INSTANCE.read(buf),
       FfiConverterBoolean.INSTANCE.read(buf)
     );
   }
@@ -82,6 +83,7 @@ public enum FfiConverterTypeProtocolConfig implements FfiConverterRustBuffer<Pro
             FfiConverterOptionalTypeCustodyConfig.INSTANCE.allocationSize(value.custody()) +
             FfiConverterBoolean.INSTANCE.allocationSize(value.dataEnabled()) +
             FfiConverterBoolean.INSTANCE.allocationSize(value.controlFreshnessEnforced()) +
+            FfiConverterOptionalSequenceByte.INSTANCE.allocationSize(value.appPublisherKey()) +
             FfiConverterBoolean.INSTANCE.allocationSize(value.encryptServiceMessages())
       );
   }
@@ -122,6 +124,7 @@ public enum FfiConverterTypeProtocolConfig implements FfiConverterRustBuffer<Pro
       FfiConverterOptionalTypeCustodyConfig.INSTANCE.write(value.custody(), buf);
       FfiConverterBoolean.INSTANCE.write(value.dataEnabled(), buf);
       FfiConverterBoolean.INSTANCE.write(value.controlFreshnessEnforced(), buf);
+      FfiConverterOptionalSequenceByte.INSTANCE.write(value.appPublisherKey(), buf);
       FfiConverterBoolean.INSTANCE.write(value.encryptServiceMessages(), buf);
   }
 }

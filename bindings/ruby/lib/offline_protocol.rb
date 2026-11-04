@@ -251,6 +251,27 @@ private_constant :UniffiHandleMap
     end
   end
 
+  # The Record type AppMembershipStatus.
+
+  def self.check_lower_TypeAppMembershipStatus(v)
+    
+    RustBuffer.check_lower_Optionalu64(v.certificate_not_after)
+    
+  end
+
+  def self.alloc_from_TypeAppMembershipStatus(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_TypeAppMembershipStatus(v)
+      return builder.finalize
+    end
+  end
+
+  def consume_into_TypeAppMembershipStatus
+    consumeWithStream do |stream|
+      return stream.read_TypeAppMembershipStatus
+    end
+  end
+
   # The Record type BleFragment.
 
   def self.check_lower_TypeBleFragment(v)
@@ -1055,6 +1076,7 @@ private_constant :UniffiHandleMap
     RustBuffer.check_lower_OptionalTypeCustodyConfig(v.custody)
     
     
+    RustBuffer.check_lower_OptionalSequenceu8(v.app_publisher_key)
     
   end
 
@@ -2755,6 +2777,16 @@ class RustBufferStream
     )
   end
 
+  # The Record type AppMembershipStatus.
+
+  def read_TypeAppMembershipStatus
+    AppMembershipStatus.new(
+      configured: read_bool,
+      certificate_not_after: read_Optionalu64,
+      visible_members: read_u32
+    )
+  end
+
   # The Record type BleFragment.
 
   def read_TypeBleFragment
@@ -3219,6 +3251,7 @@ class RustBufferStream
       custody: read_OptionalTypeCustodyConfig,
       data_enabled: read_bool,
       control_freshness_enforced: read_bool,
+      app_publisher_key: read_OptionalSequenceu8,
       encrypt_service_messages: read_bool
     )
   end
@@ -4755,6 +4788,14 @@ class RustBufferBuilder
     self.write_u64(v.max_pending_acks)
   end
 
+  # The Record type AppMembershipStatus.
+
+  def write_TypeAppMembershipStatus(v)
+    self.write_bool(v.configured)
+    self.write_Optionalu64(v.certificate_not_after)
+    self.write_u32(v.visible_members)
+  end
+
   # The Record type BleFragment.
 
   def write_TypeBleFragment(v)
@@ -5156,6 +5197,7 @@ class RustBufferBuilder
     self.write_OptionalTypeCustodyConfig(v.custody)
     self.write_bool(v.data_enabled)
     self.write_bool(v.control_freshness_enforced)
+    self.write_OptionalSequenceu8(v.app_publisher_key)
     self.write_bool(v.encrypt_service_messages)
   end
 
@@ -6877,6 +6919,10 @@ module UniFFILib
     [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
     RustBuffer.by_value
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status,
+    [:uint64, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu,
     [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
@@ -7481,6 +7527,10 @@ module UniFFILib
     [:uint64, RustBuffer.by_value, RustBuffer.by_value, :int8, RustCallStatus.by_ref],
     RustBuffer.by_value
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership,
+    [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
+    :void
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level,
     [:uint64, :uint8, RustCallStatus.by_ref],
     :void
@@ -7647,6 +7697,10 @@ module UniFFILib
   
   attach_function :uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance,
     [:uint64, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_func_sign_app_membership,
+    [RustBuffer.by_value, RustBuffer.by_value, :uint64, RustCallStatus.by_ref],
     RustBuffer.by_value
   
   attach_function :uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion,
@@ -7873,6 +7927,10 @@ module UniFFILib
     [],
     :uint16
   
+  attach_function :uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership,
+    [],
+    :uint16
+  
   attach_function :uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion,
     [],
     :uint16
@@ -8062,6 +8120,10 @@ module UniFFILib
     :uint16
   
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status,
     [],
     :uint16
   
@@ -8669,6 +8731,10 @@ module UniFFILib
     [],
     :uint16
   
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership,
+    [],
+    :uint16
+  
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level,
     [],
     :uint16
@@ -9115,6 +9181,32 @@ class AckConfig
       return false
     end
     if @max_pending_acks != other.max_pending_acks
+      return false
+    end
+
+    true
+  end
+  
+end
+  
+  # Record type AppMembershipStatus
+class AppMembershipStatus
+  attr_reader :configured, :certificate_not_after, :visible_members
+
+  def initialize(configured:, certificate_not_after:, visible_members:)
+    @configured = configured
+    @certificate_not_after = certificate_not_after
+    @visible_members = visible_members
+  end
+
+  def ==(other)
+    if @configured != other.configured
+      return false
+    end
+    if @certificate_not_after != other.certificate_not_after
+      return false
+    end
+    if @visible_members != other.visible_members
       return false
     end
 
@@ -10395,9 +10487,9 @@ end
   
   # Record type ProtocolConfig
 class ProtocolConfig
-  attr_reader :app_id, :profile, :ble_enabled, :wifi_direct_enabled, :internet_enabled, :reticulum_enabled, :nostr_enabled, :prefer_online, :initial_ttl, :encryption_enabled, :auto_key_exchange, :store_pending, :require_encryption, :max_pending_per_peer, :max_pending_global, :pending_ttl_ms, :overflow_policy, :edge_driven_unreachable_dm, :max_group_members, :group_relay_enabled, :group_relay_broadcast_enabled, :group_enforce_admin_commits, :require_transport_identity, :binary_wire_enabled, :nostr_sealing_enabled, :nostr_cold_contact_enabled, :nostr_username_discovery_enabled, :compact_envelope_enabled, :rich_payload_enabled, :crypto_recovery_enabled, :mesh_relay, :custody, :data_enabled, :control_freshness_enforced, :encrypt_service_messages
+  attr_reader :app_id, :profile, :ble_enabled, :wifi_direct_enabled, :internet_enabled, :reticulum_enabled, :nostr_enabled, :prefer_online, :initial_ttl, :encryption_enabled, :auto_key_exchange, :store_pending, :require_encryption, :max_pending_per_peer, :max_pending_global, :pending_ttl_ms, :overflow_policy, :edge_driven_unreachable_dm, :max_group_members, :group_relay_enabled, :group_relay_broadcast_enabled, :group_enforce_admin_commits, :require_transport_identity, :binary_wire_enabled, :nostr_sealing_enabled, :nostr_cold_contact_enabled, :nostr_username_discovery_enabled, :compact_envelope_enabled, :rich_payload_enabled, :crypto_recovery_enabled, :mesh_relay, :custody, :data_enabled, :control_freshness_enforced, :app_publisher_key, :encrypt_service_messages
 
-  def initialize(app_id:, profile:, ble_enabled:, wifi_direct_enabled:, internet_enabled:, reticulum_enabled:, nostr_enabled:, prefer_online:, initial_ttl:, encryption_enabled:, auto_key_exchange:, store_pending:, require_encryption: true, max_pending_per_peer:, max_pending_global:, pending_ttl_ms:, overflow_policy:, edge_driven_unreachable_dm: false, max_group_members: 256, group_relay_enabled: true, group_relay_broadcast_enabled: true, group_enforce_admin_commits: false, require_transport_identity: false, binary_wire_enabled: true, nostr_sealing_enabled: true, nostr_cold_contact_enabled: true, nostr_username_discovery_enabled: false, compact_envelope_enabled: true, rich_payload_enabled: true, crypto_recovery_enabled: true, mesh_relay: nil, custody: nil, data_enabled: true, control_freshness_enforced: true, encrypt_service_messages: true)
+  def initialize(app_id:, profile:, ble_enabled:, wifi_direct_enabled:, internet_enabled:, reticulum_enabled:, nostr_enabled:, prefer_online:, initial_ttl:, encryption_enabled:, auto_key_exchange:, store_pending:, require_encryption: true, max_pending_per_peer:, max_pending_global:, pending_ttl_ms:, overflow_policy:, edge_driven_unreachable_dm: false, max_group_members: 256, group_relay_enabled: true, group_relay_broadcast_enabled: true, group_enforce_admin_commits: false, require_transport_identity: false, binary_wire_enabled: true, nostr_sealing_enabled: true, nostr_cold_contact_enabled: true, nostr_username_discovery_enabled: false, compact_envelope_enabled: true, rich_payload_enabled: true, crypto_recovery_enabled: true, mesh_relay: nil, custody: nil, data_enabled: true, control_freshness_enforced: true, app_publisher_key: nil, encrypt_service_messages: true)
     @app_id = app_id
     @profile = profile
     @ble_enabled = ble_enabled
@@ -10432,6 +10524,7 @@ class ProtocolConfig
     @custody = custody
     @data_enabled = data_enabled
     @control_freshness_enforced = control_freshness_enforced
+    @app_publisher_key = app_publisher_key
     @encrypt_service_messages = encrypt_service_messages
   end
 
@@ -10536,6 +10629,9 @@ class ProtocolConfig
       return false
     end
     if @control_freshness_enforced != other.control_freshness_enforced
+      return false
+    end
+    if @app_publisher_key != other.app_publisher_key
       return false
     end
     if @encrypt_service_messages != other.encrypt_service_messages
@@ -11243,6 +11339,24 @@ end
   
   
 
+def self.sign_app_membership(publisher_private_key, address, not_after)
+    publisher_private_key = publisher_private_key.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
+    RustBuffer.check_lower_Sequenceu8(publisher_private_key)
+    
+    address = ::OfflineProtocol::uniffi_utf8(address)
+    
+    
+    not_after = ::OfflineProtocol::uniffi_in_range(not_after, "u64", 0, 2**64)
+    
+    
+  result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_func_sign_app_membership,RustBuffer.alloc_from_Sequenceu8(publisher_private_key),RustBuffer.alloc_from_string(address),not_after)
+  return result.consume_into_Sequenceu8
+end
+
+
+  
+  
+
 def self.verify_identity_assertion(assertion)
     assertion = assertion.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
     RustBuffer.check_lower_Sequenceu8(assertion)
@@ -11860,6 +11974,10 @@ end
         RustBuffer.check_lower_OptionalSequenceu8(key_package)
     result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request,uniffi_clone_handle(),RustBuffer.alloc_from_string(recipient),RustBuffer.alloc_from_string(accepter_name),RustBuffer.alloc_from_OptionalSequenceu8(key_package))
     return result.consume_into_string
+  end
+  def app_membership_status()
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status,uniffi_clone_handle(),)
+    return result.consume_into_TypeAppMembershipStatus
   end
   def ble_clear_peer_mtu(peer_id)
         peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
@@ -12789,6 +12907,12 @@ end
     result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_indicator,uniffi_clone_handle(),RustBuffer.alloc_from_string(recipient),RustBuffer.alloc_from_string(conversation_id),(is_typing ? 1 : 0))
     return result.consume_into_string
   end
+  def set_app_membership(cert)
+        cert = cert.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
+        RustBuffer.check_lower_Sequenceu8(cert)
+      ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership,uniffi_clone_handle(),RustBuffer.alloc_from_Sequenceu8(cert))
+  end
+  
   def set_battery_level(level)
         level = ::OfflineProtocol::uniffi_in_range(level, "u8", 0, 2**8)
         

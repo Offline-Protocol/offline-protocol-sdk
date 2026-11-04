@@ -561,6 +561,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership() != 8870:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 61480:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 10852:
@@ -662,6 +664,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 50880:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status() != 23851:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 19884:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -965,6 +969,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 7836:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership() != 46858:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 44179:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 59397:
@@ -1069,6 +1075,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.restype = c
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.restype = ctypes.c_uint16
@@ -1222,6 +1231,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu.restype = ctypes.c_uint16
@@ -1675,6 +1687,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_r
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level.restype = ctypes.c_uint16
@@ -1789,6 +1804,13 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.argtyp
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_sign_app_membership.argtypes = (
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_sign_app_membership.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2163,6 +2185,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_conne
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -3080,6 +3107,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_indicator.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level.argtypes = (
     ctypes.c_uint64,
     ctypes.c_uint8,
@@ -3511,6 +3544,107 @@ class _UniffiFfiConverterTypeAckConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.write(value.default_timeout_ms, buf)
         _UniffiFfiConverterUInt64.write(value.max_pending_acks, buf)
 
+class _UniffiFfiConverterBoolean:
+    @classmethod
+    def check_lower(cls, value):
+        return not not value
+
+    @classmethod
+    def lower(cls, value):
+        return 1 if value else 0
+
+    @staticmethod
+    def lift(value):
+        return value != 0
+
+    @classmethod
+    def read(cls, buf):
+        return cls.lift(buf.read_u8())
+
+    @classmethod
+    def write(cls, value, buf):
+        buf.write_u8(value)
+
+class _UniffiFfiConverterOptionalUInt64(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterUInt64.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterUInt64.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterUInt64.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterUInt32(_UniffiConverterPrimitiveInt):
+    CLASS_NAME = "u32"
+    VALUE_MIN = 0
+    VALUE_MAX = 2**32
+
+    @staticmethod
+    def read(buf):
+        return buf.read_u32()
+
+    @staticmethod
+    def write(value, buf):
+        buf.write_u32(value)
+
+@dataclass
+class AppMembershipStatus:
+    def __init__(self, *, configured:bool, certificate_not_after:typing.Optional[int], visible_members:int):
+        self.configured = configured
+        self.certificate_not_after = certificate_not_after
+        self.visible_members = visible_members
+        
+        
+
+    
+    def __str__(self):
+        return "AppMembershipStatus(configured={}, certificate_not_after={}, visible_members={})".format(self.configured, self.certificate_not_after, self.visible_members)
+    def __eq__(self, other):
+        if self.configured != other.configured:
+            return False
+        if self.certificate_not_after != other.certificate_not_after:
+            return False
+        if self.visible_members != other.visible_members:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeAppMembershipStatus(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return AppMembershipStatus(
+            configured=_UniffiFfiConverterBoolean.read(buf),
+            certificate_not_after=_UniffiFfiConverterOptionalUInt64.read(buf),
+            visible_members=_UniffiFfiConverterUInt32.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterBoolean.check_lower(value.configured)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.certificate_not_after)
+        _UniffiFfiConverterUInt32.check_lower(value.visible_members)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterBoolean.write(value.configured, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.certificate_not_after, buf)
+        _UniffiFfiConverterUInt32.write(value.visible_members, buf)
+
 class _UniffiFfiConverterString:
     @staticmethod
     def check_lower(value):
@@ -3615,27 +3749,6 @@ class _UniffiFfiConverterTypeBleFragment(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.recipient_id, buf)
         _UniffiFfiConverterSequenceUInt8.write(value.data, buf)
 
-class _UniffiFfiConverterBoolean:
-    @classmethod
-    def check_lower(cls, value):
-        return not not value
-
-    @classmethod
-    def lower(cls, value):
-        return 1 if value else 0
-
-    @staticmethod
-    def lift(value):
-        return value != 0
-
-    @classmethod
-    def read(cls, buf):
-        return cls.lift(buf.read_u8())
-
-    @classmethod
-    def write(cls, value, buf):
-        buf.write_u8(value)
-
 class _UniffiFfiConverterOptionalBoolean(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -3658,31 +3771,6 @@ class _UniffiFfiConverterOptionalBoolean(_UniffiConverterRustBuffer):
             return None
         elif flag == 1:
             return _UniffiFfiConverterBoolean.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-class _UniffiFfiConverterOptionalUInt64(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterUInt64.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterUInt64.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterUInt64.read(buf)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
@@ -4104,19 +4192,6 @@ class _UniffiFfiConverterFloat32(_UniffiConverterPrimitiveFloat):
     @staticmethod
     def write(value, buf):
         buf.write_float(value)
-
-class _UniffiFfiConverterUInt32(_UniffiConverterPrimitiveInt):
-    CLASS_NAME = "u32"
-    VALUE_MIN = 0
-    VALUE_MAX = 2**32
-
-    @staticmethod
-    def read(buf):
-        return buf.read_u32()
-
-    @staticmethod
-    def write(value, buf):
-        buf.write_u32(value)
 
 class _UniffiFfiConverterInt16(_UniffiConverterPrimitiveInt):
     CLASS_NAME = "i16"
@@ -6314,9 +6389,34 @@ class _UniffiFfiConverterOptionalTypeCustodyConfig(_UniffiConverterRustBuffer):
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
+class _UniffiFfiConverterOptionalSequenceUInt8(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterSequenceUInt8.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterSequenceUInt8.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterSequenceUInt8.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, edge_driven_unreachable_dm:bool = False, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, custody:typing.Optional[CustodyConfig] = _DEFAULT, data_enabled:bool = True, control_freshness_enforced:bool = True, encrypt_service_messages:bool = True):
+    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, edge_driven_unreachable_dm:bool = False, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, custody:typing.Optional[CustodyConfig] = _DEFAULT, data_enabled:bool = True, control_freshness_enforced:bool = True, app_publisher_key:typing.Optional[typing.List[int]] = _DEFAULT, encrypt_service_messages:bool = True):
         self.app_id = app_id
         self.profile = profile
         self.ble_enabled = ble_enabled
@@ -6357,13 +6457,17 @@ class ProtocolConfig:
             self.custody = custody
         self.data_enabled = data_enabled
         self.control_freshness_enforced = control_freshness_enforced
+        if app_publisher_key is _DEFAULT:
+            self.app_publisher_key = None
+        else:
+            self.app_publisher_key = app_publisher_key
         self.encrypt_service_messages = encrypt_service_messages
         
         
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, edge_driven_unreachable_dm={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, custody={}, data_enabled={}, control_freshness_enforced={}, encrypt_service_messages={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.edge_driven_unreachable_dm, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.custody, self.data_enabled, self.control_freshness_enforced, self.encrypt_service_messages)
+        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, edge_driven_unreachable_dm={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, custody={}, data_enabled={}, control_freshness_enforced={}, app_publisher_key={}, encrypt_service_messages={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.edge_driven_unreachable_dm, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.custody, self.data_enabled, self.control_freshness_enforced, self.app_publisher_key, self.encrypt_service_messages)
     def __eq__(self, other):
         if self.app_id != other.app_id:
             return False
@@ -6433,6 +6537,8 @@ class ProtocolConfig:
             return False
         if self.control_freshness_enforced != other.control_freshness_enforced:
             return False
+        if self.app_publisher_key != other.app_publisher_key:
+            return False
         if self.encrypt_service_messages != other.encrypt_service_messages:
             return False
         return True
@@ -6475,6 +6581,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
             custody=_UniffiFfiConverterOptionalTypeCustodyConfig.read(buf),
             data_enabled=_UniffiFfiConverterBoolean.read(buf),
             control_freshness_enforced=_UniffiFfiConverterBoolean.read(buf),
+            app_publisher_key=_UniffiFfiConverterOptionalSequenceUInt8.read(buf),
             encrypt_service_messages=_UniffiFfiConverterBoolean.read(buf),
         )
 
@@ -6514,6 +6621,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeCustodyConfig.check_lower(value.custody)
         _UniffiFfiConverterBoolean.check_lower(value.data_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.control_freshness_enforced)
+        _UniffiFfiConverterOptionalSequenceUInt8.check_lower(value.app_publisher_key)
         _UniffiFfiConverterBoolean.check_lower(value.encrypt_service_messages)
 
     @staticmethod
@@ -6552,6 +6660,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeCustodyConfig.write(value.custody, buf)
         _UniffiFfiConverterBoolean.write(value.data_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.control_freshness_enforced, buf)
+        _UniffiFfiConverterOptionalSequenceUInt8.write(value.app_publisher_key, buf)
         _UniffiFfiConverterBoolean.write(value.encrypt_service_messages, buf)
 
 @dataclass
@@ -10138,31 +10247,6 @@ class _UniffiFfiConverterTypeMeshServices:
     def write(cls, value: MeshServices, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
-class _UniffiFfiConverterOptionalSequenceUInt8(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterSequenceUInt8.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterSequenceUInt8.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterSequenceUInt8.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
 class _UniffiFfiConverterOptionalTypeBleFragment(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -11004,6 +11088,8 @@ class OfflineProtocolProtocol(typing.Protocol):
     
     def accept_connection_request(self, recipient: str,accepter_name: str,key_package: typing.Optional[typing.List[int]]) -> str:
         raise NotImplementedError
+    def app_membership_status(self, ) -> AppMembershipStatus:
+        raise NotImplementedError
     def ble_clear_peer_mtu(self, peer_id: str) -> None:
         raise NotImplementedError
     def ble_fragment_fallback_count(self, ) -> int:
@@ -11306,6 +11392,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def send_typing_indicator(self, recipient: str,conversation_id: str,is_typing: bool) -> str:
         raise NotImplementedError
+    def set_app_membership(self, cert: typing.List[int]) -> None:
+        raise NotImplementedError
     def set_battery_level(self, level: int) -> None:
         raise NotImplementedError
     def set_battery_state(self, level: int,is_charging: bool) -> None:
@@ -11424,6 +11512,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def app_membership_status(self, ) -> AppMembershipStatus:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeAppMembershipStatus.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -13725,6 +13825,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def set_app_membership(self, cert: typing.List[int]) -> None:
+        
+        _UniffiFfiConverterSequenceUInt8.check_lower(cert)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterSequenceUInt8.lower(cert),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def set_battery_level(self, level: int) -> None:
         
         _UniffiFfiConverterUInt8.check_lower(level)
@@ -14285,6 +14400,26 @@ def run_storage_conformance(storage: ProtocolStateStorageProvider) -> str:
         *_uniffi_lowered_args,
     )
     return _uniffi_lift_return(_uniffi_ffi_result)
+def sign_app_membership(publisher_private_key: typing.List[int],address: str,not_after: int) -> typing.List[int]:
+    
+    _UniffiFfiConverterSequenceUInt8.check_lower(publisher_private_key)
+
+    _UniffiFfiConverterString.check_lower(address)
+
+    _UniffiFfiConverterUInt64.check_lower(not_after)
+    _uniffi_lowered_args = (
+        _UniffiFfiConverterSequenceUInt8.lower(publisher_private_key),
+        _UniffiFfiConverterString.lower(address),
+        _UniffiFfiConverterUInt64.lower(not_after),
+    )
+    _uniffi_lift_return = _UniffiFfiConverterSequenceUInt8.lift
+    _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+    _uniffi_ffi_result = _uniffi_rust_call_with_error(
+        _uniffi_error_converter,
+        _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_sign_app_membership,
+        *_uniffi_lowered_args,
+    )
+    return _uniffi_lift_return(_uniffi_ffi_result)
 def verify_identity_assertion(assertion: typing.List[int]) -> str:
     
     _UniffiFfiConverterSequenceUInt8.check_lower(assertion)
@@ -14321,6 +14456,7 @@ __all__ = [
     "RelaySyncState",
     "TransportType",
     "AckConfig",
+    "AppMembershipStatus",
     "BleFragment",
     "CustodyConfig",
     "CustodyStats",
@@ -14372,6 +14508,7 @@ __all__ = [
     "derive_address",
     "parse_invite",
     "run_storage_conformance",
+    "sign_app_membership",
     "verify_identity_assertion",
     "DataStore",
     "DataStoreProtocol",

@@ -66,6 +66,34 @@ namespace offline_protocol {
     // listed and deleted, so a backend that merges key types keeps its real
     // records. Probe a new backend on a scratch instance until it is green.
     string run_storage_conformance(ProtocolStateStorageProvider storage);
+
+    // Sign an application membership certificate for `address`, current
+    // until `not_after` (Unix seconds), with the publisher's 32-byte Ed25519
+    // private key (ADR 0037, embedded mode). Returns the 93-byte certificate
+    // set_app_membership takes.
+    //
+    // Pure and instance-less: the key is never stored, logged, emitted or
+    // sent. An app that embeds its publisher private key lets anyone holding
+    // its binary mint members of that app, so a backend that signs the
+    // address the app sends it is the recommended mode; the certificate is
+    // the same either way.
+    //
+    // Throws for a key that is not 32 bytes or an address that does not parse.
+    [Throws=ProtocolError]
+    sequence<u8> sign_app_membership(sequence<u8> publisher_private_key, string address, u64 not_after);
+};
+
+// What app_membership_status reports: this node's own configuration, never
+// anything about a particular peer.
+dictionary AppMembershipStatus {
+    // Whether ProtocolConfig.app_publisher_key is set.
+    boolean configured;
+    // The not_after of this node's own certificate, once set_app_membership
+    // accepted one. Null also once it has expired: an expired certificate
+    // makes this node a stranger to every member, so fetch a new one.
+    u64? certificate_not_after;
+    // How many neighbours are visible as members right now.
+    u32 visible_members;
 };
 
 // A decoded and verified invite.
@@ -992,6 +1020,14 @@ dictionary ProtocolConfig {
     // MANY DIFFERENT peers, which is the clock; one peer while others are fine
     // is that peer. Defaulted so existing callers keep compiling.
     boolean control_freshness_enforced = true;
+    // This application's publisher public key, 32 bytes (ADR 0037). Set, the
+    // node runs the membership exchange as a member of this app_id: only
+    // nodes holding a certificate this key signed are reported as members,
+    // and set_app_membership supplies this node's own. Null, the node is a
+    // member of nothing, which is every release before this field. Any other
+    // length is refused at construction. Defaulted so existing callers keep
+    // compiling.
+    sequence<u8>? app_publisher_key = null;
     // Whether service request and response bodies are sealed inside the
     // recipient's 1:1 MLS session instead of crossing every hop as signed
     // plaintext (default on). Takes effect only toward a peer that advertised
@@ -1733,6 +1769,18 @@ interface OfflineProtocol {
     // only when one could not be deleted.
     [Throws=ProtocolError]
     void erase_custody();
+
+    // Application membership (ADR 0037). Supplies this node's certificate,
+    // from the app's backend or sign_app_membership. It is checked before it
+    // is kept: it must name this node's address, verify under
+    // ProtocolConfig.app_publisher_key and be current. Held in memory: supply
+    // it once per launch, after initialize_mls. Supplying the same
+    // certificate again does nothing; a new one is presented to every
+    // neighbour at once. Throws InvalidConfiguration with no publisher key,
+    // InvalidArgument for a certificate that would never verify.
+    [Throws=ProtocolError]
+    void set_app_membership(sequence<u8> cert);
+    AppMembershipStatus app_membership_status();
     
     // ========================================================================
     // MLS (END-TO-END ENCRYPTION) OPERATIONS

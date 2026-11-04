@@ -533,6 +533,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status.invokeExact(_allocator, ptr, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -1892,6 +1901,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership(long ptr, java.lang.foreign.MemorySegment cert, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership.invokeExact(ptr, cert, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -2267,6 +2285,15 @@ final class UniffiLib {
     static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(java.lang.foreign.SegmentAllocator _allocator, long storage, java.lang.foreign.MemorySegment _uniffiOutErr) {
         try {
             return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.invokeExact(_allocator, storage, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_func_sign_app_membership
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_func_sign_app_membership = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_func_sign_app_membership", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_func_sign_app_membership(java.lang.foreign.SegmentAllocator _allocator, java.lang.foreign.MemorySegment publisherPrivateKey, java.lang.foreign.MemorySegment address, long notAfter, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_func_sign_app_membership.invokeExact(_allocator, publisherPrivateKey, address, notAfter, _uniffiOutErr);
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -2774,6 +2801,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
@@ -3203,6 +3239,15 @@ final class UniffiLib {
     static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -4562,6 +4607,15 @@ final class UniffiLib {
     static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 

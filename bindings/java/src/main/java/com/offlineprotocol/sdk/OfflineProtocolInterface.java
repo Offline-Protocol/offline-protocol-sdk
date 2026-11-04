@@ -2,6 +2,7 @@ package com.offlineprotocol.sdk;
 
 public interface OfflineProtocolInterface {
     public java.lang.String acceptConnectionRequest(java.lang.String recipient, java.lang.String accepterName, java.util.List<java.lang.Byte> keyPackage) throws ProtocolException;
+    public AppMembershipStatus appMembershipStatus();
     public void bleClearPeerMtu(java.lang.String peerId) throws ProtocolException;
     public long bleFragmentFallbackCount();
     public void bleFragmentReceived(java.lang.String senderId, java.util.List<java.lang.Byte> fragment) throws ProtocolException;
@@ -153,6 +154,7 @@ public interface OfflineProtocolInterface {
     public java.lang.String sendPresenceUpdate(java.lang.String recipient, PresenceStatus status) throws ProtocolException;
     public java.lang.String sendReadReceipt(java.lang.String recipient, java.util.List<java.lang.String> messageIds) throws ProtocolException;
     public java.lang.String sendTypingIndicator(java.lang.String recipient, java.lang.String conversationId, boolean isTyping) throws ProtocolException;
+    public void setAppMembership(java.util.List<java.lang.Byte> cert) throws ProtocolException;
     public void setBatteryLevel(byte level) throws ProtocolException;
     public void setBatteryState(byte level, boolean isCharging) throws ProtocolException;
     public void setBleTransportCallback(BleTransportCallback callback);

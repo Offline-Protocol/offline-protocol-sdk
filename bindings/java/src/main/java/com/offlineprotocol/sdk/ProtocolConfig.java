@@ -35,6 +35,7 @@ public class ProtocolConfig {
     private CustodyConfig custody;
     private boolean dataEnabled;
     private boolean controlFreshnessEnforced;
+    private java.util.List<java.lang.Byte> appPublisherKey;
     private boolean encryptServiceMessages;
 
     public ProtocolConfig(
@@ -72,6 +73,7 @@ public class ProtocolConfig {
         CustodyConfig custody, 
         boolean dataEnabled, 
         boolean controlFreshnessEnforced, 
+        java.util.List<java.lang.Byte> appPublisherKey, 
         boolean encryptServiceMessages
     ) {
         
@@ -142,6 +144,8 @@ public class ProtocolConfig {
         this.dataEnabled = dataEnabled;
         
         this.controlFreshnessEnforced = controlFreshnessEnforced;
+        
+        this.appPublisherKey = appPublisherKey;
         
         this.encryptServiceMessages = encryptServiceMessages;
     }
@@ -282,6 +286,10 @@ public class ProtocolConfig {
         return this.controlFreshnessEnforced;
     }
     
+    public java.util.List<java.lang.Byte> appPublisherKey() {
+        return this.appPublisherKey;
+    }
+    
     public boolean encryptServiceMessages() {
         return this.encryptServiceMessages;
     }
@@ -387,6 +395,9 @@ public class ProtocolConfig {
     public void setControlFreshnessEnforced(boolean controlFreshnessEnforced) {
         this.controlFreshnessEnforced = controlFreshnessEnforced;
     }
+    public void setAppPublisherKey(java.util.List<java.lang.Byte> appPublisherKey) {
+        this.appPublisherKey = appPublisherKey;
+    }
     public void setEncryptServiceMessages(boolean encryptServiceMessages) {
         this.encryptServiceMessages = encryptServiceMessages;
     }
@@ -467,6 +478,8 @@ public class ProtocolConfig {
               
               controlFreshnessEnforced == _uniffiThat.controlFreshnessEnforced && 
               
+              java.util.Objects.equals(appPublisherKey, _uniffiThat.appPublisherKey) && 
+              
               encryptServiceMessages == _uniffiThat.encryptServiceMessages
               
             );
@@ -510,6 +523,7 @@ public class ProtocolConfig {
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(custody);
         _uniffiHash = 31 * _uniffiHash + java.lang.Boolean.hashCode(dataEnabled);
         _uniffiHash = 31 * _uniffiHash + java.lang.Boolean.hashCode(controlFreshnessEnforced);
+        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(appPublisherKey);
         _uniffiHash = 31 * _uniffiHash + java.lang.Boolean.hashCode(encryptServiceMessages);
         return _uniffiHash;
     }

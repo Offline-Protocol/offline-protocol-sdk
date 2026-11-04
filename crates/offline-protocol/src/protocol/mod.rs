@@ -32,6 +32,7 @@ mod types;
 pub use custody::{CustodyRefusal, CustodyStats};
 pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;
+pub use membership::{sign_app_membership, AppMembershipStatus};
 pub(crate) use prefixes::*;
 pub use service_subscriptions::PublishReport;
 #[cfg(feature = "file-store")]

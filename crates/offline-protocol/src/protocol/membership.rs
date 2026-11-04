@@ -76,6 +76,63 @@ pub(crate) const MAX_VISIBLE_MEMBERS: usize = 1024;
 /// and a replay of an older hello still finds a key never used.
 const MAX_ANSWERED_PER_EXCHANGE: usize = 8;
 
+/// What [`OfflineProtocol::app_membership_status`] reports: this node's own
+/// configuration, never anything about a particular peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppMembershipStatus {
+    /// Whether [`crate::ProtocolConfig::app_publisher_key`] is set.
+    pub configured: bool,
+    /// The `not_after` of this node's own certificate, once
+    /// [`OfflineProtocol::set_app_membership`] accepted one. `None` also once
+    /// it has expired: an expired certificate makes this node a stranger to
+    /// every member, so the application is told to fetch a new one.
+    pub certificate_not_after: Option<u64>,
+    /// How many neighbours are visible as members right now.
+    pub visible_members: u32,
+}
+
+/// Signs a membership certificate for `address`, valid until `not_after`
+/// (Unix seconds), with the publisher's Ed25519 private key: embedded mode in
+/// [ADR 0037].
+///
+/// Pure: it keeps no state, and the key is never logged, stored, emitted or
+/// sent. The application calls it and hands the result to
+/// [`OfflineProtocol::set_app_membership`]. An application that embeds its
+/// publisher key lets anyone holding its binary mint members, so a backend
+/// that signs the address it is sent is the recommended mode; the
+/// certificate is the same 93 bytes either way.
+///
+/// # Errors
+///
+/// [`Error::InvalidArgument`] for a key that is not 32 bytes or an address
+/// that does not parse.
+///
+/// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
+pub fn sign_app_membership(
+    publisher_private_key: &[u8],
+    address: &str,
+    not_after: u64,
+) -> Result<Vec<u8>> {
+    use ed25519_dalek::Signer;
+
+    let seed = <[u8; 32]>::try_from(publisher_private_key).map_err(|_| {
+        Error::InvalidArgument("The publisher private key must be 32 bytes".to_string())
+    })?;
+    let address: Address = address
+        .parse()
+        .map_err(|e| Error::InvalidArgument(format!("The address does not parse: {e}")))?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let signature = signing
+        .sign(&MemberCert::signing_payload(&address, not_after))
+        .to_bytes();
+    let cert = MemberCert {
+        address,
+        not_after,
+        signature,
+    };
+    Ok(cert.to_bytes().to_vec())
+}
+
 /// This node's side of the membership exchange.
 #[derive(Default)]
 pub(crate) struct Membership {
@@ -226,6 +283,13 @@ impl OfflineProtocol {
                 "The membership certificate has expired".to_string(),
             ));
         }
+        if self.membership.cert.as_ref() == Some(&cert) {
+            // The same certificate again: an application that supplies it on
+            // every launch or foreground. Restarting would make every
+            // neighbour sign and seal again, and a hello burst with no link
+            // change is something only a configured node produces.
+            return Ok(());
+        }
         info!(
             not_after = cert.not_after,
             "Application membership certificate set"
@@ -233,6 +297,28 @@ impl OfflineProtocol {
         self.membership.cert = Some(cert);
         self.restart_member_exchanges();
         Ok(())
+    }
+
+    /// This node's membership configuration: whether a publisher key is set,
+    /// its own certificate's expiry, and how many neighbours are visible.
+    pub fn app_membership_status(&self) -> AppMembershipStatus {
+        let now = unix_now();
+        let visible = self
+            .membership
+            .visible
+            .values()
+            .filter(|not_after| now <= **not_after)
+            .count();
+        AppMembershipStatus {
+            configured: self.membership.publisher_key.is_some(),
+            certificate_not_after: self
+                .membership
+                .cert
+                .as_ref()
+                .filter(|cert| cert.is_current(now))
+                .map(|cert| cert.not_after),
+            visible_members: u32::try_from(visible).unwrap_or(u32::MAX),
+        }
     }
 
     /// Starts a fresh exchange with every current mesh neighbour.
@@ -311,6 +397,12 @@ impl OfflineProtocol {
         if self.mls_manager.is_none() || peer.parse::<Address>().is_err() {
             return;
         }
+        // Discovery also reports peers reached through the relay, Nostr or
+        // the LAN, which a membership frame never rides. Asked before the
+        // hello is built, so such a peer costs no clock tick and no signature.
+        if !self.has_mesh_link(peer) {
+            return;
+        }
         if let Some(standing) = self.membership.exchanges.get(peer) {
             if standing.started.elapsed() < MEMBER_EXCHANGE_INTERVAL {
                 return;
@@ -324,6 +416,12 @@ impl OfflineProtocol {
         if self.send_member_hello(peer, &ours) {
             self.insert_member_exchange(peer, exchange);
         }
+    }
+
+    fn has_mesh_link(&self, peer: &str) -> bool {
+        [TransportType::BLE, TransportType::WiFiDirect]
+            .into_iter()
+            .any(|carrier| self.transport_manager.can_address_via(carrier, peer))
     }
 
     fn insert_member_exchange(&mut self, peer: &str, exchange: Exchange) {
@@ -524,6 +622,13 @@ impl OfflineProtocol {
         if let Some(exchange) = self.membership.exchanges.get_mut(peer) {
             exchange.verified = true;
         }
+        self.mark_member_visible(peer, cert.not_after);
+        info!(peer = %peer, not_after = cert.not_after, "Neighbour is a member of this application");
+    }
+
+    /// Holds `peer` visible until `not_after`, evicting the certificate that
+    /// ends soonest once [`MAX_VISIBLE_MEMBERS`] are held.
+    pub(crate) fn mark_member_visible(&mut self, peer: &str, not_after: u64) {
         let visible = &mut self.membership.visible;
         if !visible.contains_key(peer) && visible.len() >= MAX_VISIBLE_MEMBERS {
             if let Some(soonest) = visible
@@ -534,8 +639,13 @@ impl OfflineProtocol {
                 visible.remove(&soonest);
             }
         }
-        visible.insert(peer.to_string(), cert.not_after);
-        info!(peer = %peer, not_after = cert.not_after, "Neighbour is a member of this application");
+        visible.insert(peer.to_string(), not_after);
+    }
+
+    /// How many neighbours have an exchange in memory.
+    #[cfg(test)]
+    pub(crate) fn member_exchange_count(&self) -> usize {
+        self.membership.exchanges.len()
     }
 
     fn send_member_hello(&mut self, peer: &str, ours: &[u8; MEMBER_NONCE_LEN]) -> bool {

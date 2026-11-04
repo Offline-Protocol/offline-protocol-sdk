@@ -214,6 +214,10 @@ def config_field(name: str, udl_type: str, has_default: bool, table: dict) -> tu
     elif base in ENUMS:
         cs_type = base
         writes = [f'writer.WriteString("{name}", Wire({value}));']
+    elif base == "sequence<u8>":
+        # Bytes cross as standard base64, the C API's JSON form for sequence<u8>.
+        cs_type = "byte[]"
+        writes = [f'writer.WriteBase64String("{name}", {value});']
     elif base in table["records"]:
         # A nested record crosses as the host's own JSON object; the engine parses it.
         cs_type = "JsonElement"

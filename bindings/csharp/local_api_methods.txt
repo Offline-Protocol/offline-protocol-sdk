@@ -1,4 +1,5 @@
 accept_connection_request
+app_membership_status
 ble_clear_peer_mtu
 ble_fragment_fallback_count
 ble_fragment_received
@@ -188,6 +189,7 @@ services.set_service_topic_checkpoint
 services.subscribe_service
 services.unregister_service
 services.unsubscribe_service
+set_app_membership
 set_battery_level
 set_battery_state
 set_member_role
@@ -195,6 +197,7 @@ set_peer_rssi_events
 set_relay_priority
 set_telemetry_enabled
 should_escalate_to_wifi
+sign_app_membership
 sign_data
 sign_data_bytes
 telemetry_install_id

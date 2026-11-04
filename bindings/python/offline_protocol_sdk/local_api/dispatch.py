@@ -312,6 +312,13 @@ PLATFORM: frozenset[str] = frozenset(
         # carries base64, and on the wire a path is a read of any file the
         # server process can open, sent to any peer.
         "send_file_from_path",
+        # application membership (ADR 0037): the certificate binds the one
+        # identity every client shares, so it is the operator's to supply;
+        # the signing helper takes the publisher's private key, which must
+        # never cross a socket; the status reports that same configuration.
+        "set_app_membership",
+        "app_membership_status",
+        "sign_app_membership",
     }
 )
 

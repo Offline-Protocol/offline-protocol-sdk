@@ -1525,6 +1525,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: [UInt8]?) throws  -> String
     
+    func appMembershipStatus()  -> AppMembershipStatus
+    
     func bleClearPeerMtu(peerId: String) throws 
     
     func bleFragmentFallbackCount()  -> UInt64
@@ -1827,6 +1829,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendTypingIndicator(recipient: String, conversationId: String, isTyping: Bool) throws  -> String
     
+    func setAppMembership(cert: [UInt8]) throws 
+    
     func setBatteryLevel(level: UInt8) throws 
     
     func setBatteryState(level: UInt8, isCharging: Bool) throws 
@@ -1962,6 +1966,15 @@ open func acceptConnectionRequest(recipient: String, accepterName: String, keyPa
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(accepterName),
         FfiConverterOptionSequenceUInt8.lower(keyPackage),uniffiCallStatus
+    )
+})
+}
+    
+open func appMembershipStatus() -> AppMembershipStatus  {
+    return try!  FfiConverterTypeAppMembershipStatus_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -3424,6 +3437,15 @@ open func sendTypingIndicator(recipient: String, conversationId: String, isTypin
 })
 }
     
+open func setAppMembership(cert: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceUInt8.lower(cert),uniffiCallStatus
+    )
+}
+}
+    
 open func setBatteryLevel(level: UInt8)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(
@@ -3822,6 +3844,64 @@ public func FfiConverterTypeAckConfig_lift(_ buf: RustBuffer) throws -> AckConfi
 #endif
 public func FfiConverterTypeAckConfig_lower(_ value: AckConfig) -> RustBuffer {
     return FfiConverterTypeAckConfig.lower(value)
+}
+
+
+public struct AppMembershipStatus: Equatable, Hashable {
+    public var configured: Bool
+    public var certificateNotAfter: UInt64?
+    public var visibleMembers: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(configured: Bool, certificateNotAfter: UInt64?, visibleMembers: UInt32) {
+        self.configured = configured
+        self.certificateNotAfter = certificateNotAfter
+        self.visibleMembers = visibleMembers
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AppMembershipStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAppMembershipStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AppMembershipStatus {
+        return
+            try AppMembershipStatus(
+                configured: FfiConverterBool.read(from: &buf), 
+                certificateNotAfter: FfiConverterOptionUInt64.read(from: &buf), 
+                visibleMembers: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AppMembershipStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.configured, into: &buf)
+        FfiConverterOptionUInt64.write(value.certificateNotAfter, into: &buf)
+        FfiConverterUInt32.write(value.visibleMembers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAppMembershipStatus_lift(_ buf: RustBuffer) throws -> AppMembershipStatus {
+    return try FfiConverterTypeAppMembershipStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAppMembershipStatus_lower(_ value: AppMembershipStatus) -> RustBuffer {
+    return FfiConverterTypeAppMembershipStatus.lower(value)
 }
 
 
@@ -6122,11 +6202,12 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var custody: CustodyConfig?
     public var dataEnabled: Bool
     public var controlFreshnessEnforced: Bool
+    public var appPublisherKey: [UInt8]?
     public var encryptServiceMessages: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, custody: CustodyConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true, encryptServiceMessages: Bool = true) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, custody: CustodyConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true, appPublisherKey: [UInt8]? = nil, encryptServiceMessages: Bool = true) {
         self.appId = appId
         self.profile = profile
         self.bleEnabled = bleEnabled
@@ -6161,6 +6242,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.custody = custody
         self.dataEnabled = dataEnabled
         self.controlFreshnessEnforced = controlFreshnessEnforced
+        self.appPublisherKey = appPublisherKey
         self.encryptServiceMessages = encryptServiceMessages
     }
 
@@ -6214,6 +6296,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 custody: FfiConverterOptionTypeCustodyConfig.read(from: &buf), 
                 dataEnabled: FfiConverterBool.read(from: &buf), 
                 controlFreshnessEnforced: FfiConverterBool.read(from: &buf), 
+                appPublisherKey: FfiConverterOptionSequenceUInt8.read(from: &buf), 
                 encryptServiceMessages: FfiConverterBool.read(from: &buf)
         )
     }
@@ -6253,6 +6336,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterOptionTypeCustodyConfig.write(value.custody, into: &buf)
         FfiConverterBool.write(value.dataEnabled, into: &buf)
         FfiConverterBool.write(value.controlFreshnessEnforced, into: &buf)
+        FfiConverterOptionSequenceUInt8.write(value.appPublisherKey, into: &buf)
         FfiConverterBool.write(value.encryptServiceMessages, into: &buf)
     }
 }
@@ -11145,6 +11229,16 @@ public func runStorageConformance(storage: ProtocolStateStorageProvider) -> Stri
     )
 })
 }
+public func signAppMembership(publisherPrivateKey: [UInt8], address: String, notAfter: UInt64)throws  -> [UInt8]  {
+    return try  FfiConverterSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_func_sign_app_membership(
+        FfiConverterSequenceUInt8.lower(publisherPrivateKey),
+        FfiConverterString.lower(address),
+        FfiConverterUInt64.lower(notAfter),uniffiCallStatus
+    )
+})
+}
 public func verifyIdentityAssertion(assertion: [UInt8])throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
@@ -11176,6 +11270,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_func_sign_app_membership() != 8870) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 61480) {
@@ -11320,6 +11417,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 50880) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_app_membership_status() != 23851) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 19884) {
@@ -11773,6 +11873,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 7836) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_app_membership() != 46858) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 44179) {

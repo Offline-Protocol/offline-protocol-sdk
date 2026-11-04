@@ -161,6 +161,40 @@ pub fn verify_identity_assertion(assertion: Vec<u8>) -> Result<String, ProtocolE
         .map_err(|e| ProtocolError::MlsError(e.to_string()))
 }
 
+/// Signs an application membership certificate with the publisher's private
+/// key (ADR 0037, embedded mode). Pure: the key is never kept.
+///
+/// # Errors
+///
+/// [`ProtocolError::InvalidArgument`] for a key that is not 32 bytes or an
+/// address that does not parse.
+pub fn sign_app_membership(
+    publisher_private_key: Vec<u8>,
+    address: String,
+    not_after: u64,
+) -> Result<Vec<u8>, ProtocolError> {
+    offline_protocol::sign_app_membership(&publisher_private_key, &address, not_after)
+        .map_err(ProtocolError::from)
+}
+
+/// See the UDL dictionary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppMembershipStatus {
+    pub configured: bool,
+    pub certificate_not_after: Option<u64>,
+    pub visible_members: u32,
+}
+
+impl From<offline_protocol::AppMembershipStatus> for AppMembershipStatus {
+    fn from(status: offline_protocol::AppMembershipStatus) -> Self {
+        Self {
+            configured: status.configured,
+            certificate_not_after: status.certificate_not_after,
+            visible_members: status.visible_members,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Poison-recovery utilities for non-Result methods.
 //
@@ -2034,6 +2068,10 @@ pub struct ProtocolConfig {
     /// Whether the replicated-document layer accepts work (default off). See
     /// the UDL dictionary and `DataConfig::enabled` for semantics.
     pub data_enabled: bool,
+    /// The application's publisher public key (ADR 0037), 32 bytes or none.
+    /// Any other length is refused by [`OfflineProtocol::new`], so a key that
+    /// was meant to be set never silently configures nothing.
+    pub app_publisher_key: Option<Vec<u8>>,
 }
 
 /// Mesh forwarding tunables, every field optional.
@@ -2447,6 +2485,9 @@ impl From<ProtocolConfig> for CoreConfig {
             core_config.custody = custody.overlay(core_config.custody);
         }
         core_config.data.enabled = config.data_enabled;
+        core_config.app_publisher_key = config
+            .app_publisher_key
+            .and_then(|key| <[u8; 32]>::try_from(key.as_slice()).ok());
         core_config
     }
 }
@@ -2732,6 +2773,15 @@ impl OfflineProtocol {
         let internet_enabled = config.internet_enabled;
         let reticulum_enabled = config.reticulum_enabled;
         let nostr_enabled = config.nostr_enabled;
+        if config
+            .app_publisher_key
+            .as_ref()
+            .is_some_and(|key| key.len() != 32)
+        {
+            return Err(ProtocolError::InvalidConfiguration(
+                "app_publisher_key must be 32 bytes".to_string(),
+            ));
+        }
         let core_config: CoreConfig = config.into();
         core_config.validate().map_err(ProtocolError::from)?;
 
@@ -6870,6 +6920,20 @@ impl OfflineProtocol {
         protocol.erase_custody().map_err(ProtocolError::from)
     }
 
+    /// Supplies this node's application membership certificate (ADR 0037).
+    pub fn set_app_membership(&self, cert: Vec<u8>) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner_recovering();
+        protocol
+            .set_app_membership(&cert)
+            .map_err(ProtocolError::from)
+    }
+
+    /// This node's application membership configuration.
+    pub fn app_membership_status(&self) -> AppMembershipStatus {
+        let protocol = self.lock_inner_recovering();
+        protocol.app_membership_status().into()
+    }
+
     /// Gets the number of pending ACKs.
     pub fn get_pending_ack_count(&self) -> u64 {
         let protocol = self.lock_inner_recovering();
@@ -9211,6 +9275,7 @@ mod tests {
         ProtocolConfig {
             mesh_relay: None,
             custody: None,
+            app_publisher_key: None,
             data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
@@ -9251,6 +9316,7 @@ mod tests {
         ProtocolConfig {
             mesh_relay: None,
             custody: None,
+            app_publisher_key: None,
             data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
@@ -9285,6 +9351,32 @@ mod tests {
             control_freshness_enforced: true,
             encrypt_service_messages: true,
         }
+    }
+
+    #[test]
+    fn an_app_publisher_key_of_the_wrong_length_is_refused_at_construction() {
+        let mut config = create_test_config();
+        config.app_publisher_key = Some(vec![7u8; 31]);
+        assert!(matches!(
+            OfflineProtocol::new(config),
+            Err(ProtocolError::InvalidConfiguration(_))
+        ));
+
+        let mut config = create_test_config();
+        config.app_publisher_key = Some(vec![7u8; 32]);
+        let protocol = OfflineProtocol::new(config).expect("a 32-byte key is accepted");
+        assert!(protocol.app_membership_status().configured);
+    }
+
+    #[test]
+    fn sign_app_membership_crosses_the_ffi() {
+        let address = derive_address(vec![1u8; 32]).expect("an address");
+        let cert = sign_app_membership(vec![9u8; 32], address, 1_900_000_000).expect("a cert");
+        assert_eq!(cert.len(), 93);
+        assert!(matches!(
+            sign_app_membership(vec![9u8; 31], "off1x".to_string(), 0),
+            Err(ProtocolError::InvalidArgument(_))
+        ));
     }
 
     #[test]
@@ -9710,6 +9802,7 @@ mod tests {
         ProtocolConfig {
             mesh_relay: None,
             custody: None,
+            app_publisher_key: None,
             data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,

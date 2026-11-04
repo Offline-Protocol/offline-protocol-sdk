@@ -763,3 +763,212 @@ fn an_unsigned_hello_is_not_answered() {
     bob.receive_from(signed, &alice.address);
     assert_eq!(bob.take_member_frames().len(), 2);
 }
+
+// --- The application's calls (step 6) ----------------------------------------
+
+#[test]
+fn supplying_the_same_certificate_again_sends_nothing() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::member("bob", &key);
+    meet(&mut alice, &mut bob);
+    assert!(alice.sees(&bob));
+
+    // An application that hands the certificate over on every foreground.
+    let cert = certificate(&key, &alice.address);
+    let first = alice.protocol.app_membership_status().certificate_not_after;
+    let same = MemberCert {
+        not_after: first.expect("alice holds a certificate"),
+        ..cert
+    };
+    let same = MemberCert {
+        signature: key
+            .sign(&MemberCert::signing_payload(&same.address, same.not_after))
+            .to_bytes(),
+        ..same
+    };
+    alice
+        .protocol
+        .set_app_membership(&same.to_bytes())
+        .expect("the same certificate");
+    assert!(
+        alice.take_member_frames().is_empty(),
+        "the same certificate again restarts nothing"
+    );
+
+    // A different certificate (a renewal) does restart, so every neighbour
+    // learns the new one.
+    let renewed = MemberCert {
+        not_after: same.not_after + 1,
+        signature: key
+            .sign(&MemberCert::signing_payload(
+                &same.address,
+                same.not_after + 1,
+            ))
+            .to_bytes(),
+        ..same
+    };
+    alice
+        .protocol
+        .set_app_membership(&renewed.to_bytes())
+        .expect("a renewed certificate");
+    assert_eq!(alice.take_member_frames().len(), 1, "one hello to bob");
+}
+
+#[test]
+fn a_peer_with_no_mesh_link_gets_no_hello() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::member("bob", &key);
+
+    // Discovery through the relay or the LAN: no mesh link to bob.
+    alice.protocol.on_neighbor_discovered(&bob.address);
+    assert!(alice.take_member_frames().is_empty());
+    assert_eq!(alice.protocol.member_exchange_count(), 0);
+
+    // The mesh link that follows is greeted at once, not held off.
+    meet(&mut alice, &mut bob);
+    assert!(alice.sees(&bob));
+}
+
+#[test]
+fn app_membership_status_reports_this_node_only() {
+    let key = publisher(1);
+    let unconfigured = Node::launch("carol", None);
+    assert_eq!(
+        unconfigured.protocol.app_membership_status(),
+        crate::AppMembershipStatus {
+            configured: false,
+            certificate_not_after: None,
+            visible_members: 0,
+        }
+    );
+
+    let mut alice = Node::launch("alice", Some(key.verifying_key().to_bytes()));
+    let status = alice.protocol.app_membership_status();
+    assert!(status.configured);
+    assert_eq!(status.certificate_not_after, None);
+
+    let cert = certificate(&key, &alice.address);
+    alice
+        .protocol
+        .set_app_membership(&cert.to_bytes())
+        .expect("alice's certificate");
+    let mut bob = Node::member("bob", &key);
+    meet(&mut alice, &mut bob);
+    let status = alice.protocol.app_membership_status();
+    assert_eq!(status.certificate_not_after, Some(cert.not_after));
+    assert_eq!(status.visible_members, 1);
+}
+
+#[test]
+fn a_certificate_from_sign_app_membership_is_accepted() {
+    let key = publisher(7);
+    let mut alice = Node::launch("alice", Some(key.verifying_key().to_bytes()));
+    let not_after = u64::try_from(Utc::now().timestamp()).unwrap() + 3_600;
+    let cert = crate::sign_app_membership(&key.to_bytes(), &alice.address, not_after)
+        .expect("a certificate");
+    alice
+        .protocol
+        .set_app_membership(&cert)
+        .expect("signed by the configured publisher");
+
+    assert!(crate::sign_app_membership(&[0u8; 31], &alice.address, not_after).is_err());
+    assert!(crate::sign_app_membership(&key.to_bytes(), "not-an-address", not_after).is_err());
+}
+
+#[test]
+fn the_exchange_table_is_bounded() {
+    use crate::protocol::membership::MAX_MEMBER_EXCHANGES;
+
+    let mut alice = Node::launch("alice", None);
+    for n in 0..=MAX_MEMBER_EXCHANGES {
+        let mut seed = [0xEE; 32];
+        seed[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        let key = SigningKey::from_bytes(&seed);
+        let peer = offline_protocol_sealed::derive_address(&key.verifying_key().to_bytes())
+            .expect("an address")
+            .to_string();
+        alice.transport.add_connected_peer(peer.clone(), -60);
+        alice.protocol.on_neighbor_discovered(&peer);
+    }
+    assert_eq!(alice.protocol.member_exchange_count(), MAX_MEMBER_EXCHANGES);
+}
+
+#[test]
+fn the_visible_set_is_bounded_and_drops_the_soonest_to_end() {
+    use crate::protocol::membership::MAX_VISIBLE_MEMBERS;
+
+    let mut alice = Node::launch("alice", None);
+    let far = u64::try_from(Utc::now().timestamp()).unwrap() + 86_400;
+    for n in 0..MAX_VISIBLE_MEMBERS {
+        alice
+            .protocol
+            .mark_member_visible(&format!("peer-{n}"), far + n as u64);
+    }
+    // One more: the entry ending soonest ("peer-0") makes room.
+    alice.protocol.mark_member_visible("late", far + 1_000_000);
+    assert!(!alice.protocol.is_member_visible("peer-0"));
+    assert!(alice.protocol.is_member_visible("peer-1"));
+    assert!(alice.protocol.is_member_visible("late"));
+    assert_eq!(
+        alice.protocol.app_membership_status().visible_members as usize,
+        MAX_VISIBLE_MEMBERS
+    );
+}
+
+/// `sign_app_membership` holds the publisher's private key for the length of
+/// one call. Nothing in its body may log, emit, store or send, so the key can
+/// reach none of those whatever is later added around it.
+#[test]
+fn sign_app_membership_never_lets_the_key_out() {
+    let source = include_str!("../membership.rs");
+    let start = source
+        .find("pub fn sign_app_membership(")
+        .expect("the function is in membership.rs");
+    let body_start = start + source[start..].find('{').expect("a body");
+    let mut depth = 0usize;
+    let mut end = body_start;
+    for (offset, ch) in source[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = body_start + offset;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &source[body_start..end];
+    assert!(body.contains("SigningKey::from_bytes"), "found the body");
+    for refused in [
+        "trace!",
+        "debug!",
+        "info!",
+        "warn!",
+        "error!",
+        "tracing",
+        "println",
+        "eprintln",
+        "dbg!",
+        "self",
+        "emit",
+        "storage",
+        "store",
+        "persist",
+        "send",
+        "seed:?",
+        "{seed",
+        "publisher_private_key:?",
+        "{publisher_private_key",
+    ] {
+        assert!(
+            !body.contains(refused),
+            "sign_app_membership's body names `{refused}`: the private key must not reach a log, \
+             an event, storage or a link"
+        );
+    }
+}

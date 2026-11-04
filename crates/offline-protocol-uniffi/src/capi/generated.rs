@@ -15,6 +15,35 @@ use serde_json::Value;
 
 use super::codec::{decode_array, encode_array, object, variant_error, CallError, Codec, Decoded, Fields};
 
+impl Codec for crate::AppMembershipStatus {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "AppMembershipStatus")?;
+        let out = Self {
+            configured: f.take("configured")?,
+            certificate_not_after: f.take("certificate_not_after")?,
+            visible_members: f.take("visible_members")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("configured", self.configured.encode()),
+            ("certificate_not_after", self.certificate_not_after.encode()),
+            ("visible_members", self.visible_members.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::AppMembershipStatus> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
 impl Codec for crate::InviteInfo {
     fn decode(value: &Value, at: &str) -> Decoded<Self> {
         let mut f = Fields::new(value, at, "InviteInfo")?;
@@ -1588,6 +1617,7 @@ impl Codec for crate::ProtocolConfig {
             custody: f.take_or("custody", None)?,
             data_enabled: f.take_or("data_enabled", true)?,
             control_freshness_enforced: f.take_or("control_freshness_enforced", true)?,
+            app_publisher_key: f.take_or("app_publisher_key", None)?,
             encrypt_service_messages: f.take_or("encrypt_service_messages", true)?,
         };
         f.finish()?;
@@ -1629,6 +1659,7 @@ impl Codec for crate::ProtocolConfig {
             ("custody", self.custody.encode()),
             ("data_enabled", self.data_enabled.encode()),
             ("control_freshness_enforced", self.control_freshness_enforced.encode()),
+            ("app_publisher_key", self.app_publisher_key.encode()),
             ("encrypt_service_messages", self.encrypt_service_messages.encode()),
         ])
     }
@@ -2323,6 +2354,14 @@ pub fn call_namespace(method: &str, mut args: Fields<'_>) -> Result<Value, CallE
             let arg_assertion = args.take("assertion")?;
             args.finish()?;
             let result = crate::verify_identity_assertion(arg_assertion)?;
+            Ok(result.encode())
+        }
+        "sign_app_membership" => {
+            let arg_publisher_private_key = args.take("publisher_private_key")?;
+            let arg_address = args.take("address")?;
+            let arg_not_after = args.take("not_after")?;
+            args.finish()?;
+            let result = crate::sign_app_membership(arg_publisher_private_key, arg_address, arg_not_after)?;
             Ok(result.encode())
         }
         _ => Err(CallError::MethodNotFound(format!("no method {}{method}", ""))),
@@ -3069,6 +3108,17 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             args.finish()?;
             target.erase_custody()?;
             Ok(Value::Null)
+        }
+        "set_app_membership" => {
+            let arg_cert = args.take("cert")?;
+            args.finish()?;
+            target.set_app_membership(arg_cert)?;
+            Ok(Value::Null)
+        }
+        "app_membership_status" => {
+            args.finish()?;
+            let result = target.app_membership_status();
+            Ok(result.encode())
         }
         "initialize_mls_with_file_stores" => {
             let arg_mls_root = args.take("mls_root")?;
@@ -3830,6 +3880,7 @@ pub const NAMESPACE: &[&str] = &[
     "derive_address",
     "parse_invite",
     "verify_identity_assertion",
+    "sign_app_membership",
 ];
 
 /// Declarations `call` does not dispatch, because a parameter is a callback

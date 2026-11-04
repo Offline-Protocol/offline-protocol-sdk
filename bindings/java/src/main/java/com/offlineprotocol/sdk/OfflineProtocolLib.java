@@ -68,6 +68,28 @@ public class OfflineProtocolLib {
     }
     
 
+  public static java.util.List<java.lang.Byte> signAppMembership(java.util.List<java.lang.Byte> publisherPrivateKey, java.lang.String address, long notAfter) throws ProtocolException {
+            try {
+                return FfiConverterSequenceByte.INSTANCE.lift(
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_func_sign_app_membership(_allocator, 
+            FfiConverterSequenceByte.INSTANCE.lower(publisherPrivateKey), FfiConverterString.INSTANCE.lower(address), notAfter, _status);
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
   public static java.lang.String verifyIdentityAssertion(java.util.List<java.lang.Byte> assertion) throws ProtocolException {
             try {
                 return FfiConverterString.INSTANCE.lift(

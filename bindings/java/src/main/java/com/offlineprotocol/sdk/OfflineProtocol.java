@@ -147,6 +147,37 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public AppMembershipStatus appMembershipStatus()  {
+            try {
+                return FfiConverterTypeAppMembershipStatus.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_app_membership_status(_allocator, _uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public void bleClearPeerMtu(java.lang.String peerId) throws ProtocolException {
             try {
                 
@@ -4995,6 +5026,39 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
         }
     })
     );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void setAppMembership(java.util.List<java.lang.Byte> cert) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_app_membership(_uniffiHandle,
+            FfiConverterSequenceByte.INSTANCE.lower(cert), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
             } catch (java.lang.RuntimeException _uniffi_ex) {
                 
                 if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {

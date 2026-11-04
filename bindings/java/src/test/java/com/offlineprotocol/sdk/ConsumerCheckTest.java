@@ -33,7 +33,7 @@ class ConsumerCheckTest {
                 false, 256, true, true, false, false, // edge-driven DM, group size, group relay x2, admin commits, transport identity
                 true, true, true, false, true, true, true, // binary wire, nostr x3, compact envelope, rich payload, recovery
                 null, null, // mesh relay, custody
-                true, true, true); // data, control freshness, encrypt service messages
+                true, true, null, true); // data, control freshness, app publisher key, encrypt service messages
     }
 
     static final byte[] STORE_KEY = new byte[32];
