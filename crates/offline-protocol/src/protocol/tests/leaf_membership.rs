@@ -257,6 +257,12 @@ impl Radio {
     /// Pairs phone `index` with the leaf from the device's key package.
     fn pair(&mut self, index: usize) {
         let phone = self.phones[index].address.clone();
+        // Step 1, the out-of-band anchor: the application asks for a session
+        // with the address it verified. With a publisher key that names the
+        // leaf, which is what admits its key package (an unprovisioned leaf
+        // proves no membership). Nothing has arrived yet, so it is not ready.
+        let leaf = self.leaf.address.clone();
+        let _ = self.phones[index].protocol.establish_secure_session(&leaf);
         let frame = self
             .leaf
             .device
@@ -279,6 +285,24 @@ impl Radio {
 /// the two then see each other as members. The provisioning is
 /// acknowledged, and from then on the device names no application on the
 /// wire.
+/// The other half of the anchor step in [`Radio::pair`]: a configured phone
+/// whose application never named the leaf treats its key package as a
+/// stranger's, and the pairing does not start.
+#[test]
+fn a_configured_phone_never_pairs_a_leaf_its_application_did_not_name() {
+    let mut radio = Radio::new(&["alice"]);
+    radio.link(0);
+    let phone = radio.phones[0].address.clone();
+    let frame = radio
+        .leaf
+        .device
+        .key_package_frame(&phone, radio.now)
+        .expect("mint");
+    radio.leaf_outbound.push(frame);
+    radio.settle();
+    assert!(!radio.leaf.device.has_session(&phone).unwrap());
+}
+
 #[test]
 fn a_provisioned_leaf_and_its_configured_phone_see_each_other() {
     let mut radio = Radio::new(&["alice"]);

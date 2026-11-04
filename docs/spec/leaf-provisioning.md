@@ -479,6 +479,17 @@ takes part once its paired phone provisions it, and a leaf nobody provisions
 behaves exactly as this chapter describes without this section: it sends no
 `__MEMBER__` frame, answers none, and stamps its own `app_id`.
 
+**A configured phone pairs only a leaf it was told about.** A phone with a
+publisher key answers no sender it has not admitted
+([the inbound gate](control-messages.md#application-membership)), and an
+unprovisioned leaf proves no membership, so the phone admits the leaf's key
+package in step 2 only because its application named the address step 1
+verified. The application does that by asking for a session with it
+(`establish_secure_session`), which names the address even though no key
+package has arrived yet. A configured phone whose application skipped that
+step drops the leaf's key package unanswered, as it would any stranger's, and
+the pairing never starts. A phone with no publisher key is unchanged.
+
 **Provisioning travels inside the pair's session.** After step 4 of
 [the pairing exchange](#the-pairing-exchange) the phone seals, as the plaintext
 of an ordinary `__MLS_ENC__` application message, the prefix
