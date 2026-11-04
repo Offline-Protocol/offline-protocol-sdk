@@ -3335,11 +3335,11 @@ impl OfflineProtocol {
     /// (BLE discovery, WiFi Direct connections, and inbound messages on
     /// Internet/WiFi Direct/Reticulum/Nostr).
     ///
-    /// Notifies the core protocol via `on_neighbor_discovered()` — which
-    /// drives auto key exchange, outbox flush, and MLS Welcome re-arm and
-    /// has its own is_user_blocked()/self checks — then emits the
-    /// `NeighborDiscovered` platform event. The blocked read here is only
-    /// needed to suppress the platform event.
+    /// Notifies the core protocol via `neighbor_reachable()`, which runs
+    /// discovery (auto key exchange, outbox flush, MLS Welcome re-arm) and
+    /// decides whether `NeighborDiscovered` is reported now: never for a
+    /// blocked peer, and with an application publisher key only once the
+    /// peer is visible, which the core reports itself (ADR 0037).
     ///
     /// Message-path callers must drain `receive_message()` first so a
     /// handshake confirmation in the same inbound batch lands in
@@ -3356,14 +3356,12 @@ impl OfflineProtocol {
             return Ok(());
         }
 
-        let is_blocked = {
-            let mut protocol = self.lock_inner()?;
-            let blocked = protocol.is_user_blocked(peer_id);
-            protocol.on_neighbor_discovered(peer_id);
-            blocked
-        };
+        // The core decides: a blocked peer is never reported, and with an
+        // application publisher key a peer is reported only once it is
+        // visible, by the core itself when that happens (ADR 0037).
+        let report = self.lock_inner()?.neighbor_reachable(peer_id, transport);
 
-        if !is_blocked {
+        if report {
             self.emit_event(CoreEvent::NeighborDiscovered {
                 peer_id: peer_id.to_string(),
                 transport: transport.to_string(),
@@ -4539,8 +4537,9 @@ impl OfflineProtocol {
                         .downcast_ref::<BleTransport>()
                         .is_some_and(|ble| ble.on_peer_rssi(&peer_id, rssi))
                 });
-            // Suppressed like `NeighborDiscovered`: the app blocked this peer.
-            linked && !protocol.is_user_blocked(&peer_id)
+            // Suppressed like `NeighborDiscovered`: the app blocked this
+            // peer, or does not see it (ADR 0037).
+            linked && !protocol.is_user_blocked(&peer_id) && protocol.app_sees_peer(&peer_id)
         };
         if !deliver {
             return;
@@ -4596,17 +4595,13 @@ impl OfflineProtocol {
             return Ok(());
         }
 
-        // Notify the core protocol of neighbor loss
-        {
-            let mut protocol = self.lock_inner()?;
-            protocol.on_neighbor_lost(&peer_id);
+        // Notify the core protocol of neighbor loss; it says whether the
+        // application was told about this peer at all.
+        if self.lock_inner()?.neighbor_unreachable(&peer_id) {
+            self.emit_event(CoreEvent::NeighborLost {
+                peer_id: peer_id.clone(),
+            });
         }
-
-        // Emit NeighborLost event
-        let event = CoreEvent::NeighborLost {
-            peer_id: peer_id.clone(),
-        };
-        self.emit_event(event);
 
         Ok(())
     }
@@ -4653,8 +4648,9 @@ impl OfflineProtocol {
             if self.peer_linked_elsewhere(&peer_id, CoreTransportType::BLE) {
                 continue;
             }
-            self.lock_inner()?.on_neighbor_lost(&peer_id);
-            self.emit_event(CoreEvent::NeighborLost { peer_id });
+            if self.lock_inner()?.neighbor_unreachable(&peer_id) {
+                self.emit_event(CoreEvent::NeighborLost { peer_id });
+            }
         }
 
         Ok(())
@@ -5350,10 +5346,11 @@ impl OfflineProtocol {
                 if self.peer_linked_elsewhere(&link.peer_id, CoreTransportType::WiFiDirect) {
                     continue;
                 }
-                self.lock_inner()?.on_neighbor_lost(&link.peer_id);
-                self.emit_event(CoreEvent::NeighborLost {
-                    peer_id: link.peer_id,
-                });
+                if self.lock_inner()?.neighbor_unreachable(&link.peer_id) {
+                    self.emit_event(CoreEvent::NeighborLost {
+                        peer_id: link.peer_id,
+                    });
+                }
             }
         }
 
@@ -5531,14 +5528,9 @@ impl OfflineProtocol {
         // Notify the core protocol of neighbor loss, matching ble_peer_lost —
         // WiFi Direct is the only other carrier with an explicit disconnect
         // signal, so core discovery tracking must not outlive the connection.
-        {
-            let mut protocol = self.lock_inner()?;
-            protocol.on_neighbor_lost(&peer_id);
+        if self.lock_inner()?.neighbor_unreachable(&peer_id) {
+            self.emit_event(CoreEvent::NeighborLost { peer_id });
         }
-
-        // Emit NeighborLost event
-        let event = CoreEvent::NeighborLost { peer_id };
-        self.emit_event(event);
 
         Ok(())
     }

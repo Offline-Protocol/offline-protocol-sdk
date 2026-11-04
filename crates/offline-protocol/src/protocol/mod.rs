@@ -2574,6 +2574,19 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         self.kick_shared_group_data_sync(peer_id, "peer_rediscovered");
 
+        // The key package push is the one automatic effect that answers a
+        // stranger with this node's key material, so it waits until the
+        // application may see the peer (ADR 0037). Everything above is
+        // carriage, or acts on a relation the application made itself.
+        if !self.app_sees_peer(peer_id) {
+            return;
+        }
+        self.push_key_package_on_discovery(peer_id);
+    }
+
+    /// The automatic key package push on discovering `peer_id`, at most once
+    /// per discovery, and re-armed only when it produced no session.
+    pub(crate) fn push_key_package_on_discovery(&mut self, peer_id: &str) {
         // Only send key package if encryption is enabled and auto key exchange is on
         if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
             return;

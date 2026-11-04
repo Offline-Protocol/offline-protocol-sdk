@@ -413,8 +413,9 @@ impl Node {
         if self.ble_linked(&peer) {
             return;
         }
-        self.protocol.on_neighbor_lost(&peer);
-        push_event(&self.events, &Event::NeighborLost { peer_id: peer });
+        if self.protocol.neighbor_unreachable(&peer) {
+            push_event(&self.events, &Event::NeighborLost { peer_id: peer });
+        }
     }
 
     /// The next link this module closed on its own. The page closes its
@@ -865,15 +866,16 @@ impl Node {
         if let Some(transport) = self.wifi_direct() {
             transport.on_peer_connected(address.clone());
         }
-        self.protocol.on_neighbor_discovered(&address);
-        push_event(
-            &self.events,
-            &Event::NeighborDiscovered {
-                peer_id: address,
-                transport: "WiFiDirect".to_string(),
-                rssi: None,
-            },
-        );
+        if self.protocol.neighbor_reachable(&address, "WiFiDirect") {
+            push_event(
+                &self.events,
+                &Event::NeighborDiscovered {
+                    peer_id: address,
+                    transport: "WiFiDirect".to_string(),
+                    rssi: None,
+                },
+            );
+        }
         None
     }
 

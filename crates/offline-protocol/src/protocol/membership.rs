@@ -25,13 +25,21 @@
 //!   verified under this application's publisher key for that address and is
 //!   current, and its identity signature covers this node's fresh nonce.
 //!
-//! Nothing reads visibility yet (step 5 of the shared network plan): it is a
-//! log line and [`OfflineProtocol::is_member_visible`]. The gate over
-//! discovery events and replies is a later step.
+//! # The visibility gate
+//!
+//! With a publisher key configured, a peer is reported to the application,
+//! and the automatic effects of discovering it run, only once it is visible
+//! ([`OfflineProtocol::app_sees_peer`]). A discovery that comes first is held
+//! and reported when the exchange proves membership. Carriage is never gated:
+//! relay targets, the outbox flush to that peer and custody redelivery run
+//! for everyone. Nor is anything the application asked for itself toward a
+//! peer it named (a subscription, a shared space, a Welcome, its presence
+//! watchlist). With no publisher key every peer is visible, which is every
+//! release before this one exactly.
 //!
 //! [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -52,6 +60,7 @@ use tracing::{debug, error, info, warn};
 
 use super::types::CTRL_PK_META_KEY;
 use super::{base64_decode, internal_prefixes, OfflineProtocol};
+use crate::events::Event;
 use crate::{Error, Result};
 
 /// How long an exchange with one neighbour stands before a later discovery
@@ -146,6 +155,12 @@ pub(crate) struct Membership {
     exchanges: HashMap<String, Exchange>,
     /// Verified members, by address, with their certificate's `not_after`.
     visible: HashMap<String, u64>,
+    /// Neighbours a carrier reported before they were visible, with the
+    /// carrier's name, reported to the application once they are.
+    held_reports: HashMap<String, String>,
+    /// Neighbours reported to the application, so that only those are
+    /// reported lost.
+    reported: HashSet<String>,
 }
 
 struct Exchange {
@@ -361,18 +376,81 @@ impl OfflineProtocol {
         }
     }
 
+    /// Whether the application may be told about `peer`, and the automatic
+    /// effects of discovering it may run: always with no publisher key
+    /// configured, otherwise only once `peer` is visible.
+    pub fn app_sees_peer(&self, peer: &str) -> bool {
+        self.membership.publisher_key.is_none() || self.is_member_visible(peer)
+    }
+
+    /// A carrier reports `peer` reachable: runs discovery, and returns
+    /// whether the caller reports `NeighborDiscovered` for it now.
+    ///
+    /// `false` for a blocked peer, and, with a publisher key configured, for
+    /// a peer not yet visible. Such a report is held, and the engine emits
+    /// `NeighborDiscovered` itself, naming `transport`, when the exchange
+    /// makes the peer visible. Every carrier's discovery goes through here,
+    /// so the decision is made once, in the core.
+    pub fn neighbor_reachable(&mut self, peer: &str, transport: &str) -> bool {
+        let blocked = self.is_user_blocked(peer);
+        self.on_neighbor_discovered(peer);
+        if blocked {
+            return false;
+        }
+        if self.membership.publisher_key.is_none() {
+            return true;
+        }
+        if self.is_member_visible(peer) {
+            self.membership.reported.insert(peer.to_string());
+            return true;
+        }
+        let held = &mut self.membership.held_reports;
+        if !held.contains_key(peer) && held.len() >= MAX_MEMBER_EXCHANGES {
+            // Bounded like the exchanges it waits on. An arbitrary entry
+            // goes: one that never resolves is a stranger's.
+            if let Some(victim) = held.keys().next().cloned() {
+                held.remove(&victim);
+            }
+        }
+        held.insert(peer.to_string(), transport.to_string());
+        false
+    }
+
+    /// A carrier reports `peer` lost: runs the loss, and returns whether the
+    /// caller reports `NeighborLost` for it. With a publisher key configured,
+    /// only a peer the application was told about is reported lost.
+    pub fn neighbor_unreachable(&mut self, peer: &str) -> bool {
+        self.on_neighbor_lost(peer);
+        if self.membership.publisher_key.is_none() {
+            return true;
+        }
+        self.membership.held_reports.remove(peer);
+        self.membership.reported.remove(peer)
+    }
+
+    /// Runs what was held back from `peer`'s discovery, now that it is
+    /// visible: its `NeighborDiscovered`, and the automatic key package push.
+    fn release_held_discovery(&mut self, peer: &str) {
+        let Some(transport) = self.membership.held_reports.remove(peer) else {
+            return;
+        };
+        if !self.has_mesh_link(peer) && !self.known_peers.contains_key(peer) {
+            // Gone since: nothing to report, and its loss was not reported.
+            return;
+        }
+        self.membership.reported.insert(peer.to_string());
+        self.emit_event(Event::NeighborDiscovered {
+            peer_id: peer.to_string(),
+            transport,
+            rssi: None,
+        });
+        self.push_key_package_on_discovery(peer);
+    }
+
     /// Whether `peer` has proven, in a membership exchange, that it belongs to
     /// this node's application, and its certificate is still current.
     ///
-    /// Always `false` with no publisher key configured. Nothing in the engine
-    /// acts on it yet.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the visibility gate of a later step reads it; until then only tests do"
-        )
-    )]
+    /// Always `false` with no publisher key configured.
     pub(crate) fn is_member_visible(&self, peer: &str) -> bool {
         self.membership
             .visible
@@ -624,6 +702,7 @@ impl OfflineProtocol {
         }
         self.mark_member_visible(peer, cert.not_after);
         info!(peer = %peer, not_after = cert.not_after, "Neighbour is a member of this application");
+        self.release_held_discovery(peer);
     }
 
     /// Holds `peer` visible until `not_after`, evicting the certificate that

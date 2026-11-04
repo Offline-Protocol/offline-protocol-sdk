@@ -450,6 +450,27 @@ reaches a provider through gossip and its direct sender is any relay. Without
 that check a member's proof, recorded once, would carry any other node's frame
 of the same kind and body hash.
 
+**What visibility gates.** With a publisher key configured, a node reports a
+neighbour to its application, and runs the automatic effects of discovering
+it, only once the neighbour is visible. Concretely:
+
+- `NeighborDiscovered` is held for a neighbour that is not visible yet, and
+  reported, naming the carrier that found it, when the exchange makes it
+  visible. A neighbour that never proves membership is never reported.
+- `NeighborLost` is reported only for a neighbour whose discovery was.
+- `PeerRssi` and a received `__PRESENCE__` are reported only for a visible
+  peer.
+- The automatic key package push on discovery waits for visibility. It is the
+  one discovery effect that answers a stranger with this node's key material.
+
+Carriage is not gated: relay targets, the outbox flush to that peer and
+custody redelivery run for every neighbour. Neither is an effect the
+application asked for itself toward a peer it named: a subscription, a shared
+space, a Welcome, the relay presence answers for its watchlist. A node with
+no publisher key sees every peer, which is the behaviour before this section
+existed. The decision is made once, in the engine; every binding's discovery
+and loss go through it.
+
 ## Document sync frames
 
 `__DATA_V1__` frames replicate documents. They are specified in their own

@@ -52,12 +52,16 @@ struct Node {
 
 impl Node {
     fn launch(label: &str, publisher_key: Option<[u8; 32]>) -> Self {
+        Self::launch_with(label, publisher_key, false)
+    }
+
+    /// `auto_key_exchange` off unless a test is about the key-package push
+    /// on discovery: with it on, every link also carries a handshake.
+    fn launch_with(label: &str, publisher_key: Option<[u8; 32]>, auto_key_exchange: bool) -> Self {
         let mut config: ProtocolConfig = create_test_config_for_user(label);
         config.app_id = APP.to_string();
         config.encryption.enabled = true;
-        // The key-package push on discovery is not what is under test; with
-        // it on, every link would also carry a session handshake.
-        config.encryption.auto_key_exchange = false;
+        config.encryption.auto_key_exchange = auto_key_exchange;
         config.app_publisher_key = publisher_key;
         let mut protocol = OfflineProtocol::new(config).expect("protocol");
         let state = Arc::new(InMemoryStorage::new());
@@ -971,4 +975,218 @@ fn sign_app_membership_never_lets_the_key_out() {
              an event, storage or a link"
         );
     }
+}
+
+// --- The visibility gate (step 7) ---------------------------------------------
+
+use crate::events::{Event, PresenceStatus};
+use std::sync::Mutex;
+
+/// Every event the core emits, for a test to read.
+fn record_events(node: &mut Node) -> Arc<Mutex<Vec<Event>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    node.protocol
+        .on_event(move |event| sink.lock().unwrap().push(event));
+    seen
+}
+
+fn discovered(events: &Mutex<Vec<Event>>, peer: &str) -> Vec<String> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::NeighborDiscovered {
+                peer_id, transport, ..
+            } if peer_id == peer => Some(transport.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A carrier reporting `peer` the way the bindings do: link first, then
+/// the core's decision.
+fn reach(node: &mut Node, peer: &Node) -> bool {
+    node.transport.add_connected_peer(peer.address.clone(), -55);
+    node.protocol.neighbor_reachable(&peer.address, "BLE")
+}
+
+#[test]
+fn a_member_is_reported_once_it_proves_membership_and_a_stranger_never() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::member("bob", &key);
+    let mut carol = Node::member("carol", &publisher(2));
+    let events = record_events(&mut alice);
+
+    assert!(!reach(&mut alice, &bob), "not visible yet: held");
+    bob.link(&alice);
+    run(&mut alice, &mut bob);
+    assert_eq!(
+        discovered(&events, &bob.address),
+        vec!["BLE".to_string()],
+        "the core reports bob once he is visible, naming the carrier"
+    );
+
+    assert!(!reach(&mut alice, &carol));
+    carol.link(&alice);
+    run(&mut alice, &mut carol);
+    assert!(discovered(&events, &carol.address).is_empty());
+    assert!(!alice.protocol.app_sees_peer(&carol.address));
+
+    // Rediscovered while visible: reported by the caller at once.
+    assert!(reach(&mut alice, &bob));
+}
+
+#[test]
+fn an_unconfigured_node_reports_every_neighbour_at_once() {
+    let mut alice = Node::launch("alice", None);
+    let bob = Node::member("bob", &publisher(1));
+    let events = record_events(&mut alice);
+    assert!(reach(&mut alice, &bob));
+    assert!(alice.protocol.app_sees_peer(&bob.address));
+    assert!(alice.protocol.neighbor_unreachable(&bob.address));
+    assert!(
+        discovered(&events, &bob.address).is_empty(),
+        "the caller reports it; the core adds nothing"
+    );
+}
+
+#[test]
+fn a_loss_is_reported_only_for_a_neighbour_that_was_reported() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::member("bob", &key);
+    let carol = Node::member("carol", &publisher(2));
+
+    reach(&mut alice, &carol);
+    alice.take_member_frames();
+    assert!(
+        !alice.protocol.neighbor_unreachable(&carol.address),
+        "never reported, so never reported lost"
+    );
+
+    reach(&mut alice, &bob);
+    bob.link(&alice);
+    run(&mut alice, &mut bob);
+    assert!(alice.protocol.neighbor_unreachable(&bob.address));
+    assert!(
+        !alice.protocol.neighbor_unreachable(&bob.address),
+        "reported lost once"
+    );
+}
+
+#[test]
+fn a_neighbour_lost_before_it_proves_membership_is_never_reported() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::member("bob", &key);
+    let events = record_events(&mut alice);
+
+    reach(&mut alice, &bob);
+    assert!(!alice.protocol.neighbor_unreachable(&bob.address));
+    // The exchange completes after the loss was seen.
+    bob.link(&alice);
+    run(&mut alice, &mut bob);
+    assert!(discovered(&events, &bob.address).is_empty());
+}
+
+/// Key packages handed to the link for `peer`, by either send path.
+fn key_packages_to(node: &Node, peer: &Node) -> usize {
+    let is_kp = |m: &Message| {
+        m.recipient.as_str() == peer.address
+            && m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+    };
+    node.transport
+        .peer_sends()
+        .iter()
+        .filter(|(_, m)| is_kp(m))
+        .count()
+        + node
+            .transport
+            .sent_messages()
+            .iter()
+            .filter(|m| is_kp(m))
+            .count()
+}
+
+#[test]
+fn the_key_package_push_waits_until_the_peer_is_visible() {
+    let key = publisher(1);
+    let mut alice = Node::launch_with("alice", Some(key.verifying_key().to_bytes()), true);
+    let cert = certificate(&key, &alice.address);
+    alice
+        .protocol
+        .set_app_membership(&cert.to_bytes())
+        .expect("alice's certificate");
+    let mut bob = Node::member("bob", &key);
+    let carol = Node::member("carol", &publisher(2));
+
+    reach(&mut alice, &carol);
+    reach(&mut alice, &bob);
+    assert_eq!(key_packages_to(&alice, &carol), 0);
+    assert_eq!(
+        key_packages_to(&alice, &bob),
+        0,
+        "not before bob is visible"
+    );
+
+    // The exchange, keeping alice's other sends on the record.
+    bob.link(&alice);
+    for _ in 0..4 {
+        let from_alice: Vec<_> = alice
+            .transport
+            .peer_sends()
+            .into_iter()
+            .filter(|(to, m)| {
+                to == &bob.address && m.content.starts_with(internal_prefixes::MEMBER)
+            })
+            .collect();
+        for (_, m) in from_alice {
+            bob.receive_from(m, &alice.address.clone());
+        }
+        for (_, m) in bob.take_member_frames() {
+            alice.receive_from(m, &bob.address.clone());
+        }
+        if alice.sees(&bob) {
+            break;
+        }
+    }
+    assert!(alice.sees(&bob));
+    assert_eq!(
+        key_packages_to(&alice, &bob),
+        1,
+        "pushed once bob is visible"
+    );
+    assert_eq!(key_packages_to(&alice, &carol), 0, "never to a stranger");
+}
+
+#[test]
+fn presence_from_a_peer_the_application_does_not_see_is_not_reported() {
+    let key = publisher(1);
+    let mut alice = Node::member("alice", &key);
+    let mut bob = Node::member("bob", &key);
+    let carol = Node::member("carol", &publisher(2));
+    let events = record_events(&mut alice);
+    meet(&mut alice, &mut bob);
+
+    let body = r#"{"status":"online","timestamp_ms":1}"#;
+    alice.protocol.handle_presence_message(&carol.address, body);
+    alice.protocol.handle_presence_message(&bob.address, body);
+    let reported: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::PresenceUpdated {
+                peer_id, status, ..
+            } => {
+                assert_eq!(*status, PresenceStatus::Online);
+                Some(peer_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reported, vec![bob.address.clone()]);
 }

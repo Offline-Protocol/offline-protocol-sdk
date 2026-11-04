@@ -158,9 +158,7 @@ impl Node {
                 connected: true,
             });
         }
-        let blocked = self.protocol.is_user_blocked(peer);
-        self.protocol.on_neighbor_discovered(peer);
-        if !blocked {
+        if self.protocol.neighbor_reachable(peer, "BLE") {
             push_event(
                 &self.events,
                 &Event::NeighborDiscovered {
@@ -233,13 +231,14 @@ impl Node {
         if self.stream_linked(peer) {
             return;
         }
-        self.protocol.on_neighbor_lost(peer);
-        push_event(
-            &self.events,
-            &Event::NeighborLost {
-                peer_id: peer.to_string(),
-            },
-        );
+        if self.protocol.neighbor_unreachable(peer) {
+            push_event(
+                &self.events,
+                &Event::NeighborLost {
+                    peer_id: peer.to_string(),
+                },
+            );
+        }
     }
 
     /// Reports every Bluetooth link lost, for [`Node::stop`].

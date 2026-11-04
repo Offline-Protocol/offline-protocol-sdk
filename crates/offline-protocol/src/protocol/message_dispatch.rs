@@ -2021,6 +2021,10 @@ impl OfflineProtocol {
         if let Ok(payload) = serde_json::from_str::<PresencePayload>(data) {
             if payload.timestamp_ms < 0 {
                 warn!("Dropping presence update with negative timestamp");
+            } else if !self.app_sees_peer(sender) {
+                // A stranger's presence is not this application's to see
+                // (ADR 0037); the frame is consumed and nothing is reported.
+                debug!(sender = %sender, "Presence update from a peer this application does not see");
             } else {
                 debug!(sender = %sender, status = ?payload.status, "Received presence update");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {

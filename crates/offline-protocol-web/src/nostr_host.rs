@@ -349,9 +349,7 @@ impl Node {
         if peer.is_empty() {
             return Ok(());
         }
-        let blocked = self.protocol.is_user_blocked(&peer);
-        self.protocol.on_neighbor_discovered(&peer);
-        if !blocked {
+        if self.protocol.neighbor_reachable(&peer, "Nostr") {
             push_event(
                 &self.events,
                 &Event::NeighborDiscovered {
