@@ -125,6 +125,16 @@ pub enum LeafError {
     #[error("Peer table is full")]
     TooManyPeers,
 
+    /// A paired phone's membership provisioning was refused: the certificate
+    /// names another address, does not verify under the publisher key it
+    /// came with, or has expired against the time supplied with it.
+    ///
+    /// Its own variant because the repair is on the phone, which sent a
+    /// certificate this device can never present: a fresh one from the
+    /// application's backend. Nothing was stored and nothing acknowledged.
+    #[error("Membership provisioning refused: {0}")]
+    MembershipRefused(String),
+
     /// The sealed layer refused a value.
     #[error("{0}")]
     Sealed(String),

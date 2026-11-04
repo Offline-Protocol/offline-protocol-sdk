@@ -150,8 +150,12 @@ a peer never met has advertised nothing yet
 ([ADR 0023](../adr/0023-a-control-frame-states-when-it-was-made.md)). A leaf
 MUST therefore accept `__MLS_KEY_PKG__` under the older payload, MUST ignore
 that frame's `session_reset`, and MUST NOT judge its age, since the payload
-leaves the timestamp outside the signature. Every other control frame a leaf
-accepts MUST be refused under it, and none of them needs the exception: a
+leaves the timestamp outside the signature. A provisioned leaf MUST accept
+`__MEMBER__` under it too, for the same first-contact reason: the membership
+exchange runs with every neighbour, and a neighbour that never paired with the
+device never learned it verifies the newer payload (see
+[Application membership](#application-membership)). Every other control frame a
+leaf accepts MUST be refused under it, and none of them needs the exception: a
 Welcome and a confirmation probe can only follow this device's own key package
 reaching the peer, which is the frame that teaches the peer to sign the
 freshness-bound payload.
@@ -204,10 +208,12 @@ arrives, answers, and persists.
 
 A conforming leaf:
 
-- **emits** `__MLS_KEY_PKG__`, `__MLS_ENC__`, and `__MLS_CONFIRM_ACK__`;
+- **emits** `__MLS_KEY_PKG__`, `__MLS_ENC__`, and `__MLS_CONFIRM_ACK__`, and
+  `__MEMBER__` once provisioned with application membership;
 - **accepts** `__MLS_KEY_PKG__` (including one that sets `session_reset`),
-  `__MLS_WELCOME__`, `__MLS_ENC__` carrying either an application message or a
-  commit, and `__MLS_CONFIRM_PROBE__`;
+  `__MLS_WELCOME__`, `__MLS_ENC__` carrying an application message, a commit or
+  a `__MEMBER_PROVISION__` body, `__MLS_CONFIRM_PROBE__`, and `__MEMBER__`
+  (consumed and unanswered until provisioned);
 - **answers** a frame it accepted with a delivery acknowledgement, which is not
   a control frame and carries no prefix (see
   [What a leaf owes for a frame it received](#what-a-leaf-owes-for-a-frame-it-received));
@@ -462,6 +468,71 @@ on the device side.
 
 Letting a device originate Update proposals would make it self-healing on its
 own schedule. That is deliberately outside this version.
+
+## Application membership
+
+An application that configures a publisher key makes its users visible only to
+each other ([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md)),
+by the exchange and the certificate in
+[Application membership](control-messages.md#application-membership). A leaf
+takes part once its paired phone provisions it, and a leaf nobody provisions
+behaves exactly as this chapter describes without this section: it sends no
+`__MEMBER__` frame, answers none, and stamps its own `app_id`.
+
+**Provisioning travels inside the pair's session.** After step 4 of
+[the pairing exchange](#the-pairing-exchange) the phone seals, as the plaintext
+of an ordinary `__MLS_ENC__` application message, the prefix
+`__MEMBER_PROVISION__` followed by base64 (standard, padded) of a fixed body:
+
+| Field | Size | Value |
+|-------|------|-------|
+| `version` | 1 | 1 |
+| `kind` | 1 | 3, which no `__MEMBER__` step is, so neither body parses as the other |
+| `publisher_key` | 32 | The application's publisher Ed25519 public key |
+| `cert` | 93 | The leaf's own certificate |
+| `supplied_time` | 8 | The phone's clock, Unix seconds, big-endian |
+
+The layout is `MemberProvision` in `offline-protocol-sealed`, pinned by the
+`provision` block of `app-membership-v1.vectors.json`. Being opened in the
+pair's session is the whole authorization, which is why the frame is never
+sent on its own: a leaf MUST act on it only as a decrypted application message
+whose sealing member is bound to the frame's sender, and MUST ignore the prefix
+anywhere else. An engine reserves the prefix, so application text sent into
+the session cannot provision the device, and consumes it if it ever finds one.
+The phone obtains the certificate from the application's backend, or mints it
+with `sign_app_membership`, and checks it before sealing: it must name the
+leaf's address, verify under the publisher key and be current.
+
+**Durable before acknowledged.** A leaf MUST check the certificate (it names
+the leaf's own address, verifies under the publisher key the frame carries, and
+is current at the supplied time) and write the publisher key, the certificate
+and the supplied time to its store **before** it writes the group state that
+spends the frame's generation, and acknowledge only after both. A refusal or a
+store that fails then leaves the device unprovisioned, unacknowledged and able
+to open the phone's retransmission. The other order spends the generation on a
+provisioning that never landed, and every retry is refused as a replay. This is
+obligation 3 applied to the one frame that changes what the device is.
+
+**No clock is read.** A leaf checks every certificate's `not_after`, its own and
+every neighbour's, against the latest time it was supplied: the provisioning's
+`supplied_time`, which never moves backwards, or the time firmware passes in,
+whichever is later. That bounds freshness after a long gap, the same stance
+obligation 2 takes for key packages, and it is not authentication. The phone
+refreshes it by sending the provisioning again; the same certificate again
+restarts no exchange.
+
+**Once provisioned** the leaf derives `K_app` from the publisher key and the
+`app_id` it was opened with, exactly as a phone does, so a leaf opened under
+another id is a stranger to every member. It then runs the exchange with every
+neighbour firmware reports, under the rules a phone follows: one hello per new
+neighbour, one fixed-size response to every fresh hello whatever the result, a
+TTL of one, no acknowledgement requested and none given, and nothing skipped
+because a neighbour is already visible. It accepts `__MEMBER__` under the older
+control payload, since its freshness is in its nonces. A hello that arrives
+before the device is provisioned is remembered in memory, unanswered, and
+answered the moment a provisioning lands. Every frame the provisioned device
+sends stamps the constant wire `app_id` `"offline"`, so the wire names no
+application.
 
 ## Identity and key storage
 

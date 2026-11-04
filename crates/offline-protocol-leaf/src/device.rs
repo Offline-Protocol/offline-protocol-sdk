@@ -21,6 +21,7 @@ use crate::error::{LeafError, Result};
 use crate::frames;
 use crate::identity::{build_client, Identity};
 use crate::keypkg;
+use crate::membership::{self, Membership};
 use crate::shared::{Arc, SharedStore};
 use crate::store::{
     LeafStore, KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE, KEY_TYPE_KEY_PACKAGE, KEY_TYPE_PEER,
@@ -96,6 +97,26 @@ pub enum LeafEvent {
         peer: String,
         /// The epoch the session is now in.
         epoch: u64,
+    },
+    /// The paired phone provisioned this device with its application's
+    /// membership (ADR 0037), and it is durable. From here the device stamps
+    /// the constant wire `app_id` and runs the membership exchange with every
+    /// neighbour firmware reports through [`LeafDevice::neighbor_discovered`].
+    MembershipProvisioned {
+        /// The phone that provisioned it, proven: the frame opened in its
+        /// session.
+        peer: String,
+        /// The `not_after` of this device's certificate.
+        not_after: u64,
+    },
+    /// A neighbour proved, in a membership exchange, that it belongs to this
+    /// device's application. Proof of membership, never permission: firmware
+    /// still decides what any peer may actuate.
+    MemberVisible {
+        /// The neighbour's address.
+        peer: String,
+        /// The `not_after` of its certificate.
+        not_after: u64,
     },
     /// A frame was not for this device, or carried nothing to act on.
     ///
@@ -209,9 +230,15 @@ enum Sender {
 /// its identity key into a log would undo the part of the threat model that
 /// says the key never leaves storage.
 pub struct LeafDevice {
-    store: Arc<dyn LeafStore>,
-    identity: Identity,
-    app_id: AppId,
+    pub(crate) store: Arc<dyn LeafStore>,
+    pub(crate) identity: Identity,
+    /// The application id `K_app` is derived under. On the wire only while
+    /// this device holds no membership certificate; see
+    /// [`LeafDevice::wire_app_id`].
+    pub(crate) app_id: AppId,
+    /// The membership a paired phone provisioned, and the exchange state
+    /// built on it.
+    pub(crate) membership: Membership,
 }
 
 impl LeafDevice {
@@ -222,20 +249,30 @@ impl LeafDevice {
     /// device's address and silently orphans every peer paired with it.
     pub fn provision(store: SharedStore, app_id: &str) -> Result<Self> {
         let identity = Identity::provision(&store)?;
+        let app_id = parse_app_id(app_id)?;
+        let membership = membership::load(&store, &identity.address, &app_id)?;
         Ok(Self {
             store,
             identity,
-            app_id: parse_app_id(app_id)?,
+            app_id,
+            membership,
         })
     }
 
     /// Loads a device that was provisioned earlier.
+    ///
+    /// A membership a paired phone provisioned earlier is loaded with it, so
+    /// the device stamps the constant wire `app_id` and runs the exchange from
+    /// the first frame after a power cut.
     pub fn resume(store: SharedStore, app_id: &str) -> Result<Self> {
         let identity = Identity::resume(&store)?;
+        let app_id = parse_app_id(app_id)?;
+        let membership = membership::load(&store, &identity.address, &app_id)?;
         Ok(Self {
             store,
             identity,
-            app_id: parse_app_id(app_id)?,
+            app_id,
+            membership,
         })
     }
 
@@ -281,7 +318,7 @@ impl LeafDevice {
         let mut message = frames::build(
             &self.store,
             &self.identity,
-            &self.app_id,
+            &self.wire_app_id(),
             peer,
             format!("{}{}", prefixes::KEY_PACKAGE, body),
             now_unix_secs,
@@ -370,7 +407,7 @@ impl LeafDevice {
         frames::build(
             &self.store,
             &self.identity,
-            &self.app_id,
+            &self.wire_app_id(),
             peer,
             format!("{}{}", prefixes::ENCRYPTED, body),
             now_unix_secs,
@@ -430,6 +467,14 @@ impl LeafDevice {
     pub fn handle(&mut self, message: &Message, now_unix_secs: u64) -> Result<Handled> {
         if !self.is_addressed_to_me(message) {
             return Ok(ignored("frame is addressed to another node"));
+        }
+
+        // Ahead of everything that can answer: a membership frame is never
+        // acknowledged, whatever it proved and whatever it asked for, since
+        // an acknowledgement is an answer whose presence would depend on this
+        // device (ADR 0037).
+        if let Some(body) = frames::strip_prefix(&message.content, prefixes::MEMBER) {
+            return self.on_member_frame(message, body, now_unix_secs);
         }
 
         // Before the frame is opened, because opening it a second time is what
@@ -749,7 +794,12 @@ impl LeafDevice {
         })
     }
 
-    fn on_encrypted(&mut self, message: &Message, body: &str, _now: u64) -> Result<Handled> {
+    fn on_encrypted(
+        &mut self,
+        message: &Message,
+        body: &str,
+        now_unix_secs: u64,
+    ) -> Result<Handled> {
         // Not signature-gated: this is the data plane, and MLS authenticates
         // its own sender. A second signature on the outside would state what
         // the AEAD already proves on the inside.
@@ -793,10 +843,44 @@ impl LeafDevice {
             .process_incoming_message(inbound)
             .map_err(|e| LeafError::Mls(format!("cannot open: {e:?}")))?;
 
+        // A membership provisioning (ADR 0037) is checked and made durable
+        // here, before the group state that spends its generation. A refusal
+        // or a store that fails then returns before anything is written or
+        // acknowledged, so the device stays as it was and the phone's
+        // retransmission opens again; the other order would spend the
+        // generation on a provisioning that never landed, and every retry
+        // would be refused as a replay. Opening it in this session is the
+        // whole authorization, and the sealing member is bound to the frame's
+        // sender first, as for any message.
+        let provisioned = match &received {
+            ReceivedMessage::ApplicationMessage(app) => {
+                match app
+                    .data()
+                    .strip_prefix(prefixes::MEMBER_PROVISION.as_bytes())
+                {
+                    Some(body) => {
+                        self.bind_sender_credential(&group, app.sender_index, sender)?;
+                        let body = core::str::from_utf8(body).map_err(|_| {
+                            LeafError::MalformedFrame(String::from(
+                                "membership provisioning is not text",
+                            ))
+                        })?;
+                        Some(self.store_provision(body)?)
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+
         let epoch = group.current_epoch();
         group
             .write_to_storage()
             .map_err(|e| LeafError::Storage(format!("cannot persist group state: {e:?}")))?;
+
+        if let Some(provisioned) = provisioned {
+            return self.install_provision(provisioned, sender, now_unix_secs);
+        }
 
         let events = match received {
             ReceivedMessage::ApplicationMessage(app) => {
@@ -907,7 +991,7 @@ impl LeafDevice {
         let mut ack = frames::build(
             &self.store,
             &self.identity,
-            &self.app_id,
+            &self.wire_app_id(),
             sender,
             String::from(prefixes::SESSION_CONFIRM_ACK),
             now_unix_secs,
@@ -1391,7 +1475,7 @@ impl LeafDevice {
             outbound: alloc::vec![frames::acknowledge(
                 &self.store,
                 &self.identity,
-                &self.app_id,
+                &self.wire_app_id(),
                 message,
                 now_unix_secs,
             )?],
@@ -1440,7 +1524,7 @@ impl LeafDevice {
         let ack = frames::acknowledge(
             &self.store,
             &self.identity,
-            &self.app_id,
+            &self.wire_app_id(),
             message,
             now_unix_secs,
         )?;
@@ -1546,7 +1630,7 @@ impl core::fmt::Debug for LeafDevice {
 /// Surfaced rather than swallowed so a bench can tell "refused" from "silently
 /// dropped", which are the two states a pairing failure looks like from
 /// outside a device with no console.
-fn ignored(reason: &str) -> Handled {
+pub(crate) fn ignored(reason: &str) -> Handled {
     Handled {
         outbound: Vec::new(),
         events: vec![LeafEvent::Ignored {

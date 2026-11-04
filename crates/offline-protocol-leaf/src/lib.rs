@@ -85,6 +85,18 @@
 //! involved; see [`LeafDevice`] for that argument and for what a replayed
 //! control frame can still do.
 //!
+//! # Application membership
+//!
+//! An application that configures a publisher key makes its users visible
+//! only to each other (ADR 0037). A device takes part once its paired phone
+//! provisions it inside their session: it stores the publisher key and its
+//! certificate before acknowledging, reports
+//! [`LeafEvent::MembershipProvisioned`], stamps the constant wire `app_id`
+//! from then on, and runs the `__MEMBER__` exchange with every neighbour
+//! firmware reports through [`LeafDevice::neighbor_discovered`]. It reads no
+//! clock for this either: certificates are checked against the latest time
+//! it was supplied. A device nobody provisions behaves as it did before.
+//!
 //! # Bare metal
 //!
 //! Builds with `--no-default-features` for a target with no `std`, which is
@@ -120,6 +132,7 @@ mod error;
 mod frames;
 mod identity;
 mod keypkg;
+mod membership;
 mod shared;
 pub mod store;
 

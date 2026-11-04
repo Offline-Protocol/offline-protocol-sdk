@@ -31,7 +31,8 @@
 //! Two payloads exist: the older one, which binds the sender, the id, the
 //! recipient and the content, and the freshness-bound one, which additionally
 //! binds the frame's timestamp. A leaf verifies the freshness-bound payload on
-//! every control frame, and the older one on exactly one: `__MLS_KEY_PKG__`.
+//! every control frame, and the older one on exactly two: `__MLS_KEY_PKG__`,
+//! and `__MEMBER__` (the last paragraph says why that one).
 //!
 //! The exception is required rather than permitted, and the reason is not that
 //! some phones are old. A sender builds the freshness-bound payload for a
@@ -58,6 +59,15 @@
 //! hint data everywhere else. The frame's age is not judged either, because
 //! the older payload leaves the timestamp outside the signature and judging it
 //! would be judging a number an attacker chose.
+//!
+//! `__MEMBER__`, the application membership exchange (ADR 0037), is the
+//! other frame admitted under the older payload, for the same first-contact
+//! reason: it runs with every neighbour, most of which never paired with
+//! this device and so never learned it verifies the newer one. Refusing it
+//! would make a provisioned device invisible to every member it did not pair
+//! with. It costs nothing either: the exchange's freshness is in its own
+//! nonces, a replayed hello is never answered twice, and a replayed response
+//! names a nonce this device no longer holds.
 //!
 //! Every other control frame a leaf accepts is refused under the older
 //! payload, and none of them needs it: a Welcome and a confirmation probe can
@@ -292,11 +302,11 @@ pub(crate) enum ControlPayload {
 ///
 /// Named rather than passed as a bare flag, because the call site is where
 /// this has to be readable: [`Admitted`](UndatedPayload::Admitted) appears
-/// once in this crate and every other control frame refuses it.
+/// twice in this crate and every other control frame refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UndatedPayload {
-    /// `__MLS_KEY_PKG__` alone, where the older payload is required rather
-    /// than tolerated.
+    /// `__MLS_KEY_PKG__` and `__MEMBER__`, where the older payload is
+    /// required rather than tolerated.
     Admitted,
     /// Every other control frame a leaf accepts.
     Refused,

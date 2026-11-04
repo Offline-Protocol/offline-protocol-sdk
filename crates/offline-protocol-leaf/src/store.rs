@@ -62,6 +62,13 @@ pub const KEY_TYPE_PEER: &str = "peer";
 /// this seam offers no way to enumerate what is in it, and a bound nobody can
 /// count is not a bound.
 pub const KEY_TYPE_PEER_INDEX: &str = "peer_index";
+/// Key type for the application membership a paired phone provisioned
+/// (ADR 0037): the publisher key, this device's certificate and the latest
+/// time it was supplied.
+///
+/// One entry, written before the provisioning frame is acknowledged, so an
+/// acknowledged provisioning survives a power cut.
+pub const KEY_TYPE_MEMBERSHIP: &str = "membership";
 
 /// What a store can fail with.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
