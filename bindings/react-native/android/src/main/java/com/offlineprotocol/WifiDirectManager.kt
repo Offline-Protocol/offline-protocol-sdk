@@ -426,14 +426,23 @@ class WifiDirectManager(
         // never formed a group again. The channel, receiver and discovery a
         // partial start brought up are undone by [stopUnsafe], which accepts
         // STARTING.
+        //
+        // [stopUnsafe] runs first and the listener is closed after it. Once
+        // [startServerSocket] has run, the accept task may be in accept():
+        // closing the socket while `serverRunning` is still true makes it
+        // report an "Error accepting connection" that never happened, and
+        // [stopUnsafe] clears the flag before it closes the socket. The close
+        // below covers a throw before the socket was published, and a
+        // [stopUnsafe] that itself throws, which is why it is in `finally`.
         try {
             startBound(p2p, listener)
         } catch (e: Throwable) {
-            try { listener.socket.close() } catch (_: IOException) {}
             try {
                 stopUnsafe()
             } catch (cleanup: Throwable) {
                 e.addSuppressed(cleanup)
+            } finally {
+                try { listener.socket.close() } catch (_: IOException) {}
             }
             throw e
         }
@@ -503,7 +512,10 @@ class WifiDirectManager(
         p2pUp = p2p
         reportLayer()
 
-        lan = LanPeerDiscovery(
+        // Assigned before it starts, so a throw from start() leaves it where
+        // the unwind in [startUnsafe] can stop it; `.also { it.start() }`
+        // assigned only after start() returned.
+        val discovery = LanPeerDiscovery(
             context = context,
             handler = transportHandler,
             executor = socketExecutor,
@@ -513,7 +525,9 @@ class WifiDirectManager(
             running = { state == TransportState.RUNNING },
             networkChanged = ::lanNetworkChanged,
             diagnostic = ::emitDiagnostic,
-        ).also { it.start() }
+        )
+        lan = discovery
+        discovery.start()
         sockets.onLost = { address ->
             transportHandler.post {
                 lan?.peerLost(address)
