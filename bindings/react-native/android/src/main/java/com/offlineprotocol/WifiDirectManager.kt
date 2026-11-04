@@ -94,7 +94,6 @@ class WifiDirectManager(
         // via onMessagesAvailable(); this timer only catches edge cases.
         private const val MESSAGE_POLL_INTERVAL_MS = 2000L
         private const val CONNECTION_TIMEOUT_MS = 30000L
-        private const val SERVER_PORT = 8988
         // Name of the private looper this manager confines itself to. Shared
         // process-wide under this key, so a manager rebuilt after stop()
         // inherits the same ordered queue.
@@ -173,12 +172,15 @@ class WifiDirectManager(
     private val socketExecutor = Executors.newCachedThreadPool()
     
     // Server socket for receiving connections. Volatile because it crosses
-    // two threads with no lock: the socket executor binds and publishes it,
-    // and stopServerSocket() closes and nulls it from the transport thread —
+    // two threads with no lock: start() binds and publishes it, the socket
+    // executor accepts on it, and stopServerSocket() closes and nulls it —
     // the close is what unblocks a parked accept(), so a stale read there
     // skips the one call that ends the loop early.
     @Volatile private var serverSocket: ServerSocket? = null
     private var serverRunning = AtomicBoolean(false)
+    // Whether the listener holds the port a group's clients dial. Written at
+    // start, read by formation on the transport thread.
+    private var ownsGroupPort = false
     
     // Every socket from its first byte to its end: the preamble, the framing,
     // one announced stream per address, the writers. This manager owns the
@@ -448,8 +450,12 @@ class WifiDirectManager(
         // Start peer discovery
         startPeerDiscovery()
 
-        // Start server socket
-        startServerSocket()
+        // Start server socket. Bound here, before the LAN advert below,
+        // because the record carries the port it got. A bind is a local call
+        // with no network round trip, so it may run on the transport thread.
+        val listener = PeerStreamListener.bind()
+            ?: throw TransportException.StartFailed("no port to listen for peer streams on")
+        startServerSocket(listener)
 
         updateState(TransportState.RUNNING)
 
@@ -464,7 +470,7 @@ class WifiDirectManager(
             handler = transportHandler,
             executor = socketExecutor,
             sockets = sockets,
-            port = SERVER_PORT,
+            port = listener.socket.localPort,
             localAddress = ::localAddressOrNull,
             running = { state == TransportState.RUNNING },
             networkChanged = ::lanNetworkChanged,
@@ -1074,6 +1080,7 @@ class WifiDirectManager(
                 ownerProbeDue = now - lastJoinAtMs >=
                     WifiDirectGroupFormation.probePeriodMs(failedProbes),
                 joinFirst = joinFirstRemaining > 0,
+                canOwn = ownsGroupPort,
             ),
             adverts.values,
         )
@@ -1305,24 +1312,23 @@ class WifiDirectManager(
 
     // MARK: - Socket Operations
 
-    private fun startServerSocket() {
+    private fun startServerSocket(listener: PeerStreamListener.Bound) {
         serverRunning.set(true)
-        
+        val server = listener.socket
+        serverSocket = server
+        ownsGroupPort = listener.ownsGroupPort
+
         socketExecutor.execute {
-            // Held locally as well as published, so the finally closes exactly
-            // the socket this task bound. A stop() can land before the bind
-            // publishes: it clears serverRunning, closes a still-null field
-            // and nulls it — then the bind completes, the loop guard reads
-            // false and exits immediately, and without the finally the
-            // freshly bound socket would leak with port 8988 still held,
-            // failing the next start() with BindException.
-            var server: ServerSocket? = null
+            // The finally closes exactly the socket this task was handed,
+            // whichever way the loop ends: a stop() that lands before the loop
+            // starts closes it too, and one leaked would hold the port and
+            // fail the next start() with BindException.
             try {
-                server = ServerSocket(SERVER_PORT)
                 server.soTimeout = SOCKET_TIMEOUT_MS
-                serverSocket = server
-                
-                emitDiagnostic("info", "Server socket started on port $SERVER_PORT")
+
+                emitDiagnostic("info", "Server socket started on port ${server.localPort}", mapOf(
+                    "ownsGroupPort" to listener.ownsGroupPort,
+                ))
                 
                 // `serverRunning` alone is the wrong question, because it is
                 // process state and this loop is asking about *its* socket. A
@@ -1352,7 +1358,7 @@ class WifiDirectManager(
                     "error" to (e.message ?: "unknown")
                 ))
             } finally {
-                try { server?.close() } catch (_: Exception) {}
+                try { server.close() } catch (_: Exception) {}
             }
         }
     }
@@ -1388,7 +1394,10 @@ class WifiDirectManager(
             try {
                 val socket = Socket()
                 try {
-                    socket.connect(InetSocketAddress(address, SERVER_PORT), CONNECTION_TIMEOUT_MS.toInt())
+                    socket.connect(
+                        InetSocketAddress(address, PeerStreamListener.GROUP_OWNER_PORT),
+                        CONNECTION_TIMEOUT_MS.toInt(),
+                    )
                 } catch (e: Exception) {
                     try { socket.close() } catch (_: Exception) {}
                     emitDiagnostic("error", "Failed to connect to group owner", mapOf(
