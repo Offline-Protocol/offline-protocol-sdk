@@ -97,7 +97,7 @@ pub use keypackage::{
     MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1, SVC_SUB_V1,
 };
 pub use membership::{
-    MemberCert, MemberCredential, MemberFrame, MemberHello, MemberProof, ProofKind,
+    MemberCert, MemberCredential, MemberFrame, MemberHello, MemberProof, MemberProvision, ProofKind,
 };
 
 #[cfg(all(test, feature = "std"))]

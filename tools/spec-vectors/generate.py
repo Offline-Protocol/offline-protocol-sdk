@@ -1818,6 +1818,18 @@ def build_app_membership_vectors() -> dict:
     )
     proof_salt = bytes([0x5A]) * 16
 
+    # The provisioning body a phone seals to a paired leaf: kind 3, which no
+    # __MEMBER__ step is, then the publisher key, the leaf's certificate and
+    # the phone's clock.
+    supplied_time = 1_790_000_000
+    provision_raw = (
+        bytes([1, 3]) + publisher_pk + cert + supplied_time.to_bytes(8, "big")
+    )
+    provision_body = base64.b64encode(provision_raw).decode("ascii")
+
+    def provision_reject(raw: bytes) -> str:
+        return base64.b64encode(raw).decode("ascii")
+
     return {
         "_comment": [
             "Frozen conformance vectors for application membership, from",
@@ -1901,6 +1913,22 @@ def build_app_membership_vectors() -> dict:
             {"name": "hello_short", "body": base64.b64encode(bytes([1, 1]) + bytes(31)).decode()},
             {"name": "hello_size_as_response", "body": base64.b64encode(bytes([1, 2]) + bytes(32)).decode()},
             {"name": "response_long", "body": base64.b64encode(bytes([1, 2]) + bytes(174)).decode()},
+            {"name": "empty", "body": ""},
+        ],
+        "provision": {
+            "note": "The plaintext of a sealed message inside the paired 1:1 "
+            "session, after the __MEMBER_PROVISION__ prefix: version 1, kind 3, "
+            "publisher key, the leaf's certificate, the phone's clock.",
+            "publisher_public_key_hex": publisher_pk.hex(),
+            "certificate_hex": cert.hex(),
+            "supplied_time": supplied_time,
+            "body": provision_body,
+        },
+        "provision_rejects": [
+            {"name": "version_2", "body": provision_reject(bytes([2]) + provision_raw[1:])},
+            {"name": "kind_1", "body": provision_reject(bytes([1, 1]) + provision_raw[2:])},
+            {"name": "short", "body": provision_reject(provision_raw[:-1])},
+            {"name": "long", "body": provision_reject(provision_raw + b"\x00")},
             {"name": "empty", "body": ""},
         ],
     }

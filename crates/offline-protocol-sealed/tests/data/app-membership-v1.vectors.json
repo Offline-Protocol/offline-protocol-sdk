@@ -96,5 +96,34 @@
       "name": "empty",
       "body": ""
     }
+  ],
+  "provision": {
+    "note": "The plaintext of a sealed message inside the paired 1:1 session, after the __MEMBER_PROVISION__ prefix: version 1, kind 3, publisher key, the leaf's certificate, the phone's clock.",
+    "publisher_public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "certificate_hex": "0139f713d0a644253f04529421b9f51b9b08979d08000000006b49d200000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "supplied_time": 1790000000,
+    "body": "AQPXWpgBgrEKt9VL/tPJZAc6DuFy89qmIyWvAhpo9wdRGgE59xPQpkQlPwRSlCG59RubCJedCAAAAABrSdIAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+PwAAAABqsTuA"
+  },
+  "provision_rejects": [
+    {
+      "name": "version_2",
+      "body": "AgPXWpgBgrEKt9VL/tPJZAc6DuFy89qmIyWvAhpo9wdRGgE59xPQpkQlPwRSlCG59RubCJedCAAAAABrSdIAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+PwAAAABqsTuA"
+    },
+    {
+      "name": "kind_1",
+      "body": "AQHXWpgBgrEKt9VL/tPJZAc6DuFy89qmIyWvAhpo9wdRGgE59xPQpkQlPwRSlCG59RubCJedCAAAAABrSdIAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+PwAAAABqsTuA"
+    },
+    {
+      "name": "short",
+      "body": "AQPXWpgBgrEKt9VL/tPJZAc6DuFy89qmIyWvAhpo9wdRGgE59xPQpkQlPwRSlCG59RubCJedCAAAAABrSdIAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+PwAAAABqsTs="
+    },
+    {
+      "name": "long",
+      "body": "AQPXWpgBgrEKt9VL/tPJZAc6DuFy89qmIyWvAhpo9wdRGgE59xPQpkQlPwRSlCG59RubCJedCAAAAABrSdIAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+PwAAAABqsTuAAA=="
+    },
+    {
+      "name": "empty",
+      "body": ""
+    }
   ]
 }

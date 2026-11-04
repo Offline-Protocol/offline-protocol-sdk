@@ -45,6 +45,7 @@
 //! [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
 //! [spec]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/control-messages.md#application-membership
 
+use crate::derive::ED25519_PUBLIC_KEY_LEN;
 use crate::identity_assertion::ED25519_SIGNATURE_LEN;
 use crate::{Result, SealedError};
 use alloc::format;
@@ -133,6 +134,28 @@ pub const MEMBER_FRAME_VERSION: u8 = 1;
 
 const STEP_HELLO: u8 = 1;
 const STEP_RESPONSE: u8 = 2;
+/// The kind byte of a provisioning body. No `__MEMBER__` step is 3, so
+/// neither parser reads the other's body: a provisioning body handed to
+/// [`MemberFrame::parse`] is an unknown step, and a membership frame handed
+/// to [`MemberProvision::parse`] is the wrong kind.
+const KIND_PROVISION: u8 = 3;
+
+/// The wire `app_id` every frame of a node holding a membership
+/// certificate carries, whatever application it runs.
+///
+/// The real id is not on the wire, because an id in the clear groups every
+/// user of one application for anyone listening (ADR 0037, "Nothing in the
+/// clear"). One constant, here, so the engine and a leaf stamp the same
+/// string: two spellings would split configured nodes into two groups by
+/// the very field this exists to blank.
+pub const CONFIGURED_WIRE_APP_ID: &str = "offline";
+
+/// The version byte a provisioning body begins with.
+pub const MEMBER_PROVISION_VERSION: u8 = 1;
+
+/// Length of a provisioning payload: publisher key, certificate, supplied
+/// time.
+pub const MEMBER_PROVISION_LEN: usize = ED25519_PUBLIC_KEY_LEN + MEMBER_CERT_LEN + 8;
 
 fn invalid(what: &str) -> SealedError {
     SealedError::Deserialization(format!("membership: {what}"))
@@ -533,6 +556,90 @@ impl MemberProof {
     }
 }
 
+/// What a phone hands a paired leaf so the leaf can run the exchange: the
+/// publisher key, the leaf's own certificate, and the time.
+///
+/// Carried as the plaintext of an ordinary sealed message inside the 1:1
+/// session, never as a frame of its own, so only the peer holding that
+/// session can provision the device. The leaf stores it durably before it
+/// acknowledges the message ([`prefixes::MEMBER_PROVISION`]).
+///
+/// `supplied_time` is the phone's clock in Unix seconds. A leaf reads no
+/// clock, so it checks every certificate's `not_after`, its own and its
+/// neighbours', against the latest time it was supplied. That bounds
+/// freshness after a long gap and is not authentication.
+///
+/// Holding one proves nothing either: the receiver owes the check that the
+/// certificate names its own address and verifies under `publisher_key`.
+///
+/// [`prefixes::MEMBER_PROVISION`]: crate::prefixes::MEMBER_PROVISION
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberProvision {
+    /// The application's publisher Ed25519 public key, the input keying
+    /// material of `K_app`.
+    pub publisher_key: [u8; ED25519_PUBLIC_KEY_LEN],
+    /// The receiving leaf's certificate.
+    pub cert: MemberCert,
+    /// The sender's clock, Unix seconds.
+    pub supplied_time: u64,
+}
+
+impl MemberProvision {
+    /// The body, the text after the prefix: base64 (standard, padded) of
+    /// `version(1) || kind(1) = 3 || publisher_key(32) || cert(93) ||
+    /// u64be(supplied_time)`.
+    pub fn to_body(&self) -> String {
+        let mut raw = Vec::with_capacity(2 + MEMBER_PROVISION_LEN);
+        raw.push(MEMBER_PROVISION_VERSION);
+        raw.push(KIND_PROVISION);
+        raw.extend_from_slice(&self.publisher_key);
+        raw.extend_from_slice(&self.cert.to_bytes());
+        raw.extend_from_slice(&self.supplied_time.to_be_bytes());
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw)
+    }
+
+    /// Reads a body.
+    ///
+    /// # Errors
+    ///
+    /// [`SealedError::Deserialization`] for a body that is not base64, an
+    /// unknown version or kind, a payload not exactly
+    /// [`MEMBER_PROVISION_LEN`] bytes, or a certificate
+    /// [`MemberCert::from_bytes`] refuses. The encoded length is checked
+    /// before decoding, so an oversized body costs no allocation.
+    pub fn parse(body: &str) -> Result<Self> {
+        const MAX_BODY: usize = (2 + MEMBER_PROVISION_LEN).div_ceil(3) * 4;
+        if body.len() > MAX_BODY {
+            return Err(invalid("provisioning body too long"));
+        }
+        let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body)
+            .map_err(|_| invalid("provisioning body is not base64"))?;
+        let [version, kind, payload @ ..] = raw.as_slice() else {
+            return Err(invalid("provisioning body too short"));
+        };
+        if *version != MEMBER_PROVISION_VERSION {
+            return Err(invalid("provisioning version"));
+        }
+        if *kind != KIND_PROVISION {
+            return Err(invalid("provisioning kind"));
+        }
+        if payload.len() != MEMBER_PROVISION_LEN {
+            return Err(invalid("provisioning payload length"));
+        }
+        let mut publisher_key = [0u8; ED25519_PUBLIC_KEY_LEN];
+        publisher_key.copy_from_slice(&payload[..ED25519_PUBLIC_KEY_LEN]);
+        let cert_end = ED25519_PUBLIC_KEY_LEN + MEMBER_CERT_LEN;
+        let cert = MemberCert::from_bytes(&payload[ED25519_PUBLIC_KEY_LEN..cert_end])?;
+        let mut supplied_time = [0u8; 8];
+        supplied_time.copy_from_slice(&payload[cert_end..]);
+        Ok(Self {
+            publisher_key,
+            cert,
+            supplied_time: u64::from_be_bytes(supplied_time),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,6 +814,80 @@ mod tests {
         assert!(e2e_proof_signing_payload(Some(&b), ProofKind::DiscoveryQuery, b"q").is_err());
     }
 
+    fn provision() -> MemberProvision {
+        MemberProvision {
+            publisher_key: [6; ED25519_PUBLIC_KEY_LEN],
+            cert: MemberCert {
+                address: addr(4),
+                not_after: 1_800_000_000,
+                signature: [7; ED25519_SIGNATURE_LEN],
+            },
+            supplied_time: 1_790_000_000,
+        }
+    }
+
+    #[test]
+    fn a_provisioning_body_round_trips_at_its_one_size() {
+        assert_eq!(MEMBER_PROVISION_LEN, 133);
+        let body = provision().to_body();
+        assert_eq!(MemberProvision::parse(&body), Ok(provision()));
+    }
+
+    #[test]
+    fn a_provisioning_body_of_any_other_shape_is_refused() {
+        let encode =
+            |raw: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw);
+        let good = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            provision().to_body(),
+        )
+        .unwrap();
+        let mut short = good.clone();
+        short.pop();
+        let mut long = good.clone();
+        long.push(0);
+        let mut wrong_version = good.clone();
+        wrong_version[0] = 2;
+        let mut wrong_kind = good.clone();
+        wrong_kind[1] = STEP_HELLO;
+        let mut versionless_cert = good.clone();
+        versionless_cert[2 + ED25519_PUBLIC_KEY_LEN] = 0;
+        for (name, raw) in [
+            ("short", short),
+            ("long", long),
+            ("version", wrong_version),
+            ("a membership step as the kind", wrong_kind),
+            ("a certificate address with no version", versionless_cert),
+            ("empty", vec![]),
+        ] {
+            assert!(MemberProvision::parse(&encode(&raw)).is_err(), "{name}");
+        }
+        assert!(MemberProvision::parse("not base64!").is_err());
+        assert!(MemberProvision::parse(&"A".repeat(1024)).is_err());
+    }
+
+    /// Neither parser reads the other's body, so a provisioning body that
+    /// reached the exchange, or a hello that reached a leaf's provisioning
+    /// path, is refused rather than read as something it is not.
+    #[test]
+    fn a_provisioning_body_and_a_membership_frame_never_parse_as_each_other() {
+        assert!(MemberFrame::parse(&provision().to_body()).is_err());
+        let hello = MemberFrame::Hello(MemberHello {
+            nonce: [1; MEMBER_NONCE_LEN],
+            tag: [2; MEMBER_TAG_LEN],
+        });
+        let response = MemberFrame::Response([3; MEMBER_SEALED_LEN]);
+        for frame in [hello, response] {
+            assert!(MemberProvision::parse(&frame.to_body()).is_err());
+        }
+    }
+
+    #[test]
+    fn the_configured_wire_app_id_is_pinned() {
+        assert_eq!(CONFIGURED_WIRE_APP_ID, "offline");
+        assert!(offline_protocol_core::AppId::new(CONFIGURED_WIRE_APP_ID).is_ok());
+    }
+
     /// A proof for one kind of frame must not verify as another over the same
     /// bytes: a key package's proof replayed onto a Welcome.
     #[test]
@@ -796,6 +977,7 @@ mod vectors {
             "hello",
             "exchange",
             "proof",
+            "provision",
         ] {
             assert!(v[block].is_object(), "{block} is present");
         }
@@ -954,6 +1136,45 @@ mod vectors {
         let proof = MemberProof::from_bytes(&bytes).expect("a proof");
         assert_eq!(proof.salt.to_vec(), salt);
         assert_eq!(proof.to_bytes().to_vec(), bytes);
+    }
+
+    #[test]
+    fn the_provisioning_body_matches() {
+        let v = vectors();
+        let p = &v["provision"];
+        assert_eq!(
+            field(p, &["publisher_public_key_hex"]),
+            field(&v, &["app_key", "publisher_public_key_hex"])
+        );
+        let cert_bytes = unhex(field(p, &["certificate_hex"]));
+        assert_eq!(hex(&cert_bytes), field(&v, &["certificate", "bytes_hex"]));
+        let provision = MemberProvision {
+            publisher_key: array(&unhex(field(p, &["publisher_public_key_hex"]))),
+            cert: MemberCert::from_bytes(&cert_bytes).expect("a certificate"),
+            supplied_time: p["supplied_time"].as_u64().expect("supplied_time"),
+        };
+        assert_eq!(provision.to_body(), field(p, &["body"]));
+        assert_eq!(MemberProvision::parse(field(p, &["body"])), Ok(provision));
+        assert!(
+            MemberFrame::parse(field(p, &["body"])).is_err(),
+            "a provisioning body is never a membership frame"
+        );
+    }
+
+    #[test]
+    fn every_rejected_provisioning_body_is_refused() {
+        let v = vectors();
+        let rejects = v["provision_rejects"]
+            .as_array()
+            .expect("provision_rejects");
+        assert_eq!(rejects.len(), 5);
+        for case in rejects {
+            let name = field(case, &["name"]);
+            assert!(
+                MemberProvision::parse(field(case, &["body"])).is_err(),
+                "[{name}] parsed"
+            );
+        }
     }
 
     #[test]

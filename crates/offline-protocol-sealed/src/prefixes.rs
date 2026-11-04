@@ -1,12 +1,13 @@
 //! The control-frame prefixes a 1:1 sealed conversation is carried on.
 //!
-//! A frame's type is the reserved prefix its content begins with. The seven
+//! A frame's type is the reserved prefix its content begins with. The eight
 //! here are the ones both ends of a pair speak: everything needed to
 //! establish a session, carry sealed payloads over it, and confirm it came
 //! up, and the membership exchange a leaf with a certificate runs like any
-//! other node. They live in this crate because a leaf node emits and parses them
-//! with a different MLS implementation than the engine, and two ends that
-//! disagree about a prefix byte do not have a conversation at all.
+//! other node, with the in-session frame that gives it the certificate. They
+//! live in this crate because a leaf node emits and parses them with a
+//! different MLS implementation than the engine, and two ends that disagree
+//! about a prefix byte do not have a conversation at all.
 //!
 //! # What is not here
 //!
@@ -70,6 +71,18 @@ pub const SESSION_CONFIRM_ENCRYPTED: &str = "__MLS_ENC_CONFIRM__";
 /// [`MemberFrame`]: crate::MemberFrame
 pub const MEMBER: &str = "__MEMBER__";
 
+/// Carries a [`MemberProvision`]: a phone handing its paired leaf the
+/// publisher key, the leaf's certificate and the time.
+///
+/// Travels **inside** an [`ENCRYPTED`] envelope of the pair's 1:1 session and
+/// never on the wire as a frame of its own, like
+/// [`SESSION_CONFIRM_ENCRYPTED`]. Being inside the session is the whole
+/// authorization: only the peer that holds it can provision the device. A
+/// node that finds it anywhere else consumes it and acts on nothing.
+///
+/// [`MemberProvision`]: crate::membership::MemberProvision
+pub const MEMBER_PROVISION: &str = "__MEMBER_PROVISION__";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +103,7 @@ mod tests {
         assert_eq!(SESSION_CONFIRM_ACK, "__MLS_CONFIRM_ACK__");
         assert_eq!(SESSION_CONFIRM_ENCRYPTED, "__MLS_ENC_CONFIRM__");
         assert_eq!(MEMBER, "__MEMBER__");
+        assert_eq!(MEMBER_PROVISION, "__MEMBER_PROVISION__");
     }
 
     /// No prefix may be a prefix of another.
@@ -109,6 +123,7 @@ mod tests {
             SESSION_CONFIRM_ACK,
             SESSION_CONFIRM_ENCRYPTED,
             MEMBER,
+            MEMBER_PROVISION,
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
