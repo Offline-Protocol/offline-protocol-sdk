@@ -1,5 +1,6 @@
 //! Configuration accessors, diagnostics, and service registration.
 
+use super::membership::MembershipKeys;
 use super::mesh_relay::{MeshRelayConfig, MeshRelayStats};
 use super::{
     lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState, KNOWN_PEER_TTL_SECS,
@@ -440,15 +441,36 @@ impl OfflineProtocol {
     /// originator, and each device in between forwards the response on to it
     /// (`offline_protocol_services`), so discovery reaches as far as the query
     /// was gossiped.
+    ///
+    /// With `ProtocolConfig::app_publisher_key` set the query follows the
+    /// configured node's rules (ADR 0037, "Service discovery"): it goes to
+    /// the mesh neighbours only, never to `known_peers` (which membership
+    /// makes an admitted set), its `service_id` travels sealed under the
+    /// application key with a membership proof, and only a provider of the
+    /// same application that proves its membership is reported.
     pub fn discover_services(&mut self, service_id: Option<&str>) -> Result<String> {
         // Service discovery messages are internal control messages (not user
         // content), so they are exempt from require_encryption.
 
-        let peers: Vec<String> = self.known_peers.keys().cloned().collect();
-        let result = self
-            .mesh_services
-            .discover_services(&self.local_id, &peers, service_id)
-            .map_err(Error::Service)?;
+        let result = if self.membership_configured() {
+            let peers: Vec<String> = self
+                .transport_manager
+                .mesh_neighbors()
+                .into_iter()
+                .map(|neighbour| neighbour.peer_id)
+                .collect();
+            let keys =
+                MembershipKeys::new(&self.membership, self.mls_manager.as_ref(), &self.local_id);
+            self.mesh_services
+                .discover_services_sealed(&self.local_id, &peers, service_id, &keys)
+                .map_err(Error::Service)?
+        } else {
+            let peers: Vec<String> = self.known_peers.keys().cloned().collect();
+            self.mesh_services
+                .discover_services(&self.local_id, &peers, service_id)
+                .map_err(Error::Service)?
+        };
+        let total = result.messages.len();
         let mut send_failures = 0usize;
         for msg in result.messages {
             if self
@@ -461,8 +483,7 @@ impl OfflineProtocol {
         if send_failures > 0 {
             warn!(
                 failures = send_failures,
-                total = peers.len(),
-                "Some discovery broadcasts failed to send"
+                total, "Some discovery broadcasts failed to send"
             );
         }
         Ok(result.query_id)

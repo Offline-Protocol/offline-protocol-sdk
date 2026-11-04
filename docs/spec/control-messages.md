@@ -208,7 +208,11 @@ eight spellings above name the frames currently in it. None of the eight is a
 prefix of another, so a `starts_with` test names exactly one frame.
 
 They are signature-gated like any control frame, and they are **exempt from the
-encryption requirement**. Discovery gossip is always sent in cleartext.
+encryption requirement**. Discovery gossip is always a signed plaintext frame,
+never an MLS envelope. On a node whose application configured a publisher key,
+every field but the routing ones travels sealed under the application key
+inside that frame ([Application membership](#application-membership)); on any
+other node the whole payload is cleartext.
 
 `__SVC_REQ__` and `__SVC_RESP__` MAY instead travel inside `__MLS_ENC__`
 toward a peer that advertised `svc_versions` entry 1
@@ -421,7 +425,11 @@ identity key. A pass makes the sender visible until `not_after`.
 opens a session across the mesh, under the key `__member_proof`, base64
 (standard, padded). It rides in the metadata rather than inside the payload so
 that `frame_body` is the payload exactly as it travels, the frame's content
-after its prefix, and no verifier re-serialises anything to hash it. The
+after its prefix, and no verifier re-serialises anything to hash it. A
+discovery query and response are the exception: every forwarder builds a new
+frame, so frame metadata does not survive a hop, and the proof travels in the
+payload's `member_proof` field instead, over a body built from the fields no
+hop rewrites ("Service discovery on a configured node", below). The
 metadata is outside the control signature, which costs nothing: the proof
 signs the recipient, the kind and the body itself, so stripping it fails
 closed and moving it onto another frame fails to verify. Every key package,
@@ -447,7 +455,8 @@ The key label and the signing domain differ, so no byte string is both an HKDF
 | 4 | Service discovery query | 21 zero bytes: gossip names no single recipient, and the query is bound through its body, which carries `query_id` and `originator`. No address payload is all zero, since the version byte is never zero |
 | 5 | Service discovery response | The query originator's address payload |
 
-`frame_body` is the frame's content after its prefix, byte for byte. The
+For kinds 1 to 3, `frame_body` is the frame's content after its prefix, byte
+for byte. For kinds 4 and 5 it is the discovery bound body below. The
 salt is fresh per proof because `K_app` is shared by every install of the
 application, and a fixed key with a fixed nonce would repeat across installs.
 
@@ -457,7 +466,86 @@ address against the party the frame speaks for**: the frame's sender for kinds
 1, 2, 3 and 5, and the body's `originator` for kind 4, since a discovery query
 reaches a provider through gossip and its direct sender is any relay. Without
 that check a member's proof, recorded once, would carry any other node's frame
-of the same kind and body hash.
+of the same kind and body hash. For kinds 1 to 3 the identity key is the one
+that signed the frame, which the control-plane gate already bound to the
+sender. For kinds 4 and 5 it travels inside the sealed body, and the verifier
+checks that it derives to the address the proof speaks for.
+
+**Service discovery on a configured node.** Discovery is gossip and so is
+carriage, and a node whose application configured a publisher key runs it
+under four rules
+([ADR 0037](../adr/0037-an-applications-users-are-visible-only-to-that-application.md#service-discovery)).
+A node with no publisher key runs it exactly as before: its frames carry none
+of the fields below, and it reads them only to carry them on.
+
+1. *Fan-out never reads membership.* A configured node sends a query it
+   originates, and forwards a query it receives, to its mesh neighbours (the
+   peer-to-peer carriers' links) and to nothing else, never to its known
+   peers. It forwards every query within its hop budget, and relays every
+   response toward its originator, whether or not the sender is admitted,
+   the body opened, the proof verified or a service matched. It acknowledges
+   a query, and a response on its way to someone else, whoever sent it: that
+   acknowledgement is carriage, and one given only to admitted senders would
+   mark a node's fellow members on the link.
+2. *The body is sealed under the application key.* The cleartext payload
+   keeps `query_id`, `originator` and (in a query) `remaining_hops`. Its
+   `service_id` holds the sentinel `__sealed`, which names no service: a
+   service id may not begin with `__`, so no provider can register it, and an
+   unconfigured provider matches nothing against it. The field is not left
+   out, because an absent `service_id` asks an unconfigured provider for
+   every service. In a response `version` and `provider_peer_id` are empty,
+   `capabilities` is empty and `hop_count` is 0. The real fields travel in
+   `sealed`, base64 (standard, padded) of
+
+   ```
+   salt  = random(16)
+   k     = HKDF(ikm = K_app, salt, info = "offline-app-svc-v1")
+   sealed = salt || ChaCha20-Poly1305(k, nonce = 0, aad = empty, plaintext)
+   ```
+
+   where the plaintext is UTF-8 JSON: for a query
+   `{"issued_at": <unix seconds>, "identity_key": <base64 of the originator's
+   Ed25519 identity key>, "service_id"?: <the service asked for, absent for
+   every service>}`, and for a response `{"provider": <the provider's
+   address>, "identity_key": <base64 of its identity key>, "service_id",
+   "version", "capabilities", "hop_count"}`. A node that cannot open the body
+   forwards the frame unchanged but for the hop budget and answers nothing.
+3. *Both ends prove membership.* Each frame carries `member_proof`, base64 of
+   a proof of kind 4 (query) or 5 (response, bound to the originator), whose
+   `frame_body` is the **discovery bound body**:
+
+   ```
+   u16be(len(query_id)) || query_id || originator(21) || salt || ciphertext
+   ```
+
+   with `originator` its address payload and the last two fields the bytes
+   `sealed` decodes to. These are the fields no hop rewrites; the hop budget
+   is not bound. A provider answers only a query whose proof verifies
+   against `originator`. An originator reports `ServiceDiscovered` only for a
+   response that names it as `originator`, whose sealed `provider` is the
+   frame's sender, and whose proof verifies against that provider. A
+   configured node with no certificate sends 189 random bytes in
+   `member_proof`, so whether it holds one does not show to a carrier.
+4. *A provider answers the originator, once, while the query is fresh.* The
+   response is an ordinary signed unicast addressed to `originator`, not to
+   the query's direct sender. The provider answers only while
+   `|now - issued_at|` is at most the discovery query lifetime, 60 seconds,
+   which is no longer than the query dedup window, and answers a `query_id`
+   at most once: it remembers each answered `query_id` until
+   `issued_at + 60`, past which the query is stale anyway, and at its cap it
+   refuses rather than forget one that is still fresh. Freshness is never
+   judged by the frame's control timestamp, which each forwarder signs anew.
+
+A configured provider never answers a cleartext query (one with no `sealed`
+field): its originator is not of this application, and the answer would be
+the provider's service list in the clear to a stranger. A configured
+originator never reports a cleartext response, since it never asks in the
+clear.
+
+The constants and the bound body are owned by `offline-protocol-sealed`
+(`membership::DISCOVERY_SEAL_INFO`, `DISCOVERY_SEALED_SERVICE_ID`,
+`discovery_bound_body`) and pinned by the `discovery` block of the vectors
+above.
 
 **Leaf provisioning.** A leaf cannot fetch a certificate, so its paired phone
 hands it one inside their 1:1 session, as the plaintext of an ordinary sealed
@@ -529,10 +617,14 @@ admitted is consumed as a blocked sender's is: not processed, not answered
 `no_session` reply), no event. The sender observes what it observes for an
 address nobody holds, and its retries run to expiry. A key package, 1:1
 Welcome or group Welcome passes when it carries a valid end-to-end proof
-(below). Passed whatever the sender: a `__MEMBER__` frame, a relay server's
+(above). Passed whatever the sender: a `__MEMBER__` frame, a relay server's
 answer, a custody receipt, the group data plane (it opens only under a group
-this node holds), and service discovery gossip, which has its own rules. A
-frame addressed to someone else is relayed as before.
+this node holds), and service discovery gossip, which has its own rules
+(above): a query, and a response on its way to someone else, pass and are
+acknowledged whoever sent them, while a response that names this node as its
+originator, or names none, passes and is acknowledged only when its sender is
+admitted or it carries a proof that verifies. A frame addressed to someone
+else is relayed as before.
 
 Carriage is not gated: relay targets, the outbox flush to that peer and
 custody redelivery run for every neighbour. Neither is an effect the

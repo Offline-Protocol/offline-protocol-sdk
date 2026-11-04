@@ -40,6 +40,7 @@
 //! [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -48,12 +49,16 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{Address, ContentType, Message, MessageId, MessagePriority, TTL};
+use offline_protocol_mls::MlsManager;
 use offline_protocol_sealed::membership::{
     app_key_info, e2e_proof_signing_payload, exchange_key_info, exchange_salt, hello_tag_input,
     transcript_signing_payload, MemberCert, MemberCredential, MemberFrame, MemberHello,
-    MemberProof, MemberProvision, ProofKind, APP_KEY_LEN, MEMBER_CREDENTIAL_LEN,
-    MEMBER_E2E_KEY_INFO, MEMBER_NONCE_LEN, MEMBER_PROOF_META_KEY, MEMBER_SEALED_LEN,
-    MEMBER_TAG_LEN,
+    MemberProof, MemberProvision, ProofKind, APP_KEY_LEN, DISCOVERY_SALT_LEN, DISCOVERY_SEAL_INFO,
+    MEMBER_CREDENTIAL_LEN, MEMBER_E2E_KEY_INFO, MEMBER_NONCE_LEN, MEMBER_PROOF_LEN,
+    MEMBER_PROOF_META_KEY, MEMBER_PROOF_SALT_LEN, MEMBER_SEALED_LEN, MEMBER_TAG_LEN,
+};
+use offline_protocol_services::{
+    discovery_response_ends_at, discovery_response_is_proven, DiscoverySealer,
 };
 use offline_protocol_transport::TransportType;
 use rand_core::{OsRng, RngCore};
@@ -728,7 +733,10 @@ impl OfflineProtocol {
     /// the group data plane (it opens only under a group this node holds, so
     /// a stranger cannot produce one). A key package, a 1:1 Welcome or a
     /// group Welcome from a sender not otherwise admitted passes only with a
-    /// valid end-to-end membership proof.
+    /// valid end-to-end membership proof. Discovery gossip follows
+    /// [`Self::is_discovery_carriage`]: a query passes whoever sent it, so a
+    /// stranger's query is still forwarded, and a response ending here
+    /// passes only with its provider's proof.
     ///
     /// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
     pub(crate) fn inbound_admitted(
@@ -747,7 +755,7 @@ impl OfflineProtocol {
             || content.starts_with(internal_prefixes::CUSTODY_RECEIPT)
             || Self::is_unsignable_relay_answer(message, arrival)
             || Self::is_group_data_plane(content)
-            || Self::is_service_discovery(content)
+            || self.is_discovery_carriage(content, sender)
             || self.admitted(sender)
         {
             return true;
@@ -763,11 +771,31 @@ impl OfflineProtocol {
         content.starts_with("__GRP_") && !content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
     }
 
-    /// Discovery gossip is carriage until its own membership rules land
-    /// (step 7c); it never answers a stranger with anything but a provider
-    /// answer, which those rules gate.
-    fn is_service_discovery(content: &str) -> bool {
-        content.starts_with("__SVC_DISC")
+    /// Whether a discovery frame is processed and acknowledged whatever its
+    /// sender: every query, and every response on its way to someone else,
+    /// since passing those on is carriage and a stranger's query must still
+    /// be forwarded. A response that ends at this node is end to end: it
+    /// passes only when it carries a proof from its provider (or its sender
+    /// is admitted), so a stranger's forged answer is not even
+    /// acknowledged.
+    ///
+    /// Passing here is not answering. The services layer still answers a
+    /// query only when its own proof verifies and reports a response only
+    /// when its proof does.
+    pub(crate) fn is_discovery_carriage(&self, content: &str, sender: &str) -> bool {
+        if content.starts_with(offline_protocol_services::SVC_DISCOVER_QUERY) {
+            return true;
+        }
+        if !content.starts_with(offline_protocol_services::SVC_DISCOVER_RESPONSE) {
+            return false;
+        }
+        !discovery_response_ends_at(content, &self.local_id)
+            || discovery_response_is_proven(
+                content,
+                sender,
+                &self.local_id,
+                &self.membership_keys(),
+            )
     }
 
     /// The proof kind a frame of this content would carry, with the body
@@ -839,23 +867,9 @@ impl OfflineProtocol {
         kind: ProofKind,
         body: &[u8],
     ) -> Option<Vec<u8>> {
-        let app_key = self.membership.app_key?;
-        let cert = self.membership.cert.clone()?;
         let recipient: Address = recipient.parse().ok()?;
-        let payload = e2e_proof_signing_payload(Some(&recipient), kind, body).ok()?;
-        let signature = self.sign_with_identity(&payload)?;
-        let credential = MemberCredential { cert, signature };
-        let salt: [u8; 16] = random_array();
-        let key = hkdf32(&app_key, Some(&salt), MEMBER_E2E_KEY_INFO);
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let sealed = cipher
-            .encrypt(
-                Nonce::from_slice(&[0u8; 12]),
-                credential.to_bytes().as_slice(),
-            )
-            .ok()?;
-        let sealed = <[u8; MEMBER_SEALED_LEN]>::try_from(sealed.as_slice()).ok()?;
-        Some(MemberProof { salt, sealed }.to_bytes().to_vec())
+        self.membership_keys()
+            .member_proof(Some(&recipient), kind, body)
     }
 
     /// Verifies a proof from `signer` toward this node: it opens under
@@ -870,45 +884,24 @@ impl OfflineProtocol {
         kind: ProofKind,
         body: &[u8],
     ) -> bool {
-        let (Some(app_key), Some(publisher_key), Some(identity_key)) = (
-            self.membership.app_key,
-            self.membership.publisher_key,
-            identity_key,
-        ) else {
-            return false;
-        };
-        let (Ok(proof), Ok(local), Ok(signer_addr)) = (
-            MemberProof::from_bytes(proof),
-            self.local_id.parse::<Address>(),
-            signer.parse::<Address>(),
-        ) else {
-            return false;
-        };
-        let key = hkdf32(&app_key, Some(&proof.salt), MEMBER_E2E_KEY_INFO);
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-        let Ok(plaintext) = cipher.decrypt(Nonce::from_slice(&[0u8; 12]), proof.sealed.as_slice())
+        let (Some(identity_key), Ok(local)) = (identity_key, self.local_id.parse::<Address>())
         else {
             return false;
         };
-        let Ok(credential) = MemberCredential::from_bytes(&plaintext) else {
-            return false;
-        };
-        let cert = &credential.cert;
-        if cert.address != signer_addr
-            || !cert_verifies(&publisher_key, cert)
-            || !cert.is_current(unix_now())
-        {
-            return false;
-        }
-        let Ok(payload) = e2e_proof_signing_payload(Some(&local), kind, body) else {
-            return false;
-        };
-        offline_protocol_mls::MlsManager::verify_signature(
+        self.membership_keys().check_member_proof(
+            proof,
+            signer,
             identity_key,
-            &payload,
-            &credential.signature,
+            Some(&local),
+            kind,
+            body,
         )
-        .unwrap_or(false)
+    }
+
+    /// What this node's membership lends to code that holds only a part of
+    /// the engine (service discovery).
+    fn membership_keys(&self) -> MembershipKeys<'_> {
+        MembershipKeys::new(&self.membership, self.mls_manager.as_ref(), &self.local_id)
     }
 
     /// Whether `peer` has proven, in a membership exchange, that it belongs to
@@ -1288,9 +1281,7 @@ impl OfflineProtocol {
 
     /// An Ed25519 signature by this node's identity key, always 64 bytes.
     fn sign_with_identity(&self, payload: &[u8]) -> Option<[u8; 64]> {
-        let manager = self.mls_manager.as_ref()?.read().ok()?;
-        let signature = manager.sign_data(payload).ok()?;
-        <[u8; 64]>::try_from(signature.as_slice()).ok()
+        sign_with_identity(self.mls_manager.as_ref(), payload)
     }
 
     /// Puts one membership frame on the neighbour's link: signed, TTL one,
@@ -1331,4 +1322,203 @@ fn cert_verifies(publisher_key: &[u8; 32], cert: &MemberCert) -> bool {
         &cert.signature,
     )
     .unwrap_or(false)
+}
+
+/// An Ed25519 signature by this node's identity key, always 64 bytes.
+fn sign_with_identity(mls: Option<&Arc<RwLock<MlsManager>>>, payload: &[u8]) -> Option<[u8; 64]> {
+    let manager = mls?.read().ok()?;
+    let signature = manager.sign_data(payload).ok()?;
+    <[u8; 64]>::try_from(signature.as_slice()).ok()
+}
+
+/// ChaCha20-Poly1305 under `key` with the zero nonce and no associated data:
+/// every key it is given is derived from a fresh salt and used once.
+fn seal_once(key: &[u8; 32], plaintext: &[u8]) -> Option<Vec<u8>> {
+    ChaCha20Poly1305::new(Key::from_slice(key))
+        .encrypt(Nonce::from_slice(&[0u8; 12]), plaintext)
+        .ok()
+}
+
+fn open_once(key: &[u8; 32], ciphertext: &[u8]) -> Option<Vec<u8>> {
+    ChaCha20Poly1305::new(Key::from_slice(key))
+        .decrypt(Nonce::from_slice(&[0u8; 12]), ciphertext)
+        .ok()
+}
+
+/// This node's membership, borrowed apart from the rest of the engine: the
+/// application key, the certificate, the identity signer and the address.
+///
+/// Built from three fields rather than from `&OfflineProtocol`, so the
+/// service layer can be handed it while the engine holds that layer
+/// mutably. It is the one place the end-to-end proof is made and checked,
+/// for the frames that open a session and for service discovery alike.
+pub(crate) struct MembershipKeys<'a> {
+    membership: &'a Membership,
+    mls: Option<&'a Arc<RwLock<MlsManager>>>,
+    local_id: &'a str,
+}
+
+impl<'a> MembershipKeys<'a> {
+    pub(crate) fn new(
+        membership: &'a Membership,
+        mls: Option<&'a Arc<RwLock<MlsManager>>>,
+        local_id: &'a str,
+    ) -> Self {
+        Self {
+            membership,
+            mls,
+            local_id,
+        }
+    }
+
+    /// A proof of `kind` over `body` toward `recipient` (`None` for a
+    /// discovery query), when this node holds a certificate.
+    fn member_proof(
+        &self,
+        recipient: Option<&Address>,
+        kind: ProofKind,
+        body: &[u8],
+    ) -> Option<Vec<u8>> {
+        let app_key = self.membership.app_key?;
+        let cert = self.membership.cert.clone()?;
+        let payload = e2e_proof_signing_payload(recipient, kind, body).ok()?;
+        let signature = sign_with_identity(self.mls, &payload)?;
+        let credential = MemberCredential { cert, signature };
+        let salt: [u8; MEMBER_PROOF_SALT_LEN] = random_array();
+        let key = hkdf32(&app_key, Some(&salt), MEMBER_E2E_KEY_INFO);
+        let sealed = seal_once(&key, credential.to_bytes().as_slice())?;
+        let sealed = <[u8; MEMBER_SEALED_LEN]>::try_from(sealed.as_slice()).ok()?;
+        Some(MemberProof { salt, sealed }.to_bytes().to_vec())
+    }
+
+    /// Whether `proof` opens under `K_app`, its certificate names `signer`,
+    /// verifies under the publisher key and is current, and `identity_key`
+    /// signed `recipient`, `kind` and `body`. The caller owes the binding of
+    /// `identity_key` to `signer`.
+    fn check_member_proof(
+        &self,
+        proof: &[u8],
+        signer: &str,
+        identity_key: &[u8],
+        recipient: Option<&Address>,
+        kind: ProofKind,
+        body: &[u8],
+    ) -> bool {
+        let (Some(app_key), Some(publisher_key)) =
+            (self.membership.app_key, self.membership.publisher_key)
+        else {
+            return false;
+        };
+        let (Ok(proof), Ok(signer_addr)) =
+            (MemberProof::from_bytes(proof), signer.parse::<Address>())
+        else {
+            return false;
+        };
+        let key = hkdf32(&app_key, Some(&proof.salt), MEMBER_E2E_KEY_INFO);
+        let Some(plaintext) = open_once(&key, proof.sealed.as_slice()) else {
+            return false;
+        };
+        let Ok(credential) = MemberCredential::from_bytes(&plaintext) else {
+            return false;
+        };
+        let cert = &credential.cert;
+        if cert.address != signer_addr
+            || !cert_verifies(&publisher_key, cert)
+            || !cert.is_current(unix_now())
+        {
+            return false;
+        }
+        let Ok(payload) = e2e_proof_signing_payload(recipient, kind, body) else {
+            return false;
+        };
+        offline_protocol_mls::MlsManager::verify_signature(
+            identity_key,
+            &payload,
+            &credential.signature,
+        )
+        .unwrap_or(false)
+    }
+}
+
+/// Service discovery on a configured node ([ADR 0037], "Service
+/// discovery"): the body sealed under `K_app` with a fresh salt, and the
+/// end-to-end proof of kinds 4 and 5.
+///
+/// [ADR 0037]: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/adr/0037-an-applications-users-are-visible-only-to-that-application.md
+impl DiscoverySealer for MembershipKeys<'_> {
+    fn now_unix(&self) -> u64 {
+        unix_now()
+    }
+
+    fn identity_key(&self) -> Option<Vec<u8>> {
+        self.mls?.read().ok()?.get_identity_public_key().ok()
+    }
+
+    fn seal(&self, plaintext: &[u8]) -> Option<Vec<u8>> {
+        let app_key = self.membership.app_key?;
+        let salt: [u8; DISCOVERY_SALT_LEN] = random_array();
+        let key = hkdf32(&app_key, Some(&salt), DISCOVERY_SEAL_INFO);
+        let mut out = salt.to_vec();
+        out.extend(seal_once(&key, plaintext)?);
+        Some(out)
+    }
+
+    fn open(&self, sealed: &[u8]) -> Option<Vec<u8>> {
+        let app_key = self.membership.app_key?;
+        if sealed.len() < DISCOVERY_SALT_LEN {
+            return None;
+        }
+        let (salt, ciphertext) = sealed.split_at(DISCOVERY_SALT_LEN);
+        let key = hkdf32(&app_key, Some(salt), DISCOVERY_SEAL_INFO);
+        open_once(&key, ciphertext)
+    }
+
+    /// With no certificate, random bytes of a proof's length: whether this
+    /// node holds one must not show to a carrier that cannot open a proof.
+    fn prove(&self, recipient: Option<&str>, kind: ProofKind, bound: &[u8]) -> Vec<u8> {
+        let recipient = match recipient.map(str::parse::<Address>) {
+            Some(Ok(address)) => Some(address),
+            Some(Err(_)) => return random_array::<MEMBER_PROOF_LEN>().to_vec(),
+            None => None,
+        };
+        self.member_proof(recipient.as_ref(), kind, bound)
+            .unwrap_or_else(|| random_array::<MEMBER_PROOF_LEN>().to_vec())
+    }
+
+    /// The identity key comes from inside a sealed body, not from a frame's
+    /// signature, so its binding to `signer` is checked here: it must derive
+    /// to `signer`'s address.
+    fn verify(
+        &self,
+        proof: &[u8],
+        signer: &str,
+        identity_key: &[u8],
+        recipient: Option<&str>,
+        kind: ProofKind,
+        bound: &[u8],
+    ) -> bool {
+        let derives = match (
+            offline_protocol_sealed::derive_address(identity_key),
+            signer.parse::<Address>(),
+        ) {
+            (Ok(derived), Ok(signer)) => derived == signer,
+            _ => false,
+        };
+        if !derives {
+            return false;
+        }
+        let recipient = match recipient.map(str::parse::<Address>) {
+            Some(Ok(address)) => Some(address),
+            Some(Err(_)) => return false,
+            None => None,
+        };
+        // A proof toward a recipient names this node: a proof made for
+        // another member must not verify here.
+        if let Some(recipient) = &recipient {
+            if self.local_id.parse::<Address>().ok().as_ref() != Some(recipient) {
+                return false;
+            }
+        }
+        self.check_member_proof(proof, signer, identity_key, recipient.as_ref(), kind, bound)
+    }
 }

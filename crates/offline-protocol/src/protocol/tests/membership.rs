@@ -58,11 +58,21 @@ impl Node {
     /// `auto_key_exchange` off unless a test is about the key-package push
     /// on discovery: with it on, every link also carries a handshake.
     fn launch_with(label: &str, publisher_key: Option<[u8; 32]>, auto_key_exchange: bool) -> Self {
+        Self::launch_configured(label, publisher_key, auto_key_exchange, |_| {})
+    }
+
+    fn launch_configured(
+        label: &str,
+        publisher_key: Option<[u8; 32]>,
+        auto_key_exchange: bool,
+        tweak: impl FnOnce(&mut ProtocolConfig),
+    ) -> Self {
         let mut config: ProtocolConfig = create_test_config_for_user(label);
         config.app_id = APP.to_string();
         config.encryption.enabled = true;
         config.encryption.auto_key_exchange = auto_key_exchange;
         config.app_publisher_key = publisher_key;
+        tweak(&mut config);
         let mut protocol = OfflineProtocol::new(config).expect("protocol");
         let state = Arc::new(InMemoryStorage::new());
         protocol
@@ -1611,3 +1621,6 @@ fn frames_for_this_node_have_one_entry_and_it_is_gated() {
         "the gate runs before the first side effect"
     );
 }
+
+#[path = "membership_discovery.rs"]
+mod discovery;

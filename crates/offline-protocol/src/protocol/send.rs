@@ -5721,8 +5721,14 @@ impl OfflineProtocol {
         status: Option<&str>,
     ) -> Result<()> {
         // No acknowledgement of any kind to a sender this application has
-        // not admitted (ADR 0037).
-        if !self.admitted(message.sender.as_str()) {
+        // not admitted (ADR 0037), except for discovery carriage: a hop of
+        // gossip, or a provider's proven answer, is acknowledged whoever
+        // sent it, so a member's acknowledgements do not single out its
+        // fellow members on the link, and a proven answer is not resent to
+        // its expiry.
+        if !self.admitted(message.sender.as_str())
+            && !self.is_discovery_carriage(&message.content, message.sender.as_str())
+        {
             return Ok(());
         }
         if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {

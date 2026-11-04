@@ -1,5 +1,6 @@
 //! Message dispatch handlers for internal protocol messages.
 
+use super::membership::MembershipKeys;
 use super::session::{Corroboration, SESSION_CORROBORATED};
 use super::{
     base64_decode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
@@ -19,7 +20,8 @@ use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_mls::{EncryptedMessage, WelcomeMessage};
 use offline_protocol_sealed::{SessionCorroboration, SVC_SEALED_V1, SVC_SUB_V1};
 use offline_protocol_services::{
-    is_subscription_frame, ServiceAction, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE,
+    is_subscription_frame, DiscoverySealer, ServiceAction, SVC_MESSAGE_PREFIX, SVC_REQUEST,
+    SVC_RESPONSE,
 };
 use offline_protocol_transport::TransportType;
 use tracing::{debug, error, info, warn};
@@ -2598,18 +2600,34 @@ impl OfflineProtocol {
         if !sealed && self.drop_plaintext_subscription_frame(sender, content) {
             return;
         }
-        let peers: Vec<String> = self
-            .known_peers
-            .keys()
-            .filter(|p| p.as_str() != sender)
-            .cloned()
-            .collect();
-        match self.mesh_services.handle_incoming_message(
+        // A configured node gossips to its mesh neighbours only, as it
+        // relays: `known_peers` is an admitted set once a publisher key is
+        // set, and gossip targets chosen by membership would make discovery
+        // one network per application (ADR 0037, "Service discovery").
+        let configured = self.membership_configured();
+        let peers: Vec<String> = if configured {
+            self.transport_manager
+                .mesh_neighbors()
+                .into_iter()
+                .map(|neighbour| neighbour.peer_id)
+                .filter(|p| p.as_str() != sender)
+                .collect()
+        } else {
+            self.known_peers
+                .keys()
+                .filter(|p| p.as_str() != sender)
+                .cloned()
+                .collect()
+        };
+        let keys = MembershipKeys::new(&self.membership, self.mls_manager.as_ref(), &self.local_id);
+        let sealer: Option<&dyn DiscoverySealer> = if configured { Some(&keys) } else { None };
+        match self.mesh_services.handle_incoming_message_sealed(
             content,
             sender,
             message.hop_count.value(),
             &self.local_id,
             &peers,
+            sealer,
         ) {
             ServiceAction::NotHandled => {
                 warn!(sender = %sender, "Received unknown service message prefix, consuming");
