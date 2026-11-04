@@ -12,7 +12,10 @@ receiver MUST NOT drop or authorize a frame by it
 ([wire format](../spec/wire-format.md)), and
 [R17](../security/threat-model.md#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)
 says why it could not anyway, since the id is cleartext and anyone on the path
-can rewrite it. So the mesh is one network, and its density grows with the
+can rewrite it. The one carriage path that reads `known_peers` is service
+discovery gossip, which takes its fan-out from that map when it originates a
+query and at every hop that forwards one; this decision moves it onto the
+transports too ([below](#service-discovery)). So the mesh is one network, and its density grows with the
 installs of every integrator together. That is worth keeping.
 
 What is not worth keeping is that the network is also one *audience*. Today a
@@ -68,7 +71,10 @@ removes.
    node, as its final recipient, arrived. Carriage-level answers, such as a
    `__CUSTODY_RECEIPT__` to a depositor
    ([custody](../spec/custody.md)), are outside this invariant: they reveal
-   only that an SDK node is live here, which party 2 may learn.
+   only that an SDK node is live here, which party 2 may learn. Forwarding
+   service discovery gossip is carriage too: passing a `__SVC_DISC_Q__` on,
+   or a `__SVC_DISC_R__` toward its originator, is never gated. Only a
+   provider's own response to a query is an end-to-end answer.
 4. **Nothing names the application in the clear.** Every value a carrier or a
    connecting party can read is either constant across applications or
    derived from a key that party 2 does not hold.
@@ -163,7 +169,7 @@ sealed, so this is R16's existing presence-spoof exposure, not a new one.
 
 The gate covers what the engine does **automatically** because it discovered a
 peer: `NeighborDiscovered`, `NeighborLost`, `PeerRssi`, `presence_updated` on
-receipt, the key-package push, subscription renewal and the data-sync kick in
+receipt, `ServiceDiscovered` for a provider ([below](#service-discovery)), the key-package push, subscription renewal and the data-sync kick in
 `on_neighbor_discovered`. The emission decision moves into the core, and the
 FFI choke point (`notify_neighbor_reachable`) and the browser engine's
 emission sites ask it. The emission gate and the inbound gate ask **one
@@ -218,6 +224,7 @@ admitted when one of these holds:
 |---|---|---|
 | Key package, 1:1 Welcome, group Welcome (`__GRP_MLS_WELCOME__`), connection request, service subscription | No: dropped before any state changes, so no session, no group, no pending package and no subscription forms | No |
 | Data frame under a session or group this node holds | Not applicable: holding the session or being on the roster admits the sender | Not applicable |
+| Service discovery query or response with no valid proof from its originator or provider | Forwarded as carriage, unchanged; never matched, never reported | No |
 | Anything else addressed to this node | No | No |
 | A frame addressed to someone else | Relayed as before | Not applicable |
 
@@ -239,7 +246,10 @@ between two frames is assumed:
   the path where an admin invites an address whose key package it fetched the
   same way. The invitee holds no session with the inviter and, until it
   joins, no roster that names it, so without the proof a group invite to a
-  member never met would be dropped.
+  member never met would be dropped;
+- in the **service discovery query and response**, binding that frame, for
+  the provider several hops away that no other source can admit
+  ([below](#service-discovery)).
 
 ```
 salt  = random(16)
@@ -248,16 +258,78 @@ proof = salt || AEAD_k(nonce = 0, cert || sig_identity(
           "offline-app-member-e2e-v1" || addr_recipient || kind || hash(frame_body)))
 ```
 
-`kind` is one byte naming key package, 1:1 Welcome or group Welcome, and
-`frame_body` is the package or the Welcome with the proof field absent. `K_app` is shared by every
+`kind` is one byte naming key package, 1:1 Welcome, group Welcome, discovery
+query or discovery response, and `frame_body` is the package, the Welcome or
+the discovery payload with the proof field absent. The certificate's address
+is checked against the frame's sender for the first three kinds, and against
+the payload's `originator` or sealed provider for the two discovery kinds,
+since those frames are forwarded and their sender is the last hop. `K_app` is shared by every
 install of the application, so the AEAD key is derived per proof from a fresh
 salt and is used once; a fixed nonce under a fleet-shared key would repeat
 across installs. Binding the recipient, the kind and the body stops a captured
 proof from being replayed to another member, onto another package or onto
-another Welcome of either kind. A relay that does not hold `K_app` (party 2) sees random
+another Welcome of either kind, or onto another discovery frame. A relay that does not hold `K_app` (party 2) sees random
 bytes. A relay that does (party 3) can decrypt every proof it carries and
 learns which address is opening a session to which: party 3's recognition
 residual, extended from one connection to the proofs it happens to carry.
+
+### Service discovery
+
+Discovery is gossip, so it is carriage, and today it is also cleartext: the
+query names the `service_id` it asks for and the response names the provider,
+`service_id`, version and capabilities, all readable at every hop
+([R9](../security/threat-model.md#r9-service-bodies-are-sealed-only-toward-capable-peers-discovery-is-signed-not-encrypted)).
+A configured node runs it under four rules, and an unconfigured one runs it as
+today (invariant 5).
+
+- **Fan-out never reads membership.** The targets of a query a node
+  originates or forwards are its mesh neighbours
+  (`TransportManager::mesh_neighbors`), as relay targets are, together with
+  the peers it already reaches off the mesh. A node forwards every query
+  within its hop budget, and relays every response toward its originator,
+  whether or not the sender is admitted, whether or not it can open the
+  body, and whether or not it matched, so forwarding is never an oracle.
+  Without this rule a configured node would gossip only to admitted peers
+  and drop every stranger's query, and discovery for every application would
+  stop at the first node of another.
+- **The body is sealed under the application key.** Only the routing fields
+  travel in the clear: `query_id`, `originator` and the hop budget. The rest,
+  the requested `service_id` in a query and the provider, `service_id`,
+  version and capabilities in a response, travels as
+  `salt || AEAD_k(body)` with
+  `k = HKDF(ikm = K_app, salt = salt, info = "offline-app-svc-v1")` and a
+  fresh salt per frame. Party 2 sees that address X issued a query, which
+  it may learn, and cannot read what was asked or link two queries for the
+  same service. A derived service id in the clear would be deterministic and
+  so would group every A user asking for the same service, which is why the
+  matching id is sealed rather than hashed. A node that cannot open the body
+  forwards it unchanged and answers nothing.
+- **Both ends prove membership.** A query carries a `member_proof` of kind
+  discovery query, with an empty `addr_recipient` because a query has no
+  single recipient; the body hash binds its `query_id` and `originator`. A
+  provider answers only a query whose proof verifies against `originator`. A
+  response carries a proof of kind discovery response, bound to the
+  originator and verified against the sealed provider, and `ServiceDiscovered`
+  is emitted only for a response that passes. A provider is usually several
+  hops from the originator, so no other admission source holds, and without
+  these proofs discovery between members would never return a result.
+- **A provider answers the originator, once, while the query is fresh.** The
+  response is addressed to `originator` and routed as an ordinary unicast,
+  not handed back to the query's direct sender as an unconfigured node does.
+  That rule exists so a spoofed originator cannot draw a provider's service
+  list toward an arbitrary peer; the proof binds the originator, so the
+  spoof is gone, and answering the direct sender would hand a party 2 that
+  replays a recorded query a frame addressed to itself whenever the target
+  is a member. A provider answers a given `query_id` once, and only within
+  the discovery query lifetime rather than the thirty-day control-frame
+  window, so a recorded query cannot be replayed later to probe.
+
+What remains is traffic analysis. A carrier that delivers a query to a
+provider and then carries the response sees that the provider sent a frame
+to the originator. That is the exposure every unicast between two members
+already has, since sender and recipient travel in the clear for routing,
+and it is stated as part of party 2's residual rather than closed here; the
+defence would be cover traffic.
 
 ### Nothing in the clear
 
@@ -282,6 +354,9 @@ residual, extended from one connection to the proofs it happens to carry.
   today.
 - **The Android Wi-Fi Direct group** name, passphrase and `app` TXT key, and
   **the browser's nearby room key**, are derived from `K_app`.
+- **Service discovery bodies** are sealed under `K_app`
+  ([above](#service-discovery)); only the routing fields stay in the clear,
+  and none of them names an application.
 
 ### Leaves
 
@@ -301,7 +376,8 @@ with no certificate behaves as today.
   application's traffic, and B's users relay A's messages without ever
   learning A is there.
 - **Two small frames each way per new neighbour**, sent whatever the result,
-  plus one proof field per session started across the mesh. Cached per address until `not_after`; bounded by the
+  plus one proof field per session started across the mesh and per discovery
+  query and response. Cached per address until `not_after`; bounded by the
   per-link relay bucket.
 - **A stranger's message to a member goes unanswered** and runs its retry
   queue to expiry, as for an absent peer. That is the intended observable,
@@ -323,12 +399,15 @@ with no certificate behaves as today.
   the sealed rich payload; an optional `member_proof` field in the key package
   payload, the 1:1 Welcome and the group Welcome payload, all in
   `offline-protocol-sealed`, and the group Welcome handler among the receive
-  sites the source guard enumerates; a new
+  sites the source guard enumerates; a sealed body and a `member_proof` in
+  the discovery query and response payloads, discovery fan-out moved onto
+  the mesh neighbour list, and a configured provider answering the
+  originator rather than the direct sender; a new
   derivation for the app tag and a new instance-selection rule in the BLE
-  framing chapter and its three mirrors; R15, R17 and R22 are rewritten, and
-  a new threat-model entry states party 3's residual, including what it reads
-  from the proofs it carries, backend mode's enrolment boundary, and embedded
-  mode's forgery.
+  framing chapter and its three mirrors; R9, R15, R17 and R22 are rewritten,
+  and a new threat-model entry states party 3's residual, including what it
+  reads from the proofs it carries, backend mode's enrolment boundary,
+  embedded mode's forgery, and the traffic analysis left to party 2.
 
 ## Alternatives considered
 
@@ -360,7 +439,10 @@ applications, never for several developers'.
 
 A relay, forwarding or custody decision that reads membership. It turns a
 visibility boundary into a carriage boundary, and the shared network becomes
-one network per application without anything failing.
+one network per application without anything failing. Discovery fan-out is
+such a decision: choosing gossip targets from admitted peers rather than from
+the mesh neighbours, or forwarding only a query whose body opened, makes
+discovery one network per application while every message still flows.
 
 An emission site added for a neighbour, presence or signal event that does
 not ask the gate. The peer leaks through that one event. The source guard
