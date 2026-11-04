@@ -280,6 +280,23 @@ class WifiDirectGroupFormationTest {
         assertTrue(WifiDirectGroupFormation.DEAD_OWNER_TTL_MS > 2 * 30_000L)
     }
 
+    // --- A second app on the phone -------------------------------------------------
+
+    @Test
+    fun `a device without the group port never creates, and joins where it would have`() {
+        assertEquals(Action.Wait, decide(local("off1a").copy(canOwn = false), "off1b"))
+        assertEquals(
+            Action.Join,
+            decide(local("off1a", ownerNearby = true, failedJoins = 1).copy(canOwn = false), "off1b"),
+        )
+        assertEquals(
+            Action.Join,
+            decide(local("off1b", failedJoins = WifiDirectGroupFormation.TAKEOVER_FAILED_JOINS)
+                .copy(canOwn = false, ownerNearby = true), "off1a"),
+        )
+        assertEquals(Action.Join, decide(local("off1b").copy(canOwn = false), "off1a"))
+    }
+
     // --- The switch ----------------------------------------------------------------
 
     @Test

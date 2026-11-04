@@ -154,6 +154,12 @@ internal object WifiDirectGroupFormation {
          * formed and dissolved in step on two phones.
          */
         val joinFirst: Boolean = false,
+        /**
+         * Whether this device's listener holds the port a group's clients
+         * dial ([PeerStreamListener]). One that does not never creates: its
+         * clients would reach whichever app on this phone holds the port.
+         */
+        val canOwn: Boolean = true,
     )
 
     enum class Action { Wait, Create, Join }
@@ -185,6 +191,14 @@ internal object WifiDirectGroupFormation {
         }
 
     fun decide(local: Local, adverts: Collection<Advert>): Action {
+        val action = decideOwning(local, adverts)
+        // Joining is still open, which is what the other devices' takeover
+        // expects of a lowest address that never creates.
+        if (action != Action.Create || local.canOwn) return action
+        return if (local.ownerNearby) Action.Join else Action.Wait
+    }
+
+    private fun decideOwning(local: Local, adverts: Collection<Advert>): Action {
         if (local.inGroup) return Action.Wait
         val peers = adverts.filter { it.app == local.app && it.address != local.address }
         if (peers.isEmpty()) {

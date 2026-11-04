@@ -90,6 +90,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A second SDK app on an Android phone gets its own LAN streams.** The
+  peer-stream listener bound the fixed port 8988, so a second app on the
+  same phone failed to bind it and still advertised 8988 on the LAN: every
+  peer that dialled it reached the first app, and it had no inbound streams
+  at all. A listener that cannot take 8988 now binds a free port and
+  advertises that one. A group's clients can only dial 8988, so an app
+  without it never creates a Wi-Fi Direct group and joins instead. A start
+  that cannot bind any port now fails rather than advertising one.
+
 - **Frames for a Bluetooth neighbor no longer leave through a relay that
   cannot reach it.** The application dispatch sent a message for a recipient
   with a live direct mesh link over that link, but retries,
