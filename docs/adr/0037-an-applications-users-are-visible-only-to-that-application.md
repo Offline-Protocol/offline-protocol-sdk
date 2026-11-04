@@ -372,7 +372,9 @@ and both are stated as part of party 2's residual rather than closed here.
   which gains an optional `app_id` field and is authoritative on receipt
   ([ADR 0008](0008-sealed-rich-payload.md)). Control frames and
   acknowledgements carry only the constant. This is the fix R17 names.
-- **The Bluetooth LE app tag** becomes `HMAC(K_app, instance_address)[0..8]`:
+- **The Bluetooth LE app tag** becomes
+  `HMAC(K_app, "offline-app-ble-tag-v1" || device_id)[0..8]`, over the Device
+  id string exactly as served, so a central computes it before it parses anything:
   different per phone and per identity, so it groups nothing for party 2, and
   computable by a same-application central from that instance's address.
   This changes the selection procedure. Today a central chooses an instance
