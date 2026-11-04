@@ -3098,5 +3098,37 @@ mod tests {
                 "{name} reads the application id on the forwarding path"
             );
         }
+
+        // Custody holds third-party frames, so it is on the path too. It
+        // reads the id in one place: the held frame's size, charged against
+        // the byte budget, which counts the id's bytes whatever it says. A
+        // second read is a decision on it, such as a per-application quota,
+        // which would key on a value the depositor chooses.
+        let custody = read("custody.rs");
+        let custody = custody
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("custody has a body");
+        let footprint_start = custody
+            .find("fn frame_footprint(")
+            .expect("custody charges a held frame's size in frame_footprint");
+        let footprint_len = custody[footprint_start..]
+            .find("\n}\n")
+            .expect("frame_footprint has a closing brace");
+        let footprint = &custody[footprint_start..footprint_start + footprint_len];
+        assert_eq!(
+            footprint.matches("app_id").count(),
+            1,
+            "frame_footprint counts the application id's bytes exactly once"
+        );
+        assert!(
+            footprint.contains("message.app_id.as_str().len()"),
+            "the one read in frame_footprint is the id's length, never its value"
+        );
+        let outside = custody.replacen(footprint, "", 1);
+        assert!(
+            !outside.contains("app_id"),
+            "custody.rs reads the application id outside the size accounting"
+        );
     }
 }

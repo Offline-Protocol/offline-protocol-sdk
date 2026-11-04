@@ -917,11 +917,20 @@ fn a_device_running_another_application_carries_the_message_both_ways() {
         carried.iter().any(|frame| frame.id.as_str() == msg_id),
         "bob must have carried the message"
     );
+    // Not just any frame from bob to alice: carol's acknowledgement of this
+    // message, alone or in a coalesced batch.
+    let names_msg = |frame: &Message| {
+        let ack_for = frame.metadata.get("ack_for").map(String::as_str);
+        let more = frame.metadata.get("ack_more").map(String::as_str);
+        ack_for == Some(msg_id.as_str())
+            || more.is_some_and(|ids| ids.split(',').any(|id| id == msg_id))
+    };
     assert!(
-        net.transmissions
-            .iter()
-            .any(|(from, to, _)| from == "bob" && to == "alice"),
-        "and carol's answer back to alice"
+        net.frames.iter().any(|(from, to, frame)| from == "bob"
+            && to == "alice"
+            && frame.sender.as_str() == "carol"
+            && names_msg(frame)),
+        "and carol's acknowledgement of it back to alice"
     );
     assert!(
         carried

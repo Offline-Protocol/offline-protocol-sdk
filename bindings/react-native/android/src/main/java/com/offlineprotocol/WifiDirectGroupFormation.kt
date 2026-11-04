@@ -51,6 +51,11 @@ import java.security.MessageDigest
  *    group owner too, and a device that joins on every step answers no
  *    discovery query for most of its time: on two phones next to two
  *    televisions, both did that and neither heard the other for minutes.
+ * 5. A device whose listener did not get the group port ([Local.canOwn] is
+ *    false, a second SDK application on the phone) never creates: a group's
+ *    clients know only the owner's address and dial the fixed port, so they
+ *    would reach whichever application holds it. Where rule 2 or 3 says
+ *    create, it joins if a group owner is nearby and waits otherwise.
  *
  * A device in a group does nothing here; the manager dissolves a group it
  * owns that stays empty, and the device then joins before it may create
