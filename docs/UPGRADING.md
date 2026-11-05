@@ -2807,6 +2807,87 @@ that targets Android 14 or later declares the foreground service type in the
 Play Console. Reticulum and Nostr configs, which the plugin used to refuse,
 now start those transports.
 
+## 30. Behaviour that changes without a compile error *(v0.32.0)*
+
+Nothing is removed from any binding. Three additions break Rust code that
+names every case or every field, or implements a generated interface by hand;
+the first paragraph lists them. Each paragraph after it says what to check.
+
+**Three additions that break an exhaustive match, a full struct literal or a
+hand-written conformer.** `Event` gains `ServiceSubscribeReceived`,
+`ServiceSubscriptionChanged` and `ServiceUpdateReceived`, and `Event` is not
+`#[non_exhaustive]`, so a `match` with no `_` arm needs the three cases.
+`ProtocolConfig` gains `service_subscriptions: ServiceSubscriptionConfig`.
+`ProtocolConfig` has no `Default`, so a literal that names every field needs
+`service_subscriptions: ServiceSubscriptionConfig::default()`; code that starts
+from `ProtocolConfig::new` is unaffected. A hand-written conformer of the
+generated `MeshServices` interface (a test double in Swift, Kotlin or Java)
+needs the twelve new subscription methods, from `subscribe_service` to
+`service_subscribers`.
+
+**TypeScript: the event union widens.** `ProtocolEvent` gains
+`ServiceSubscribeReceivedEvent`, `ServiceSubscriptionChangedEvent` and
+`ServiceUpdateReceivedEvent`. An exhaustive `switch` that ends in a `never`
+check, or a `Record` keyed by every event type, fails `tsc` until it has the
+three cases.
+
+**Services: a registered service can now be asked for a subscription.**
+Subscriptions are on by default, and every binding runs the default; in Rust,
+`service_subscriptions.enabled = false` turns them off. Under the default
+policy, `restricted`, a peer's request to subscribe to a service this device
+registered raises `service_subscribe_received` and waits for the application
+to call `accept_service_subscription` or `reject_service_subscription`. A
+request nobody answers is rejected after `approval_timeout_ms`, 60 seconds by
+default, so an application that ignores the new event serves nobody. The
+device also advertises the capability in its signed key package. Every
+subscription frame is sealed in the 1:1 MLS session or not sent
+([ADR 0035](adr/0035-a-service-can-be-subscribed-to.md)).
+
+**A send that begins with `__MEMBER__` is refused.** The prefix is reserved
+for the application membership exchange, so `send_message` and every other
+public send fail with `InvalidArgument` on content that starts with it, as
+they already did for the other reserved prefixes. No node sends the frame yet
+([control messages](spec/control-messages.md#reserved-prefix-registry)).
+
+**Frames for a live mesh neighbour stay on its link.** Acknowledgements,
+retries and session control frames for a peer with a live direct Bluetooth LE
+or Wi-Fi link now leave on that link, as application messages already did.
+Before, they went to transport selection, which could hand them to Nostr, the
+internet relay or Reticulum, all of which accept a frame for any recipient.
+A device with a relay configured therefore sends fewer frames through it.
+
+**Android: a second SDK app on the phone takes another LAN port.** The first
+app still listens for peer streams on port 8988. A second app that finds it
+taken binds a free port, advertises that one, and never creates a Wi-Fi Direct
+group, because a group's clients dial only 8988. It joins groups instead. A
+network policy that allows only 8988 now blocks the second app's inbound
+streams.
+
+**Bluetooth LE keeps discovering with the app in the background or the screen
+off.** A backgrounded iPhone now scans for the mesh service, so it discovers
+new peers in the background and raises `neighbor_discovered` there. An
+Android phone with its screen off scans with a mesh service filter and keeps
+discovering. Android also drops and redials a client link that takes writes
+and has never been answered, about 20 to 25 seconds after its first write, so
+a peer whose app restarted is reached again without a restart on this side
+([C14](bridges/README.md#c14-a-quiet-scan-in-a-pocket-is-not-a-stall)).
+
+**React Native: four calls do what they say again.** Since 0.31.0 these were
+silently broken, and they now work as documented. On Android,
+`sendReadReceipt` sends instead of throwing. On iOS, `acceptConnectionRequest`
+and `sendConnectionRequest` accept an omitted `keyPackage`, and
+`createInvite(name, true)` signs the invite. On both platforms,
+`checkInternetPresence(id, { force: true })` forces the check, so it now goes
+to the network each time it is called that way. An application that worked
+around any of these can drop the workaround.
+
+**Smaller changes.** `mls_get_pending_welcome` returns nothing for a 1:1
+session after `delete_session`. An event callback may call
+`set_event_callback`, and a callback that throws no longer costs the polling
+queue an event. On Android, the native module's `start()` rejects when no
+protocol has been created, instead of starting the mesh foreground service
+over no engine; the JavaScript wrapper never made that call.
+
 ---
 
 ## Appendix A: limits reference
