@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.31.x` line.
+current `v0.32.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
@@ -71,6 +71,14 @@ gains `PeerRssi`, `SendMessageOptions` and `GroupSendOptions` gain
 `peer_rssi` case. A device with Nostr on now asks its relays for a stranger's
 key packages, and a Flutter app on Android runs a foreground service
 ([§29](#29-behaviour-that-changes-without-a-compile-error-v0310)).
+`v0.32.0` breaks Rust code that names every case or every field: `Event`
+gains `ServiceSubscribeReceived`, `ServiceSubscriptionChanged` and
+`ServiceUpdateReceived`, and `ProtocolConfig` gains `service_subscriptions`.
+An exhaustive TypeScript `switch` over the event union needs the three
+`service_*` cases, and a hand-written `MeshServices` conformer needs the
+twelve new subscription methods. A build that predates this release shows a
+`__MEMBER__` frame as a security warning or as text
+([§30](#30-behaviour-that-changes-without-a-compile-error-v0320)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
