@@ -623,7 +623,7 @@ impl OfflineProtocol {
                 let onward = self.mesh_relay.select_targets(
                     neighbors
                         .iter()
-                        .map(|n| (n.peer_id.as_str(), n.link_quality())),
+                        .map(|n| (n.peer_id.as_str(), n.link_quality(), n.transport)),
                     &exclude,
                     &message_id,
                 );

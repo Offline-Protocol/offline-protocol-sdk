@@ -63,6 +63,7 @@
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_reliability::{RelaySeenCache, RelaySeenConfig};
+use offline_protocol_transport::TransportType;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -1239,7 +1240,7 @@ impl MeshRelayGovernor {
     /// [`Self::select_origination_targets`] instead.
     pub fn select_targets<'a>(
         &self,
-        neighbors: impl IntoIterator<Item = (&'a str, u8)>,
+        neighbors: impl IntoIterator<Item = (&'a str, u8, TransportType)>,
         exclude: &[&str],
         message_id: &str,
     ) -> Vec<String> {
@@ -1262,7 +1263,7 @@ impl MeshRelayGovernor {
     /// [`Self::take_own_send_token`].
     pub fn select_origination_targets<'a>(
         &self,
-        neighbors: impl IntoIterator<Item = (&'a str, u8)>,
+        neighbors: impl IntoIterator<Item = (&'a str, u8, TransportType)>,
         exclude: &[&str],
         message_id: &str,
     ) -> Vec<String> {
@@ -1279,20 +1280,20 @@ impl MeshRelayGovernor {
 
     fn select_within_fanout<'a>(
         &self,
-        neighbors: impl IntoIterator<Item = (&'a str, u8)>,
+        neighbors: impl IntoIterator<Item = (&'a str, u8, TransportType)>,
         exclude: &[&str],
         message_id: &str,
         fanout: usize,
     ) -> Vec<String> {
-        let mut candidates: Vec<(&str, u8)> = neighbors
+        let mut candidates: Vec<(&str, u8, TransportType)> = neighbors
             .into_iter()
-            .filter(|(peer, _)| !exclude.contains(peer))
+            .filter(|(peer, _, _)| !exclude.contains(peer))
             .collect();
 
         if candidates.len() <= fanout {
             return candidates
                 .into_iter()
-                .map(|(peer, _)| peer.to_string())
+                .map(|(peer, _, _)| peer.to_string())
                 .collect();
         }
 
@@ -1310,7 +1311,7 @@ impl MeshRelayGovernor {
         // hold, a second copy of the same message picks the same neighbors
         // instead of a fresh set, so a retransmission does not widen its own
         // footprint.
-        candidates.sort_by(|(a_peer, a_quality), (b_peer, b_quality)| {
+        candidates.sort_by(|(a_peer, a_quality, _), (b_peer, b_quality, _)| {
             b_quality.cmp(a_quality).then_with(|| {
                 Self::hash_of(&[message_id, a_peer, &self.local_id]).cmp(&Self::hash_of(&[
                     message_id,
@@ -1319,10 +1320,33 @@ impl MeshRelayGovernor {
                 ]))
             })
         });
-        candidates
+
+        // Then the strongest link on each carrier takes a slot before any
+        // carrier's second. Quality is a reading within one carrier: a
+        // Bluetooth RSSI, or a mid-scale default for a carrier that measures
+        // nothing (a peer stream), so ranking across carriers by it says
+        // nothing about which one leads to the recipient. And a carrier is
+        // usually a different neighborhood: the phones in radio range on one,
+        // the machines on the LAN on the other. Ranked by quality alone, a
+        // service with four Bluetooth links and one peer stream never handed a
+        // frame to the stream, the only way to the engines behind it, and
+        // because the choice is stable per id no retry tried it either.
+        // Leaders go first so a send budget that runs out mid-fan-out still
+        // spends its first tokens across carriers.
+        let mut carriers: Vec<TransportType> = Vec::new();
+        let (leaders, rest): (Vec<_>, Vec<_>) =
+            candidates.into_iter().partition(|(_, _, carrier)| {
+                let first = !carriers.contains(carrier);
+                if first {
+                    carriers.push(*carrier);
+                }
+                first
+            });
+        leaders
             .into_iter()
+            .chain(rest)
             .take(fanout)
-            .map(|(peer, _)| peer.to_string())
+            .map(|(peer, _, _)| peer.to_string())
             .collect()
     }
 
@@ -1541,6 +1565,8 @@ fn priority_rank(priority: MessagePriority) -> u8 {
 mod tests {
     use super::*;
     use offline_protocol_core::{AppId, UserId, TTL};
+
+    const BLE: TransportType = TransportType::BLE;
 
     /// Zero jitter so `admit` queues a forward that is immediately due, which
     /// keeps the tests deterministic without a clock abstraction.
@@ -2311,7 +2337,12 @@ mod tests {
     fn a_frame_is_never_sent_back_where_it_came_from() {
         let gov = governor();
         let targets = gov.select_targets(
-            [("alice", 80), ("b", 80), ("c", 80), ("d", 80)],
+            [
+                ("alice", 80, BLE),
+                ("b", 80, BLE),
+                ("c", 80, BLE),
+                ("d", 80, BLE),
+            ],
             &["b", "alice"], // arrival neighbor and the peer that wrote it
             "msg-1",
         );
@@ -2328,14 +2359,14 @@ mod tests {
         // All equally good, so the tie-break is what decides — which is the
         // property under test.
         let neighbors = [
-            ("n0", 70),
-            ("n1", 70),
-            ("n2", 70),
-            ("n3", 70),
-            ("n4", 70),
-            ("n5", 70),
-            ("n6", 70),
-            ("n7", 70),
+            ("n0", 70, BLE),
+            ("n1", 70, BLE),
+            ("n2", 70, BLE),
+            ("n3", 70, BLE),
+            ("n4", 70, BLE),
+            ("n5", 70, BLE),
+            ("n6", 70, BLE),
+            ("n7", 70, BLE),
         ];
 
         let first = gov.select_targets(neighbors, &[], "msg-1");
@@ -2348,6 +2379,47 @@ mod tests {
         // hammering one set.
         let other = gov.select_targets(neighbors, &[], "msg-2");
         assert_eq!(other.len(), DEFAULT_RELAY_FANOUT);
+    }
+
+    #[test]
+    fn every_carrier_gets_a_slot_before_any_carrier_gets_a_second() {
+        let gov = governor();
+        // Four strong Bluetooth links and one unmeasured peer stream. Ranked
+        // by quality alone the stream never made the fan-out.
+        let neighbors = [
+            ("p1", 100, BLE),
+            ("p2", 100, BLE),
+            ("p3", 70, BLE),
+            ("p4", 70, BLE),
+            ("stream", 50, TransportType::WiFiDirect),
+        ];
+
+        for id in ["msg-1", "msg-2", "msg-3", "msg-4"] {
+            let targets = gov.select_targets(neighbors, &[], id);
+            assert_eq!(targets.len(), DEFAULT_RELAY_FANOUT);
+            assert_eq!(
+                targets[1], "stream",
+                "each carrier's best goes first: {targets:?}"
+            );
+            assert!(targets[0] == "p1" || targets[0] == "p2");
+            assert_eq!(
+                gov.select_origination_targets(neighbors, &[], id),
+                targets,
+                "a forward and an origination choose alike at full width",
+            );
+        }
+
+        // The cap still holds: with one slot the strongest link takes it.
+        let single = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                fanout: 1,
+                ..immediate_config()
+            },
+        );
+        let only = single.select_targets(neighbors, &[], "msg-1");
+        assert_eq!(only.len(), 1);
+        assert_ne!(only[0], "stream");
     }
 
     #[test]
@@ -2518,7 +2590,12 @@ mod tests {
 
     #[test]
     fn a_weak_device_forwards_to_fewer_neighbors_but_never_none() {
-        let neighbors: Vec<(&str, u8)> = vec![("a", 90), ("b", 80), ("c", 70), ("d", 60)];
+        let neighbors: Vec<(&str, u8, TransportType)> = vec![
+            ("a", 90, BLE),
+            ("b", 80, BLE),
+            ("c", 70, BLE),
+            ("d", 60, BLE),
+        ];
 
         let mut capable = biased_governor();
         capable.set_conditions(Some(100), false, false, 30);
@@ -2549,7 +2626,12 @@ mod tests {
         // message id, a narrowed set would be the same narrowed set on every
         // retransmission — one dead-end neighbor forever instead of three
         // chances.
-        let neighbors: Vec<(&str, u8)> = vec![("a", 90), ("b", 80), ("c", 70), ("d", 60)];
+        let neighbors: Vec<(&str, u8, TransportType)> = vec![
+            ("a", 90, BLE),
+            ("b", 80, BLE),
+            ("c", 70, BLE),
+            ("d", 60, BLE),
+        ];
 
         let mut weak = biased_governor();
         weak.set_conditions(Some(0), false, false, 30);

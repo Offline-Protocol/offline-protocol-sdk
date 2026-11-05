@@ -28976,6 +28976,50 @@ fn test_a_weak_device_offers_its_own_message_to_every_neighbor() {
     );
 }
 
+/// A device's own message reaches a neighbor on every carrier it has one on,
+/// however many stronger links another carrier holds.
+///
+/// The failure: a Python service with two phones on its Bluetooth peripheral
+/// and one peer stream to a second engine never got a frame to that engine's
+/// side of the mesh. The peer stream reports no signal strength, so it scored
+/// mid-scale, and the four Bluetooth links (two phones, each announced twice)
+/// outranked it on every send. Target choice is stable per message id, so no
+/// retry ever tried it. Link quality is a reading within one carrier; it says
+/// nothing about which carrier leads to the recipient.
+#[test]
+fn test_own_message_reaches_a_neighbor_on_every_carrier() {
+    use offline_protocol_transport::PeerLink;
+
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    for peer in ["p1", "p2", "p3", "p4"] {
+        ble.add_connected_peer(peer, -50);
+    }
+    let stream = MockTransport::new(TransportType::WiFiDirect);
+    stream.start().unwrap();
+    stream.set_connected_peers(vec![PeerLink::new("engine-a")]);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(stream.clone()));
+    protocol.start().unwrap();
+
+    // Several ids, because the tie-break among the four equal Bluetooth links
+    // varies per id and the peer stream must be chosen for every one.
+    for n in 0..8 {
+        let message = signed_frame(&id("user123"), "engine-b", &format!("carry {n}"));
+        protocol.offer_to_mesh(&message);
+        assert_eq!(
+            stream.peer_send_count_for(&message.id.as_str()),
+            1,
+            "the only link toward the recipient got no copy of message {n}",
+        );
+    }
+}
+
 /// Turning relaying off in configuration surrenders the standing on the next
 /// tick, for the same reason the battery floor does.
 #[test]

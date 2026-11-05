@@ -4443,7 +4443,7 @@ impl OfflineProtocol {
             self.mesh_relay.select_origination_targets(
                 neighbors
                     .iter()
-                    .map(|n| (n.peer_id.as_str(), n.link_quality())),
+                    .map(|n| (n.peer_id.as_str(), n.link_quality(), n.transport)),
                 &[],
                 &message.id.as_str(),
             )
