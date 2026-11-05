@@ -37,7 +37,8 @@ Every channel carries the version number of the release it came from.
 | C, and any language that calls C | `offline_protocol.h` and the native library in each [GitHub release](https://github.com/Offline-Protocol/offline-protocol-sdk/releases)'s desktop archives | See [bindings/c](bindings/c/README.md) |
 | Flutter (iOS, Android, preview) | [`offline_protocol`](bindings/flutter/README.md) plugin in this repository | Path dependency; see [bindings/flutter](bindings/flutter/README.md) |
 | Java (JVM 22+, desktop and server) | [`com.offlineprotocol:offline-protocol-java`](https://central.sonatype.com/artifact/com.offlineprotocol/offline-protocol-java) on Maven Central, over the native library in each release's desktop archives | `implementation("com.offlineprotocol:offline-protocol-java:0.31.0")`, see [bindings/java](bindings/java/README.md) |
-| Ruby (desktop and server) | Generated source in [bindings/ruby](bindings/ruby/README.md), over the native library in each release's desktop archives; not on RubyGems yet | See [bindings/ruby](bindings/ruby/README.md) |
+| C# (.NET 8, desktop and server, preview) | Source in [bindings/csharp](bindings/csharp/README.md), over the C API and the native library in each release's desktop archives; not on NuGet | Project reference; see [bindings/csharp](bindings/csharp/README.md) |
+| Ruby (desktop and server) | [`offline_protocol`](https://rubygems.org/gems/offline_protocol) on RubyGems, over the native library in each release's desktop archives | `gem install offline_protocol`, see [bindings/ruby](bindings/ruby/README.md) |
 | Browser (Chromium, Firefox, Safari; experimental) | [`bindings/web`](bindings/web) in this repository, over the [`offline-protocol-web`](https://crates.io/crates/offline-protocol-web) crate; the JavaScript package is not published yet | Build from source; see [docs/bridges/web.md](docs/bridges/web.md) |
 
 **Python.** Wheels are published for Python 3.10 or later on macOS arm64

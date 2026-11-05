@@ -84,6 +84,11 @@ ignore = [
     # successor is web-time, which is what our code reads the clock through.
     # Drop this waiver when an OpenMLS release replaces fluvio-wasm-timer.
     { id = "RUSTSEC-2024-0384", reason = "instant unmaintained; wasm32-only, via openmls `js` -> fluvio-wasm-timer -> parking_lot 0.11; openmls cannot build for wasm without it; no safe upgrade exists" },
+    # `pin-utils` reaches us by the same route, directly under
+    # fluvio-wasm-timer, and compiles for wasm32 only. Its successors
+    # (`core::pin::pin!`, pin-project-lite) need a fluvio-wasm-timer change.
+    # Drop it with the waiver above.
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained; wasm32-only, via openmls `js` -> fluvio-wasm-timer; openmls cannot build for wasm without it; no safe upgrade exists" },
     # The `im` persistent-collections family: all three crates were archived
     # by the same upstream author in 2026 and flagged unmaintained together.
     # They reach us as

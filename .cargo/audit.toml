@@ -28,6 +28,10 @@ ignore = [
     # deny.toml, where the full rationale is.
     "RUSTSEC-2024-0384",
 
+    # RUSTSEC-2026-0441: pin-utils unmaintained. wasm32 only, directly under
+    # fluvio-wasm-timer on the same OpenMLS `js` path. Mirrors deny.toml.
+    "RUSTSEC-2026-0441",
+
     # --- Lockfile-only: the libcrux HPKE backend is never compiled ---------
     #
     # `hpke-rs-libcrux` and its `libcrux-aesgcm` dependency appear in Cargo.lock
