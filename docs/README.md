@@ -94,7 +94,7 @@ implementation written against these documents should interoperate.
 
 | Document | Scope |
 |----------|-------|
-| [ADR index](adr/README.md) | Thirty-six decisions that are expensive to reverse or easy to undo by accident |
+| [ADR index](adr/README.md) | Thirty-seven decisions that are expensive to reverse or easy to undo by accident |
 
 If something in the codebase looks redundant or over-engineered, check here
 before simplifying it.
@@ -115,6 +115,7 @@ in here fails **silently** when violated.
 | [C](bridges/c.md) | The C API: the local API called in process, for C and every language that calls C |
 | [Java](bridges/java.md) | The generated Java binding for the JVM, over the foreign function API |
 | [Ruby](bridges/ruby.md) | The generated Ruby binding, over the ffi gem |
+| [C#](bridges/csharp.md) | The hand-written .NET binding, P/Invoke over the C API |
 | [Flutter](bridges/flutter.md) | The Flutter plugin for iOS and Android, over the shared React Native bridge sources |
 | [Web](bridges/web.md) | The engine in a browser Web Worker, and the JavaScript in `bindings/web` that runs it |
 | [Web on two devices](bridges/web-devices.md) | The manual checklist for the browser binding between two real devices |
