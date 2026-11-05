@@ -554,7 +554,11 @@ on a binding runs the defaults.
 
 The calls are on `MeshServices` in every UniFFI binding (Swift, Kotlin,
 Python, Ruby, Java, C), with the mode and policy as enums and the policy as
-a `SubscriptionPolicyConfig` record. The hand-written layers take strings:
+a `SubscriptionPolicyConfig` record. C# reaches the same calls through
+`engine.Services` (`MeshServicesClient`), generated from the definition, which
+takes the [local API](spec/local-api.md) parameters as JSON
+(`SubscribeServiceAsync`, `PublishServiceUpdateAsync`,
+`SetServiceSubscriptionPolicyAsync`). The hand-written layers take strings:
 
 | Binding | Subscribe | Publish | Policy |
 |---------|-----------|---------|--------|

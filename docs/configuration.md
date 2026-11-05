@@ -557,6 +557,32 @@ The counters are `getCustodyStats()`, and `eraseCustody()` drops every held
 frame; see [mesh.md](mesh.md#holding-a-frame-for-hours-custody) for what the
 numbers mean and what a custodian owes.
 
+### Service Subscription Configuration
+
+How this device subscribes to other devices' services and is subscribed to
+([service discovery](service-discovery.md#subscriptions),
+[ADR 0035](adr/0035-a-service-can-be-subscribed-to.md)). On by default, and
+it needs MLS: subscription frames are sealed or not sent.
+
+**Rust only.** The section is `ProtocolConfig::service_subscriptions`, a
+`ServiceSubscriptionConfig`. No binding's config record carries it yet, so a
+device on a binding always runs the defaults below, and none of the
+TypeScript examples in this guide can set it.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | `bool` | `true` | Whether this device subscribes and can be subscribed to |
+| `lease_ms` | `u64` | 120000 (2 minutes) | The lease a consumer asks for. It renews at half of what the provider grants. Between 30000 and 600000 |
+| `min_update_interval_ms` | `u64` | 50 | The least time between two `latest` updates to one subscriber. Faster publishes coalesce to the newest value per key |
+| `approval_timeout_ms` | `u64` | 60000 | How long a provider holds a subscription its application has not answered before rejecting it. Under the default `restricted` policy, an application that never answers `service_subscribe_received` serves nobody |
+| `pending_timeout_ms` | `u64` | 120000 | How long a consumer waits for a session and an answer before giving a subscription up |
+| `max_pause_ms` | `u64` | 600000 | How long a consumer keeps a subscription whose renewals go unanswered before ending it |
+
+```rust
+let mut config = ProtocolConfig::new("my-app", "default");
+config.service_subscriptions.lease_ms = 60_000;
+```
+
 ### Reliability Configuration
 
 **ACK Config**:
@@ -882,6 +908,13 @@ work. Nothing is partially applied.
     must be both zero (no deposits from peers without a session, the default)
     or both > 0, a positive byte cap must be at least 65536, and neither may
     exceed the global dial
+
+**Service subscriptions** (Rust only, see above)
+
+29. `service_subscriptions.lease_ms` must be between 30000 and 600000,
+    whether or not subscriptions are enabled
+30. `service_subscriptions.approval_timeout_ms`, `pending_timeout_ms` and
+    `max_pause_ms` must each be > 0
 
 Rules 26 through 28 are checked only while custody is enabled. A disabled
 section that could refuse a configuration would turn every outbox lifetime

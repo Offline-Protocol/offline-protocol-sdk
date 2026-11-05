@@ -94,6 +94,7 @@ pub struct ProtocolConfig {
     pub security: SecurityConfig,  // Transport & control-message hardening
     pub data: DataConfig,          // Replicated documents (default: enabled)
     pub custody: CustodyConfig,    // Holding neighbours' frames for hours (default: off)
+    pub service_subscriptions: ServiceSubscriptionConfig, // Subscribing to services (default: on)
 }
 ```
 

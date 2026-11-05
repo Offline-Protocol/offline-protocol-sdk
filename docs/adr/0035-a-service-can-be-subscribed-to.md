@@ -1,6 +1,7 @@
 # 0035. A service can be subscribed to
 
-**Status:** Proposed
+**Status:** Accepted. Phases 1 and 2 below shipped in 0.32.0; phase 3 is
+[ADR 0036](0036-a-topic-can-be-backed-by-a-group.md), which is still proposed.
 
 ## Context
 
