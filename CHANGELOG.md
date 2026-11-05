@@ -145,7 +145,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   at all. A listener that cannot take 8988 now binds a free port and
   advertises that one. A group's clients can only dial 8988, so an app
   without it never creates a Wi-Fi Direct group and joins instead. A start
-  that cannot bind any port now fails rather than advertising one.
+  that cannot bind any port now fails rather than advertising one, and a
+  start that fails at any point leaves nothing running.
+
+- **Enabling Wi-Fi Direct on Android no longer starts it a second time over
+  a start in progress.** `enableTransport('wifiDirect')` stopped the manager
+  first only when it was running, while the Internet branch also stopped it
+  when it was starting. An enable that found a start still in progress, or a
+  start that had thrown partway and left the manager starting, started it
+  again over what the first start had brought up: a second broadcast receiver
+  over the first, and a second listener for the port the first one held. The
+  Wi-Fi Direct branch now stops a starting manager as the Internet branch
+  does.
 
 - **Frames for a Bluetooth neighbor no longer leave through a relay that
   cannot reach it.** The application dispatch sent a message for a recipient
