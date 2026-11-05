@@ -68,7 +68,7 @@ public sealed partial class ProtocolEngine : IAsyncDisposable
         engineThread.Start();
     }
 
-    /// <summary>The native library's version, such as <c>"0.31.0"</c>. Needs no engine.</summary>
+    /// <summary>The native library's version, such as <c>"0.32.0"</c>. Needs no engine.</summary>
     public static string LibraryVersion => OfflineProtocolNative.Version();
 
     /// <summary>Creates an engine from a typed <see cref="ProtocolConfig"/>.</summary>

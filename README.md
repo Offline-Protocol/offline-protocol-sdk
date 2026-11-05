@@ -33,10 +33,10 @@ Every channel carries the version number of the release it came from.
 | Python (macOS, Linux, Windows) | [`offline-protocol-sdk`](https://pypi.org/project/offline-protocol-sdk/) on PyPI | `pip install offline-protocol-sdk` |
 | Rust | [`offline-protocol`](https://crates.io/crates/offline-protocol) and its sibling `offline-protocol-*` crates on crates.io | `cargo add offline-protocol` |
 | Swift, iOS (preview) | [`offline-protocol-swift`](https://github.com/Offline-Protocol/offline-protocol-swift), product `OfflineProtocolSDK` | Swift Package Manager, see below |
-| Android, Kotlin (preview) | [`com.offlineprotocol:offline-protocol-sdk`](https://central.sonatype.com/artifact/com.offlineprotocol/offline-protocol-sdk) on Maven Central | `implementation("com.offlineprotocol:offline-protocol-sdk:0.31.0")`, see below |
+| Android, Kotlin (preview) | [`com.offlineprotocol:offline-protocol-sdk`](https://central.sonatype.com/artifact/com.offlineprotocol/offline-protocol-sdk) on Maven Central | `implementation("com.offlineprotocol:offline-protocol-sdk:0.32.0")`, see below |
 | C, and any language that calls C | `offline_protocol.h` and the native library in each [GitHub release](https://github.com/Offline-Protocol/offline-protocol-sdk/releases)'s desktop archives | See [bindings/c](bindings/c/README.md) |
 | Flutter (iOS, Android, preview) | [`offline_protocol`](bindings/flutter/README.md) plugin in this repository | Path dependency; see [bindings/flutter](bindings/flutter/README.md) |
-| Java (JVM 22+, desktop and server) | [`com.offlineprotocol:offline-protocol-java`](https://central.sonatype.com/artifact/com.offlineprotocol/offline-protocol-java) on Maven Central, over the native library in each release's desktop archives | `implementation("com.offlineprotocol:offline-protocol-java:0.31.0")`, see [bindings/java](bindings/java/README.md) |
+| Java (JVM 22+, desktop and server) | [`com.offlineprotocol:offline-protocol-java`](https://central.sonatype.com/artifact/com.offlineprotocol/offline-protocol-java) on Maven Central, over the native library in each release's desktop archives | `implementation("com.offlineprotocol:offline-protocol-java:0.32.0")`, see [bindings/java](bindings/java/README.md) |
 | C# (.NET 8, desktop and server, preview) | Source in [bindings/csharp](bindings/csharp/README.md), over the C API and the native library in each release's desktop archives; not on NuGet | Project reference; see [bindings/csharp](bindings/csharp/README.md) |
 | Ruby (desktop and server) | [`offline_protocol`](https://rubygems.org/gems/offline_protocol) on RubyGems, over the native library in each release's desktop archives | `gem install offline_protocol`, see [bindings/ruby](bindings/ruby/README.md) |
 | Browser (Chromium, Firefox, Safari; experimental) | [`bindings/web`](bindings/web) in this repository, over the [`offline-protocol-web`](https://crates.io/crates/offline-protocol-web) crate; the JavaScript package is not published yet | Build from source; see [docs/bridges/web.md](docs/bridges/web.md) |
@@ -54,7 +54,7 @@ source](#build-python-desktop-bindings) instead. The import name is
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.31.0")
+    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.32.0")
 ],
 targets: [
     .target(name: "YourApp", dependencies: [
@@ -74,7 +74,7 @@ Native:
 
 ```kotlin
 dependencies {
-    implementation("com.offlineprotocol:offline-protocol-sdk:0.31.0")
+    implementation("com.offlineprotocol:offline-protocol-sdk:0.32.0")
 }
 ```
 
