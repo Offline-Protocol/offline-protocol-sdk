@@ -330,8 +330,9 @@ class TestOutgoingFragments:
 
 class TestPeerMonitoring:
     @pytest.mark.asyncio
-    async def test_detects_new_central(self, peripheral, mock_protocol):
-        """Simulate a central appearing in _central_subscriptions."""
+    async def test_tracks_a_central_without_announcing_its_uuid(self, peripheral, mock_protocol):
+        """A central id is a label, not an address: the core hears of a
+        central only through the address its hello proves (P15)."""
         mock_delegate = MagicMock()
         mock_delegate._central_subscriptions = {}
         mock_delegate.is_advertising = MagicMock(return_value=True)
@@ -352,16 +353,14 @@ class TestPeerMonitoring:
 
         await asyncio.sleep(1.5)
         assert "PHONE-UUID-1" in peripheral._connected_centrals
-        mock_protocol.ble_peer_discovered.assert_called_with(
-            peer_id="PHONE-UUID-1", rssi=-50
-        )
+        mock_protocol.ble_peer_discovered.assert_not_called()
 
         # Simulate central disconnecting
         mock_delegate._central_subscriptions.clear()
 
         await asyncio.sleep(1.5)
         assert len(peripheral._connected_centrals) == 0
-        mock_protocol.ble_peer_lost.assert_called_with(peer_id="PHONE-UUID-1")
+        mock_protocol.ble_peer_lost.assert_not_called()
 
         task.cancel()
         try:
@@ -558,7 +557,7 @@ class TestInterruptedStop:
         assert peripheral._server is None
         assert peripheral.get_metrics()["is_advertising"] is False
         assert peripheral._connected_centrals == {}
-        mock_protocol.ble_peer_lost.assert_called_once_with(peer_id="central-1")
+        mock_protocol.ble_peer_lost.assert_not_called()  # never announced
         mock_protocol.ble_status_changed.assert_called_once_with(is_available=False)
 
     @pytest.mark.asyncio
@@ -743,7 +742,7 @@ def bluez_peripheral(mock_protocol, fake_bus, subscribed: list[str]) -> BlePerip
 
 class TestPeripheralOnBlueZ:
     @pytest.mark.asyncio
-    async def test_the_monitor_announces_and_loses_a_central(self, mock_protocol, fake_bus, monkeypatch):
+    async def test_the_monitor_tracks_a_central_coming_and_going(self, mock_protocol, fake_bus, monkeypatch):
         monkeypatch.setattr(ble_peripheral_module, "_PEER_MONITOR_INTERVAL", 0.01)
         subscribed: list[str] = []
         peripheral = bluez_peripheral(mock_protocol, fake_bus, subscribed)
@@ -757,15 +756,14 @@ class TestPeripheralOnBlueZ:
 
             subscribed.append(MESSAGE_CHAR_UUID)
             await asyncio.sleep(0.05)
-            mock_protocol.ble_peer_discovered.assert_called_once_with(
-                peer_id="AA:BB:CC:DD:EE:01", rssi=-50
-            )
             assert "AA:BB:CC:DD:EE:01" in peripheral._connected_centrals
+            # Announced only under the address a hello proves (P15).
+            mock_protocol.ble_peer_discovered.assert_not_called()
 
             fake_bus.connected[PHONE] = False
             await asyncio.sleep(0.05)
-            mock_protocol.ble_peer_lost.assert_called_with(peer_id="AA:BB:CC:DD:EE:01")
             assert peripheral._connected_centrals == {}
+            mock_protocol.ble_peer_lost.assert_not_called()
         finally:
             task.cancel()
             await asyncio.wait({task})

@@ -186,7 +186,7 @@ class TestPeripheralCentralLeaving:
     ):
         await self._leave(peripheral, linked_elsewhere=False)
         lost = [c.kwargs["peer_id"] for c in protocol.ble_peer_lost.call_args_list]
-        assert lost == [PHONE_CENTRAL, PHONE]
+        assert lost == [PHONE]
         assert peripheral._hello_bindings == {}
 
     @pytest.mark.asyncio
@@ -194,8 +194,7 @@ class TestPeripheralCentralLeaving:
         self, peripheral, protocol, verifier
     ):
         await self._leave(peripheral, linked_elsewhere=True)
-        lost = [c.kwargs["peer_id"] for c in protocol.ble_peer_lost.call_args_list]
-        assert lost == [PHONE_CENTRAL]
+        protocol.ble_peer_lost.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_a_hello_from_a_central_that_never_subscribes_is_dropped(
@@ -240,6 +239,29 @@ class TestPeripheralCentralLeaving:
         await self._poll(peripheral, lambda: PHONE_CENTRAL not in peripheral._hello_bindings)
         assert PHONE_CENTRAL not in peripheral._hello_bindings
         protocol.ble_peer_lost.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_central_is_announced_only_under_the_address_it_proved(
+        self, peripheral, protocol, verifier
+    ):
+        """A subscription used to announce the central under its Bluetooth
+        id as well, so each phone was two Bluetooth peers in the core. With
+        two phones those four links outranked the one peer stream on every
+        mesh send, and an engine behind the stream was never reached. A
+        central that never says hello is announced under nothing, and
+        nothing is reported lost that was never announced."""
+        write(peripheral, PHONE_CENTRAL, HELLO_CHAR_UUID, HELLO)
+        polls = iter([{PHONE_CENTRAL, MAC_CENTRAL}] * 3)
+        await self._poll(
+            peripheral,
+            lambda: False,
+            current=lambda: next(polls, set()),
+            ticks=20,
+        )
+        announced = [c.kwargs["peer_id"] for c in protocol.ble_peer_discovered.call_args_list]
+        lost = [c.kwargs["peer_id"] for c in protocol.ble_peer_lost.call_args_list]
+        assert announced == [PHONE]
+        assert lost == [PHONE]
 
     async def _poll(self, peripheral, done, current=lambda: set(), ticks=200, step=1.0):
         peripheral._server = MagicMock()

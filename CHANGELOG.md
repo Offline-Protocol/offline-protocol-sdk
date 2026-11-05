@@ -11,6 +11,22 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **A Python service with phones on its Bluetooth peripheral reaches the
+  engines behind its peer stream.** The peripheral announced each subscribed
+  central under its Bluetooth id as well as under the address its hello
+  proved, so every phone was two Bluetooth peers in the core. The mesh fan-out
+  ranked links by quality alone, and a peer stream, which measures no signal,
+  scores mid-scale: with two phones linked, the four Bluetooth links took all
+  three slots on every send, and a message for an engine two hops away was
+  never delivered, on any retry. The peripheral now announces a central only
+  under its proven address, and the fan-out gives the strongest link on each
+  carrier a slot before any carrier gets a second, so three phones and one
+  peer stream no longer starve the stream either.
+
 ## [0.32.0] — 2026-11-05
 
 > **A service can be subscribed to.** A consumer takes a lease on a topic of a
