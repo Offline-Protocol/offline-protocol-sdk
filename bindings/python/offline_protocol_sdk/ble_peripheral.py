@@ -858,10 +858,6 @@ class BlePeripheral(TransportManager):
         self._subscribed_centrals = {}
         self._notify_ready = None
         for central_uuid in centrals_snapshot:
-            try:
-                self._protocol.ble_peer_lost(peer_id=central_uuid)
-            except Exception:
-                logger.debug("ble_peer_lost failed for %s", central_uuid)
             resolved_uid = resolved_snapshot.get(central_uuid)
             if resolved_uid:
                 try:
@@ -1554,22 +1550,19 @@ class BlePeripheral(TransportManager):
                         f"ignoring {central_uuid}",
                     )
 
+                # A subscription announces nothing: the core keys a route by
+                # the id it is handed, and a central id is a label, not an
+                # address. The hello announces the address it proved, and
+                # resolve_sender_identity covers a central that writes none.
+                # Announced under both, each phone was two Bluetooth peers in
+                # the core, and two phones' four links outranked the peer
+                # stream on every mesh send (P15).
                 for central_uuid in added:
-                    try:
-                        self._protocol.ble_peer_discovered(
-                            peer_id=central_uuid, rssi=-50
-                        )
-                    except Exception:
-                        logger.debug("ble_peer_discovered failed for %s", central_uuid)
                     self._emit_diagnostic(
                         "info", "Central connected", {"central": central_uuid}
                     )
 
                 for central_uuid, resolved_uid in removed:
-                    try:
-                        self._protocol.ble_peer_lost(peer_id=central_uuid)
-                    except Exception:
-                        logger.debug("ble_peer_lost failed for %s", central_uuid)
                     if resolved_uid and not self._linked_elsewhere(resolved_uid):
                         try:
                             self._protocol.ble_peer_lost(peer_id=resolved_uid)

@@ -449,7 +449,10 @@ The pieces, each of which the failure needs only one of to come back:
   verify with the core's one verifier; bind the central to the derived address;
   never rebind; announce the peer only when no other link has, which includes
   the central role's client link (`ProtocolManager` hands the peripheral
-  `BleManager.holds_peer`). A message's `sender` field never replaces a hello
+  `BleManager.holds_peer`). A subscription announces nothing: a central id
+  is a label, not an address. Announced under it as well, each phone was two
+  Bluetooth peers in the core, and two phones' four links took every mesh
+  fan-out slot from the one peer stream to the engines behind it. A message's `sender` field never replaces a hello
   binding: it proves nothing. A central that says hello and never subscribes
   is not a central the monitor tracks, so its binding is dropped, and its peer
   reported lost unless another link reaches it, once it has gone 5 seconds
