@@ -552,6 +552,48 @@ impl OfflineProtocol {
         );
     }
 
+    /// The mesh-only counterpart of [`Self::note_confirmation_probe_unreachable`]:
+    /// a probe that left with no infrastructure carrier up and no direct mesh
+    /// link to its peer could only be handed to neighbors to carry, and that
+    /// is the peer's verdict on a carrier that never gives one. It backs the
+    /// schedule off on the same 15s -> 600s ladder.
+    ///
+    /// Without it, every pending session with a peer that is gone (a device
+    /// met once, or an earlier install of the same app, which is a new
+    /// identity) is probed every `CONFIRMATION_PROBE_INTERVAL_SECS` for the
+    /// life of the process, and restored and probed again at each start.
+    /// Each probe is a new message with its own retry ladder, offered to every
+    /// neighbor on every resend, so a handful of such peers keeps a Bluetooth
+    /// link to the one neighbor that is present saturated: on two phones,
+    /// eight dead pending sessions were offered to the only neighbor about
+    /// 1,400 times in five minutes, and the frames that neighbor was waiting
+    /// for queued behind them for minutes.
+    ///
+    /// With an infrastructure carrier up the relay's verdict drives the ladder
+    /// and this does nothing, so the two never escalate one probe twice. A
+    /// returning peer resets it: discovery does, as a presence edge does
+    /// ([`Self::reset_confirmation_probe_backoff`]).
+    pub(super) fn note_confirmation_probe_carried(&mut self, peer_id: &str) {
+        if self.transport_manager.has_infrastructure_carrier()
+            || self.transport_manager.mesh_can_address(peer_id)
+        {
+            return;
+        }
+        self.note_confirmation_probe_unreachable(peer_id);
+    }
+
+    /// A reachability edge resets the session-confirmation probe's backoff:
+    /// clear the escalation counter and mark a probe due now, so a peer that
+    /// went unreachable while unconfirmed is re-probed immediately and its
+    /// session converges rather than waiting out the (up to 600s) backoff.
+    pub(super) fn reset_confirmation_probe_backoff(&mut self, peer_id: &str) {
+        if self.confirmation_probe_due_at.contains_key(peer_id) {
+            self.confirmation_probe_unreachable_parks.remove(peer_id);
+            self.confirmation_probe_due_at
+                .insert(peer_id.to_string(), Utc::now());
+        }
+    }
+
     pub(super) fn collect_pending_session_peers(&mut self) -> Result<Vec<String>> {
         let Some(mls) = self.mls_manager.clone() else {
             return Ok(Vec::new());
@@ -633,6 +675,7 @@ impl OfflineProtocol {
                     source_event = %source_event,
                     "session_confirmation_probe_sent"
                 );
+                self.note_confirmation_probe_carried(peer_id);
             }
             Err(err) => {
                 // The send can fail after the probe entered the outbox, and
@@ -1988,16 +2031,7 @@ impl OfflineProtocol {
                 self.resend_unconfirmed_sent_welcome(peer_id, "peer_presence_online");
                 self.note_welcome_rescue_attempt(peer_id);
             }
-            // A reachability edge resets the session-confirmation probe's
-            // unreachable backoff: clear the escalation counter and mark a probe
-            // due now, so a peer that went unreachable while unconfirmed is
-            // re-probed immediately and its session converges rather than
-            // waiting out the (up to 600s) backoff.
-            if self.confirmation_probe_due_at.contains_key(peer_id) {
-                self.confirmation_probe_unreachable_parks.remove(peer_id);
-                self.confirmation_probe_due_at
-                    .insert(peer_id.to_string(), Utc::now());
-            }
+            self.reset_confirmation_probe_backoff(peer_id);
         } else {
             self.park_welcome_peer_unreachable(peer_id);
         }

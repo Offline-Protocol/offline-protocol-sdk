@@ -176,10 +176,24 @@ what heals a fetched package that was already consumed.
 
 An unconfirmed session is probed on a fixed cadence, and **a peer holds at most
 one probe in the outbox**: each new probe supersedes the last rather than
-stacking its own retry ladder on top. The cadence only backs off on a relay
+stacking its own retry ladder on top. The cadence backs off on a relay
 verdict (`unreachable` or `relay_pushed`), which a mesh-only carrier never
 produces, so stacked probes once filled the outbox and capacity eviction failed
 real messages.
+
+**A probe only the mesh could carry is that verdict.** With no infrastructure
+carrier up and no direct mesh link to the peer, a probe can only be handed to
+neighbors, and it backs the cadence off on the same 15 s to 600 s ladder. A
+mesh-only device otherwise probed every pending session with a peer that is gone
+(a device met once, or an earlier install of the same app, which is a new
+identity) every five seconds for the life of the process, and again after every
+restart, since pending sessions are restored. Each probe is offered to every
+neighbor on every resend, so on two phones eight such peers held the one
+Bluetooth link for minutes and the frames its neighbor was waiting for queued
+behind them. With an infrastructure carrier up the relay's verdict drives the
+ladder and this rule does nothing, so one probe never escalates twice.
+Discovering the peer resets the ladder and probes it at once, as a presence
+edge does.
 
 The supersede lives in the one function that sends a probe, because two paths
 call it: the periodic scan and the fast path taken when the transport confirms

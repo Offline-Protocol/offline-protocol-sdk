@@ -15,6 +15,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A mesh-only device stops flooding its neighbors with probes for peers that
+  are gone.** A pending 1:1 session was probed every five seconds forever when
+  no relay was there to say its peer was unreachable, and pending sessions are
+  restored at every start, so a phone that had met a few devices (or earlier
+  installs of the same app) kept probing all of them. Each probe was offered to
+  every neighbor on every resend: on two phones over Bluetooth, eight such
+  peers held the only link for minutes and a service subscription's reply
+  waited behind them. A probe that only the mesh could carry now backs off on
+  the relay verdict's 15 s to 600 s ladder, and discovering the peer probes it
+  again at once.
+
 - **A Python service with phones on its Bluetooth peripheral reaches the
   engines behind its peer stream.** The peripheral announced each subscribed
   central under its Bluetooth id as well as under the address its hello
