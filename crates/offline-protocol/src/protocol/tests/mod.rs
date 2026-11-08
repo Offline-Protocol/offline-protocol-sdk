@@ -42529,8 +42529,14 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
 /// intervals late finds nothing and changes nothing.
 #[test]
 fn a_late_verdict_on_a_superseded_probe_still_backs_off() {
-    let (mut alice, _handle) = unconfirmed_probe_target();
+    let (mut alice, handle) = unconfirmed_probe_target();
     let bob = id("bob").to_string();
+    // A live link to bob, so only the relay's verdicts move the ladder here:
+    // with none, a probe the mesh could only carry backs it off on its own
+    // (`a_probe_only_the_mesh_could_carry_backs_off`), as the one `start()`
+    // sent did; discovering bob resets that.
+    handle.add_connected_peer(&bob, -60);
+    alice.on_neighbor_discovered(&bob);
 
     // Two intervals late: the oldest of three probes is no longer remembered.
     alice.send_session_confirmation_probe(&bob, "test");
@@ -42594,6 +42600,61 @@ fn a_late_verdict_on_a_superseded_probe_still_backs_off() {
         alice.send_session_confirmation_probe(&bob, "transport_confirmed");
         assert_eq!(alice.confirmation_probe_due_at[&bob], backed_off);
     }
+}
+
+/// On a mesh-only device a pending session whose peer is gone gets no relay
+/// verdict, so it was probed every 5s forever, and each probe, offered to the
+/// one neighbor on every resend, kept that link saturated (eight such peers
+/// held a phone's only Bluetooth link for minutes). A probe that could only
+/// be carried backs the schedule off on the verdict ladder; a live link to the
+/// peer does not, and rediscovering the peer probes it again at once.
+#[test]
+fn a_probe_only_the_mesh_could_carry_backs_off() {
+    let (mut alice, handle) = unconfirmed_probe_target();
+    let bob = id("bob").to_string();
+    let secs_until_due =
+        |p: &OfflineProtocol| (p.confirmation_probe_due_at[&bob] - Utc::now()).num_seconds();
+
+    // `start()` probed bob once already, with no carrier able to reach him.
+    assert_eq!(
+        alice.confirmation_probe_unreachable_parks.get(&bob),
+        Some(&1),
+        "a probe no carrier could deliver directly is the verdict a mesh never gives"
+    );
+    let first = secs_until_due(&alice);
+    assert!(
+        (WELCOME_NO_CARRIER_RETRY_SECS - 2..=WELCOME_NO_CARRIER_RETRY_SECS + 1).contains(&first),
+        "first carried probe must back off to ~15s, got {first}s"
+    );
+    alice.send_session_confirmation_probe(&bob, "test");
+    let second = secs_until_due(&alice);
+    assert!(
+        (2 * WELCOME_NO_CARRIER_RETRY_SECS - 2..=2 * WELCOME_NO_CARRIER_RETRY_SECS + 1)
+            .contains(&second),
+        "the ladder doubles, got {second}s"
+    );
+    // And the scan honours it: nothing is due, so nothing is sent.
+    handle.clear_sent_messages();
+    alice.kick_pending_session_reconciliation("test");
+    assert!(sent_confirmation_probes(&handle).is_empty());
+
+    // Bob comes into range: probed now, from the bottom of the ladder.
+    handle.add_connected_peer(&bob, -60);
+    alice.on_neighbor_discovered(&bob);
+    assert!(!alice
+        .confirmation_probe_unreachable_parks
+        .contains_key(&bob));
+    assert!(
+        secs_until_due(&alice) <= 1,
+        "a discovered peer is probed at once"
+    );
+
+    // With a live link the probe is not carried, and the plain cadence holds.
+    alice.send_session_confirmation_probe(&bob, "test");
+    assert!(!alice
+        .confirmation_probe_unreachable_parks
+        .contains_key(&bob));
+    assert!(secs_until_due(&alice) <= CONFIRMATION_PROBE_INTERVAL_SECS);
 }
 
 /// A probe the tracking no longer names could never be superseded and would

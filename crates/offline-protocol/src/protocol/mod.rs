@@ -2539,6 +2539,10 @@ impl OfflineProtocol {
         // next renewal time.
         self.on_subscription_peer_seen(peer_id);
 
+        // A pending session backed off while no carrier reached this peer is
+        // probed now: the peer is in front of us.
+        self.reset_confirmation_probe_backoff(peer_id);
+
         // A Welcome that stalled or expired while this peer was unreachable now
         // has a fresh delivery opportunity over the carrier that surfaced this
         // peer — re-arm it. No-op when there is no pending Welcome for the peer.
