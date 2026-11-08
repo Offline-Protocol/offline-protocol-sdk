@@ -164,21 +164,39 @@ pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 ///
 /// Nothing authenticates the stamp, so a forged one buys what a frame under a
 /// fresh id already buys: one more flood, paid for from the same per-neighbor
-/// and per-device budgets.
+/// and per-device budgets, and only up to [`RESEND_MAX_GENERATION`] of them for
+/// any one id.
 pub const RESEND_META_KEY: &str = "__resend";
+
+/// The highest resend generation. A sender counts no higher and a forwarder
+/// reads anything higher as this, so within the retention window a message
+/// floods the mesh at most this many times more than its first copy.
+///
+/// A recipient that is gone answers no flood, and each one crosses every
+/// device in reach. Without a limit, each step of the retry ladder past the
+/// first timeout was a full flood: in a simulated crowd of forty phones, 60
+/// transmissions rather than 16, for a message nobody could receive. A resend
+/// past the limit is a copy again, carried by the device beside the sender and
+/// suppressed beyond it. On the default ladder and timeout the generations are
+/// reached at 15 and 31 seconds, which is where lost frames were recovered.
+pub const RESEND_MAX_GENERATION: u64 = 3;
 
 /// What suppression is keyed on: the id, and the resend generation when the
 /// frame carries a well-formed one. A malformed stamp is ignored rather than
-/// trusted, so it cannot grow the cache's keys.
+/// trusted, so it cannot grow the cache's keys, and a generation past
+/// [`RESEND_MAX_GENERATION`] is that generation, so no stamp buys more floods
+/// than a sender would make.
 pub(crate) fn relay_key(message: &Message) -> String {
     let id = message.id.as_str();
-    match message
+    let generation = message
         .metadata
         .get(RESEND_META_KEY)
         .and_then(|generation| generation.parse::<u64>().ok())
-    {
-        Some(generation) => format!("{id}~{generation}"),
-        None => id,
+        .unwrap_or(0)
+        .min(RESEND_MAX_GENERATION);
+    match generation {
+        0 => id,
+        generation => format!("{id}~{generation}"),
     }
 }
 
@@ -2171,6 +2189,33 @@ mod tests {
             .metadata
             .insert(RESEND_META_KEY.to_string(), "x".repeat(4096));
         assert!(gov.absorb_settled_duplicate(&forged, Some("carol")));
+    }
+
+    /// A stamp cannot buy more floods than a sender would ever make: every
+    /// generation past the limit is the limit's, and a generation of 0 is the
+    /// first copy.
+    #[test]
+    fn a_resend_generation_past_the_limit_is_the_limit() {
+        let mut gov = governor();
+        let mut first = frame();
+        first.hop_count = first.hop_count.increment().unwrap();
+        let stamped = |generation: String| {
+            let mut copy = first.clone();
+            copy.metadata
+                .insert(RESEND_META_KEY.to_string(), generation);
+            copy
+        };
+        let at_limit = stamped(RESEND_MAX_GENERATION.to_string());
+        assert_eq!(gov.admit(&at_limit, Some("bob"), 3), RelayAdmission::Queued);
+        gov.take_due(Instant::now());
+        assert!(gov.absorb_settled_duplicate(
+            &stamped((RESEND_MAX_GENERATION + 1).to_string()),
+            Some("carol")
+        ));
+        assert!(gov.absorb_settled_duplicate(&stamped(u64::MAX.to_string()), Some("carol")));
+
+        let zero = stamped("0".to_string());
+        assert_eq!(relay_key(&zero), zero.id.as_str());
     }
 
     /// An origin re-send that admission refuses leaves the id suppressed. The

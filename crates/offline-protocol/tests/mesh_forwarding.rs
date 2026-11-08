@@ -1555,6 +1555,45 @@ fn a_resend_reaches_past_forwarders_that_already_carried_the_first_copy() {
     assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
 }
 
+#[test]
+fn resends_to_a_peer_nobody_can_reach_stop_flooding() {
+    // alice — bob — carol — dave, and the recipient is not here at all. Each
+    // resend a timeout old is a new flood, and a recipient who is gone answers
+    // none of them, so without a limit every step of the retry ladder crossed
+    // the whole mesh for as long as the ladder ran. Past the limit a resend is
+    // a copy again: it goes no further than the device beside the sender.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 100;
+    let mut net = Neighborhood::new(&["bob", "carol", "dave"]);
+    net.add_node("alice", alice);
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+    net.link("carol", "dave");
+
+    let msg_id = net.send("alice", "ghost", "to nobody");
+    net.run_until_quiet(12);
+    // Far past the limit in timeouts, resending at every step on the way.
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(110));
+        net.node("alice").flush_outbox_all();
+        net.run_until_quiet(12);
+    }
+
+    let floods = net
+        .frames
+        .iter()
+        .filter(|(from, to, m)| from == "carol" && to == "dave" && m.id.as_str() == msg_id)
+        .count();
+    // The first copy and at most three resend generations.
+    assert!(
+        (2..=4).contains(&floods),
+        "ten resends crossed the far end of the mesh {floods} times"
+    );
+    // The resends past the limit still reached the device beside alice, which
+    // is what lets a neighbor that refused an earlier one carry it.
+    assert!(net.deliveries_to("bob", &msg_id) > floods);
+}
+
 /// The distinct receipts `from` has sent for `message_id`, each of which is a
 /// flood of its own.
 fn receipts_sent(net: &Neighborhood, from: &str, message_id: &str) -> usize {
@@ -1994,7 +2033,7 @@ fn every_receipt_in_a_crowd_comes_back() {
 }
 
 #[test]
-#[ignore = "a measurement, not a gate: only two resends a full timeout old fit in 35 seconds, and one receipt lost twice fails the run, so whole runs pass anywhere from one time in six to every time; per flow, 126 of 126 were delivered and 124 acknowledged"]
+#[ignore = "a measurement, not a gate: only two resends a full timeout old fit in 35 seconds, and one receipt lost twice fails the run, so whole runs pass anywhere from one time in six to every time; per flow, every message was delivered and 116 to 124 of 126 acknowledged"]
 fn a_crowd_on_a_lossy_radio_recovers_by_retrying() {
     // One hand-off in ten lost, and frames up to two rounds late. The first
     // flood misses some recipients and loses some receipts; the sender's

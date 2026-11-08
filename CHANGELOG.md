@@ -40,13 +40,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   again, but to every device after it the copy was an echo. A message lost
   past the first forwarder could not be recovered by retrying, and neither
   could a lost delivery receipt, since the recipient answers only a copy
-  that reaches it. A resend handed to the mesh now carries its generation
-  in a new reserved metadata key, `__resend`, and a forwarder suppresses
-  each generation separately, so a resend is a new flood and its own copies
-  are still suppressed. In a simulated crowd of forty phones, every delivery
-  receipt now comes back; at one hand-off in ten lost, 126 of 126 messages
-  arrived and 124 were acknowledged within 35 seconds, where a message or
-  receipt lost past the first forwarder used to stay lost. Older
+  that reaches it. A resend handed to the mesh a full acknowledgement
+  timeout or more after the message was written now carries its generation
+  (how many timeouts old the message is, at most three) in a new reserved
+  metadata key, `__resend`, and a forwarder suppresses each generation
+  separately, so it is a new flood whose own copies are still suppressed.
+  Earlier resends stay copies of the first flood, so a receipt that is merely
+  slow costs nothing extra; later ones are copies again, so a message for a
+  recipient who is gone stops crossing the mesh. In a simulated crowd of forty
+  phones, every delivery receipt now comes back; at one hand-off in ten lost, every message
+  arrived and more than nine in ten were acknowledged within 35 seconds, where
+  a message or receipt lost past the first forwarder used to stay lost. Older
   senders send no stamp and behave as before.
 
 - **A forward that runs out of send budget partway through its fan-out is

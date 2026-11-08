@@ -4371,7 +4371,9 @@ impl OfflineProtocol {
     /// one second, then two and four, and an answer across several hops of
     /// phones takes about three: stamping every resend re-flooded the mesh for
     /// most messages that were never lost. Counting generations by timeout
-    /// gives at most one new flood per timeout, whatever the ladder does.
+    /// gives at most one new flood per timeout, whatever the ladder does, and
+    /// [`RESEND_MAX_GENERATION`](super::mesh_relay::RESEND_MAX_GENERATION) ends
+    /// them, so a message for a recipient who is gone stops crossing the mesh.
     pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
         if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
             return 0;
@@ -4379,7 +4381,7 @@ impl OfflineProtocol {
         let period_ms = self.config.reliability.ack.default_timeout_ms.max(1);
         let age_ms = u64::try_from(Utc::now().timestamp_millis() - message.timestamp.as_millis())
             .unwrap_or(0);
-        let generation = age_ms / period_ms;
+        let generation = (age_ms / period_ms).min(super::mesh_relay::RESEND_MAX_GENERATION);
         let stamped;
         let message = if generation > 0 {
             let mut resend = message.clone();
