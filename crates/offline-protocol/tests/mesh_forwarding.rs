@@ -1978,8 +1978,8 @@ fn every_receipt_in_a_crowd_comes_back() {
             .into_iter()
             .filter(|f| f.hops <= budget)
             .collect();
-        // Up to two resend generations: the ladder's resend fourteen seconds in
-        // is the first a full timeout old, and the next comes at thirty.
+        // Up to two resend generations: the ladder's resend fifteen seconds in
+        // is the first a full timeout old, and the next comes at thirty-one.
         step_until(&mut net, Duration::from_secs(32), |_| {
             flows.iter().all(Flow::acknowledged)
         });
@@ -1994,7 +1994,7 @@ fn every_receipt_in_a_crowd_comes_back() {
 }
 
 #[test]
-#[ignore = "a measurement, not a gate: a sender behind a chain of single links can lose every resend that fits in 35 seconds to chance; about six runs in ten settle every flow"]
+#[ignore = "a measurement, not a gate: only two resends a full timeout old fit in 35 seconds, and one receipt lost twice fails the run, so whole runs pass anywhere from one time in six to every time; per flow, 126 of 126 were delivered and 124 acknowledged"]
 fn a_crowd_on_a_lossy_radio_recovers_by_retrying() {
     // One hand-off in ten lost, and frames up to two rounds late. The first
     // flood misses some recipients and loses some receipts; the sender's

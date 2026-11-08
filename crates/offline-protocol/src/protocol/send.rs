@@ -4368,7 +4368,7 @@ impl OfflineProtocol {
     /// Generation 0 is never stamped, so a resend inside the first timeout is
     /// one more copy of the first flood, suppressed past the device beside us
     /// as before. The retry ladder resends a frame handed to the mesh after
-    /// two seconds, then four and eight, and an answer across several hops of
+    /// one second, then two and four, and an answer across several hops of
     /// phones takes about three: stamping every resend re-flooded the mesh for
     /// most messages that were never lost. Counting generations by timeout
     /// gives at most one new flood per timeout, whatever the ladder does.

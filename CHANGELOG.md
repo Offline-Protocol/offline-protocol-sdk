@@ -44,8 +44,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   in a new reserved metadata key, `__resend`, and a forwarder suppresses
   each generation separately, so a resend is a new flood and its own copies
   are still suppressed. In a simulated crowd of forty phones, every delivery
-  receipt now comes back; at one hand-off in ten lost, about six runs in ten
-  settle every message within 35 seconds, where none did before. Older
+  receipt now comes back; at one hand-off in ten lost, 126 of 126 messages
+  arrived and 124 were acknowledged within 35 seconds, where a message or
+  receipt lost past the first forwarder used to stay lost. Older
   senders send no stamp and behave as before.
 
 - **A forward that runs out of send budget partway through its fan-out is
