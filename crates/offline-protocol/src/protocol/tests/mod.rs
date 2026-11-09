@@ -43959,6 +43959,50 @@ fn test_a_frame_still_in_the_local_queue_is_not_retried() {
     );
 }
 
+/// The retry ladder holds a resend whose earlier copy is still in the local
+/// queue, as the acknowledgement timeout does: on the 2026-11-09 phone chain,
+/// the 1 s and 3 s resends queued behind the first copy on a slow Bluetooth
+/// link, and every receipt for that sender's other messages waited behind
+/// them, ten copies ahead in a fast round and twenty in a slow one.
+#[test]
+fn test_a_resend_waits_while_its_earlier_copy_is_still_queued() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let carrier = BackloggedTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+
+    let id = protocol
+        .send_message("bob", "slow link", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    // On the retry ladder, as a frame no carrier took directly is.
+    protocol.ack_manager.remove_ack(&id);
+    let message = carrier.sent.lock().unwrap()[0].clone();
+    protocol.retry_queue.enqueue_with_delay(message, 2, 0);
+
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        carrier.sent.lock().unwrap().len(),
+        1,
+        "no second copy behind the first"
+    );
+    let held: Vec<u32> = protocol
+        .retry_queue
+        .drain_all()
+        .into_iter()
+        .map(|entry| entry.retry_count)
+        .collect();
+    assert_eq!(held, [2], "held on its rung, not spent");
+}
+
 /// A sender stops re-sealing a peer's resends once it has sealed the budget
 /// past that peer's last acknowledgement, and an acknowledgement re-opens it.
 /// Every re-seal spends a generation the receiver must fast-forward over; in

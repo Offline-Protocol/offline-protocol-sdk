@@ -4097,6 +4097,7 @@ impl OfflineProtocol {
         }
 
         let mut processed = 0;
+        let queued = self.transport_manager.queued_message_ids();
 
         while processed < max_batch_size {
             let mut entry = match self.retry_queue.dequeue_ready() {
@@ -4119,6 +4120,19 @@ impl OfflineProtocol {
                     entry.retry_count,
                     recheck_ms,
                 );
+                continue;
+            }
+
+            // An earlier copy still in a local carrier queue has not gone out,
+            // so it cannot have been answered, and a resend would queue another
+            // copy behind it. The acknowledgement timeout already holds such a
+            // frame; this ladder did not, and on the 2026-11-09 phone chain its
+            // 1 s and 3 s resends queued behind the first copy on a slow
+            // Bluetooth link, with the receipts for the sender's other messages
+            // waiting behind them. When the copy leaves is not known here, so
+            // the entry waits out its current rung again and keeps its count.
+            if queued.contains(entry.message.id.as_str().as_str()) {
+                let _ = self.retry_queue.enqueue(entry.message, entry.retry_count);
                 continue;
             }
 
