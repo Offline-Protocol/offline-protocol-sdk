@@ -107,9 +107,10 @@ function flush() {
   }
   // Bluetooth fragments go to the page, which holds the GATT connections
   // (W14). Transferred, as a carrier frame is. Pulled only while no link has
-  // BLE_WRITES_AHEAD of them unwritten: a fragment left in the engine is one
-  // it still counts as queued, so it holds a resend and puts a receipt ahead
-  // of data. Drained all at once, a slow link's backlog sat in the page where
+  // BLE_WRITES_AHEAD of them unwritten: what is left in the engine, it can
+  // order, putting a receipt ahead of any message not yet started, and a
+  // message none of whose fragments was pulled still counts as queued, so it
+  // holds a resend. Drained all at once, a slow link's backlog sat in the page where
   // the engine could see neither, and receipts waited behind resends.
   while (![...bleWriting.values()].some((n) => n >= BLE_WRITES_AHEAD)) {
     const next = engine.bleNextFragment();
