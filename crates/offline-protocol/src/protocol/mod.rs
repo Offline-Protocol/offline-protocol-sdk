@@ -435,13 +435,16 @@ pub struct OfflineProtocol {
     /// only the last few seconds of deliveries.
     answered_deliveries: HashMap<String, Instant>,
 
-    /// When each message's first resend reached a neighbor, which is what its
-    /// resend generations count from (`offer_resend_to_mesh`). Kept while the
-    /// message is in an outbox, so it stays at its last generation however long
-    /// it lives, and trimmed on insert, so its size follows the outboxes'. In
-    /// memory only: after a restart the count starts again, and forwarders still
-    /// suppress what they have seen, so it costs no floods.
-    first_mesh_resend_at: HashMap<MessageId, Instant>,
+    /// Each message's current resend generation, and when a resend under it
+    /// last moved it there (`offer_resend_to_mesh`). Kept while the message is
+    /// in an outbox, so it stays at its last generation however long it lives,
+    /// and trimmed on insert, so its size follows the outboxes'. In memory only:
+    /// after a restart the count starts again. Within the suppression window
+    /// that costs no floods, since forwarders still suppress what they have
+    /// seen; past it, a message still waiting can flood up to its full count
+    /// again, a cost accepted for each stuck message at each relaunch rather
+    /// than persisting this.
+    mesh_resend_generations: HashMap<MessageId, (u64, Instant)>,
 
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are
@@ -1301,7 +1304,7 @@ impl OfflineProtocol {
             peer_coalesced_ack: std::collections::HashSet::new(),
             coalesced_acks_out: HashMap::new(),
             answered_deliveries: HashMap::new(),
-            first_mesh_resend_at: HashMap::new(),
+            mesh_resend_generations: HashMap::new(),
             control_freshness_peers: std::collections::HashSet::new(),
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),

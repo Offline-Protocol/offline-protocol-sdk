@@ -148,8 +148,8 @@ pub const MAX_RELAY_RATE_PEERS: usize = 256;
 pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 
 /// The metadata key a sender stamps on a resend it hands to the mesh: its
-/// generation, how many acknowledgement timeouts have passed since the
-/// message's first resend reached a neighbor, from 1.
+/// generation, from 1, which goes up by one when a resend reaches a neighbor at
+/// least an acknowledgement timeout after the last generation did.
 /// Engine-written and unsigned, like the hop fields.
 ///
 /// Every device that carried the first copy suppresses its id for the
@@ -181,7 +181,7 @@ pub const RESEND_META_KEY: &str = "__resend";
 /// past the limit is a copy again, carried by the device beside the sender and
 /// suppressed beyond it until forwarders forget the generation, so it floods at
 /// most once per retention window, as an unstamped id would. On the default ladder and timeout the generations are
-/// reached at 15 and 31 seconds, which is where lost frames were recovered.
+/// reached at 15, 31 and 63 seconds; lost frames were recovered by the first two.
 pub const RESEND_MAX_GENERATION: u64 = 3;
 
 /// What suppression is keyed on: the id, and the resend generation when the
@@ -1374,7 +1374,7 @@ impl MeshRelayGovernor {
             neighbors,
             exclude,
             message_id,
-            self.config.fanout.max(1) + 1,
+            self.config.fanout.max(1).saturating_add(1),
         )
     }
 

@@ -4358,39 +4358,42 @@ impl OfflineProtocol {
     /// the frame, and one that refused it (rate limit, full queue) is exactly
     /// the one a later offer should reach.
     ///
-    /// A resend made a full acknowledgement timeout or more after this
-    /// message's first resend that reached a neighbor is stamped with its
-    /// generation ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)):
-    /// how many timeouts ago that was. That is what carries it past forwarders
-    /// that suppress the first copy's id. To them it is a new flood, and its
-    /// own copies are suppressed as usual.
+    /// A resend made a full acknowledgement timeout or more after the last one
+    /// to reach a neighbor under this message's current generation moves to the
+    /// next generation ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)).
+    /// That is what carries it past forwarders that suppress the earlier
+    /// copies. To them it is a new flood, and its own copies are suppressed as
+    /// usual.
     ///
-    /// Generation 0 is never stamped, so a resend inside the first timeout is
-    /// one more copy of the first flood, suppressed past the device beside us
-    /// as before. The retry ladder resends a frame handed to the mesh after
-    /// one second, then two and four, and an answer across several hops of
-    /// phones takes about three: stamping every resend re-flooded the mesh for
-    /// most messages that were never lost. Counting generations by timeout
-    /// gives at most one new flood per timeout, whatever the ladder does, and
+    /// A resend inside the timeout is one more copy of the flood before it,
+    /// suppressed past the device beside us. The retry ladder resends a frame
+    /// handed to the mesh after one second, then two and four, and an answer
+    /// across several hops of phones takes about three: stamping every resend
+    /// re-flooded the mesh for most messages that were never lost.
     /// [`RESEND_MAX_GENERATION`](super::mesh_relay::RESEND_MAX_GENERATION) ends
     /// them. A message stays at the last generation for as long as it lives, so
     /// one for a recipient who is gone crosses the mesh at most once per
     /// suppression window from then on, when forwarders have forgotten it.
     ///
-    /// Counted from a resend that reached someone rather than from when the
-    /// message was written: time spent with nobody in range is not time the
-    /// mesh failed to answer, and a message that waited longer than the
-    /// generations last would have spent them all on its first hand-off.
+    /// A generation advances only on a resend that reached someone, and by one,
+    /// rather than by the clock: time spent with nobody in range is not time the
+    /// mesh failed to answer. Counted by the clock, a message that waited alone,
+    /// before its first hand-off or between two of them, spent every generation
+    /// on the next resend, and that one flood was all it had.
     pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
         if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
             return 0;
         }
-        let first_resend = self.first_mesh_resend_at.get(&message.id).copied();
-        let period_ms = self.config.reliability.ack.default_timeout_ms.max(1);
-        let generation = first_resend.map_or(0, |at| {
-            (u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX) / period_ms)
-                .min(super::mesh_relay::RESEND_MAX_GENERATION)
-        });
+        let last = self.mesh_resend_generations.get(&message.id).copied();
+        let period =
+            StdDuration::from_millis(self.config.reliability.ack.default_timeout_ms.max(1));
+        let generation = match last {
+            None => 0,
+            Some((generation, since)) if since.elapsed() >= period => {
+                (generation + 1).min(super::mesh_relay::RESEND_MAX_GENERATION)
+            }
+            Some((generation, _)) => generation,
+        };
         let stamped;
         let message = if generation > 0 {
             let mut resend = message.clone();
@@ -4404,14 +4407,20 @@ impl OfflineProtocol {
             message
         };
         let handed_to_mesh = self.offer_to_mesh(message);
-        if handed_to_mesh > 0 && first_resend.is_none() {
-            let retention = self.mesh_relay.config().seen.retention;
-            let (outbox, media_outbox) = (&self.outbox, &self.media_outbox);
-            self.first_mesh_resend_at.retain(|id, at| {
-                outbox.contains_key(id) || media_outbox.contains_key(id) || at.elapsed() < retention
-            });
-            self.first_mesh_resend_at
-                .insert(message.id.clone(), Instant::now());
+        if handed_to_mesh > 0 {
+            if last.is_none() {
+                let retention = self.mesh_relay.config().seen.retention;
+                let (outbox, media_outbox) = (&self.outbox, &self.media_outbox);
+                self.mesh_resend_generations.retain(|id, (_, since)| {
+                    outbox.contains_key(id)
+                        || media_outbox.contains_key(id)
+                        || since.elapsed() < retention
+                });
+            }
+            if last.is_none_or(|(previous, _)| generation > previous) {
+                self.mesh_resend_generations
+                    .insert(message.id.clone(), (generation, Instant::now()));
+            }
         }
         if handed_to_mesh > 0 {
             debug!(
@@ -5952,8 +5961,7 @@ impl OfflineProtocol {
     /// ([`Self::hold_unrouted_ack`]): it was owed the moment the message was
     /// accepted, and the common miss is a carrier that is merely not up yet —
     /// a push-injected frame acknowledged before the relay socket has
-    /// authenticated. Held is reported as `Ok`, like any carrier queue.
-    /// Returns whether a route took it; `false` means it is held.
+    /// authenticated. Returns whether a route took it; `false` means it is held.
     fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> bool {
         if self.try_route_ack(ack_message, inbound_transport) {
             return true;

@@ -1547,7 +1547,7 @@ fn a_resend_reaches_past_forwarders_that_already_carried_the_first_copy() {
     );
 
     // Alice re-drives her outbox, as a retry does. Her first resend is still a
-    // copy of the first flood, and one a timeout later is not.
+    // copy of the first flood, and one a timeout after it is not.
     net.node("alice").flush_outbox_all();
     net.run_until_quiet(12);
     std::thread::sleep(Duration::from_millis(1_100));
@@ -1658,7 +1658,7 @@ fn a_message_stays_at_its_last_generation_past_the_suppression_window() {
     let msg_id = net.send("alice", "ghost", "to nobody");
     net.node("alice").flush_outbox_all();
     net.run_until_quiet(12);
-    for _ in 0..3 {
+    for _ in 0..6 {
         std::thread::sleep(Duration::from_millis(150));
         net.node("alice").flush_outbox_all();
         net.run_until_quiet(12);
@@ -1675,6 +1675,41 @@ fn a_message_stays_at_its_last_generation_past_the_suppression_window() {
         last_three.iter().all(|stamp| stamp.as_deref() == Some("3")),
         "a capped message must stay capped: {stamps:?}"
     );
+}
+
+#[test]
+fn a_sender_that_lost_its_neighbors_does_not_skip_generations() {
+    // alice has reached bob once when she walks away. Time out of range is not
+    // time the mesh failed to answer: counted by the clock, her next resend
+    // jumped to the last generation, so one flood was all she had left, and
+    // every resend after it stopped at the device beside her for ten minutes.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 100;
+    let mut net = Neighborhood::new(&["bob"]);
+    net.add_node("alice", alice);
+    net.link("alice", "bob");
+
+    let msg_id = net.send("alice", "ghost", "to nobody");
+    net.node("alice").flush_outbox_all();
+    net.run_until_quiet(12);
+    net.unlink_all("alice");
+    std::thread::sleep(Duration::from_millis(500));
+    net.node("alice").flush_outbox_all();
+    net.link("alice", "bob");
+    let mut stamps = Vec::new();
+    for _ in 0..4 {
+        let before = net.frames.len();
+        std::thread::sleep(Duration::from_millis(110));
+        net.node("alice").flush_outbox_all();
+        net.run_until_quiet(12);
+        stamps.extend(
+            net.frames[before..]
+                .iter()
+                .filter(|(from, _, m)| from == "alice" && m.id.as_str() == msg_id)
+                .map(|(_, _, m)| m.metadata.get("__resend").cloned().unwrap_or_default()),
+        );
+    }
+    assert_eq!(stamps, ["1", "2", "3", "3"]);
 }
 
 #[test]
@@ -2287,7 +2322,7 @@ fn every_receipt_in_a_crowd_comes_back() {
             .filter(|f| f.hops <= budget)
             .collect();
         // Up to two resend generations: the ladder's resend fifteen seconds in
-        // is the first a full timeout old, and the next comes at thirty-one.
+        // is the first a full timeout on, and the next comes at thirty-one.
         step_until(&mut net, Duration::from_secs(32), |_| {
             flows.iter().all(Flow::acknowledged)
         });

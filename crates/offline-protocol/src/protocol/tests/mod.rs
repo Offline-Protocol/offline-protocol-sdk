@@ -44359,10 +44359,10 @@ fn a_relayed_copy_answered_in_a_coalesced_batch_is_not_answered_again() {
     assert_eq!(ack_frames(&ble).len(), 1);
 }
 
-/// What generations count from is kept while the message may still resend, and
-/// nothing is kept for a message that has left the outbox.
+/// A generation is kept while the message may still resend, and nothing is kept
+/// for a message that has left the outbox.
 #[test]
-fn the_first_resend_times_are_trimmed_to_what_can_still_resend() {
+fn resend_generations_are_trimmed_to_what_can_still_resend() {
     let mut config = create_test_config();
     config.mesh_relay.seen.retention = std::time::Duration::from_millis(1);
     let mut protocol = OfflineProtocol::new(config).unwrap();
@@ -44380,8 +44380,8 @@ fn the_first_resend_times_are_trimmed_to_what_can_still_resend() {
     std::thread::sleep(std::time::Duration::from_millis(5));
     assert!(protocol.offer_resend_to_mesh(&next, false) > 0);
 
-    assert!(!protocol.first_mesh_resend_at.contains_key(&settled.id));
-    assert!(protocol.first_mesh_resend_at.contains_key(&next.id));
+    assert!(!protocol.mesh_resend_generations.contains_key(&settled.id));
+    assert!(protocol.mesh_resend_generations.contains_key(&next.id));
 }
 
 #[test]
