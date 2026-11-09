@@ -767,8 +767,14 @@ fn a_fan_out_cut_short_by_the_send_budget_is_finished_when_it_refills() {
     bob.mesh_relay.burst = 2.0;
     bob.mesh_relay.rate_per_sec = 8.0;
     let onward = ["carol", "dave", "erin", "grace"];
+    // Alice's own retries would reach bob again, and he forwards a sender's
+    // resend by design, so the count below holds only until her first retry
+    // (1 s by default). A slow CI runner stepping twelve times took longer.
+    let mut alice = default_config("alice");
+    alice.reliability.retry.initial_delay_ms = 60_000;
 
-    let mut net = Neighborhood::new(&["alice", "carol", "dave", "erin", "grace"]);
+    let mut net = Neighborhood::new(&["carol", "dave", "erin", "grace"]);
+    net.add_node("alice", alice);
     net.add_node("bob", bob);
     net.link("alice", "bob");
     for peer in onward {
