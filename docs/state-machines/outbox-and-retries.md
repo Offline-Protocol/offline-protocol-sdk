@@ -478,8 +478,11 @@ message ahead of it, the spacing being half the rate a neighbor accepts from
 this device. Each one moved starts its retry budget over, as a re-drive does:
 the receipt proves the peer answers, and a message carrying the count of a long
 wait alone would fail for good one timeout later, delivered or not. One already
-due sooner keeps its count, or a stream of receipts would hold a sibling whose
-own sends keep failing on the bottom rung of its ladder. The spacing is per
+due sooner keeps its count. The reset cannot tell whether a message failed
+before or after the route came back, so while other receipts keep arriving, a
+sibling that keeps failing cycles through the rungs below about one timeout,
+at most once per timeout, and only its outbox lifetime ends it, as on the
+re-drive this replaced, which sent it on every receipt. The spacing is per
 recipient; backlogs for several recipients behind one neighbor still add up
 there. A message on a later backoff moves to its slot, and one resting
 edge-driven with no retry entry (`edge_driven_unreachable_dm`) is scheduled at

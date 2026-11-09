@@ -221,8 +221,7 @@ impl RetryQueue {
     /// many milliseconds from now, and starts its retry count over: the caller
     /// has news that the route works, and the count of a long wait would cut
     /// the new attempt's budget short. An entry already due sooner keeps its
-    /// time and its count, so repeated calls cannot hold a message that keeps
-    /// failing on the bottom rung of its ladder.
+    /// time and its count.
     pub fn bring_forward(&mut self, cap: impl Fn(&Message) -> Option<u64>) {
         let now = Utc::now();
         let mut entries = std::mem::take(&mut self.queue).into_vec();

@@ -6535,19 +6535,22 @@ impl OfflineProtocol {
     /// acknowledgement timeout, one at a time, and sends nothing itself.
     ///
     /// Each one this moves starts its retry budget over, as the flush that used
-    /// to send them did: the receipt proves the peer answers. One already due
-    /// sooner keeps its count, so a sibling whose sends keep failing climbs its
-    /// ladder however many receipts arrive. Carried over, a message that
-    /// backed off past `max_retries` while alone failed for good after one ack
-    /// timeout, delivered or not, and a two-hop receipt can take longer.
+    /// to send them did: the receipt proves the peer answers. Carried over, a
+    /// message that backed off past `max_retries` while alone failed for good
+    /// after one ack timeout, delivered or not, and a two-hop receipt can take
+    /// longer. One already due sooner keeps its count. The reset does not know
+    /// whether a message failed before or after the route came back, so while
+    /// other receipts keep arriving, a sibling that keeps failing cycles through
+    /// the rungs below about one ack timeout and only its outbox lifetime ends
+    /// it, as on the flush, which sent it on every receipt.
     ///
     /// Spaced per recipient at half the rate a neighbor accepts from us (our
     /// own `peer_rate_per_sec`, so it assumes neighbors share the setting), in
     /// the order they were first sent. Backlogs for several recipients behind
     /// one neighbor still add up there; past two the spacing leaves no margin.
-    /// One instant for all was the failure: forty messages brought to one instant were thirty
-    /// frames in a twentieth of a second on a neighbor that accepts fifteen at
-    /// once, and its refusals spend the allowance our own receipts need. Each
+    /// One instant for all was the failure: forty messages were thirty frames
+    /// in a twentieth of a second on a neighbor that accepts fifteen at once,
+    /// and its refusals spend the allowance our own receipts need. Each
     /// message's slot only ever moves earlier, and a later receipt computes the
     /// same slots from a later now, so however many receipts arrive a message
     /// goes at most once per timeout.
@@ -6578,6 +6581,11 @@ impl OfflineProtocol {
         if slots.is_empty() {
             return;
         }
+        debug!(
+            recipient = %recipient,
+            scheduled = slots.len(),
+            "A receipt scheduled the recipient's other waiting messages"
+        );
         self.retry_queue
             .bring_forward(|message| slots.get(&message.id.as_str()).copied());
     }
