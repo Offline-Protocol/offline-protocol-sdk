@@ -340,9 +340,10 @@ export class OfflineNode extends EventTarget {
   /// `{ write(peer, bytes), close() }`, `close` called once when the node
   /// stops or fails. A `write` that returns a promise holds the next
   /// fragments until it settles, a few per peer at most, so a backlog stays
-  /// in the engine, which can see it. One sink per node, which BluetoothCarrier takes:
-  /// replacing a sink another carrier holds throws, since that carrier's
-  /// links would go deaf with no error. `null` gives it back.
+  /// in the engine, which can see it. One sink per node, which
+  /// BluetoothCarrier takes: replacing a sink another carrier holds throws,
+  /// since that carrier's links would go deaf with no error. `null` gives it
+  /// back.
   setBluetoothSink(sink) {
     if (sink !== null && this.#bleSink !== null) {
       throw new Error("another BluetoothCarrier holds this node's Bluetooth; release() it first");

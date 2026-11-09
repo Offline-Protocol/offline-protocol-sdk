@@ -22,9 +22,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   behind the first copies, and the receipts for the sender's other messages
   waited behind them: ten copies ahead of the receipt that completed a round
   in a fast round, twenty in a slow one. The ladder now holds such a resend
-  on its rung, for at most the minute from the last send that already bounds
-  the acknowledgement timeout's extension, so a link that died without
-  telling the transport still cannot pin a message to it.
+  for one more rung, and only within the minute from the last send that
+  already bounds the acknowledgement timeout's extension, so a link that
+  died without telling the transport still cannot pin a message to it.
 
 - **The browser hands its Bluetooth link a few fragments at a time.** The
   worker passed every fragment to the page at once, into one write queue per

@@ -161,9 +161,12 @@ is offered.
 - **No resend behind a queued copy.** A frame whose earlier copy is still in a
   local carrier queue is not resent, by the acknowledgement timeout or by the
   retry ladder: that copy has not gone out, so nothing can have answered it.
-  The ladder holds such a resend on its current rung and keeps its count, for
-  at most the minute from the last send that bounds the timeout's extension;
-  past it the resend goes, so a dead link cannot pin the message. On
+  The ladder holds such a resend for one more rung and keeps its count, and
+  holds it only within the minute from the last send that bounds the
+  timeout's extension; past it the resend goes, so a dead link cannot pin the
+  message. Neither path asks which carrier holds the copy, so within that
+  minute a resend that could have gone by another carrier waits too; a
+  carrier, discovery or session edge still flushes past the hold. On
   the 2026-11-09 phone chain the ladder did not, and its 1 s and 3 s resends
   queued behind the first copy on a slow link. The receipt that completed a
   round had ten copies ahead of it in a fast round and twenty in a slow one.
