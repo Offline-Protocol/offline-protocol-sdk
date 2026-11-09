@@ -10,9 +10,9 @@
 //!
 //! Four mechanisms, each covering something the others cannot:
 //!
-//! 1. **Suppression** ([`RelaySeenCache`]) — an id is forwarded once. Without
-//!    it, copies circulate until their hop limit runs out, and every node
-//!    repeats every copy.
+//! 1. **Suppression** ([`RelaySeenCache`]) — an id is forwarded once per resend
+//!    generation ([`RESEND_META_KEY`]). Without it, copies circulate until their
+//!    hop limit runs out, and every node repeats every copy.
 //! 2. **Jitter with narrowing** — a forward waits a short randomized delay
 //!    before going out, and every copy that arrives while it waits takes the
 //!    neighbor that sent it off the fan-out, because that neighbor holds the
@@ -147,6 +147,62 @@ pub const MAX_RELAY_RATE_PEERS: usize = 256;
 /// forward into an abandoned one, which `ProtocolConfig::validate` refuses.
 pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 
+/// The metadata key a sender stamps on a resend it hands to the mesh: its
+/// generation, from 1, which goes up by one when a resend reaches a neighbor at
+/// least an acknowledgement timeout after the last generation did.
+/// Engine-written and unsigned, like the hop fields.
+///
+/// Every device that carried the first copy suppresses its id for the
+/// retention window, so a resend under the same id stopped at the first
+/// forwarder: the one beside the sender carries a resend from the sender
+/// itself ([`MeshRelayGovernor::admit`]), but the copy it hands on has a spent
+/// hop, and to the next forwarder that is an echo. A frame lost past the first
+/// forwarder could not be recovered by retrying for ten minutes, and nor could
+/// a lost acknowledgement, since the recipient answers only a copy that
+/// reaches it. Suppression is therefore per resend: an id under a generation
+/// it has not handled is taken on afresh, through the full admission, and
+/// copies of that generation are suppressed as before.
+///
+/// Nothing authenticates the stamp. On a frame of an attacker's own it buys what
+/// a fresh id already buys: one more flood, from the same per-neighbor and
+/// per-device budgets. On a captured real frame it buys more, since the frame
+/// reaches a recipient that answers it, and that is bounded by
+/// [`RESEND_MAX_GENERATION`] per id per retention window (threat model R33).
+pub use offline_protocol_sealed::RESEND_META_KEY;
+
+/// The highest resend generation. A sender counts no higher and a forwarder
+/// reads anything higher as this, so within the retention window a message
+/// floods the mesh at most this many times more than its first copy.
+///
+/// A recipient that is gone answers no flood, and each one crosses every
+/// device in reach. Without a limit, each step of the retry ladder past the
+/// first timeout was a full flood: in a simulated crowd of forty phones, 60
+/// transmissions rather than 16, for a message nobody could receive. A resend
+/// past the limit is a copy again, carried by the device beside the sender and
+/// suppressed beyond it until forwarders forget the generation, so it floods at
+/// most once per retention window, as an unstamped id would. On the default
+/// ladder and timeout the generations are reached at 15, 31 and 63 seconds.
+pub const RESEND_MAX_GENERATION: u64 = 3;
+
+/// What suppression is keyed on: the id, and the resend generation when the
+/// frame carries a well-formed one. A malformed stamp is ignored rather than
+/// trusted, so it cannot grow the cache's keys, and a generation past
+/// [`RESEND_MAX_GENERATION`] is that generation, so no stamp buys more floods
+/// than a sender would make.
+pub(crate) fn relay_key(message: &Message) -> String {
+    let id = message.id.as_str();
+    let generation = message
+        .metadata
+        .get(RESEND_META_KEY)
+        .and_then(|generation| generation.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(RESEND_MAX_GENERATION);
+    match generation {
+        0 => id,
+        generation => format!("{id}~{generation}"),
+    }
+}
+
 /// Smallest share of the full forwarding effort a device is scaled down to by
 /// capability bias.
 ///
@@ -198,7 +254,8 @@ pub struct MeshRelayConfig {
     pub dense_max_ttl: u8,
     /// Neighbor count at which the dense budget applies.
     pub dense_degree: usize,
-    /// Neighbors a frame is forwarded to.
+    /// Neighbors a frame is forwarded to. A device's own frame goes to one more
+    /// (`MeshRelayGovernor::select_origination_targets`).
     pub fanout: usize,
     /// Shortest pre-transmit delay.
     pub jitter_min: Duration,
@@ -328,6 +385,17 @@ pub struct PendingRelay {
     /// covered. Kept apart from [`Self::arrival_peer`], which custody reads
     /// as the link the frame first came in on.
     pub heard_from: Vec<String>,
+    /// The neighbors a fan-out cut short by the send budget still owes the
+    /// frame. Empty until a fan-out has reached some of its neighbors and not
+    /// the rest. The rest go out as the budget refills, to these neighbors
+    /// alone rather than a fresh selection, so a cut-short fan-out is
+    /// finished, never widened. Counting the frame forwarded at the cut left
+    /// it with whichever neighbor came first, chosen by a hash rather than by
+    /// where the recipient is, and its id suppressed for the whole retention
+    /// window. In a crowd that is how a receipt went one way, the wrong one,
+    /// and never arrived. Bounded like any queued forward: by the overdue
+    /// cut-off, measured from the original due time.
+    pub owed: Vec<String>,
     /// When it becomes eligible to transmit.
     pub due_at: Instant,
     /// The class token the frame carried as a deposit request on arrival
@@ -343,6 +411,15 @@ pub struct PendingRelay {
     /// suppression cache for it, because the held intake never recorded its
     /// id there.
     pub custody_target: Option<String>,
+}
+
+impl PendingRelay {
+    /// Whether this forward has already reached a neighbor and waits only to
+    /// finish its fan-out. Every path that drops a queued forward has to ask:
+    /// the rest assumes a queued frame has never transmitted.
+    fn is_part_sent(&self) -> bool {
+        !self.owed.is_empty()
+    }
 }
 
 /// Running totals, for telemetry and for tests that assert a flood stayed
@@ -364,7 +441,8 @@ pub struct MeshRelayCounters {
     pub forwarded: u64,
     /// Frames put back on the queue because they reached no neighbor at all —
     /// the budget ran out, the links chosen for them went away, or there was
-    /// no usable link to choose.
+    /// no usable link to choose. Also those whose fan-out the budget cut short,
+    /// which still owe the rest of it.
     pub requeued: u64,
     /// Queued forwards displaced to make room for a higher-priority frame.
     pub queue_evicted: u64,
@@ -776,6 +854,7 @@ impl MeshRelayGovernor {
     ) -> RelayAdmission {
         let now = Instant::now();
         let message_id = message.id.as_str();
+        let key = relay_key(message);
 
         // The origin re-sending its own frame is a sender that heard no
         // acknowledgement, not a copy echoing round the neighbourhood, and
@@ -791,7 +870,7 @@ impl MeshRelayGovernor {
         // it here, before those checks, meant a re-send refused for rate or
         // queue space left the id open, and the next forwarder's echo of it
         // (hop spent, never an origin re-send) was carried a second time.
-        let suppressed = self.seen.contains(&message_id);
+        let suppressed = self.seen.contains(&key);
         let origin_resend = suppressed && self.is_origin_resend(message, arrival_peer);
 
         // Has this id been dealt with? Checked without recording, because a
@@ -826,7 +905,7 @@ impl MeshRelayGovernor {
             if let Some(pending) = self
                 .pending
                 .iter_mut()
-                .find(|p| p.message.id.as_str() == message_id)
+                .find(|p| p.message.id.as_str() == message_id && relay_key(&p.message) == key)
             {
                 if let Some(peer) = arrival_peer {
                     if pending.arrival_peer.as_deref() != Some(peer)
@@ -881,15 +960,16 @@ impl MeshRelayGovernor {
         // nothing bounds. An accepted origin re-send is recorded afresh, so the
         // window runs from the copy this device is about to transmit.
         if origin_resend {
-            self.seen.forget(&message_id);
+            self.seen.forget(&key);
         }
-        self.seen.observe(&message_id);
+        self.seen.observe(&key);
 
         let due_at = now + self.jitter_for(&message_id, degree);
         self.pending.push(PendingRelay {
             message: forwarded,
             arrival_peer: arrival_peer.map(str::to_string),
             heard_from: Vec::new(),
+            owed: Vec::new(),
             due_at,
             custody_request,
             custody_target: None,
@@ -935,6 +1015,7 @@ impl MeshRelayGovernor {
             message,
             arrival_peer: None,
             heard_from: Vec::new(),
+            owed: Vec::new(),
             due_at: now,
             custody_request: None,
             custody_target: Some(target.to_string()),
@@ -993,13 +1074,20 @@ impl MeshRelayGovernor {
             }
 
             if now.saturating_duration_since(relay.due_at) > RELAY_QUEUE_MAX_OVERDUE {
+                // Already on the air: the rest of its fan-out ends here. It is
+                // not a frame this device could not carry, so it keeps its id
+                // and never reaches the drop point (a frame that transmitted
+                // is never held).
+                if relay.is_part_sent() {
+                    continue;
+                }
                 if relay.custody_target.is_none() {
                     // Never made it onto a link, so its id must not stay
                     // suppressed: the sender's retransmissions carry the same
                     // id, and refusing them would close this route for the
                     // whole retention window over a few seconds of
                     // congestion.
-                    self.seen.forget(&relay.message.id.as_str());
+                    self.seen.forget(&relay_key(&relay.message));
                     self.counters.abandoned_overdue =
                         self.counters.abandoned_overdue.saturating_add(1);
                 }
@@ -1092,7 +1180,9 @@ impl MeshRelayGovernor {
     /// For the frame that reached no neighbor at all between [`Self::take_due`]
     /// releasing it and the radio being asked — because the budget ran out,
     /// because every link picked for it had gone away, or because there was no
-    /// usable link to pick. All three end the same way: the frame has travelled
+    /// usable link to pick. Also for the rest of a fan-out the budget cut short
+    /// ([`PendingRelay::owed`]). The first three end the same way: the frame has
+    /// travelled
     /// nowhere, its id is already recorded as handled, and dropping it would
     /// refuse the copies and retransmissions behind it for the whole retention
     /// window.
@@ -1113,11 +1203,15 @@ impl MeshRelayGovernor {
             if relay.custody_target.is_some() {
                 return Some(relay);
             }
+            // A neighbor holds it, so the rest of its fan-out just ends.
+            if relay.is_part_sent() {
+                return None;
+            }
             // Refused room on the way back, so this frame is being dropped
             // having reached nobody. Release its id for the same reason the
             // overdue cut-off does — a copy behind it, or the sender's own
             // retransmission, is now the only way it travels.
-            self.seen.forget(&relay.message.id.as_str());
+            self.seen.forget(&relay_key(&relay.message));
             self.counters.queue_full = self.counters.queue_full.saturating_add(1);
             return None;
         }
@@ -1184,10 +1278,16 @@ impl MeshRelayGovernor {
     fn is_origin_resend(&self, message: &Message, arrival_peer: Option<&str>) -> bool {
         arrival_peer == Some(message.sender.as_str())
             && message.hop_count.value() == 0
-            && !self
-                .pending
-                .iter()
-                .any(|p| p.message.id.as_str() == message.id.as_str())
+            && !self.holds_pending_copy(&message.id.as_str(), &relay_key(message))
+    }
+
+    /// Whether a forward of this id under this key is still queued. Ids are
+    /// compared first because this runs for most third-party arrivals in a
+    /// dense neighborhood, and a key is built only for an id that matches.
+    fn holds_pending_copy(&self, message_id: &str, key: &str) -> bool {
+        self.pending
+            .iter()
+            .any(|p| p.message.id.as_str() == message_id && relay_key(&p.message) == key)
     }
 
     /// Absorbs an arrival that is a copy of a frame already dealt with and
@@ -1203,22 +1303,19 @@ impl MeshRelayGovernor {
     /// id, even though that is also a duplicate: the copy names a neighbor
     /// that now holds the frame, which narrows our pending forward, so it has
     /// to go through [`Self::admit`]. Those are rare, since the pending window
-    /// is one jitter delay wide. Answers `false` for the origin re-sending its
+    /// is one jitter delay wide, or at most the overdue cut-off for a forward
+    /// waiting for budget. Answers `false` for the origin re-sending its
     /// own frame too, which [`Self::admit`] takes as a fresh forward.
     pub fn absorb_settled_duplicate(
         &mut self,
         message: &Message,
         arrival_peer: Option<&str>,
     ) -> bool {
-        let message_id = message.id.as_str();
-        if !self.seen.contains(&message_id) || self.is_origin_resend(message, arrival_peer) {
+        let key = relay_key(message);
+        if !self.seen.contains(&key) || self.is_origin_resend(message, arrival_peer) {
             return false;
         }
-        if self
-            .pending
-            .iter()
-            .any(|p| p.message.id.as_str() == message_id)
-        {
+        if self.holds_pending_copy(&message.id.as_str(), &key) {
             return false;
         }
         self.counters.duplicates_suppressed = self.counters.duplicates_suppressed.saturating_add(1);
@@ -1261,13 +1358,27 @@ impl MeshRelayGovernor {
     /// Bias still reaches this device's own traffic through the send budget's
     /// forwarding share, which is the one dial that cannot mistake the two: see
     /// [`Self::take_own_send_token`].
+    ///
+    /// One wider than a forward's fan-out. A forwarder never hands a frame
+    /// back to the neighbor it came from, so its fan-out covers that many of
+    /// its *other* links; this device heard the frame from nobody. At the
+    /// same width, a phone holding four Bluetooth LE links handed its own
+    /// frame to three and left one out by a hash of the message id, and a
+    /// message whose only way on was that link never left, nor did any resend
+    /// of it, the choice being stable per id. It cost a delivery receipt the
+    /// same way whenever the link left out was the one the message arrived on.
     pub fn select_origination_targets<'a>(
         &self,
         neighbors: impl IntoIterator<Item = (&'a str, u8, TransportType)>,
         exclude: &[&str],
         message_id: &str,
     ) -> Vec<String> {
-        self.select_within_fanout(neighbors, exclude, message_id, self.config.fanout.max(1))
+        self.select_within_fanout(
+            neighbors,
+            exclude,
+            message_id,
+            self.config.fanout.max(1).saturating_add(1),
+        )
     }
 
     /// The fan-out width for other people's traffic.
@@ -1435,8 +1546,12 @@ impl MeshRelayGovernor {
                 // Displaced before it ever reached a link. Its id goes back to
                 // being unknown, so the copy behind it — or the sender's
                 // retransmission — can still be carried by this device once
-                // there is room again.
-                self.seen.forget(&displaced.message.id.as_str());
+                // there is room again. Not one that has transmitted: a
+                // neighbor holds that frame, and only the rest of its fan-out
+                // is lost.
+                if !displaced.is_part_sent() {
+                    self.seen.forget(&relay_key(&displaced.message));
+                }
                 self.counters.queue_evicted = self.counters.queue_evicted.saturating_add(1);
                 true
             }
@@ -2075,6 +2190,154 @@ mod tests {
         assert!(gov.absorb_settled_duplicate(&echoed, Some("alice")));
     }
 
+    /// A resend generation is a new flood to a forwarder that carried the
+    /// first copy, however many hops from the sender it is, and its own echoes
+    /// are suppressed as before. Without it a forwarder past the first
+    /// suppressed every resend for the retention window, so a frame or an
+    /// acknowledgement lost beyond it was never recovered by retrying.
+    #[test]
+    fn a_resend_generation_is_carried_past_a_forwarder_that_carried_the_first_copy() {
+        let mut gov = governor();
+        let mut first = frame();
+        first.hop_count = first.hop_count.increment().unwrap();
+        assert_eq!(gov.admit(&first, Some("bob"), 3), RelayAdmission::Queued);
+        gov.take_due(Instant::now());
+
+        let mut resend = first.clone();
+        resend
+            .metadata
+            .insert(RESEND_META_KEY.to_string(), "1".to_string());
+        assert!(!gov.absorb_settled_duplicate(&resend, Some("bob")));
+        assert_eq!(gov.admit(&resend, Some("bob"), 3), RelayAdmission::Queued);
+        gov.take_due(Instant::now());
+
+        assert!(
+            gov.absorb_settled_duplicate(&resend, Some("carol")),
+            "an echo of the same generation is absorbed"
+        );
+        assert!(
+            gov.absorb_settled_duplicate(&first, Some("carol")),
+            "and the first copy is still suppressed"
+        );
+
+        // A stamp that is not a generation is ignored, not trusted: it is the
+        // first copy again.
+        let mut forged = first.clone();
+        forged
+            .metadata
+            .insert(RESEND_META_KEY.to_string(), "x".repeat(4096));
+        assert!(gov.absorb_settled_duplicate(&forged, Some("carol")));
+    }
+
+    /// A stamp cannot buy more floods than a sender would ever make: every
+    /// generation past the limit is the limit's, and a generation of 0 is the
+    /// first copy.
+    #[test]
+    fn a_resend_generation_past_the_limit_is_the_limit() {
+        let mut gov = governor();
+        let mut first = frame();
+        first.hop_count = first.hop_count.increment().unwrap();
+        let stamped = |generation: String| {
+            let mut copy = first.clone();
+            copy.metadata
+                .insert(RESEND_META_KEY.to_string(), generation);
+            copy
+        };
+        let at_limit = stamped(RESEND_MAX_GENERATION.to_string());
+        assert_eq!(gov.admit(&at_limit, Some("bob"), 3), RelayAdmission::Queued);
+        gov.take_due(Instant::now());
+        assert!(gov.absorb_settled_duplicate(
+            &stamped((RESEND_MAX_GENERATION + 1).to_string()),
+            Some("carol")
+        ));
+        assert!(gov.absorb_settled_duplicate(&stamped(u64::MAX.to_string()), Some("carol")));
+
+        let zero = stamped("0".to_string());
+        assert_eq!(relay_key(&zero), zero.id.as_str());
+    }
+
+    /// Every path that drops a forward that never transmitted releases the
+    /// generation it was taken on under, not the bare id. Releasing the bare id
+    /// would leave the generation suppressed for the whole retention window.
+    #[test]
+    fn dropping_a_stamped_forward_releases_its_generation() {
+        let stamped = |priority| {
+            let mut frame = frame_with(8, priority);
+            frame
+                .metadata
+                .insert(RESEND_META_KEY.to_string(), "2".to_string());
+            frame
+        };
+        let small_queue = || {
+            MeshRelayGovernor::with_config(
+                "relay-node",
+                MeshRelayConfig {
+                    queue_capacity: 1,
+                    ..immediate_config()
+                },
+            )
+        };
+
+        // Overdue.
+        let mut gov = governor();
+        let overdue = stamped(MessagePriority::Low);
+        gov.admit(&overdue, Some("b"), 3);
+        gov.release_due(Instant::now() + RELAY_QUEUE_MAX_OVERDUE + Duration::from_secs(1));
+        assert!(!gov.seen.contains(&relay_key(&overdue)), "overdue");
+
+        // Refused room on the way back.
+        let mut gov = small_queue();
+        let refused = stamped(MessagePriority::Low);
+        gov.admit(&refused, Some("b"), 3);
+        let released = gov.take_due(Instant::now()).remove(0);
+        gov.admit(&frame_with(8, MessagePriority::Critical), Some("b"), 3);
+        assert!(gov.requeue(released).is_none());
+        assert!(!gov.seen.contains(&relay_key(&refused)), "refused room");
+
+        // Displaced by something more urgent.
+        let mut gov = small_queue();
+        let displaced = stamped(MessagePriority::Low);
+        gov.admit(&displaced, Some("b"), 3);
+        gov.admit(&frame_with(8, MessagePriority::Critical), Some("b"), 3);
+        assert!(!gov.seen.contains(&relay_key(&displaced)), "displaced");
+    }
+
+    /// A part-sent fan-out has transmitted, so neither a full queue nor a
+    /// higher-priority frame releases its id: a neighbor holds the frame, and
+    /// releasing it would take the next copy on as new.
+    #[test]
+    fn dropping_a_part_sent_forward_leaves_its_id_suppressed() {
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                queue_capacity: 1,
+                ..immediate_config()
+            },
+        );
+        let low = frame_with(8, MessagePriority::Low);
+        assert_eq!(gov.admit(&low, Some("b"), 3), RelayAdmission::Queued);
+        let mut part_sent = gov.take_due(Instant::now()).remove(0);
+        part_sent.owed = vec!["c".to_string()];
+        let urgent = frame_with(8, MessagePriority::Critical);
+        assert_eq!(gov.admit(&urgent, Some("b"), 3), RelayAdmission::Queued);
+
+        assert!(gov.requeue(part_sent.clone()).is_none());
+        assert!(
+            gov.is_suppressed(&low.id.as_str()),
+            "refused room on requeue"
+        );
+
+        // Room again, and this time displaced by something more urgent.
+        gov.take_due(Instant::now());
+        assert!(gov.requeue(part_sent).is_none());
+        let another = frame_with(8, MessagePriority::Critical);
+        assert_eq!(gov.admit(&another, Some("b"), 3), RelayAdmission::Queued);
+        assert!(
+            gov.is_suppressed(&low.id.as_str()),
+            "evicted from the queue"
+        );
+    }
+
     /// An origin re-send that admission refuses leaves the id suppressed. The
     /// release used to run before the rate, hop and queue checks, so a re-send
     /// refused for the neighbour's rate left the id forgotten, and the next
@@ -2402,10 +2665,15 @@ mod tests {
                 "each carrier's best goes first: {targets:?}"
             );
             assert!(targets[0] == "p1" || targets[0] == "p2");
+            // The same choice in the same order, one wider: a forward's
+            // fan-out leaves out the neighbor it came from, an own frame's
+            // has nobody to leave out.
+            let own = gov.select_origination_targets(neighbors, &[], id);
+            assert_eq!(own.len(), DEFAULT_RELAY_FANOUT + 1);
             assert_eq!(
-                gov.select_origination_targets(neighbors, &[], id),
+                own[..DEFAULT_RELAY_FANOUT],
                 targets,
-                "a forward and an origination choose alike at full width",
+                "an origination must start with what a forward chooses",
             );
         }
 
@@ -2643,8 +2911,9 @@ mod tests {
         assert_eq!(
             weak.select_origination_targets(neighbors.clone(), &[], "msg-1")
                 .len(),
-            DEFAULT_RELAY_FANOUT,
-            "this device's own frame must reach as many neighbors as a capable device's",
+            DEFAULT_RELAY_FANOUT + 1,
+            "this device's own frame must reach as many neighbors as a capable device's, \
+             and one more than a forward, which leaves out the neighbor it came from",
         );
 
         // And identical to what a fully capable device would have picked, not
@@ -3012,6 +3281,7 @@ mod tests {
             message: frame(),
             arrival_peer: None,
             heard_from: Vec::new(),
+            owed: Vec::new(),
             due_at: Instant::now(),
             custody_request: None,
             custody_target: Some("dave".to_string()),

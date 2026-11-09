@@ -29,7 +29,7 @@ use crate::constants::{
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::time::{Duration as StdDuration, SystemTime};
 use offline_protocol_core::{Message, MutexExt};
-use offline_protocol_sealed::ACK_FOR_KEY;
+use offline_protocol_sealed::{ACK_FOR_KEY, RESEND_META_KEY};
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -667,7 +667,7 @@ impl BleTransport {
             mtu,
             "ble: selected fragment payload size"
         );
-        let message_id = message.id.as_str();
+        let message_id = assembly_key(message);
         let message_id_bytes = message_id.as_bytes();
         if message_id_bytes.len() > u8::MAX as usize {
             return Err(crate::Error::Other("Message ID too long".to_string()));
@@ -791,7 +791,10 @@ impl BleTransport {
                     );
 
                     eviction_info = Some(FragmentEvictionInfo {
-                        message_id: evict_id.clone(),
+                        message_id: evict_id
+                            .split_once(RESEND_KEY_SEPARATOR)
+                            .map_or(evict_id.as_str(), |(id, _)| id)
+                            .to_string(),
                         completion_percent,
                     });
 
@@ -961,6 +964,29 @@ impl BleTransport {
         }
 
         self.update_queue_metric();
+    }
+}
+
+/// Separates a message id from its resend generation in an assembly key. A
+/// message id is a UUID, so it never appears in one.
+const RESEND_KEY_SEPARATOR: char = '~';
+
+/// What a frame's fragments are grouped under. A resend generation is different
+/// bytes under the same message id, so it needs its own assembly: on the id alone,
+/// its fragments finished a stale partial of the copy before it, decoding with the
+/// old stamp or none, or were refused for a fragment count the stamp had changed.
+/// A receiver treats this as an opaque key (`docs/spec/ble-framing.md`). A stamp
+/// that is not a generation is ignored, as forwarders ignore it, so it cannot grow
+/// the key.
+fn assembly_key(message: &Message) -> String {
+    let id = message.id.as_str();
+    match message
+        .metadata
+        .get(RESEND_META_KEY)
+        .and_then(|generation| generation.parse::<u64>().ok())
+    {
+        Some(generation) => format!("{id}{RESEND_KEY_SEPARATOR}{generation}"),
+        None => id,
     }
 }
 
@@ -2806,9 +2832,10 @@ mod tests {
         })));
 
         // Fill the reassembly buffer to capacity with partial assemblies.
-        // Each entry: message_id "msg-N", fragment 0 of 4 (so 25% complete).
+        // Each entry: message_id "msg-N", fragment 0 of 4 (so 25% complete),
+        // grouped under a resend generation, which the event must not report.
         for i in 0..BLE_MAX_FRAGMENT_ASSEMBLIES {
-            let msg_id = format!("msg-{i}");
+            let msg_id = format!("msg-{i}~1");
             let frag = encode_fragment(msg_id.as_bytes(), 0, 4, b"payload-data").unwrap();
             let result = transport.process_fragment(&frag).unwrap();
             assert!(result.is_none(), "partial fragment should not complete");
@@ -2829,6 +2856,100 @@ mod tests {
             captured[0].message_id.starts_with("msg-"),
             "evicted entry should be one of the pre-filled assemblies"
         );
+        assert!(
+            !captured[0].message_id.contains('~'),
+            "the event names the message, not its assembly"
+        );
+    }
+
+    /// A resend generation is different bytes under the same message id: a
+    /// stale partial of the copy before it must neither swallow it nor block it.
+    /// On one id, the fragments of the stamped frame finished the old assembly
+    /// and decoded with the old stamp or none, or were refused outright when the
+    /// stamp pushed the frame over a fragment boundary, which is the case a
+    /// resend exists to recover.
+    #[test]
+    fn a_stale_partial_does_not_touch_the_next_resend_generation() {
+        let stamped = |message: &Message, generation: &str| {
+            let mut copy = message.clone();
+            copy.metadata
+                .insert(RESEND_META_KEY.to_string(), generation.to_string());
+            copy
+        };
+        let assemble = |transport: &BleTransport, fragments: Vec<Vec<u8>>| {
+            fragments
+                .into_iter()
+                .filter_map(|fragment| transport.process_fragment(&fragment).unwrap())
+                .collect::<Vec<_>>()
+        };
+        // Long enough to span fragments, whichever way the stamp falls.
+        let mut message = small_message();
+        message.content = "x".repeat(2_000);
+
+        for (name, from, to) in [
+            ("the first copy to generation 1", None, "1"),
+            ("one generation to the next", Some("1"), "2"),
+        ] {
+            let transport = BleTransport::new("test-device");
+            let earlier = from.map_or_else(|| message.clone(), |g| stamped(&message, g));
+            let mut partial = transport.fragment_message(&earlier).unwrap();
+            assert!(partial.len() > 2);
+            partial.remove(1);
+            assert!(assemble(&transport, partial).is_empty());
+
+            let next = stamped(&message, to);
+            let complete = assemble(&transport, transport.fragment_message(&next).unwrap());
+            assert_eq!(complete.len(), 1, "{name}");
+            assert_eq!(
+                complete[0]
+                    .metadata
+                    .get(RESEND_META_KEY)
+                    .map(String::as_str),
+                Some(to),
+                "{name}"
+            );
+            assert_eq!(complete[0].id, message.id, "{name}");
+        }
+    }
+
+    /// The stamp can push a frame over a fragment boundary, which changes the
+    /// fragment count. That must not be a count mismatch against a stale partial.
+    #[test]
+    fn a_stamp_that_adds_a_fragment_is_not_a_count_mismatch() {
+        let transport = BleTransport::new("test-device");
+        let mut message = small_message();
+        let with_stamp = |message: &Message| {
+            let mut copy = message.clone();
+            copy.metadata
+                .insert(RESEND_META_KEY.to_string(), "1".to_string());
+            copy
+        };
+        // Grow the frame until the stamp alone adds a fragment.
+        let mut base = 200;
+        loop {
+            message.content = "x".repeat(base);
+            let plain = transport.fragment_message(&message).unwrap().len();
+            let stamped = transport
+                .fragment_message(&with_stamp(&message))
+                .unwrap()
+                .len();
+            if plain > 2 && stamped > plain {
+                break;
+            }
+            base += 1;
+            assert!(base < 20_000, "no size puts the stamp over a boundary");
+        }
+
+        let mut partial = transport.fragment_message(&message).unwrap();
+        partial.pop();
+        for fragment in partial {
+            assert!(transport.process_fragment(&fragment).unwrap().is_none());
+        }
+        let mut complete = None;
+        for fragment in transport.fragment_message(&with_stamp(&message)).unwrap() {
+            complete = complete.or(transport.process_fragment(&fragment).unwrap());
+        }
+        assert!(complete.is_some());
     }
 
     #[test]

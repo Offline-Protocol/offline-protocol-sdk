@@ -22,7 +22,7 @@ use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
     ACK_COALESCE_MAX, ACK_COALESCE_WINDOW, ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_MORE_KEY,
     ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT,
-    MAX_OUTBOX_ENTRIES,
+    MAX_OUTBOX_ENTRIES, MESH_COPY_ANSWER_WINDOW,
 };
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
@@ -51,6 +51,17 @@ pub(crate) const MAX_UNROUTED_ACKS: usize = 500;
 /// it bridges a carrier coming up moments later, and a sender still waiting
 /// past it re-sends, which the duplicate re-ACK path answers.
 pub(crate) const UNROUTED_ACK_TTL: StdDuration = StdDuration::from_secs(600);
+
+/// Which route took a delivery acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckRoute {
+    /// A mesh link: the recipient-side link it arrived on, or neighbors.
+    Mesh,
+    /// Another carrier, which says nothing about a sender only the mesh reaches.
+    Elsewhere,
+    /// Nothing took it.
+    None,
+}
 
 impl OfflineProtocol {
     // ========================================================================
@@ -4353,22 +4364,82 @@ impl OfflineProtocol {
     /// own-send tokens any other frame of ours does, and a neighbor that took
     /// the frame carries our re-send again only within its per-neighbor
     /// allowance for us (it has to: the recipient re-acknowledges only a
-    /// re-send that reaches it). Every device further on still suppresses the
-    /// id for the `RelaySeenCache` retention window. Excluding neighbors we already handed it to
+    /// re-send that reaches it). Excluding neighbors we already handed it to
     /// would be wrong, because a neighbor records an id only when it *accepts*
     /// the frame, and one that refused it (rate limit, full queue) is exactly
     /// the one a later offer should reach.
+    ///
+    /// A resend that reaches a neighbor a full acknowledgement timeout or more
+    /// after this message's current generation began moves it to the next
+    /// generation ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)).
+    /// That is what carries it past forwarders that suppress the earlier
+    /// copies. To them it is a new flood, and its own copies are suppressed as
+    /// usual.
+    ///
+    /// A resend inside the timeout is one more copy of the flood before it,
+    /// suppressed past the device beside us. The retry ladder resends a frame
+    /// handed to the mesh after one second, then two and four, and an answer
+    /// across several hops of phones takes about three: stamping every resend
+    /// re-flooded the mesh for most messages that were never lost.
+    /// [`RESEND_MAX_GENERATION`](super::mesh_relay::RESEND_MAX_GENERATION) ends
+    /// them. A message stays at the last generation for as long as it lives, so
+    /// one for a recipient who is gone crosses the mesh at most once per
+    /// suppression window from then on, when forwarders have forgotten it.
+    ///
+    /// A generation advances only on a resend that reached someone, and by one,
+    /// rather than by the clock: time spent with nobody in range is not time the
+    /// mesh failed to answer. Counted by the clock, a message that waited alone,
+    /// before its first hand-off or between two of them, spent every generation
+    /// on the next resend, and that one flood was all it had.
     pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
         if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
             return 0;
         }
+        let last = self.mesh_resend_generations.get(&message.id).copied();
+        let period =
+            StdDuration::from_millis(self.config.reliability.ack.default_timeout_ms.max(1));
+        let generation = match last {
+            None => 0,
+            Some((generation, since)) if since.elapsed() >= period => {
+                (generation + 1).min(super::mesh_relay::RESEND_MAX_GENERATION)
+            }
+            Some((generation, _)) => generation,
+        };
+        let stamped;
+        let message = if generation > 0 {
+            let mut resend = message.clone();
+            resend.metadata.insert(
+                super::mesh_relay::RESEND_META_KEY.to_string(),
+                generation.to_string(),
+            );
+            stamped = resend;
+            &stamped
+        } else {
+            message
+        };
         let handed_to_mesh = self.offer_to_mesh(message);
+        if handed_to_mesh > 0 {
+            if last.is_none() {
+                let retention = self.mesh_relay.config().seen.retention;
+                let (outbox, media_outbox) = (&self.outbox, &self.media_outbox);
+                self.mesh_resend_generations.retain(|id, (_, since)| {
+                    outbox.contains_key(id)
+                        || media_outbox.contains_key(id)
+                        || since.elapsed() < retention
+                });
+            }
+            if last.is_none_or(|(previous, _)| generation > previous) {
+                self.mesh_resend_generations
+                    .insert(message.id.clone(), (generation, Instant::now()));
+            }
+        }
         if handed_to_mesh > 0 {
             debug!(
                 message_id = %message.id,
                 recipient = %message.recipient,
                 accepted,
                 handed_to_mesh,
+                generation,
                 "Resend could not reach the recipient directly; handed it to neighbors"
             );
         }
@@ -5687,7 +5758,53 @@ impl OfflineProtocol {
             return Ok(());
         }
         let ack = self.build_ack(message, inbound_transport, status)?;
-        self.route_ack(&ack, inbound_transport)
+        // Only an answer the mesh took has answered a flood. One held for the
+        // next carrier edge has answered nothing, and one only the relay took
+        // says nothing about a sender only the mesh can reach: the copies still
+        // arriving are what can get an answer to them.
+        if self.route_ack(&ack, inbound_transport) == AckRoute::Mesh && status.is_none() {
+            self.record_answered(Self::answered_key(message));
+        }
+        Ok(())
+    }
+
+    /// Whether `message` is one more relayed copy of a mesh flood this device
+    /// answered moments ago ([`MESH_COPY_ANSWER_WINDOW`]).
+    ///
+    /// Only a copy a relay carried (hop spent, over a mesh carrier) and under
+    /// a generation already answered. A copy straight from its sender, one
+    /// over any other carrier, and a resend under a new generation are always
+    /// answered: each may be the sender retrying because the answer was lost,
+    /// and staying quiet for it turns a delivered message into a failed one.
+    pub(super) fn is_answered_flood_copy(
+        &self,
+        message: &Message,
+        inbound_transport: TransportType,
+    ) -> bool {
+        TransportManager::is_mesh_transport(inbound_transport)
+            && message.hop_count.value() > 0
+            && self
+                .answered_deliveries
+                .get(&Self::answered_key(message))
+                .is_some_and(|at| at.elapsed() < MESH_COPY_ANSWER_WINDOW)
+    }
+
+    fn record_answered(&mut self, key: String) {
+        let now = Instant::now();
+        self.answered_deliveries
+            .retain(|_, at| now.saturating_duration_since(*at) < MESH_COPY_ANSWER_WINDOW);
+        self.answered_deliveries.insert(key, now);
+    }
+
+    /// The sender is part of it because a duplicate is answered before anything
+    /// is authenticated: without it, a forged copy naming someone else as its
+    /// sender would use up the answer the real sender is owed.
+    fn answered_key(message: &Message) -> String {
+        format!(
+            "{}|{}",
+            message.sender.as_str(),
+            super::mesh_relay::relay_key(message)
+        )
     }
 
     /// Holds the delivery ACK for `message` to go out with others to the same
@@ -5723,10 +5840,15 @@ impl OfflineProtocol {
                 since: Instant::now(),
                 hop_count: message.hop_count.value().to_string(),
                 ids: Vec::new(),
+                answered_keys: Vec::new(),
             });
         let id = message.id.as_str();
         if !batch.ids.contains(&id) {
             batch.ids.push(id);
+        }
+        let answered_key = Self::answered_key(message);
+        if !batch.answered_keys.contains(&answered_key) {
+            batch.answered_keys.push(answered_key);
         }
         if batch.ids.len() >= ACK_COALESCE_MAX {
             self.flush_coalesced_acks_for(&peer);
@@ -5787,8 +5909,10 @@ impl OfflineProtocol {
                 return;
             }
         };
-        if let Err(err) = self.route_ack(&ack, batch.transport) {
-            debug!(peer = %peer, error = %err, "Coalesced delivery ACK not routed");
+        if self.route_ack(&ack, batch.transport) == AckRoute::Mesh {
+            for key in batch.answered_keys {
+                self.record_answered(key);
+            }
         }
     }
 
@@ -5864,17 +5988,19 @@ impl OfflineProtocol {
     /// ([`Self::hold_unrouted_ack`]): it was owed the moment the message was
     /// accepted, and the common miss is a carrier that is merely not up yet —
     /// a push-injected frame acknowledged before the relay socket has
-    /// authenticated. Held is reported as `Ok`, like any carrier queue.
-    fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> Result<()> {
-        if self.try_route_ack(ack_message, inbound_transport) {
-            return Ok(());
+    /// authenticated. Returns which route took it; [`AckRoute::None`] means it
+    /// is held.
+    fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> AckRoute {
+        let route = self.try_route_ack(ack_message, inbound_transport);
+        if route != AckRoute::None {
+            return route;
         }
         debug!(
             ack_to = %ack_message.recipient,
             "No route back for a delivery acknowledgement; holding it for the next carrier edge"
         );
         self.hold_unrouted_ack(ack_message.clone(), inbound_transport, Instant::now());
-        Ok(())
+        AckRoute::None
     }
 
     /// Holds an acknowledgement until [`Self::flush_unrouted_acks`]. Bounded
@@ -5908,7 +6034,7 @@ impl OfflineProtocol {
         for (ack, inbound, held_at) in std::mem::take(&mut self.unrouted_acks) {
             if held_at.elapsed() > UNROUTED_ACK_TTL
                 || self.is_user_blocked(ack.recipient.as_str())
-                || self.try_route_ack(&ack, inbound)
+                || self.try_route_ack(&ack, inbound) != AckRoute::None
             {
                 continue;
             }
@@ -5916,8 +6042,12 @@ impl OfflineProtocol {
         }
     }
 
-    /// The ladder itself; `true` when some route took the acknowledgement.
-    fn try_route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> bool {
+    /// The ladder itself; which route took the acknowledgement.
+    fn try_route_ack(
+        &mut self,
+        ack_message: &Message,
+        inbound_transport: TransportType,
+    ) -> AckRoute {
         let ack_to = ack_message.recipient.as_str().to_string();
 
         if self
@@ -5928,7 +6058,11 @@ impl OfflineProtocol {
                 .send_via_transport(ack_message, inbound_transport)
                 .is_ok()
         {
-            return true;
+            return if TransportManager::is_mesh_transport(inbound_transport) {
+                AckRoute::Mesh
+            } else {
+                AckRoute::Elsewhere
+            };
         }
 
         debug!(
@@ -5955,14 +6089,21 @@ impl OfflineProtocol {
                     "Handed the acknowledgement to the mesh"
                 );
                 if no_direct_route {
-                    return true;
+                    return AckRoute::Mesh;
                 }
             }
         }
 
         // Neighbors took it, so the answer is on its way even though nothing
         // else could carry it.
-        self.transport_manager.send(ack_message).is_ok() || handed_to_mesh > 0
+        let sent = self.transport_manager.send(ack_message).is_ok();
+        if handed_to_mesh > 0 {
+            AckRoute::Mesh
+        } else if sent {
+            AckRoute::Elsewhere
+        } else {
+            AckRoute::None
+        }
     }
 
     /// Builds and sends a delivery ACK from the group-message drain, which
@@ -5992,7 +6133,8 @@ impl OfflineProtocol {
 
         // Same ladder as a direct-message ACK, mesh fallback included: a group
         // frame reaches its members over the same hops a DM does.
-        self.route_ack(&ack_message, inbound_transport)
+        self.route_ack(&ack_message, inbound_transport);
+        Ok(())
     }
 
     pub(super) fn handle_ack_message(&mut self, message: &Message) {

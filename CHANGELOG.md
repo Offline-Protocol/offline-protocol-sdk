@@ -15,6 +15,56 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A device hands its own frame to every neighbor a phone can hold.** A
+  forward's fan-out of three covers every link of a four-link phone but the
+  one the frame came from, and a device's own frame was given the same
+  three, so one of its four links was left out, chosen by the message id. A
+  message whose only way on was that link never left, nor did any resend of
+  it, and a delivery receipt was lost the same way when the link left out
+  was the one the message arrived on. A device's own frames now go to one
+  more neighbor than a forward.
+
+- **A delivery carried across the mesh is answered once, not once per path.**
+  A recipient answered every copy it heard, and one delivery arrives by as
+  many paths as neighbors carried it, so each message cost up to four answer
+  floods in a crowd of phones holding four links each. A copy a relay carried
+  is no longer answered when the same message, under the same resend
+  generation, was answered in the last five seconds. A copy from the sender
+  itself, one over any other carrier, and a resend under a new generation are
+  still always answered. In a simulated crowd of forty phones this cut the receipt frames
+  by a third to two thirds and the total airtime by up to a half.
+
+- **A resend crosses the mesh as far as the first copy did.** Every device
+  that carries a frame ignores its id for ten minutes, so a sender's resend
+  stopped at the first forwarder: the device beside the sender carried it
+  again, but to every device after it the copy was an echo. A message lost
+  past the first forwarder could not be recovered by retrying, and neither
+  could a lost delivery receipt, since the recipient answers only a copy
+  that reaches it. A resend that reaches a neighbor a full acknowledgement
+  timeout or more after the last generation did now moves to the next generation
+  (at most three, and time out of range does not count), carried in a new reserved
+  metadata key, `__resend`, and a forwarder suppresses each generation
+  separately, so it is a new flood whose own copies are still suppressed.
+  Earlier resends stay copies of the first flood, so a receipt that is merely
+  slow costs nothing extra; a message stays at the last generation for as long
+  as it lives, so one for a recipient who is gone crosses the mesh at most once
+  per ten minutes from then on, as it did before. In a simulated crowd of forty
+  phones, every delivery receipt now comes back; at one hand-off in ten lost, every message
+  arrived and more than nine in ten were acknowledged within 35 seconds, where
+  a message or receipt lost past the first forwarder used to stay lost. Older
+  senders send no stamp and behave as before.
+
+- **A forward that runs out of send budget partway through its fan-out is
+  finished when the budget refills.** The device counted it forwarded at the
+  cut, so the frame went to whichever neighbor came first, chosen by a hash
+  rather than by where its recipient is, and its id stayed suppressed for ten
+  minutes. In a simulated crowd of forty phones with six conversations at
+  once, the delivery receipts outran the budgets this way and 4 to 7 of about
+  20 never came back; this fix alone brought that to 0 to 2, and the resend fix
+  above the rest. The remaining neighbors
+  now get the frame within the few seconds a queued forward is kept, and
+  only those chosen in the first place, so the fan-out is never widened.
+
 - **A mesh-only device stops flooding its neighbors with probes for peers that
   are gone.** A pending 1:1 session was probed every five seconds forever when
   no relay was there to say its peer was unreachable, and pending sessions are

@@ -44,7 +44,7 @@ Every inbound frame resolves to exactly one:
 stateDiagram-v2
     [*] --> Received
     Received --> Duplicate: identifier already seen
-    Duplicate --> [*]: re-ACK if requested<br/>and sender not blocked, no delivery
+    Duplicate --> [*]: re-ACK if requested, sender not blocked<br/>and not a flood copy answered moments ago, no delivery
     Duplicate --> Deferred: original still pending
 
     Received --> Gate: new identifier, marked
@@ -83,7 +83,9 @@ appears.
 
 `Duplicate` is a receive-loop disposition rather than a decrypt outcome, and its
 acknowledgement is conditional: a duplicate is re-acknowledged only when the
-frame asked for an acknowledgement and the sender is not blocked.
+frame asked for an acknowledgement, the sender is not blocked, and it is not
+one more relayed copy of a mesh flood answered moments ago (see
+[Acknowledgements on a mesh link](#acknowledgements-on-a-mesh-link)).
 
 **A message sent during a block is never delivered, whenever the block ends.**
 A blocked sender's frame is dropped with no acknowledgement and no event, and
@@ -156,6 +158,22 @@ is offered.
   An acknowledgement per frame was a third of the frames a phone sent in that
   test. A held batch is in memory only; one lost with a restart is answered
   again when the resend arrives as a duplicate.
+- **One answer per flood.** A delivery carried across the mesh arrives by as
+  many paths as neighbors carried it, and each answer is a flood of its own
+  back. So a copy a relay carried (hop spent, over a mesh carrier) is not
+  answered when the same message under the same resend generation was
+  answered within the last five seconds. A copy straight from its sender, one
+  over any other carrier, and a mesh resend under a new generation
+  (`__resend`, [Mesh networking](../mesh.md#what-handled-once-costs)) are
+  always answered, because each may be the sender retrying after a lost
+  answer. Answering every copy sent up to four answer floods per message in a
+  simulated crowd of phones holding four links each; it ran the send budgets
+  dry, and the receipts it lost were the ones it was sending. Answering once
+  cut the crowd's airtime by up to a half. Only an answer the mesh took counts:
+  one with no route, held for the next carrier edge, or one only the relay
+  accepted, has not reached a sender that only the mesh can reach, so the copies
+  behind it are still answered. A coalesced batch counts when it goes out, not
+  when a delivery joins it.
 
 ## The deferred-acknowledgement atom
 

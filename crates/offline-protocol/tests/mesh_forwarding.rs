@@ -715,6 +715,92 @@ fn everyone_hearing_everyone_does_not_multiply_the_traffic() {
 }
 
 #[test]
+fn a_device_hands_its_own_frame_to_every_neighbor_a_phone_can_hold() {
+    // alice holds four links, and only bob leads anywhere: dave is beyond
+    // him. A forwarder fans out to three, which with four links is every
+    // neighbor but the one it heard the frame from. Alice heard it from
+    // nobody, so three of her four left one out, chosen by a hash of the
+    // message id. A message that left out bob never reached dave, and since
+    // the choice is stable per id, neither did any resend of it.
+    // Budgets, and an allowance per neighbor, that sixteen messages and their
+    // answers cannot exhaust, since the rounds here take no time to refill
+    // them.
+    let roomy = |id: &str| {
+        let mut config = default_config(id);
+        config.mesh_relay.burst = 1_000.0;
+        config.mesh_relay.peer_burst = 1_000.0;
+        config
+    };
+    let mut net = Neighborhood::new(&["carol", "dave", "erin", "frank"]);
+    net.add_node("alice", roomy("alice"));
+    net.add_node("bob", roomy("bob"));
+    for peer in ["bob", "carol", "erin", "frank"] {
+        net.link("alice", peer);
+    }
+    net.link("bob", "dave");
+
+    let sent: Vec<String> = (0..16)
+        .map(|n| {
+            let content = format!("message {n}");
+            net.send("alice", "dave", &content);
+            content
+        })
+        .collect();
+    net.run_until_quiet(24);
+
+    let mut inbox = net.inbox("dave");
+    inbox.sort();
+    let mut expected = sent;
+    expected.sort();
+    assert_eq!(inbox, expected);
+}
+
+#[test]
+fn a_fan_out_cut_short_by_the_send_budget_is_finished_when_it_refills() {
+    // alice — bob — {carol, dave, erin, grace}. Bob fans out to three of his
+    // four onward neighbors and can afford one forward at a time, so his
+    // fan-out runs out after the first. Counting the frame forwarded there
+    // left it with one neighbor, chosen by a hash rather than by where its
+    // recipient is, and its id suppressed for ten minutes: in a crowd that is
+    // how a receipt went one way, the wrong one, and never arrived.
+    let mut bob = default_config("bob");
+    bob.mesh_relay.burst = 2.0;
+    bob.mesh_relay.rate_per_sec = 8.0;
+    let onward = ["carol", "dave", "erin", "grace"];
+
+    let mut net = Neighborhood::new(&["alice", "carol", "dave", "erin", "grace"]);
+    net.add_node("bob", bob);
+    net.link("alice", "bob");
+    for peer in onward {
+        net.link("bob", peer);
+    }
+
+    let msg_id = net.send("alice", "frank", "carried all the way out");
+    for _ in 0..12 {
+        net.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The rest of the fan-out goes out once the budget refills, to the
+    // neighbors first chosen: finished, never widened to the fourth.
+    let reached: Vec<usize> = onward
+        .iter()
+        .map(|peer| net.deliveries_to(peer, &msg_id))
+        .collect();
+    assert_eq!(
+        reached.iter().sum::<usize>(),
+        3,
+        "bob's fan-out reached {reached:?}"
+    );
+    assert!(
+        reached.iter().all(|&n| n <= 1),
+        "a neighbor got it twice: {reached:?}"
+    );
+    // Finishing the fan-out is not a second forward of the frame.
+    assert_eq!(net.node("bob").mesh_relay_stats().forwarded, 1);
+}
+
+#[test]
 fn a_device_hearing_a_frame_from_every_side_still_carries_it_onward() {
     // Three devices hear each other and the sender, and each also reaches
     // dave, the one way on toward the recipient:
@@ -1424,6 +1510,570 @@ fn a_flushed_message_no_carrier_takes_is_handed_to_the_neighbors() {
 }
 
 #[test]
+fn a_resend_reaches_past_forwarders_that_already_carried_the_first_copy() {
+    // alice — bob — carol — dave. The first copy is lost on its last hop,
+    // after bob and carol have both taken it on. Each suppresses the id for
+    // ten minutes, so alice's resend went no further than bob: he carries a
+    // resend from alice herself, but the copy he hands carol has a spent hop,
+    // and to carol that is an echo. A frame lost past the first forwarder
+    // could not be recovered by retrying, and neither could a lost receipt,
+    // since the recipient answers only a copy that reaches it.
+    // A one-second acknowledgement timeout, so a resend can be a generation on
+    // from the first without ten seconds' wait.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 1_000;
+    let mut net = Neighborhood::new(&["bob", "carol", "dave"]);
+    net.add_node("alice", alice);
+    net.air.delay_rounds = (1, 1);
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+    net.link("carol", "dave");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let msg_id = net.send("alice", "dave", "worth a second try");
+    for _ in 0..12 {
+        if net.deliveries_to("dave", &msg_id) > 0 {
+            break;
+        }
+        net.step();
+    }
+    // The copy is on the air to dave: he steps out of range as it lands.
+    net.unlink_all("dave");
+    net.step();
+    net.link("carol", "dave");
+    assert!(
+        net.inbox("dave").is_empty(),
+        "the first copy should have been lost"
+    );
+
+    // Alice re-drives her outbox, as a retry does. Her first resend is still a
+    // copy of the first flood, and one a timeout after it is not.
+    net.node("alice").flush_outbox_all();
+    net.run_until_quiet(12);
+    std::thread::sleep(Duration::from_millis(1_100));
+    net.node("alice").flush_outbox_all();
+    step_until_delivered(&mut net, &delivered, 24);
+
+    assert_eq!(net.inbox("dave"), vec!["worth a second try".to_string()]);
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
+}
+
+#[test]
+fn a_message_that_waited_offline_still_recovers_by_retrying() {
+    // alice — bob — carol — dave, but alice was alone when she wrote, for
+    // longer than the resend generations last. Time alone is not time the mesh
+    // failed to answer: counted from when she wrote, her first hand-off used
+    // the last generation and so did every resend after it, so one flood was
+    // all the message ever got.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 100;
+    let mut net = Neighborhood::new(&["bob", "carol", "dave"]);
+    net.add_node("alice", alice);
+    net.air.delay_rounds = (1, 1);
+    net.link("bob", "carol");
+    net.link("carol", "dave");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let msg_id = net.send("alice", "dave", "written while alone");
+    std::thread::sleep(Duration::from_millis(500));
+    net.link("alice", "bob");
+    net.node("alice").flush_outbox_all();
+    for _ in 0..12 {
+        if net.deliveries_to("dave", &msg_id) > 0 {
+            break;
+        }
+        net.step();
+    }
+    // The copy is on the air to dave: he steps out of range as it lands.
+    net.unlink_all("dave");
+    net.step();
+    net.link("carol", "dave");
+    assert!(
+        net.inbox("dave").is_empty(),
+        "the first copy should have been lost"
+    );
+
+    std::thread::sleep(Duration::from_millis(110));
+    net.node("alice").flush_outbox_all();
+    step_until_delivered(&mut net, &delivered, 24);
+
+    assert_eq!(net.inbox("dave"), vec!["written while alone".to_string()]);
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
+}
+
+#[test]
+fn resends_to_a_peer_nobody_can_reach_stop_flooding() {
+    // alice — bob — carol — dave, and the recipient is not here at all. Each
+    // resend a timeout old is a new flood, and a recipient who is gone answers
+    // none of them, so without a limit every step of the retry ladder crossed
+    // the whole mesh for as long as the ladder ran. Past the limit a resend is
+    // a copy again: it goes no further than the device beside the sender.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 100;
+    let mut net = Neighborhood::new(&["bob", "carol", "dave"]);
+    net.add_node("alice", alice);
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+    net.link("carol", "dave");
+
+    let msg_id = net.send("alice", "ghost", "to nobody");
+    net.run_until_quiet(12);
+    // Far past the limit in timeouts, resending at every step on the way.
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(110));
+        net.node("alice").flush_outbox_all();
+        net.run_until_quiet(12);
+    }
+
+    let floods = net
+        .frames
+        .iter()
+        .filter(|(from, to, m)| from == "carol" && to == "dave" && m.id.as_str() == msg_id)
+        .count();
+    // The first copy and at most three resend generations.
+    assert!(
+        (2..=4).contains(&floods),
+        "ten resends crossed the far end of the mesh {floods} times"
+    );
+    // The resends past the limit still reached the device beside alice, which
+    // is what lets a neighbor that refused an earlier one carry it.
+    assert!(net.deliveries_to("bob", &msg_id) > floods);
+}
+
+#[test]
+fn a_message_stays_at_its_last_generation_past_the_suppression_window() {
+    // The limit holds for as long as the message lives. Counted afresh each
+    // time the suppression window passed, a capped resend for a recipient who
+    // is gone flooded the mesh every time the retry ladder reached it: once the
+    // ladder is at its ceiling, twice as often as an unchanging id would, for
+    // the week an outbox entry lives. Staying at the last generation, it floods
+    // once per window, when forwarders have forgotten it.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 10;
+    alice.mesh_relay.seen.retention = Duration::from_millis(100);
+    let mut net = Neighborhood::new(&["bob"]);
+    net.add_node("alice", alice);
+    net.link("alice", "bob");
+
+    let msg_id = net.send("alice", "ghost", "to nobody");
+    net.node("alice").flush_outbox_all();
+    net.run_until_quiet(12);
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(150));
+        net.node("alice").flush_outbox_all();
+        net.run_until_quiet(12);
+    }
+
+    let stamps: Vec<Option<String>> = net
+        .frames
+        .iter()
+        .filter(|(from, _, m)| from == "alice" && m.id.as_str() == msg_id)
+        .map(|(_, _, m)| m.metadata.get("__resend").cloned())
+        .collect();
+    let last_three = &stamps[stamps.len() - 3..];
+    assert!(
+        last_three.iter().all(|stamp| stamp.as_deref() == Some("3")),
+        "a capped message must stay capped: {stamps:?}"
+    );
+}
+
+#[test]
+fn a_sender_that_lost_its_neighbors_does_not_skip_generations() {
+    // alice has reached bob once when she walks away. Time out of range is not
+    // time the mesh failed to answer: counted by the clock, her next resend
+    // jumped to the last generation, so one flood was all she had left, and
+    // every resend after it stopped at the device beside her for ten minutes.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 100;
+    let mut net = Neighborhood::new(&["bob"]);
+    net.add_node("alice", alice);
+    net.link("alice", "bob");
+
+    let msg_id = net.send("alice", "ghost", "to nobody");
+    net.node("alice").flush_outbox_all();
+    net.run_until_quiet(12);
+    net.unlink_all("alice");
+    std::thread::sleep(Duration::from_millis(500));
+    net.node("alice").flush_outbox_all();
+    net.link("alice", "bob");
+    let mut stamps = Vec::new();
+    for _ in 0..4 {
+        let before = net.frames.len();
+        std::thread::sleep(Duration::from_millis(110));
+        net.node("alice").flush_outbox_all();
+        net.run_until_quiet(12);
+        stamps.extend(
+            net.frames[before..]
+                .iter()
+                .filter(|(from, _, m)| from == "alice" && m.id.as_str() == msg_id)
+                .map(|(_, _, m)| m.metadata.get("__resend").cloned().unwrap_or_default()),
+        );
+    }
+    assert_eq!(stamps, ["1", "2", "3", "3"]);
+}
+
+#[test]
+fn a_finished_fan_out_skips_neighbors_that_left_or_handed_over_a_copy() {
+    // alice — bob — {carol, dave, erin}, and bob can afford one forward. While
+    // he waits for the budget one neighbor he owes walks away and the other
+    // hands him a copy, so it holds the frame. Neither gets anything, and the
+    // forward ends there: nothing left over, and not counted a second time.
+    let mut bob = default_config("bob");
+    bob.mesh_relay.burst = 2.0;
+    bob.mesh_relay.rate_per_sec = 2.0;
+    let mut net = Neighborhood::new(&["alice", "carol", "dave", "erin"]);
+    net.add_node("bob", bob);
+    net.link("alice", "bob");
+    let onward = ["carol", "dave", "erin"];
+    for peer in onward {
+        net.link("bob", peer);
+    }
+
+    let msg_id = net.send("alice", "frank", "only part of the way");
+    for _ in 0..4 {
+        net.step();
+        if onward
+            .iter()
+            .any(|peer| net.deliveries_to(peer, &msg_id) > 0)
+        {
+            break;
+        }
+    }
+    let owed: Vec<&str> = onward
+        .into_iter()
+        .filter(|peer| net.deliveries_to(peer, &msg_id) == 0)
+        .collect();
+    assert_eq!(owed.len(), 2, "the budget allows one neighbor");
+    let copy = net
+        .frames
+        .iter()
+        .find(|(from, _, m)| from == "bob" && m.id.as_str() == msg_id)
+        .map(|(_, _, m)| m.clone())
+        .unwrap();
+
+    net.unlink_all(owed[0]);
+    net.radios["bob"].queue_message_from(copy, owed[1].to_string());
+    net.step();
+    std::thread::sleep(Duration::from_millis(700));
+    for _ in 0..3 {
+        net.step();
+    }
+
+    assert_eq!(net.deliveries_to(owed[0], &msg_id), 0);
+    assert_eq!(net.deliveries_to(owed[1], &msg_id), 0);
+    let stats = net.node("bob").mesh_relay_stats();
+    assert_eq!(stats.forwarded, 1);
+    assert_eq!(stats.awaiting_transmission, 0);
+}
+
+/// The distinct receipts `from` has sent for `message_id`, each of which is a
+/// flood of its own.
+fn receipts_sent(net: &Neighborhood, from: &str, message_id: &str) -> usize {
+    net.frames
+        .iter()
+        .filter(|(sender, _, m)| {
+            sender == from && m.metadata.get("ack_for").map(String::as_str) == Some(message_id)
+        })
+        .map(|(_, _, m)| m.id.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+#[test]
+fn a_delivery_heard_over_several_paths_is_answered_once() {
+    // alice — {bob, carol} — dave. Dave hears the message from bob and from
+    // carol, moments apart. Each copy was answered, and each answer is a
+    // flood of its own back across the mesh: in a crowd of phones holding
+    // four links, up to four floods per message, which is what ran the send
+    // budgets dry. Two copies of one flood, seconds apart, are one delivery.
+    let mut net = Neighborhood::new(&["alice", "bob", "carol", "dave"]);
+    net.link("alice", "bob");
+    net.link("alice", "carol");
+    net.link("bob", "dave");
+    net.link("carol", "dave");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let msg_id = net.send("alice", "dave", "heard twice");
+    net.run_until_quiet(16);
+
+    assert_eq!(
+        net.deliveries_to("dave", &msg_id),
+        2,
+        "both paths carried it"
+    );
+    assert_eq!(net.inbox("dave"), vec!["heard twice".to_string()]);
+    assert_eq!(receipts_sent(&net, "dave", &msg_id), 1);
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
+}
+
+/// A relayed copy of a message from `from` to `to`, as carried by a neighbor.
+fn relayed_copy(from: &str, to: &str, content: &str) -> Message {
+    let mut copy = message(from, to, content);
+    copy.requires_ack = true;
+    copy.hop_count = copy.hop_count.increment().unwrap();
+    copy
+}
+
+#[test]
+fn a_copy_is_answered_when_the_answer_to_the_last_one_never_left() {
+    // dave has spent his send budget when the first copy lands, so his answer
+    // goes nowhere and is held for the next carrier edge, which may be a long
+    // way off. The second copy, once the budget has refilled, is the one that
+    // can still get an answer out: an answer that never left is not an answer.
+    let mut dave = default_config("dave");
+    dave.mesh_relay.burst = 1.0;
+    dave.mesh_relay.rate_per_sec = 5.0;
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("dave", dave);
+    net.link("bob", "dave");
+    net.link("carol", "dave");
+
+    net.send("dave", "ghost", "spends the budget");
+    let copy = relayed_copy("alice", "dave", "heard twice");
+    let msg_id = copy.id.as_str();
+    net.radios["dave"].queue_message_from(copy.clone(), "bob".to_string());
+    net.step();
+    net.step();
+    assert_eq!(
+        receipts_sent(&net, "dave", &msg_id),
+        0,
+        "the budget was spent"
+    );
+
+    std::thread::sleep(Duration::from_millis(400));
+    net.radios["dave"].queue_message_from(copy, "carol".to_string());
+    net.step();
+    net.step();
+    assert_eq!(receipts_sent(&net, "dave", &msg_id), 1);
+}
+
+#[test]
+fn only_a_relayed_mesh_copy_inside_the_window_goes_unanswered() {
+    // alice — dave directly. Each exception here is a copy that may be the
+    // sender retrying because the answer was lost, so staying quiet for it
+    // would turn a delivered message into a failed one.
+    let mut net = Neighborhood::new(&["alice", "dave"]);
+    net.link("alice", "dave");
+    let steps = |net: &mut Neighborhood| {
+        net.step();
+        net.step();
+    };
+
+    // A copy straight from the sender is answered every time.
+    let mut direct = message("alice", "dave", "direct");
+    direct.requires_ack = true;
+    let direct_id = direct.id.as_str();
+    for answers in 1..=2 {
+        net.radios["dave"].queue_message_from(direct.clone(), "alice".to_string());
+        steps(&mut net);
+        assert_eq!(receipts_sent(&net, "dave", &direct_id), answers);
+    }
+
+    // A relayed copy is answered once inside the window, and again past it.
+    let relayed = relayed_copy("alice", "dave", "relayed");
+    let relayed_id = relayed.id.as_str();
+    for _ in 0..2 {
+        net.radios["dave"].queue_message_from(relayed.clone(), "alice".to_string());
+        steps(&mut net);
+    }
+    assert_eq!(receipts_sent(&net, "dave", &relayed_id), 1);
+    std::thread::sleep(offline_protocol::constants::MESH_COPY_ANSWER_WINDOW);
+    net.radios["dave"].queue_message_from(relayed, "alice".to_string());
+    steps(&mut net);
+    assert_eq!(receipts_sent(&net, "dave", &relayed_id), 2);
+}
+
+#[test]
+fn a_copy_over_a_carrier_outside_the_mesh_is_answered_every_time() {
+    // The hop count on a frame says nothing about the relay, and a relay's
+    // redelivery is exactly what an answer has to settle.
+    let relay = MockTransport::new(TransportType::Internet);
+    relay.start().unwrap();
+    relay.add_connected_peer("alice", -55);
+    let mut net = Neighborhood::new(&["alice", "dave"]);
+    net.node("dave")
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(relay.clone()));
+
+    let copy = relayed_copy("alice", "dave", "over the relay");
+    let id = copy.id.as_str();
+    for _ in 0..2 {
+        relay.queue_message_from(copy.clone(), "alice".to_string());
+        net.step();
+        net.step();
+    }
+    let answers = relay
+        .sent_messages()
+        .iter()
+        .filter(|m| m.metadata.get("ack_for").map(String::as_str) == Some(id.as_str()))
+        .count();
+    assert_eq!(answers, 2);
+}
+
+#[test]
+fn an_answer_over_the_relay_does_not_silence_a_copy_over_the_mesh() {
+    // The first copy came over the relay, and the answer went back that way.
+    // That says nothing about a sender only the mesh can reach, so the relayed
+    // copy that follows still gets an answer of its own.
+    let relay = MockTransport::new(TransportType::Internet);
+    relay.start().unwrap();
+    relay.add_connected_peer("alice", -55);
+    let mut net = Neighborhood::new(&["bob", "dave"]);
+    net.node("dave")
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(relay.clone()));
+    net.link("bob", "dave");
+
+    let copy = relayed_copy("alice", "dave", "both ways");
+    let id = copy.id.as_str();
+    relay.queue_message_from(copy.clone(), "alice".to_string());
+    net.step();
+    net.step();
+    net.radios["dave"].queue_message_from(copy, "bob".to_string());
+    net.step();
+    net.step();
+
+    assert_eq!(receipts_sent(&net, "dave", &id), 1);
+}
+
+#[test]
+fn an_answer_only_the_relay_took_does_not_silence_a_copy_over_the_mesh() {
+    // The copy came over the mesh, and dave has spent his send budget, so his
+    // answer reached no neighbor, but the relay accepted it. That says nothing
+    // about a sender only the mesh can reach, so the copy that follows, once the
+    // budget has refilled, still gets an answer the mesh can carry.
+    let mut dave = default_config("dave");
+    dave.mesh_relay.burst = 1.0;
+    dave.mesh_relay.rate_per_sec = 5.0;
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("dave", dave);
+    net.link("bob", "dave");
+    net.link("carol", "dave");
+    net.send("dave", "ghost", "spends the budget");
+
+    let relay = MockTransport::new(TransportType::Internet);
+    relay.start().unwrap();
+    net.node("dave")
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(relay.clone()));
+
+    let copy = relayed_copy("alice", "dave", "heard twice");
+    let id = copy.id.as_str();
+    let over_the_relay = |relay: &MockTransport| {
+        relay
+            .sent_messages()
+            .iter()
+            .filter(|m| m.metadata.get("ack_for").map(String::as_str) == Some(id.as_str()))
+            .count()
+    };
+    net.radios["dave"].queue_message_from(copy.clone(), "bob".to_string());
+    net.step();
+    net.step();
+    assert_eq!(over_the_relay(&relay), 1, "the relay took the first answer");
+    assert_eq!(
+        receipts_sent(&net, "dave", &id),
+        0,
+        "the mesh took none of it"
+    );
+
+    std::thread::sleep(Duration::from_millis(400));
+    net.radios["dave"].queue_message_from(copy, "carol".to_string());
+    net.step();
+    net.step();
+    assert_eq!(receipts_sent(&net, "dave", &id), 1);
+}
+
+#[test]
+fn a_forged_copy_cannot_silence_the_answer_to_the_real_sender() {
+    // Nothing is authenticated when a duplicate is answered, so anyone in range
+    // who saw an id can send a relayed copy naming themselves as its sender.
+    // That earns them an answer, as a duplicate always could. It must not use up
+    // the answer owed to the real sender for that resend generation.
+    let mut net = Neighborhood::new(&["bob", "dave"]);
+    net.link("bob", "dave");
+    let copy = relayed_copy("alice", "dave", "worth answering");
+    let id = copy.id.as_str();
+    let mut resend = copy.clone();
+    resend
+        .metadata
+        .insert("__resend".to_string(), "1".to_string());
+    let mut forged = resend.clone();
+    forged.sender = UserId::new("mallory").unwrap();
+
+    for frame in [copy, forged, resend] {
+        net.radios["dave"].queue_message_from(frame, "bob".to_string());
+        net.step();
+        net.step();
+    }
+
+    let answers_to = |net: &Neighborhood, who: &str| {
+        net.frames
+            .iter()
+            .filter(|(from, _, m)| {
+                from == "dave"
+                    && m.recipient.as_str() == who
+                    && m.metadata.get("ack_for").map(String::as_str) == Some(id.as_str())
+            })
+            .map(|(_, _, m)| m.id.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    };
+    assert_eq!(
+        answers_to(&net, "alice"),
+        2,
+        "the first copy and the resend"
+    );
+    assert_eq!(answers_to(&net, "mallory"), 1);
+}
+
+#[test]
+fn a_resend_is_answered_even_moments_after_the_first_answer() {
+    // alice — bob — dave. Dave's answer is lost on its way back, and alice's
+    // resend reaches him seconds later, well inside the window in which
+    // copies of one flood go unanswered. A resend is a new generation, so it
+    // is answered: staying quiet would turn a delivered message into a
+    // failed one.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 1_000;
+    let mut net = Neighborhood::new(&["bob", "dave"]);
+    net.add_node("alice", alice);
+    net.air.delay_rounds = (1, 1);
+    net.link("alice", "bob");
+    net.link("bob", "dave");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let msg_id = net.send("alice", "dave", "answer me again");
+    for _ in 0..16 {
+        let answered = net.frames.iter().any(|(from, to, m)| {
+            from == "bob"
+                && to == "alice"
+                && m.metadata.get("ack_for").map(String::as_str) == Some(msg_id.as_str())
+        });
+        if answered {
+            break;
+        }
+        net.step();
+    }
+    // The answer is on the air to alice: she steps out of range as it lands.
+    net.unlink_all("alice");
+    net.step();
+    net.link("alice", "bob");
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "the answer should have been lost"
+    );
+
+    net.node("alice").flush_outbox_all();
+    net.run_until_quiet(12);
+    std::thread::sleep(Duration::from_millis(1_100));
+    net.node("alice").flush_outbox_all();
+    step_until_delivered(&mut net, &delivered, 24);
+
+    assert_eq!(receipts_sent(&net, "dave", &msg_id), 2);
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
+}
+
+#[test]
 fn a_resend_a_carrier_swallows_is_still_handed_to_the_neighbors() {
     // A carrier can take a frame for a recipient it cannot reach and report
     // success (the internet transport does, for one the relay has said it
@@ -1738,13 +2388,16 @@ fn a_crowd_carries_a_message_as_far_as_its_hop_budget_and_no_further() {
 }
 
 #[test]
-#[ignore = "fails today: a receipt is lost when a fan-out is cut short by the send budget or refused by a neighbor's acceptance limit, and the sender's retry cannot pass the forwarders' ten-minute suppression"]
 fn every_receipt_in_a_crowd_comes_back() {
     // The messages all arrive (the test above). Their receipts are four
     // floods per message, one per copy the recipient heard, and together they
-    // outrun the send budgets: a forwarder out of budget hands a receipt to
-    // one neighbor and counts it forwarded, and one whose neighbor exceeded
-    // its acceptance limit drops it. Either way no device holds it any more.
+    // outrun the budgets. Two things bring every one back. A fan-out the send
+    // budget cuts short is finished when it refills, rather than left with
+    // whichever neighbor came first. And a receipt lost anyway (a neighbor
+    // over its acceptance limit drops it) is answered again when the sender
+    // retries, because a resend is a new flood to the forwarders that
+    // carried the first copy: before, they suppressed it for ten minutes, so
+    // it never reached the recipient to be answered.
     let mut missing = Vec::new();
     for seed in 1..=4 {
         let air = Air {
@@ -1758,7 +2411,9 @@ fn every_receipt_in_a_crowd_comes_back() {
             .into_iter()
             .filter(|f| f.hops <= budget)
             .collect();
-        step_until(&mut net, Duration::from_secs(15), |_| {
+        // Up to two resend generations: the ladder's resend fifteen seconds in
+        // is the first a full timeout on, and the next comes at thirty-one.
+        step_until(&mut net, Duration::from_secs(32), |_| {
             flows.iter().all(Flow::acknowledged)
         });
         missing.extend(
@@ -1772,11 +2427,13 @@ fn every_receipt_in_a_crowd_comes_back() {
 }
 
 #[test]
-#[ignore = "fails today: a lost frame is retried by its sender, and every forwarder past the first suppresses the retry for ten minutes"]
+#[ignore = "a measurement, not a gate: only two resends a full timeout old fit in 35 seconds, and one receipt lost twice fails the run, so whole runs pass anywhere from one time in six to every time; per flow, every message was delivered and 116 to 125 of 126 acknowledged"]
 fn a_crowd_on_a_lossy_radio_recovers_by_retrying() {
     // One hand-off in ten lost, and frames up to two rounds late. The first
     // flood misses some recipients and loses some receipts; the sender's
-    // acknowledgement timeout (ten seconds) is what should cover them.
+    // acknowledgement timeout (ten seconds) and its resends cover them. Before
+    // a resend was a new flood to the forwarders, no run settled every flow:
+    // a frame lost past the first forwarder stayed lost for ten minutes.
     for seed in 2..=3 {
         let air = Air {
             seed,

@@ -26,6 +26,10 @@ use core::time::Duration;
 /// naming one would be firmware's guess crossing the wire as fact.
 pub const ACK_FOR_KEY: &str = "ack_for";
 
+/// The metadata key on a resend a sender hands to the mesh: its resend
+/// generation, in decimal, from 1. Unsigned, like the hop fields.
+pub const RESEND_META_KEY: &str = "__resend";
+
 /// How many generations behind the latest decrypted message a sender ratchet
 /// key is kept, so late/reordered messages remain decryptable.
 ///

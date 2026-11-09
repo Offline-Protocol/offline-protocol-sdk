@@ -831,6 +831,52 @@ fn a_neighbour_without_a_mesh_link_queues_nothing_and_stays_untried() {
     );
 }
 
+/// A fan-out the send budget cut short has transmitted: a neighbour holds the
+/// frame. When the rest of it goes overdue the frame is not one the forwarding
+/// path could not carry, so it is never held, and its id stays suppressed so
+/// the copies behind it are not taken on again by a device out of budget.
+#[test]
+fn a_forward_that_reached_a_neighbour_and_went_overdue_is_never_held() {
+    let mut alice = Node::new("alice");
+    let mut carol = Node::new("carol");
+    let mut config = base_config("bob");
+    config.custody = open_custody();
+    // One forward's worth, and no meaningful refill.
+    config.mesh_relay.burst = 2.0;
+    config.mesh_relay.rate_per_sec = 0.001;
+    let mut bob = Node::with_config("bob", config);
+    pair(&mut alice, &mut carol);
+    alice.link(&bob);
+    bob.link(&alice);
+    let dave = Node::new("dave");
+    let erin = Node::new("erin");
+    bob.link(&dave);
+    bob.link(&erin);
+
+    let frame = deposit_from(&mut alice, &bob, &carol);
+    bob.receive_from(frame.clone(), &alice.address);
+    bob.flush_after(Duration::ZERO);
+    assert_eq!(
+        bob.transport.peer_send_count_for(&frame.id.as_str()),
+        1,
+        "the budget allows one neighbour and owes the other"
+    );
+
+    bob.flush_after(RELAY_QUEUE_MAX_OVERDUE + Duration::from_millis(1));
+
+    assert_eq!(bob.protocol.custody_stats().accepted, 0);
+    assert_eq!(bob.protocol.custody_stats().held, 0);
+    assert_eq!(bob.protocol.mesh_relay_stats().abandoned_overdue, 0);
+
+    let queued = bob.protocol.mesh_relay_stats().queued;
+    bob.receive_from(frame, &dave.address);
+    assert_eq!(
+        bob.protocol.mesh_relay_stats().queued,
+        queued,
+        "a further copy is suppressed, not taken on again"
+    );
+}
+
 #[test]
 fn an_abandoned_forward_leaves_the_neighbour_untried() {
     let (mut alice, mut bob, carol) = topology(open_custody());

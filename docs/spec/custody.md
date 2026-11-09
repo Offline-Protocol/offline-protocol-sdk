@@ -187,7 +187,9 @@ released the frame's identifier from the suppression cache, which is what
 makes the fourth invariant a consequence of existing code rather than a new
 mechanism. A frame that transmitted is never held: holding every copy of every
 fan-out would multiply storage by the fan-out at each hop, for frames another
-device is already carrying.
+device is already carrying. That includes a forward whose fan-out the send
+budget cut short and whose remainder then went overdue: it reached a neighbor,
+so it keeps its identifier and never comes to this point.
 
 A queued forward that the governor marked as a held frame being redelivered
 ([Redelivery](#redelivery)) is returned to the store at this point, and is not

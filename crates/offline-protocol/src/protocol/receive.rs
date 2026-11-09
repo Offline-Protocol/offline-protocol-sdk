@@ -168,18 +168,22 @@ impl OfflineProtocol {
                         // retrying — but NOT for blocked users, to avoid
                         // leaking presence information.
                         //
-                        // Every copy is answered, including the several that
-                        // one delivery produces when it travels through nearby
-                        // devices. Answering only the first was tried and
-                        // rejected: a copy arriving moments later and a
-                        // retransmission arriving because the answer was lost
-                        // are not distinguishable here, and staying quiet for
-                        // the second turns a delivered message into a failed
-                        // one. The redundant answers are bounded — a delivery
-                        // arrives by at most as many paths as neighbors carried
-                        // it, answers never provoke further answers, and every
-                        // frame that leaves is rate-capped like any other.
-                        if !sender_blocked && message.requires_ack {
+                        // Every copy is answered except one more relayed copy
+                        // of a mesh flood answered moments ago
+                        // (`is_answered_flood_copy`). Answering only the first
+                        // copy of all was tried and rejected: a copy arriving
+                        // moments later and a retransmission arriving because
+                        // the answer was lost could not be told apart, and
+                        // staying quiet for the second turns a delivered
+                        // message into a failed one. A mesh resend a timeout on
+                        // now carries its generation, which tells them apart;
+                        // answering every relayed copy as well sent one flood per
+                        // path the delivery took, which in a crowd ran the send
+                        // budgets dry and lost the very receipts it answered.
+                        if !sender_blocked
+                            && message.requires_ack
+                            && !self.is_answered_flood_copy(&message, transport_used)
+                        {
                             if let Err(err) = self.send_delivery_ack(&message, transport_used) {
                                 error!(
                                     message_id = %message.id,
@@ -187,6 +191,11 @@ impl OfflineProtocol {
                                     "Failed to send delivery ACK for duplicate message"
                                 );
                             }
+                        } else if !sender_blocked && message.requires_ack {
+                            debug!(
+                                message_id = %message.id,
+                                "Relayed copy of a delivery just answered; not answering again"
+                            );
                         }
                         continue;
                     }
@@ -602,7 +611,19 @@ impl OfflineProtocol {
                 "forward"
             };
 
-            let targets = if let Some(target) = relay.custody_target.as_deref() {
+            // A fan-out the budget cut short goes on to the neighbors it still
+            // owes and to nobody else: those still in range, and not those that
+            // have since handed us a copy.
+            let continuing = !relay.owed.is_empty();
+            let targets = if continuing {
+                relay
+                    .owed
+                    .iter()
+                    .filter(|peer| neighbors.iter().any(|n| &n.peer_id == *peer))
+                    .filter(|peer| !relay.heard_from.contains(peer))
+                    .cloned()
+                    .collect()
+            } else if let Some(target) = relay.custody_target.as_deref() {
                 // A held frame goes to the one neighbor it was queued toward,
                 // never through target selection: a fan-out here would defeat
                 // at most once per neighbor. Gone from range, it goes nowhere
@@ -643,6 +664,13 @@ impl OfflineProtocol {
             };
             let deliver_direct = targets.first() == Some(&recipient);
 
+            // Every neighbor it still owed has left or holds it: the frame
+            // already went out, so this ends the forward, with nothing lost
+            // and nothing to count.
+            if continuing && targets.is_empty() {
+                continue;
+            }
+
             // Every neighbor we could hand it to has handed it to us. This is
             // the one way a duplicate ends a forward: the frame is not lost,
             // it is held all around us, and requeueing it would only spend
@@ -677,16 +705,18 @@ impl OfflineProtocol {
 
             let mut delivered_to = 0usize;
             let mut reached_recipient = false;
-            for target in &targets {
+            let mut cut_at = None;
+            for (index, target) in targets.iter().enumerate() {
                 // Each link this frame crosses is one transmission against the
-                // device's ceiling. Running out mid-fan-out stops the fan-out
-                // rather than the frame: the neighbors already reached carry it
-                // on, and the sender's retry covers the rest.
+                // device's ceiling. Running out mid-fan-out pauses the fan-out:
+                // the neighbors not yet reached are owed the frame, and get it
+                // when the budget refills (`PendingRelay::owed`).
                 if !self.mesh_relay.take_send_token() {
                     debug!(
                         message_id = %message.id,
-                        "At the forwarding limit; stopping this fan-out here"
+                        "At the forwarding limit; pausing this fan-out here"
                     );
+                    cut_at = Some(index);
                     break;
                 }
 
@@ -757,14 +787,26 @@ impl OfflineProtocol {
             if held {
                 self.record_custody_transmission(&relay, reached_recipient);
             }
-            self.mesh_relay.record_forwarded();
-            self.emit_event(Event::message_relayed(
-                message.id.as_str(),
-                message.sender.as_str().to_string(),
-                recipient,
-                hop_count,
-                remaining_ttl,
-            ));
+            // Finishing a fan-out is not a second forward of the frame.
+            if !continuing {
+                self.mesh_relay.record_forwarded();
+                self.emit_event(Event::message_relayed(
+                    message.id.as_str(),
+                    message.sender.as_str().to_string(),
+                    recipient,
+                    hop_count,
+                    remaining_ttl,
+                ));
+            }
+
+            // A held frame has one target, so it is never cut short after
+            // reaching someone, and reaching the recipient ends the journey.
+            if let Some(index) = cut_at.filter(|_| !held && !reached_recipient) {
+                let mut relay = relay;
+                relay.owed = targets[index..].to_vec();
+                // Never `Some` for an ordinary forward.
+                let _ = self.mesh_relay.requeue(relay);
+            }
         }
     }
 
