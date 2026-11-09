@@ -475,7 +475,11 @@ parked.** Those messages are on escalated probe timers, so they go at once.
 Otherwise nothing is sent at once: each of the peer's other waiting messages,
 oldest first, gets a slot one acknowledgement timeout away plus one spacing per
 message ahead of it, the spacing being half the rate a neighbor accepts from
-this device. A message on a later backoff moves to its slot, and one resting
+this device. Each starts its retry budget over, as a re-drive does: the receipt
+proves the peer answers, and a message carrying the count of a long wait alone
+would fail for good one timeout later, delivered or not. The spacing is per
+recipient; backlogs for several recipients behind one neighbor still add up
+there. A message on a later backoff moves to its slot, and one resting
 edge-driven with no retry entry (`edge_driven_unreachable_dm`) is scheduled at
 it. A slot only ever moves a message earlier, and a later receipt computes the
 same slots from a later moment, so a message goes at most once per timeout

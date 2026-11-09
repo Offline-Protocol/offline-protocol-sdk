@@ -6534,8 +6534,16 @@ impl OfflineProtocol {
     /// Schedules `recipient`'s other waiting messages to go within one
     /// acknowledgement timeout, one at a time, and sends nothing itself.
     ///
-    /// Spaced at half the rate a neighbor accepts from us, in the order they
-    /// were first sent: forty messages brought to one instant were thirty
+    /// Each starts its retry budget over, as the flush that used to send them
+    /// did: the receipt proves the peer answers. Carried over, a message that
+    /// backed off past `max_retries` while alone failed for good after one ack
+    /// timeout, delivered or not, and a two-hop receipt can take longer.
+    ///
+    /// Spaced per recipient at half the rate a neighbor accepts from us (our
+    /// own `peer_rate_per_sec`, so it assumes neighbors share the setting), in
+    /// the order they were first sent. Backlogs for several recipients behind
+    /// one neighbor still add up there; past two the spacing leaves no margin.
+    /// One instant for all was the failure: forty messages brought to one instant were thirty
     /// frames in a twentieth of a second on a neighbor that accepts fifteen at
     /// once, and its refusals spend the allowance our own receipts need. Each
     /// message's slot only ever moves earlier, and a later receipt computes the
@@ -6562,8 +6570,11 @@ impl OfflineProtocol {
             // A message resting with no retry entry gets one; enqueue keeps an
             // existing entry, which `bring_forward` caps instead.
             self.retry_queue
-                .enqueue_with_delay(entry.message.clone(), entry.attempt_count, slot);
+                .enqueue_with_delay(entry.message.clone(), 0, slot);
             slots.insert(entry.message.id.as_str(), slot);
+        }
+        if slots.is_empty() {
+            return;
         }
         self.retry_queue
             .bring_forward(|message| slots.get(&message.id.as_str()).copied());

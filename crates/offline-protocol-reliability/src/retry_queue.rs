@@ -218,8 +218,9 @@ impl RetryQueue {
     }
 
     /// Moves each entry `cap` gives a delay for to at most that many
-    /// milliseconds from now, keeping its retry count. An entry due sooner
-    /// keeps its time, and so does one `cap` returns `None` for.
+    /// milliseconds from now, and starts its retry count over: the caller has
+    /// news that the route works. An entry due sooner keeps its time, and one
+    /// `cap` returns `None` for is untouched.
     pub fn bring_forward(&mut self, cap: impl Fn(&Message) -> Option<u64>) {
         let now = Utc::now();
         let mut entries = std::mem::take(&mut self.queue).into_vec();
@@ -228,6 +229,7 @@ impl RetryQueue {
                 let latest =
                     now + chrono::Duration::milliseconds(within_ms.min(i64::MAX as u64) as i64);
                 entry.retry_at = entry.retry_at.min(latest);
+                entry.retry_count = 0;
             }
         }
         self.queue = entries.into();
@@ -695,8 +697,10 @@ mod tests {
             (900..=1_000).contains(&due(&late.id).0),
             "a later one is capped"
         );
-        assert_eq!(due(&late.id).1, 7, "and keeps its retry count");
+        assert_eq!(due(&late.id).1, 0, "and starts its retry count over");
+        assert_eq!(due(&soon.id).1, 0, "as does one due sooner");
         assert!(due(&other.id).0 > 59_000, "one with no cap is untouched");
+        assert_eq!(due(&other.id).1, 2, "count and all");
     }
 
     #[test]

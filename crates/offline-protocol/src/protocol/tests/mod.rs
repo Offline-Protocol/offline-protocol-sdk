@@ -10974,10 +10974,20 @@ fn test_a_receipt_schedules_a_dm_resting_with_no_retry_entry() {
     let fresh = protocol
         .send_message("bob", "fresh", None::<MessagePriority>, None::<String>)
         .unwrap();
-    for id in [&resting, &fresh] {
+    let backed_off = protocol
+        .send_message("bob", "backed off", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    for id in [&resting, &fresh, &backed_off] {
         protocol.ack_manager.remove_ack(id);
         protocol.retry_queue.remove(&id.as_str());
     }
+    // Both past the retry budget, as a long wait alone leaves them.
+    let max_retries = protocol.config.reliability.retry.max_retries;
+    protocol.outbox.get_mut(&resting).unwrap().attempt_count = max_retries + 2;
+    let message = protocol.outbox[&backed_off].message.clone();
+    protocol
+        .retry_queue
+        .enqueue_with_delay(message, max_retries + 2, 300_000);
 
     ble.queue_message_from(
         delivery_ack_frame("bob", "user123", &fresh),
@@ -10986,9 +10996,24 @@ fn test_a_receipt_schedules_a_dm_resting_with_no_retry_entry() {
     assert!(protocol.receive_message().is_none());
 
     assert!(!protocol.outbox.contains_key(&fresh), "the receipt settled");
-    assert!(
-        protocol.retry_queue.contains(&resting.as_str()),
-        "and the resting message is scheduled again"
+    let scheduled: HashMap<String, u32> = protocol
+        .retry_queue
+        .drain_all()
+        .into_iter()
+        .map(|entry| (entry.message.id.as_str(), entry.retry_count))
+        .collect();
+    // The receipt proves the peer answers, so each starts its budget over, as
+    // the flush that used to send them did. Carried over, one ack timeout
+    // without an answer failed them for good, delivered or not.
+    assert_eq!(
+        scheduled.get(&resting.as_str()),
+        Some(&0),
+        "the resting message is scheduled again, with a fresh budget"
+    );
+    assert_eq!(
+        scheduled.get(&backed_off.as_str()),
+        Some(&0),
+        "and so is the backed-off one"
     );
 }
 
