@@ -4097,7 +4097,9 @@ impl OfflineProtocol {
         }
 
         let mut processed = 0;
-        let queued = self.transport_manager.queued_message_ids();
+        // Asked for only once an entry is ready: it locks the carriers' queues
+        // and copies every id, and most ticks have nothing ready.
+        let mut queued = None;
 
         while processed < max_batch_size {
             let mut entry = match self.retry_queue.dequeue_ready() {
@@ -4146,7 +4148,11 @@ impl OfflineProtocol {
                             .map_or(true, |age| age < QUEUED_ACK_GRACE_MAX)
                     })
             };
-            if queued.contains(entry.message.id.as_str().as_str()) && within_grace() {
+            if queued
+                .get_or_insert_with(|| self.transport_manager.queued_message_ids())
+                .contains(entry.message.id.as_str().as_str())
+                && within_grace()
+            {
                 let _ = self.retry_queue.enqueue(entry.message, entry.retry_count);
                 continue;
             }
