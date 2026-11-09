@@ -169,7 +169,7 @@ is offered.
   answer. Answering every copy sent up to four answer floods per message in a
   simulated crowd of phones holding four links each; it ran the send budgets
   dry, and the receipts it lost were the ones it was sending. Answering once
-  halved the crowd's airtime.
+  cut the crowd's airtime by up to a half.
 
 ## The deferred-acknowledgement atom
 

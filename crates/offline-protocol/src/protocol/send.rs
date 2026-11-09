@@ -52,6 +52,17 @@ pub(crate) const MAX_UNROUTED_ACKS: usize = 500;
 /// past it re-sends, which the duplicate re-ACK path answers.
 pub(crate) const UNROUTED_ACK_TTL: StdDuration = StdDuration::from_secs(600);
 
+/// Which route took a delivery acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckRoute {
+    /// A mesh link: the recipient-side link it arrived on, or neighbors.
+    Mesh,
+    /// Another carrier, which says nothing about a sender only the mesh reaches.
+    Elsewhere,
+    /// Nothing took it.
+    None,
+}
+
 impl OfflineProtocol {
     // ========================================================================
     // CORE SEND
@@ -5743,14 +5754,16 @@ impl OfflineProtocol {
         status: Option<&str>,
     ) -> Result<()> {
         if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {
-            self.record_answered(message, inbound_transport);
+            self.record_answered(message);
             return Ok(());
         }
         let ack = self.build_ack(message, inbound_transport, status)?;
-        // An answer held for the next carrier edge has not answered anything:
-        // the copies still arriving are what can get one out sooner.
-        if self.route_ack(&ack, inbound_transport) && status.is_none() {
-            self.record_answered(message, inbound_transport);
+        // Only an answer the mesh took has answered a flood. One held for the
+        // next carrier edge has answered nothing, and one only the relay took
+        // says nothing about a sender only the mesh can reach: the copies still
+        // arriving are what can get an answer to them.
+        if self.route_ack(&ack, inbound_transport) == AckRoute::Mesh && status.is_none() {
+            self.record_answered(message);
         }
         Ok(())
     }
@@ -5776,12 +5789,7 @@ impl OfflineProtocol {
                 .is_some_and(|at| at.elapsed() < MESH_COPY_ANSWER_WINDOW)
     }
 
-    /// Only for an answer to a copy that came over the mesh: an answer over the
-    /// relay says nothing about a sender that can only be reached by the mesh.
-    fn record_answered(&mut self, message: &Message, inbound_transport: TransportType) {
-        if !TransportManager::is_mesh_transport(inbound_transport) {
-            return;
-        }
+    fn record_answered(&mut self, message: &Message) {
         let now = Instant::now();
         self.answered_deliveries
             .retain(|_, at| now.saturating_duration_since(*at) < MESH_COPY_ANSWER_WINDOW);
@@ -5972,17 +5980,19 @@ impl OfflineProtocol {
     /// ([`Self::hold_unrouted_ack`]): it was owed the moment the message was
     /// accepted, and the common miss is a carrier that is merely not up yet —
     /// a push-injected frame acknowledged before the relay socket has
-    /// authenticated. Returns whether a route took it; `false` means it is held.
-    fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> bool {
-        if self.try_route_ack(ack_message, inbound_transport) {
-            return true;
+    /// authenticated. Returns which route took it; [`AckRoute::None`] means it
+    /// is held.
+    fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> AckRoute {
+        let route = self.try_route_ack(ack_message, inbound_transport);
+        if route != AckRoute::None {
+            return route;
         }
         debug!(
             ack_to = %ack_message.recipient,
             "No route back for a delivery acknowledgement; holding it for the next carrier edge"
         );
         self.hold_unrouted_ack(ack_message.clone(), inbound_transport, Instant::now());
-        false
+        AckRoute::None
     }
 
     /// Holds an acknowledgement until [`Self::flush_unrouted_acks`]. Bounded
@@ -6016,7 +6026,7 @@ impl OfflineProtocol {
         for (ack, inbound, held_at) in std::mem::take(&mut self.unrouted_acks) {
             if held_at.elapsed() > UNROUTED_ACK_TTL
                 || self.is_user_blocked(ack.recipient.as_str())
-                || self.try_route_ack(&ack, inbound)
+                || self.try_route_ack(&ack, inbound) != AckRoute::None
             {
                 continue;
             }
@@ -6024,8 +6034,12 @@ impl OfflineProtocol {
         }
     }
 
-    /// The ladder itself; `true` when some route took the acknowledgement.
-    fn try_route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> bool {
+    /// The ladder itself; which route took the acknowledgement.
+    fn try_route_ack(
+        &mut self,
+        ack_message: &Message,
+        inbound_transport: TransportType,
+    ) -> AckRoute {
         let ack_to = ack_message.recipient.as_str().to_string();
 
         if self
@@ -6036,7 +6050,11 @@ impl OfflineProtocol {
                 .send_via_transport(ack_message, inbound_transport)
                 .is_ok()
         {
-            return true;
+            return if TransportManager::is_mesh_transport(inbound_transport) {
+                AckRoute::Mesh
+            } else {
+                AckRoute::Elsewhere
+            };
         }
 
         debug!(
@@ -6063,14 +6081,21 @@ impl OfflineProtocol {
                     "Handed the acknowledgement to the mesh"
                 );
                 if no_direct_route {
-                    return true;
+                    return AckRoute::Mesh;
                 }
             }
         }
 
         // Neighbors took it, so the answer is on its way even though nothing
         // else could carry it.
-        self.transport_manager.send(ack_message).is_ok() || handed_to_mesh > 0
+        let sent = self.transport_manager.send(ack_message).is_ok();
+        if handed_to_mesh > 0 {
+            AckRoute::Mesh
+        } else if sent {
+            AckRoute::Elsewhere
+        } else {
+            AckRoute::None
+        }
     }
 
     /// Builds and sends a delivery ACK from the group-message drain, which

@@ -1180,7 +1180,8 @@ impl MeshRelayGovernor {
     /// For the frame that reached no neighbor at all between [`Self::take_due`]
     /// releasing it and the radio being asked — because the budget ran out,
     /// because every link picked for it had gone away, or because there was no
-    /// usable link to pick. All three end the same way: the frame has travelled
+    /// usable link to pick. Also for the rest of a fan-out the budget cut short
+    /// ([`PendingRelay::owed`]). The first three end the same way: the frame has travelled
     /// nowhere, its id is already recorded as handled, and dropping it would
     /// refuse the copies and retransmissions behind it for the whole retention
     /// window.

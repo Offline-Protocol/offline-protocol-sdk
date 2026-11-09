@@ -1937,6 +1937,53 @@ fn an_answer_over_the_relay_does_not_silence_a_copy_over_the_mesh() {
 }
 
 #[test]
+fn an_answer_only_the_relay_took_does_not_silence_a_copy_over_the_mesh() {
+    // The copy came over the mesh, and dave has spent his send budget, so his
+    // answer reached no neighbor, but the relay accepted it. That says nothing
+    // about a sender only the mesh can reach, so the copy that follows, once the
+    // budget has refilled, still gets an answer the mesh can carry.
+    let mut dave = default_config("dave");
+    dave.mesh_relay.burst = 1.0;
+    dave.mesh_relay.rate_per_sec = 5.0;
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("dave", dave);
+    net.link("bob", "dave");
+    net.link("carol", "dave");
+    net.send("dave", "ghost", "spends the budget");
+
+    let relay = MockTransport::new(TransportType::Internet);
+    relay.start().unwrap();
+    net.node("dave")
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(relay.clone()));
+
+    let copy = relayed_copy("alice", "dave", "heard twice");
+    let id = copy.id.as_str();
+    let over_the_relay = |relay: &MockTransport| {
+        relay
+            .sent_messages()
+            .iter()
+            .filter(|m| m.metadata.get("ack_for").map(String::as_str) == Some(id.as_str()))
+            .count()
+    };
+    net.radios["dave"].queue_message_from(copy.clone(), "bob".to_string());
+    net.step();
+    net.step();
+    assert_eq!(over_the_relay(&relay), 1, "the relay took the first answer");
+    assert_eq!(
+        receipts_sent(&net, "dave", &id),
+        0,
+        "the mesh took none of it"
+    );
+
+    std::thread::sleep(Duration::from_millis(400));
+    net.radios["dave"].queue_message_from(copy, "carol".to_string());
+    net.step();
+    net.step();
+    assert_eq!(receipts_sent(&net, "dave", &id), 1);
+}
+
+#[test]
 fn a_forged_copy_cannot_silence_the_answer_to_the_real_sender() {
     // Nothing is authenticated when a duplicate is answered, so anyone in range
     // who saw an id can send a relayed copy naming themselves as its sender.
