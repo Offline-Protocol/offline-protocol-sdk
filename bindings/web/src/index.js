@@ -470,9 +470,17 @@ export class OfflineNode extends EventTarget {
       if (message.error !== undefined) pending?.reject(new Error(message.error));
       else pending?.resolve(message.result);
     } else if (message.kind === "bleFragment") {
-      // The worker pulls more only as writes finish (worker.js, flush).
-      const written = this.#bleSink?.write(message.peer, new Uint8Array(message.data));
-      Promise.resolve(written).finally(() => this.#call("bleWritten", { peer: message.peer }).catch(() => {}));
+      // The worker pulls more only as writes finish (worker.js, flush), so
+      // every write is reported, even one that threw: an unreported one holds
+      // its slot, and four of them stop every link.
+      let written;
+      try {
+        written = this.#bleSink?.write(message.peer, new Uint8Array(message.data));
+      } finally {
+        Promise.resolve(written)
+          .catch(() => {})
+          .finally(() => this.#call("bleWritten", { peer: message.peer }).catch(() => {}));
+      }
     } else if (message.kind === "frame") {
       this.#links.get(message.link)?.send(new Uint8Array(message.data));
     } else if (message.kind === "linkClosed") {

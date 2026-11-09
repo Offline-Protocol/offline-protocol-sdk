@@ -239,6 +239,26 @@ await run(async (step) => {
   if (next.peers.length !== 0 || third.gatt.connected) throw new Error("stopping left a link open");
   log("stopping the node closed the carrier's links");
 
-  await Promise.all([b, c, d, e, f, g, h, k, t].map((node) => node.stop()));
+  step.name = "a throwing sink";
+  // A sink whose write throws still hands its slot back: the worker counts a
+  // fragment as unwritten until the page reports it, and stops pulling for
+  // every link at four, so a throw that never reported stopped all Bluetooth
+  // output after four.
+  const [x, y] = await Promise.all([start("thrower"), start("throwee")]);
+  let attempts = 0;
+  x.setBluetoothSink({
+    write: () => {
+      attempts += 1;
+      throw new Error("the sink failed");
+    },
+  });
+  await x.bleVerify(new TextEncoder().encode(y.address), await y.bleHello());
+  await x.bleLinkUp(y.address, 180);
+  for (let n = 0; n < 3; n++) await x.sendMessage(y.address, `thrown${n} ${"x".repeat(600)}`);
+  await new Promise((r) => setTimeout(r, 1500));
+  if (attempts <= 4) throw new Error(`the sink was offered ${attempts} fragments, then nothing`);
+  log(`a sink that threw was still offered ${attempts} fragments`);
+
+  await Promise.all([b, c, d, e, f, g, h, k, t, x, y].map((node) => node.stop()));
 });
 </script>
