@@ -22,8 +22,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   behind them. Every receipt it carried waited for the sender's retry: on a
   phone chain, one refused receipt frame in each of three rounds out of ten
   left five receipts 15 s late. A link's receipts now have an allowance of
-  their own, half of `peerBurst` and `peerRatePerSec`; the chain's busiest
-  second needed three receipt frames. Nothing authenticates the receipt
+  their own, half of `peerBurst` and `peerRatePerSec`, that its messages
+  cannot spend, and spend the ordinary one once theirs is gone, so no
+  receipt is refused that sharing one would have admitted. Nothing
+  authenticates the receipt
   marker, so a neighbor that marks frames as receipts gains half an
   allowance and no more, and at the defaults one link's two allowances (7.5
   frames a second) stay below the device's whole forwarding budget (10).

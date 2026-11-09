@@ -1126,30 +1126,32 @@ what the mesh exists to carry for a pair that has never met. Refusing a
 package from a sender this device cannot see would refuse exactly that pair.
 
 **What bounds it:** the package's signature must verify against the key its
-claimed address derives from, so it cannot be made on another device's behalf,
-and the session it opens is with the attacker's own address only. Every device
-in between applies its per-neighbour forwarding allowance to the attacker's
-link before the package goes further, and its per-second budget after, so the
-rate at which packages reach this device is the forwarding rate, not the
-attacker's. A link's frames marked as delivery receipts have an allowance of
-their own, half the size, and nothing authenticates the mark, so an attacker
-that marks its packages as receipts gains half its link's share again and no
-more. At the defaults the two together (7.5 frames a second) stay below the
-device's whole forwarding budget (10). The receiving device sends its two
-frames from the share of its own budget that its own traffic uses, so a flood
-delays this device's own frames rather than putting more on the air than the
-budget allows. Stored packages are capped at 1000, evicting the soonest to
-expire, the push pool stops minting at 64 and shares a package past that, and a
+claimed address derives from, so it cannot be made on another device's
+behalf, and the session it opens is with the attacker's own address only.
+Every device in between applies its per-neighbour forwarding allowance to the
+attacker's link before the package goes further, and its per-second budget
+after, so the rate at which packages reach this device is the forwarding
+rate, not the attacker's. A link's frames marked as delivery receipts have
+an allowance of their own, half the size, and spend the link's ordinary one
+once it is gone. Nothing authenticates the mark, so an attacker that marks
+its packages as receipts gains half its link's share again and no more; at
+the defaults the two together (7.5 frames a second) stay below the device's
+whole forwarding budget (10). The receiving device sends its two frames from the
+share of its own budget that its own traffic uses, so a flood delays this
+device's own frames rather than putting more on the air than the budget
+allows. Stored packages are capped at 1000, evicting the soonest to expire,
+the push pool stops minting at 64 and shares a package past that, and a
 Welcome's lifecycle expires after 300 seconds of retries. A device does not
-answer a package from a sender only the mesh reaches with one of its own first,
-so a package buys one Welcome, not a second group. A later package from the
-same mesh-only address re-arms that Welcome only while it has stalled or
+answer a package from a sender only the mesh reaches with one of its own
+first, so a package buys one Welcome, not a second group. A later package from
+the same mesh-only address re-arms that Welcome only while it has stalled or
 expired, so a replayed package buys at most one more Welcome per stall, from
 the same budget share; the receive deduplicator absorbs a replay of the same
 frame for the redelivery window (seven days by default, while the id is among
-the 5000 most recent it tracks). A device that declines to carry (`allowRelay`
-off) carries none of this for others. The same flood from a direct neighbour or
-over the relay was possible before and is unchanged.
+the 5000 most recent it tracks). A device that declines to carry
+(`allowRelay` off) carries none of this for others. The
+same flood from a direct neighbour or over the relay was possible before and
+is unchanged.
 
 ### R25. The relay learns which of its frames a device could not decrypt
 
@@ -1428,9 +1430,10 @@ retention window.
 so one captured id costs at most three more request floods per ten-minute window,
 and about as many answer floods (an answer is withheld for five seconds, not for
 the whole generation, so copies of one generation spread further apart than that
-each earn one), and all of them spend the same per-device budget as any
-other frame and a per-neighbor allowance (the receipts' own, for answers).
-A sender blocked by the recipient gets no
+each earn one), and all of them spend the same per-neighbor and
+per-device budgets as any other frame (an answer is a receipt, so its
+per-neighbor share is the receipts' allowance and then the ordinary one). A
+sender blocked by the recipient gets no
 answer. A forged copy earns its claimed sender an answer but cannot use up the
 answer another sender is owed, because answers are tracked per sender. The bound is on what crosses the mesh: a device beside the recipient can
 send it hop-zero copies, which are answered every time, as they were before

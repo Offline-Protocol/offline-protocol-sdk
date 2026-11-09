@@ -531,14 +531,14 @@ pub struct MeshRelayStats {
     pub dropped_for_capacity: u64,
 }
 
-/// What one neighbor may hand this device: its delivery receipts draw on an
-/// allowance of their own, so its messages cannot spend the receipts' share.
-/// Sharing one allowance, a sender's own messages and resends spent the link's
-/// share and the next hop refused the receipt frame behind them; each receipt
-/// it carried waited for the sender's retry (15 s on the 2026-11-10 phone
-/// chain). The receipts' allowance is half the messages': a sender's receipts
-/// number at most its messages and are coalesced, the chain's busiest second
-/// needed three, and the receipt marker cannot be authenticated here. A
+/// What one neighbor may hand this device: its delivery receipts have an
+/// allowance its messages cannot spend, and spend the messages' allowance once
+/// their own is gone, so a receipt is never refused where it would have been
+/// admitted with the two sharing one. Sharing one, a sender's own messages and
+/// resends spent the link's share and the next hop refused the receipt frame
+/// behind them; each receipt it carried waited for the sender's retry (15 s on
+/// the 2026-11-10 phone chain). The receipts' own allowance is half the
+/// messages', because the receipt marker cannot be authenticated here: a
 /// neighbor that marks frames as receipts gains half an allowance, and the two
 /// together stay below the device's own forwarding budget at the defaults
 /// (7.5 against 10 per second). Sized like the messages', they equalled it, and
@@ -1625,13 +1625,9 @@ impl MeshRelayGovernor {
         self.peer_budgets
             .get_mut(peer_id)
             .map(|allowance| {
-                if receipt {
-                    &mut allowance.receipts
-                } else {
-                    &mut allowance.frames
-                }
+                (receipt && allowance.receipts.try_take_above(0.0, now))
+                    || allowance.frames.try_take_above(0.0, now)
             })
-            .map(|bucket| bucket.try_take_above(0.0, now))
             .unwrap_or(true)
     }
 
@@ -1915,7 +1911,7 @@ mod tests {
     /// allowance, and each of the five receipts it carried waited 15 s for the
     /// sender's retry. Nothing here can authenticate the receipt marker, so a
     /// neighbor that labels every frame a receipt gains half an allowance, no
-    /// more.
+    /// more: past both, a receipt is refused.
     #[test]
     fn a_neighbors_receipts_have_an_allowance_its_messages_cannot_spend() {
         let mut gov = governor();
@@ -1937,14 +1933,41 @@ mod tests {
             receipts <= (DEFAULT_RELAY_PEER_BURST / 2.0) as usize + 2,
             "accepted {receipts} receipts from one neighbor"
         );
+    }
 
-        // The other half of the separation: spent receipts leave messages be.
+    /// Receipts spend their own allowance first and then the messages', so a
+    /// link carrying mostly receipts keeps all the capacity it had when the two
+    /// shared one. Receipts confined to their own half-size allowance halved
+    /// it for a return link or a relay downstream of a crowd, whose receipts
+    /// answer every recipient behind it and outnumber its messages, and under
+    /// a `peer_burst` below 2 that allowance never held a whole token and
+    /// refused every receipt.
+    #[test]
+    fn receipts_fall_back_to_the_messages_allowance() {
         let mut gov = governor();
-        while gov.admit(&receipt(), Some("busy"), 3) == RelayAdmission::Queued {}
+        let mut receipts = 0;
+        for _ in 0..200 {
+            if gov.admit(&receipt(), Some("return"), 3) == RelayAdmission::Queued {
+                receipts += 1;
+            }
+        }
+        assert!(
+            receipts >= DEFAULT_RELAY_PEER_BURST as usize,
+            "a link carrying only receipts was admitted {receipts}"
+        );
+
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                peer_burst: 1.0,
+                peer_rate_per_sec: 0.5,
+                ..immediate_config()
+            },
+        );
         assert_eq!(
-            gov.admit(&frame(), Some("busy"), 3),
+            gov.admit(&receipt(), Some("narrow"), 3),
             RelayAdmission::Queued,
-            "the receipts' spent allowance refused a message"
+            "the narrowest accepted allowance refused a receipt"
         );
     }
 
