@@ -10,9 +10,9 @@
 //!
 //! Four mechanisms, each covering something the others cannot:
 //!
-//! 1. **Suppression** ([`RelaySeenCache`]) — an id is forwarded once. Without
-//!    it, copies circulate until their hop limit runs out, and every node
-//!    repeats every copy.
+//! 1. **Suppression** ([`RelaySeenCache`]) — an id is forwarded once per resend
+//!    generation ([`RESEND_META_KEY`]). Without it, copies circulate until their
+//!    hop limit runs out, and every node repeats every copy.
 //! 2. **Jitter with narrowing** — a forward waits a short randomized delay
 //!    before going out, and every copy that arrives while it waits takes the
 //!    neighbor that sent it off the fan-out, because that neighbor holds the
@@ -409,6 +409,15 @@ pub struct PendingRelay {
     pub custody_target: Option<String>,
 }
 
+impl PendingRelay {
+    /// Whether this forward has already reached a neighbor and waits only to
+    /// finish its fan-out. Every path that drops a queued forward has to ask:
+    /// the rest assumes a queued frame has never transmitted.
+    fn is_part_sent(&self) -> bool {
+        !self.owed.is_empty()
+    }
+}
+
 /// Running totals, for telemetry and for tests that assert a flood stayed
 /// bounded.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -428,7 +437,8 @@ pub struct MeshRelayCounters {
     pub forwarded: u64,
     /// Frames put back on the queue because they reached no neighbor at all —
     /// the budget ran out, the links chosen for them went away, or there was
-    /// no usable link to choose.
+    /// no usable link to choose — or because the budget cut their fan-out short
+    /// and they still owe the rest of it.
     pub requeued: u64,
     /// Queued forwards displaced to make room for a higher-priority frame.
     pub queue_evicted: u64,
@@ -1060,6 +1070,13 @@ impl MeshRelayGovernor {
             }
 
             if now.saturating_duration_since(relay.due_at) > RELAY_QUEUE_MAX_OVERDUE {
+                // Already on the air: the rest of its fan-out ends here. It is
+                // not a frame this device could not carry, so it keeps its id
+                // and never reaches the drop point (a frame that transmitted
+                // is never held).
+                if relay.is_part_sent() {
+                    continue;
+                }
                 if relay.custody_target.is_none() {
                     // Never made it onto a link, so its id must not stay
                     // suppressed: the sender's retransmissions carry the same
@@ -1179,6 +1196,10 @@ impl MeshRelayGovernor {
         if self.pending.len() >= self.config.queue_capacity {
             if relay.custody_target.is_some() {
                 return Some(relay);
+            }
+            // A neighbor holds it, so the rest of its fan-out just ends.
+            if relay.is_part_sent() {
+                return None;
             }
             // Refused room on the way back, so this frame is being dropped
             // having reached nobody. Release its id for the same reason the
@@ -1512,8 +1533,12 @@ impl MeshRelayGovernor {
                 // Displaced before it ever reached a link. Its id goes back to
                 // being unknown, so the copy behind it — or the sender's
                 // retransmission — can still be carried by this device once
-                // there is room again.
-                self.seen.forget(&relay_key(&displaced.message));
+                // there is room again. Not one that has transmitted: a
+                // neighbor holds that frame, and only the rest of its fan-out
+                // is lost.
+                if !displaced.is_part_sent() {
+                    self.seen.forget(&relay_key(&displaced.message));
+                }
                 self.counters.queue_evicted = self.counters.queue_evicted.saturating_add(1);
                 true
             }
@@ -2216,6 +2241,42 @@ mod tests {
 
         let zero = stamped("0".to_string());
         assert_eq!(relay_key(&zero), zero.id.as_str());
+    }
+
+    /// A part-sent fan-out has transmitted, so neither a full queue nor a
+    /// higher-priority frame releases its id: a neighbor holds the frame, and
+    /// releasing it would take the next copy on as new.
+    #[test]
+    fn dropping_a_part_sent_forward_leaves_its_id_suppressed() {
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                queue_capacity: 1,
+                ..immediate_config()
+            },
+        );
+        let low = frame_with(8, MessagePriority::Low);
+        assert_eq!(gov.admit(&low, Some("b"), 3), RelayAdmission::Queued);
+        let mut part_sent = gov.take_due(Instant::now()).remove(0);
+        part_sent.owed = vec!["c".to_string()];
+        let urgent = frame_with(8, MessagePriority::Critical);
+        assert_eq!(gov.admit(&urgent, Some("b"), 3), RelayAdmission::Queued);
+
+        assert!(gov.requeue(part_sent.clone()).is_none());
+        assert!(
+            gov.is_suppressed(&low.id.as_str()),
+            "refused room on requeue"
+        );
+
+        // Room again, and this time displaced by something more urgent.
+        gov.take_due(Instant::now());
+        assert!(gov.requeue(part_sent).is_none());
+        let another = frame_with(8, MessagePriority::Critical);
+        assert_eq!(gov.admit(&another, Some("b"), 3), RelayAdmission::Queued);
+        assert!(
+            gov.is_suppressed(&low.id.as_str()),
+            "evicted from the queue"
+        );
     }
 
     /// An origin re-send that admission refuses leaves the id suppressed. The
