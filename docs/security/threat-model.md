@@ -1422,8 +1422,10 @@ floods. Before generations, forwarders suppressed such a replay for the
 retention window.
 
 **Bound:** a forwarder reads any stamp above 3 as 3 and ignores a malformed one,
-so one captured id costs at most three more request floods and three more answer
-floods per ten-minute window, and all of them spend the same per-neighbor and
+so one captured id costs at most three more request floods per ten-minute window,
+and about as many answer floods (an answer is withheld for five seconds, not for
+the whole generation, so copies of one generation spread further apart than that
+each earn one), and all of them spend the same per-neighbor and
 per-device budgets as any other frame. A sender blocked by the recipient gets no
 answer. A forged copy earns its claimed sender an answer but cannot use up the
 answer another sender is owed, because answers are tracked per sender. The bound is on what crosses the mesh: a device beside the recipient can

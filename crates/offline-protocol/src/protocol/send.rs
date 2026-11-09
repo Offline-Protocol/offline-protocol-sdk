@@ -4439,6 +4439,7 @@ impl OfflineProtocol {
                 recipient = %message.recipient,
                 accepted,
                 handed_to_mesh,
+                generation,
                 "Resend could not reach the recipient directly; handed it to neighbors"
             );
         }

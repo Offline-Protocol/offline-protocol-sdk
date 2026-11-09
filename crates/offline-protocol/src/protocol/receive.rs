@@ -191,6 +191,11 @@ impl OfflineProtocol {
                                     "Failed to send delivery ACK for duplicate message"
                                 );
                             }
+                        } else if !sender_blocked && message.requires_ack {
+                            debug!(
+                                message_id = %message.id,
+                                "Relayed copy of a delivery just answered; not answering again"
+                            );
                         }
                         continue;
                     }
