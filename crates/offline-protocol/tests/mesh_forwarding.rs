@@ -2427,7 +2427,7 @@ fn every_receipt_in_a_crowd_comes_back() {
 }
 
 #[test]
-#[ignore = "a measurement, not a gate: only two resends a full timeout old fit in 35 seconds, and one receipt lost twice fails the run, so whole runs pass anywhere from one time in six to every time; per flow, every message was delivered and 116 to 124 of 126 acknowledged"]
+#[ignore = "a measurement, not a gate: only two resends a full timeout old fit in 35 seconds, and one receipt lost twice fails the run, so whole runs pass anywhere from one time in six to every time; per flow, every message was delivered and 116 to 125 of 126 acknowledged"]
 fn a_crowd_on_a_lossy_radio_recovers_by_retrying() {
     // One hand-off in ten lost, and frames up to two rounds late. The first
     // flood misses some recipients and loses some receipts; the sender's

@@ -32,7 +32,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   generation, was answered in the last five seconds. A copy from the sender
   itself, one over any other carrier, and a resend under a new generation are
   still always answered. In a simulated crowd of forty phones this cut the receipt frames
-  by a half to two thirds and the total airtime by up to a half.
+  by a third to two thirds and the total airtime by up to a half.
 
 - **A resend crosses the mesh as far as the first copy did.** Every device
   that carries a frame ignores its id for ten minutes, so a sender's resend
