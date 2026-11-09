@@ -163,10 +163,11 @@ pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 /// it has not handled is taken on afresh, through the full admission, and
 /// copies of that generation are suppressed as before.
 ///
-/// Nothing authenticates the stamp, so a forged one buys what a frame under a
-/// fresh id already buys: one more flood, paid for from the same per-neighbor
-/// and per-device budgets, and only up to [`RESEND_MAX_GENERATION`] of them for
-/// any one id.
+/// Nothing authenticates the stamp. On a frame of an attacker's own it buys what
+/// a fresh id already buys: one more flood, from the same per-neighbor and
+/// per-device budgets. On a captured real frame it buys more, since the frame
+/// reaches a recipient that answers it, and that is bounded by
+/// [`RESEND_MAX_GENERATION`] per id per retention window (threat model R33).
 pub const RESEND_META_KEY: &str = "__resend";
 
 /// The highest resend generation. A sender counts no higher and a forwarder
@@ -902,7 +903,7 @@ impl MeshRelayGovernor {
             if let Some(pending) = self
                 .pending
                 .iter_mut()
-                .find(|p| relay_key(&p.message) == key)
+                .find(|p| p.message.id.as_str() == message_id && relay_key(&p.message) == key)
             {
                 if let Some(peer) = arrival_peer {
                     if pending.arrival_peer.as_deref() != Some(peer)
@@ -1273,10 +1274,16 @@ impl MeshRelayGovernor {
     fn is_origin_resend(&self, message: &Message, arrival_peer: Option<&str>) -> bool {
         arrival_peer == Some(message.sender.as_str())
             && message.hop_count.value() == 0
-            && !self
-                .pending
-                .iter()
-                .any(|p| relay_key(&p.message) == relay_key(message))
+            && !self.holds_pending_copy(&message.id.as_str(), &relay_key(message))
+    }
+
+    /// Whether a forward of this id under this key is still queued. Ids are
+    /// compared first because this runs for most third-party arrivals in a
+    /// dense neighborhood, and a key is built only for an id that matches.
+    fn holds_pending_copy(&self, message_id: &str, key: &str) -> bool {
+        self.pending
+            .iter()
+            .any(|p| p.message.id.as_str() == message_id && relay_key(&p.message) == key)
     }
 
     /// Absorbs an arrival that is a copy of a frame already dealt with and
@@ -1303,7 +1310,7 @@ impl MeshRelayGovernor {
         if !self.seen.contains(&key) || self.is_origin_resend(message, arrival_peer) {
             return false;
         }
-        if self.pending.iter().any(|p| relay_key(&p.message) == key) {
+        if self.holds_pending_copy(&message.id.as_str(), &key) {
             return false;
         }
         self.counters.duplicates_suppressed = self.counters.duplicates_suppressed.saturating_add(1);

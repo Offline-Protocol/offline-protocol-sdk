@@ -1406,6 +1406,32 @@ evicts at either cap, so a flood of fresh identities cannot push out the
 subscribers it already has. The default admission policy asks the
 application about every subscriber.
 
+### R33. A resend stamp can replay a captured frame across the mesh
+
+Forwarders suppress a frame per message id and resend generation, and the
+generation (`__resend`, [reserved metadata keys](../spec/wire-format.md#reserved-metadata-keys))
+is unsigned, like the hop fields. Anyone who has captured a frame can send it
+again with a new stamp, and forwarders that carried it carry it again.
+
+**Impact:** a frame of the attacker's own gains nothing a fresh id would not
+give it. A captured real frame does: it reaches its recipient, which delivers
+nothing (the id is a duplicate) but answers the new generation, and the answer
+is a flood of its own back to the frame's sender. The replayer learns from
+anywhere in the mesh that the recipient is live, and spends airtime on both
+floods. Before generations, forwarders suppressed such a replay for the
+retention window.
+
+**Bound:** a forwarder reads any stamp above 3 as 3 and ignores a malformed one,
+so one captured id costs at most three more request floods and three more answer
+floods per ten-minute window, and all of them spend the same per-neighbor and
+per-device budgets as any other frame. A sender blocked by the recipient gets no
+answer.
+
+**Why it stands:** signing the stamp would need every forwarder to verify a
+signature it cannot otherwise check, on a field whose only effect is bounded
+this way. Without generations a frame or receipt lost past the first forwarder
+stayed lost for the whole window, which is the larger cost.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device
