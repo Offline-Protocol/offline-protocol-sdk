@@ -124,7 +124,9 @@ pub const RELAY_OWN_TRAFFIC_RESERVE: f32 = 5.0;
 ///
 /// Keeps a single noisy or hostile link from consuming the whole node's
 /// forwarding budget: its frames are refused at the door, leaving the budget
-/// for everyone else's traffic.
+/// for everyone else's traffic. A link's delivery receipts have half this
+/// again, of their own, and the two together stay below
+/// [`DEFAULT_RELAY_RATE_PER_SEC`].
 pub const DEFAULT_RELAY_PEER_RATE_PER_SEC: f32 = 5.0;
 
 /// Burst allowance for a single neighbor.
@@ -265,9 +267,11 @@ pub struct MeshRelayConfig {
     pub rate_per_sec: f32,
     /// Burst allowance above the sustained rate.
     pub burst: f32,
-    /// Sustained per-neighbor acceptance rate.
+    /// Sustained per-neighbor acceptance rate. A neighbor's delivery receipts
+    /// have half this again, of their own.
     pub peer_rate_per_sec: f32,
-    /// Per-neighbor burst allowance.
+    /// Per-neighbor burst allowance. A neighbor's delivery receipts have half
+    /// this again, of their own.
     pub peer_burst: f32,
     /// Maximum forwards awaiting transmission.
     pub queue_capacity: usize,
@@ -532,8 +536,13 @@ pub struct MeshRelayStats {
 /// Sharing one allowance, a sender's own messages and resends spent the link's
 /// share and the next hop refused the receipt frame behind them; each receipt
 /// it carried waited for the sender's retry (15 s on the 2026-11-10 phone
-/// chain). The receipt marker cannot be authenticated here, so a neighbor that
-/// labels every frame a receipt gains this one more allowance and no more.
+/// chain). The receipts' allowance is half the messages': a sender's receipts
+/// number at most its messages and are coalesced, the chain's busiest second
+/// needed three, and the receipt marker cannot be authenticated here. A
+/// neighbor that marks frames as receipts gains half an allowance, and the two
+/// together stay below the device's own forwarding budget at the defaults
+/// (7.5 against 10 per second). Sized like the messages', they equalled it, and
+/// one link marking half its frames could take every forwarding slot.
 #[derive(Debug, Clone)]
 struct PeerAllowance {
     frames: TokenBucket,
@@ -1602,13 +1611,12 @@ impl MeshRelayGovernor {
                     self.peer_budgets.remove(&peer);
                 }
             }
-            let bucket =
-                || TokenBucket::new(self.config.peer_burst, self.config.peer_rate_per_sec, now);
+            let (burst, rate) = (self.config.peer_burst, self.config.peer_rate_per_sec);
             self.peer_budgets.insert(
                 peer_id.to_string(),
                 PeerAllowance {
-                    frames: bucket(),
-                    receipts: bucket(),
+                    frames: TokenBucket::new(burst, rate, now),
+                    receipts: TokenBucket::new(burst / 2.0, rate / 2.0, now),
                 },
             );
         }
@@ -1906,7 +1914,7 @@ mod tests {
     /// in three of ten rounds, after the sender's messages had spent the link's
     /// allowance, and each of the five receipts it carried waited 15 s for the
     /// sender's retry. Nothing here can authenticate the receipt marker, so a
-    /// neighbor that labels every frame a receipt gains one more allowance, no
+    /// neighbor that labels every frame a receipt gains half an allowance, no
     /// more.
     #[test]
     fn a_neighbors_receipts_have_an_allowance_its_messages_cannot_spend() {
@@ -1926,8 +1934,38 @@ mod tests {
             }
         }
         assert!(
-            receipts <= DEFAULT_RELAY_PEER_BURST as usize + 2,
+            receipts <= (DEFAULT_RELAY_PEER_BURST / 2.0) as usize + 2,
             "accepted {receipts} receipts from one neighbor"
+        );
+
+        // The other half of the separation: spent receipts leave messages be.
+        let mut gov = governor();
+        while gov.admit(&receipt(), Some("busy"), 3) == RelayAdmission::Queued {}
+        assert_eq!(
+            gov.admit(&frame(), Some("busy"), 3),
+            RelayAdmission::Queued,
+            "the receipts' spent allowance refused a message"
+        );
+    }
+
+    /// One link marking frames as receipts is still admitted below the
+    /// device's whole forwarding budget: the receipts' allowance is half the
+    /// messages', so the two together stay under it. Sized like the messages',
+    /// the pair equalled the device's budget at the defaults, and a neighbor
+    /// marking half its frames could take every forwarding slot.
+    #[test]
+    fn one_link_marking_receipts_cannot_take_the_whole_forwarding_budget() {
+        let mut gov = governor();
+        let mut admitted = 0;
+        for n in 0..400 {
+            let frame = if n % 2 == 0 { frame() } else { receipt() };
+            if gov.admit(&frame, Some("marker"), 3) == RelayAdmission::Queued {
+                admitted += 1;
+            }
+        }
+        assert!(
+            (admitted as f32) < DEFAULT_RELAY_BURST,
+            "one link was admitted {admitted} frames, the device's whole burst"
         );
     }
 
@@ -2783,9 +2821,9 @@ mod tests {
         // copies were still circulating and be forwarded a second time — by
         // every node, which is how a flood becomes a storm.
         let gov = governor();
-        // Two allowances per link: its frames and its receipts.
+        // Two allowances per link: its frames, and half again for receipts.
         let max_admissions_per_sec =
-            2.0 * DEFAULT_RELAY_PEER_RATE_PER_SEC * MAX_RELAY_RATE_PEERS as f32;
+            1.5 * DEFAULT_RELAY_PEER_RATE_PER_SEC * MAX_RELAY_RATE_PEERS as f32;
         let sustained_ceiling = DEFAULT_RELAY_RATE_PER_SEC.min(max_admissions_per_sec);
         let ids_in_window = sustained_ceiling * gov.config().seen.retention.as_secs_f32();
 

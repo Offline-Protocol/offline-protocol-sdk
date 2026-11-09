@@ -22,10 +22,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   behind them. Every receipt it carried waited for the sender's retry: on a
   phone chain, one refused receipt frame in each of three rounds out of ten
   left five receipts 15 s late. A link's receipts now have an allowance of
-  their own, the same size (`peerBurst`, `peerRatePerSec`). Nothing
-  authenticates the receipt marker, so a neighbor that marks every frame a
-  receipt gains that one allowance and no more; the device's per-second
-  forwarding budget is unchanged.
+  their own, half of `peerBurst` and `peerRatePerSec`; the chain's busiest
+  second needed three receipt frames. Nothing authenticates the receipt
+  marker, so a neighbor that marks frames as receipts gains half an
+  allowance and no more, and at the defaults one link's two allowances (7.5
+  frames a second) stay below the device's whole forwarding budget (10).
 
 - **A device hands its own frame to every neighbor a phone can hold.** A
   forward's fan-out of three covers every link of a four-link phone but the
