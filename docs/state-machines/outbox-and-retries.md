@@ -156,11 +156,14 @@ so the cost is wasted work rather than loss, but the effect is real past roughly
 of a retry.** When an acknowledgement times out, the sender asks its carriers
 which frames they have accepted but not started writing (only BLE knows today:
 a message counts as queued until the bridge pulls its first fragment, which is
-why each bridge stops pulling once a peer holds 32 fragments; at 576 the
-extension saw almost nothing). Such a
-frame gets one more full timeout, repeatedly, until a minute has passed since
-the attempt, and only then falls through to the ladder. The bound is what keeps
-a link that died without telling the transport from pinning a message to it.
+why each native bridge stops pulling once a peer holds 32 fragments, and the
+browser at 4; at 576 the extension saw almost nothing). Such a frame gets one
+more full timeout, repeatedly, until a minute has passed since the attempt, and
+only then falls through to the ladder. The ladder holds a resend behind a
+queued copy within the same minute from the last send, and no longer: the
+timeout hands the message over exactly when the minute runs out. The bound is
+what keeps a link that died without telling the transport from pinning a
+message to it, never failing it and never offering it to another carrier.
 
 The failure this prevents is a feedback loop on a link carrying less than it
 is offered. Each retry appended a second copy behind the first, re-sealed under

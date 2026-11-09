@@ -4131,7 +4131,22 @@ impl OfflineProtocol {
             // Bluetooth link, with the receipts for the sender's other messages
             // waiting behind them. When the copy leaves is not known here, so
             // the entry waits out its current rung again and keeps its count.
-            if queued.contains(entry.message.id.as_str().as_str()) {
+            // Only within the minute the timeout grants from the last send:
+            // the timeout hands a still-queued message here when that minute
+            // runs out, and holding it past then would pin it to a link that
+            // died without telling the transport, never failing it.
+            let within_grace = || {
+                self.outbox
+                    .get(&entry.message.id)
+                    .or_else(|| self.media_outbox.get(&entry.message.id))
+                    .is_some_and(|sent| {
+                        Utc::now()
+                            .signed_duration_since(sent.last_sent_at)
+                            .to_std()
+                            .map_or(true, |age| age < QUEUED_ACK_GRACE_MAX)
+                    })
+            };
+            if queued.contains(entry.message.id.as_str().as_str()) && within_grace() {
                 let _ = self.retry_queue.enqueue(entry.message, entry.retry_count);
                 continue;
             }

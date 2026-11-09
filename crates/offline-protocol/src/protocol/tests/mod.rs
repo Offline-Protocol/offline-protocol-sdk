@@ -43985,7 +43985,9 @@ fn test_a_resend_waits_while_its_earlier_copy_is_still_queued() {
     // On the retry ladder, as a frame no carrier took directly is.
     protocol.ack_manager.remove_ack(&id);
     let message = carrier.sent.lock().unwrap()[0].clone();
-    protocol.retry_queue.enqueue_with_delay(message, 2, 0);
+    protocol
+        .retry_queue
+        .enqueue_with_delay(message.clone(), 2, 0);
 
     thread::sleep(Duration::from_millis(3));
     protocol.process().unwrap();
@@ -44001,6 +44003,56 @@ fn test_a_resend_waits_while_its_earlier_copy_is_still_queued() {
         .map(|entry| entry.retry_count)
         .collect();
     assert_eq!(held, [2], "held on its rung, not spent");
+
+    // Once the copy has left the queue, the ladder resends.
+    protocol.retry_queue.enqueue_with_delay(message, 2, 0);
+    carrier
+        .drained
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        carrier.sent.lock().unwrap().len(),
+        2,
+        "resent once the copy left"
+    );
+}
+
+/// The ladder holds a resend behind a queued copy only as long as the
+/// acknowledgement timeout would: a minute from the last send. The timeout
+/// hands such a message to the ladder exactly when that minute runs out, so an
+/// unbounded hold here would pin it to a link that died without telling the
+/// transport, never failing it and never offering it to another carrier.
+#[test]
+fn test_a_resend_held_behind_a_queued_copy_goes_after_a_minute() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let carrier = BackloggedTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+
+    let id = protocol
+        .send_message("bob", "dead link", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.ack_manager.remove_ack(&id);
+    protocol.outbox.get_mut(&id).unwrap().last_sent_at = Utc::now() - chrono::Duration::seconds(61);
+    let message = carrier.sent.lock().unwrap()[0].clone();
+    protocol.retry_queue.enqueue_with_delay(message, 2, 0);
+
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        carrier.sent.lock().unwrap().len(),
+        2,
+        "a copy queued past the bound no longer holds the resend"
+    );
 }
 
 /// A sender stops re-sealing a peer's resends once it has sealed the budget
