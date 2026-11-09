@@ -6513,9 +6513,17 @@ impl OfflineProtocol {
         } else {
             error!("Failed to lock shared state for an ACK event, skipping event emission");
         }
-        // The peer answered, so the rest of their waiting traffic can go now
-        // rather than waiting out its own backoff or escalated probe timers.
-        self.flush_outbox_for_peer_via(&recipient, redrive_via);
+        // The peer answered, so traffic parked on its escalated probe timers can
+        // go now, the same rule as the pending-ACK path. Only when parked: on the
+        // mesh every message of a burst is waiting for its own receipt, so
+        // re-driving on each receipt re-sent all the others, ten messages costing
+        // about forty-five more frames on a neighbor that accepts fifteen at once.
+        // Its refusals lost receipts, which are never resent, and delayed
+        // messages, and each late receipt started another wave. The rest wait out
+        // their own backoff.
+        if self.dm_unreachable_parks.contains_key(&recipient) {
+            self.flush_outbox_for_peer_via(&recipient, redrive_via);
+        }
     }
 
     pub(super) fn handle_missing_outbox_entry(

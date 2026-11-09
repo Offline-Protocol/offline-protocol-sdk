@@ -15,6 +15,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A delivery receipt no longer re-sends every message still waiting for one.**
+  When a receipt settled a message carried across the mesh, the engine re-sent
+  all the peer's other waiting messages at once. Every message of a burst is
+  waiting, so ten messages cost 45 more frames on a neighbor that accepts
+  fifteen at once. Its refusals lost receipts, which are never resent, and
+  delayed messages, and each late receipt started another wave. This now happens
+  only for a peer parked as unreachable, as the other settlement path already
+  required. On a two-hop chain of phones, ten bursts of ten messages each way
+  went from 846 frames to 308 for about the same number of messages, receipts
+  over five seconds from 118 of 200 to 68, the slowest from 34 s to 18 s, and
+  refused frames from 189 to 13.
+
 - **A device hands its own frame to every neighbor a phone can hold.** A
   forward's fan-out of three covers every link of a four-link phone but the
   one the frame came from, and a device's own frame was given the same

@@ -1713,6 +1713,45 @@ fn a_sender_that_lost_its_neighbors_does_not_skip_generations() {
 }
 
 #[test]
+fn a_receipt_does_not_resend_the_messages_still_waiting_for_theirs() {
+    // alice — bob — carol, and alice sends a burst. Every message is waiting for
+    // its receipt, so each receipt that settled one re-sent all the others: ten
+    // messages cost about forty-five more frames, on a neighbor that accepts
+    // fifteen at once. Its refusals then lost receipts, which are never resent,
+    // and each late receipt started another wave.
+    let roomy = |id: &str| {
+        let mut config = default_config(id);
+        config.mesh_relay.burst = 1_000.0;
+        config.mesh_relay.peer_burst = 1_000.0;
+        config
+    };
+    let mut net = Neighborhood::new(&[]);
+    for id in ["alice", "bob", "carol"] {
+        net.add_node(id, roomy(id));
+    }
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let ids: Vec<String> = (0..10)
+        .map(|n| net.send("alice", "carol", &format!("burst {n}")))
+        .collect();
+    net.run_until_quiet(32);
+
+    assert_eq!(delivered.lock().unwrap().len(), 10, "all ten answered");
+    let handed: Vec<usize> = ids
+        .iter()
+        .map(|id| {
+            net.transmissions
+                .iter()
+                .filter(|(from, _, sent)| from == "alice" && sent == id)
+                .count()
+        })
+        .collect();
+    assert_eq!(handed, vec![1; 10], "each message handed over once");
+}
+
+#[test]
 fn a_finished_fan_out_skips_neighbors_that_left_or_handed_over_a_copy() {
     // alice — bob — {carol, dave, erin}, and bob can afford one forward. While
     // he waits for the budget one neighbor he owes walks away and the other
