@@ -1937,6 +1937,49 @@ fn an_answer_over_the_relay_does_not_silence_a_copy_over_the_mesh() {
 }
 
 #[test]
+fn a_forged_copy_cannot_silence_the_answer_to_the_real_sender() {
+    // Nothing is authenticated when a duplicate is answered, so anyone in range
+    // who saw an id can send a relayed copy naming themselves as its sender.
+    // That earns them an answer, as a duplicate always could. It must not use up
+    // the answer owed to the real sender for that resend generation.
+    let mut net = Neighborhood::new(&["bob", "dave"]);
+    net.link("bob", "dave");
+    let copy = relayed_copy("alice", "dave", "worth answering");
+    let id = copy.id.as_str();
+    let mut resend = copy.clone();
+    resend
+        .metadata
+        .insert("__resend".to_string(), "1".to_string());
+    let mut forged = resend.clone();
+    forged.sender = UserId::new("mallory").unwrap();
+
+    for frame in [copy, forged, resend] {
+        net.radios["dave"].queue_message_from(frame, "bob".to_string());
+        net.step();
+        net.step();
+    }
+
+    let answers_to = |net: &Neighborhood, who: &str| {
+        net.frames
+            .iter()
+            .filter(|(from, _, m)| {
+                from == "dave"
+                    && m.recipient.as_str() == who
+                    && m.metadata.get("ack_for").map(String::as_str) == Some(id.as_str())
+            })
+            .map(|(_, _, m)| m.id.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    };
+    assert_eq!(
+        answers_to(&net, "alice"),
+        2,
+        "the first copy and the resend"
+    );
+    assert_eq!(answers_to(&net, "mallory"), 1);
+}
+
+#[test]
 fn a_resend_is_answered_even_moments_after_the_first_answer() {
     // alice — bob — dave. Dave's answer is lost on its way back, and alice's
     // resend reaches him seconds later, well inside the window in which

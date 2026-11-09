@@ -1425,7 +1425,8 @@ retention window.
 so one captured id costs at most three more request floods and three more answer
 floods per ten-minute window, and all of them spend the same per-neighbor and
 per-device budgets as any other frame. A sender blocked by the recipient gets no
-answer. The bound is on what crosses the mesh: a device beside the recipient can
+answer. A forged copy earns its claimed sender an answer but cannot use up the
+answer another sender is owed, because answers are tracked per sender. The bound is on what crosses the mesh: a device beside the recipient can
 send it hop-zero copies, which are answered every time, as they were before
 generations.
 

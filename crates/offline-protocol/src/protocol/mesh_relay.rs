@@ -254,7 +254,8 @@ pub struct MeshRelayConfig {
     pub dense_max_ttl: u8,
     /// Neighbor count at which the dense budget applies.
     pub dense_degree: usize,
-    /// Neighbors a frame is forwarded to.
+    /// Neighbors a frame is forwarded to. A device's own frame goes to one more
+    /// (`MeshRelayGovernor::select_origination_targets`).
     pub fanout: usize,
     /// Shortest pre-transmit delay.
     pub jitter_min: Duration,
@@ -2251,6 +2252,52 @@ mod tests {
 
         let zero = stamped("0".to_string());
         assert_eq!(relay_key(&zero), zero.id.as_str());
+    }
+
+    /// Every path that drops a forward that never transmitted releases the
+    /// generation it was taken on under, not the bare id. Releasing the bare id
+    /// would leave the generation suppressed for the whole retention window.
+    #[test]
+    fn dropping_a_stamped_forward_releases_its_generation() {
+        let stamped = |priority| {
+            let mut frame = frame_with(8, priority);
+            frame
+                .metadata
+                .insert(RESEND_META_KEY.to_string(), "2".to_string());
+            frame
+        };
+        let small_queue = || {
+            MeshRelayGovernor::with_config(
+                "relay-node",
+                MeshRelayConfig {
+                    queue_capacity: 1,
+                    ..immediate_config()
+                },
+            )
+        };
+
+        // Overdue.
+        let mut gov = governor();
+        let overdue = stamped(MessagePriority::Low);
+        gov.admit(&overdue, Some("b"), 3);
+        gov.release_due(Instant::now() + RELAY_QUEUE_MAX_OVERDUE + Duration::from_secs(1));
+        assert!(!gov.seen.contains(&relay_key(&overdue)), "overdue");
+
+        // Refused room on the way back.
+        let mut gov = small_queue();
+        let refused = stamped(MessagePriority::Low);
+        gov.admit(&refused, Some("b"), 3);
+        let released = gov.take_due(Instant::now()).remove(0);
+        gov.admit(&frame_with(8, MessagePriority::Critical), Some("b"), 3);
+        assert!(gov.requeue(released).is_none());
+        assert!(!gov.seen.contains(&relay_key(&refused)), "refused room");
+
+        // Displaced by something more urgent.
+        let mut gov = small_queue();
+        let displaced = stamped(MessagePriority::Low);
+        gov.admit(&displaced, Some("b"), 3);
+        gov.admit(&frame_with(8, MessagePriority::Critical), Some("b"), 3);
+        assert!(!gov.seen.contains(&relay_key(&displaced)), "displaced");
     }
 
     /// A part-sent fan-out has transmitted, so neither a full queue nor a

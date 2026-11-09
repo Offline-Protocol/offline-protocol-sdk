@@ -429,8 +429,8 @@ pub struct OfflineProtocol {
     /// answered again when the resend arrives as a duplicate.
     coalesced_acks_out: HashMap<String, CoalescedAcks>,
 
-    /// When each delivery was last answered, keyed by message id and resend
-    /// generation, for [`MESH_COPY_ANSWER_WINDOW`](crate::constants::MESH_COPY_ANSWER_WINDOW).
+    /// When each delivery was last answered, keyed by sender, message id and
+    /// resend generation, for [`MESH_COPY_ANSWER_WINDOW`](crate::constants::MESH_COPY_ANSWER_WINDOW).
     /// Entries older than the window are dropped on every insert, so it holds
     /// only the last few seconds of deliveries.
     answered_deliveries: HashMap<String, Instant>,

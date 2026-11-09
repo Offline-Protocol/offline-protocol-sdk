@@ -490,7 +490,7 @@ rebuild the token buckets and suppression cache underneath in-flight forwards.
 | `maxTtl` | number | 8 | Hop budget a forwarded frame is clamped to |
 | `denseMaxTtl` | number | 5 | Hop budget once the neighborhood is dense |
 | `denseDegree` | number | 6 | Neighbor count at which the dense budget applies |
-| `fanout` | number | 3 | Neighbors a frame is forwarded to (must be ≥ 1) |
+| `fanout` | number | 3 | Neighbors a frame is forwarded to, and one more for a device's own frame (must be ≥ 1) |
 | `jitterMinMs` | number | 20 | Shortest pre-transmit delay |
 | `jitterMaxMs` | number | 200 | Longest pre-transmit delay at low density |
 | `ratePerSec` | number | 10 | Sustained forwarding rate, frames per second |

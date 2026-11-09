@@ -4358,9 +4358,9 @@ impl OfflineProtocol {
     /// the frame, and one that refused it (rate limit, full queue) is exactly
     /// the one a later offer should reach.
     ///
-    /// A resend made a full acknowledgement timeout or more after the last one
-    /// to reach a neighbor under this message's current generation moves to the
-    /// next generation ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)).
+    /// A resend that reaches a neighbor a full acknowledgement timeout or more
+    /// after this message's current generation began moves it to the next
+    /// generation ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)).
     /// That is what carries it past forwarders that suppress the earlier
     /// copies. To them it is a new flood, and its own copies are suppressed as
     /// usual.
@@ -5772,7 +5772,7 @@ impl OfflineProtocol {
             && message.hop_count.value() > 0
             && self
                 .answered_deliveries
-                .get(&super::mesh_relay::relay_key(message))
+                .get(&Self::answered_key(message))
                 .is_some_and(|at| at.elapsed() < MESH_COPY_ANSWER_WINDOW)
     }
 
@@ -5786,7 +5786,18 @@ impl OfflineProtocol {
         self.answered_deliveries
             .retain(|_, at| now.saturating_duration_since(*at) < MESH_COPY_ANSWER_WINDOW);
         self.answered_deliveries
-            .insert(super::mesh_relay::relay_key(message), now);
+            .insert(Self::answered_key(message), now);
+    }
+
+    /// The sender is part of it because a duplicate is answered before anything
+    /// is authenticated: without it, a forged copy naming someone else as its
+    /// sender would use up the answer the real sender is owed.
+    fn answered_key(message: &Message) -> String {
+        format!(
+            "{}|{}",
+            message.sender.as_str(),
+            super::mesh_relay::relay_key(message)
+        )
     }
 
     /// Holds the delivery ACK for `message` to go out with others to the same

@@ -86,8 +86,9 @@ should be:
   outbox, offers the frame to the mesh, schedules a retry, and emits a
   non-terminal deferral event. Terminal failure comes only from retry-budget
   exhaustion or expiry. **A resend asks the same question.** The retry queue
-  and both outbox flushes offer the frame to the mesh when no carrier takes
-  it, and when a carrier takes it for a recipient it cannot reach (the
+  and both outbox flushes offer the frame to the mesh, under a resend generation
+  once it is a timeout on ([Mesh networking](../mesh.md#what-handled-once-costs)),
+  when no carrier takes it, and when a carrier takes it for a recipient it cannot reach (the
   internet transport and Reticulum accept any recipient; BLE and Wi-Fi Direct
   refuse one they hold no link to). Without that, a message whose first
   attempt went into a link that was already dead waited out its whole outbox
