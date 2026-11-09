@@ -58,8 +58,8 @@ pub const ACK_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_m
 /// answered whatever the window. Earlier resends are copies of the first flood:
 /// a recipient hears them only through devices that never took it or from the
 /// one forwarder beside the sender, and inside the window they go unanswered
-/// like any relayed copy. Long enough for a flood
-/// to finish arriving: a forward is abandoned once five seconds overdue.
+/// like any relayed copy. Long enough for a flood to finish arriving: a forward
+/// is abandoned once five seconds overdue.
 pub const MESH_COPY_ANSWER_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Metadata key marking a frame the SDK sent on its own: control traffic,

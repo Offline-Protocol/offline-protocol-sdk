@@ -359,6 +359,12 @@ frames cleanly instead of misparsing them.
 identifier inside the reassembled payload or draw any conclusion from it. It is
 an assembly key.
 
+A frame carrying a resend generation (`__resend`,
+[reserved metadata keys](wire-format.md#reserved-metadata-keys)) is grouped under
+`{message id}~{generation}`, because it is different bytes under the same message
+id. On the id alone its fragments finish a stale partial of the copy before it, and
+a stamp that changes the fragment count is refused against that partial.
+
 Two frames are malformed on this encoding without being refused. A sender MUST
 NOT emit `id_len = 0`, because an empty assembly key is not a key: every such
 message from every peer in range merges into one assembly and none of them
@@ -391,8 +397,8 @@ the last carries exactly `max_fragment_payload` bytes.
 A sender MUST refuse to fragment when `10 + id_len >= mtu`, because there is no
 room left for payload.
 
-On this encoding a `message_id` is a hyphenated UUID, so `id_len` is 36 and the
-real overhead is 46 bytes per fragment. At the 185-byte floor that leaves 139
+On this encoding a `message_id` is a hyphenated UUID, so `id_len` is 36 (38 under a
+resend generation) and the real overhead is 46 bytes per fragment. At the 185-byte floor that leaves 139
 payload bytes, which is the number that makes the encoding choice matter: the
 same direct message takes ten fragments under the JSON floor and four under the
 compact envelope plus binary codec (see

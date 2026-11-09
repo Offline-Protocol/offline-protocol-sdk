@@ -24,9 +24,9 @@
 //! and the sender's early retransmissions as forwarders pass them on (tens of
 //! seconds). The forwarder adjacent to the sender carries the sender's own
 //! re-send again, releasing and re-recording its entry, because the recipient
-//! re-acknowledges only a re-send that reaches it; every device after that
-//! still suppresses it. The defaults cover
-//! both with margin, and are chosen so that at the maximum rate a node will
+//! re-acknowledges only a re-send that reaches it; every device after that still
+//! suppresses it, until a resend under a new generation, which has its own entry
+//! (at most four per id). The defaults cover both with margin, and are chosen so that at the maximum rate a node will
 //! accept forwarding traffic, the cache still holds far more than
 //! [`DEFAULT_RELAY_SEEN_RETENTION_SECS`] of it — meaning entries expire by age
 //! rather than being pushed out by volume. That ordering is what makes the

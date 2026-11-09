@@ -60,7 +60,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   rather than by where its recipient is, and its id stayed suppressed for ten
   minutes. In a simulated crowd of forty phones with six conversations at
   once, the delivery receipts outran the budgets this way and 4 to 7 of about
-  20 never came back; after the fix 0 to 2 do not. The remaining neighbors
+  20 never came back; this fix alone brought that to 0 to 2, and the resend fix
+  below the rest. The remaining neighbors
   now get the frame within the few seconds a queued forward is kept, and
   only those chosen in the first place, so the fan-out is never widened.
 

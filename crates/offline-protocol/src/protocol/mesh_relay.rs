@@ -168,7 +168,7 @@ pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 /// per-device budgets. On a captured real frame it buys more, since the frame
 /// reaches a recipient that answers it, and that is bounded by
 /// [`RESEND_MAX_GENERATION`] per id per retention window (threat model R33).
-pub const RESEND_META_KEY: &str = "__resend";
+pub use offline_protocol_sealed::RESEND_META_KEY;
 
 /// The highest resend generation. A sender counts no higher and a forwarder
 /// reads anything higher as this, so within the retention window a message
@@ -180,8 +180,8 @@ pub const RESEND_META_KEY: &str = "__resend";
 /// transmissions rather than 16, for a message nobody could receive. A resend
 /// past the limit is a copy again, carried by the device beside the sender and
 /// suppressed beyond it until forwarders forget the generation, so it floods at
-/// most once per retention window, as an unstamped id would. On the default ladder and timeout the generations are
-/// reached at 15, 31 and 63 seconds; lost frames were recovered by the first two.
+/// most once per retention window, as an unstamped id would. On the default
+/// ladder and timeout the generations are reached at 15, 31 and 63 seconds.
 pub const RESEND_MAX_GENERATION: u64 = 3;
 
 /// What suppression is keyed on: the id, and the resend generation when the
@@ -441,8 +441,8 @@ pub struct MeshRelayCounters {
     pub forwarded: u64,
     /// Frames put back on the queue because they reached no neighbor at all —
     /// the budget ran out, the links chosen for them went away, or there was
-    /// no usable link to choose — or because the budget cut their fan-out short
-    /// and they still owe the rest of it.
+    /// no usable link to choose. Also those whose fan-out the budget cut short,
+    /// which still owe the rest of it.
     pub requeued: u64,
     /// Queued forwards displaced to make room for a higher-priority frame.
     pub queue_evicted: u64,
@@ -1181,7 +1181,8 @@ impl MeshRelayGovernor {
     /// releasing it and the radio being asked — because the budget ran out,
     /// because every link picked for it had gone away, or because there was no
     /// usable link to pick. Also for the rest of a fan-out the budget cut short
-    /// ([`PendingRelay::owed`]). The first three end the same way: the frame has travelled
+    /// ([`PendingRelay::owed`]). The first three end the same way: the frame has
+    /// travelled
     /// nowhere, its id is already recorded as handled, and dropping it would
     /// refuse the copies and retransmissions behind it for the whole retention
     /// window.
