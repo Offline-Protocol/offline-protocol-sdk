@@ -6552,8 +6552,8 @@ impl OfflineProtocol {
     /// in a twentieth of a second on a neighbor that accepts fifteen at once,
     /// and its refusals spend the allowance our own receipts need. Each
     /// message's slot only ever moves earlier, and a later receipt computes the
-    /// same slots from a later now, so however many receipts arrive a message
-    /// goes at most once per timeout.
+    /// same slots from a later now, so however many receipts arrive, none
+    /// makes a message go sooner than one timeout after it.
     fn schedule_waiting_after_receipt(&mut self, recipient: &str) {
         let timeout_ms = self.config.reliability.ack.default_timeout_ms;
         let spacing_ms = (2_000.0 / self.mesh_relay.config().peer_rate_per_sec.max(0.1)) as u64;

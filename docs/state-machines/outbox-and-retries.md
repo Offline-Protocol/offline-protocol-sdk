@@ -481,14 +481,14 @@ wait alone would fail for good one timeout later, delivered or not. One already
 due sooner keeps its count. The reset cannot tell whether a message failed
 before or after the route came back, so while other receipts keep arriving, a
 sibling that keeps failing cycles through the rungs below about one timeout,
-at most once per timeout, and only its outbox lifetime ends it, as on the
+and only its outbox lifetime ends it, as on the
 re-drive this replaced, which sent it on every receipt. The spacing is per
 recipient; backlogs for several recipients behind one neighbor still add up
 there. A message on a later backoff moves to its slot, and one resting
 edge-driven with no retry entry (`edge_driven_unreachable_dm`) is scheduled at
 it. A slot only ever moves a message earlier, and a later receipt computes the
-same slots from a later moment, so a message goes at most once per timeout
-however many receipts arrive. Sending them at once is the
+same slots from a later moment, so however many receipts arrive, none makes a
+message go sooner than one timeout after it. Sending them at once is the
 failure this prevents: every message of a mesh burst is waiting for its own
 receipt, so each receipt re-sent all the others, and ten messages cost about
 forty-five more frames against a next hop that accepts fifteen at once. Its
