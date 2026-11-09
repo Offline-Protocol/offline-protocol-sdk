@@ -179,7 +179,8 @@ pub const RESEND_META_KEY: &str = "__resend";
 /// first timeout was a full flood: in a simulated crowd of forty phones, 60
 /// transmissions rather than 16, for a message nobody could receive. A resend
 /// past the limit is a copy again, carried by the device beside the sender and
-/// suppressed beyond it. On the default ladder and timeout the generations are
+/// suppressed beyond it until forwarders forget the generation, so it floods at
+/// most once per retention window, as an unstamped id would. On the default ladder and timeout the generations are
 /// reached at 15 and 31 seconds, which is where lost frames were recovered.
 pub const RESEND_MAX_GENERATION: u64 = 3;
 
@@ -1299,7 +1300,8 @@ impl MeshRelayGovernor {
     /// id, even though that is also a duplicate: the copy names a neighbor
     /// that now holds the frame, which narrows our pending forward, so it has
     /// to go through [`Self::admit`]. Those are rare, since the pending window
-    /// is one jitter delay wide. Answers `false` for the origin re-sending its
+    /// is one jitter delay wide, or at most the overdue cut-off for a forward
+    /// waiting for budget. Answers `false` for the origin re-sending its
     /// own frame too, which [`Self::admit`] takes as a fresh forward.
     pub fn absorb_settled_duplicate(
         &mut self,

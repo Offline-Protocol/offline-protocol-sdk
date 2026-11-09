@@ -30,8 +30,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   floods in a crowd of phones holding four links each. A copy a relay carried
   is no longer answered when the same message, under the same resend
   generation, was answered in the last five seconds. A copy from the sender
-  itself, one over any other carrier, and a resend are still always
-  answered. In a simulated crowd of forty phones this cut the receipt frames
+  itself, one over any other carrier, and a resend under a new generation are
+  still always answered. In a simulated crowd of forty phones this cut the receipt frames
   by a half to two thirds and the total airtime by up to a half.
 
 - **A resend crosses the mesh as far as the first copy did.** Every device
@@ -46,8 +46,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   new reserved metadata key, `__resend`, and a forwarder suppresses each generation
   separately, so it is a new flood whose own copies are still suppressed.
   Earlier resends stay copies of the first flood, so a receipt that is merely
-  slow costs nothing extra; later ones are copies again, so a message for a
-  recipient who is gone stops crossing the mesh. In a simulated crowd of forty
+  slow costs nothing extra; a message stays at the last generation for as long
+  as it lives, so one for a recipient who is gone crosses the mesh at most once
+  per ten minutes from then on, as it did before. In a simulated crowd of forty
   phones, every delivery receipt now comes back; at one hand-off in ten lost, every message
   arrived and more than nine in ten were acknowledged within 35 seconds, where
   a message or receipt lost past the first forwarder used to stay lost. Older

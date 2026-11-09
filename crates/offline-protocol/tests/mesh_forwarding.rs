@@ -1640,6 +1640,97 @@ fn resends_to_a_peer_nobody_can_reach_stop_flooding() {
     assert!(net.deliveries_to("bob", &msg_id) > floods);
 }
 
+#[test]
+fn a_message_stays_at_its_last_generation_past_the_suppression_window() {
+    // The limit holds for as long as the message lives. Counted afresh each
+    // time the suppression window passed, a capped resend for a recipient who
+    // is gone flooded the mesh every time the retry ladder reached it: once the
+    // ladder is at its ceiling, twice as often as an unchanging id would, for
+    // the week an outbox entry lives. Staying at the last generation, it floods
+    // once per window, when forwarders have forgotten it.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 10;
+    alice.mesh_relay.seen.retention = Duration::from_millis(100);
+    let mut net = Neighborhood::new(&["bob"]);
+    net.add_node("alice", alice);
+    net.link("alice", "bob");
+
+    let msg_id = net.send("alice", "ghost", "to nobody");
+    net.node("alice").flush_outbox_all();
+    net.run_until_quiet(12);
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(150));
+        net.node("alice").flush_outbox_all();
+        net.run_until_quiet(12);
+    }
+
+    let stamps: Vec<Option<String>> = net
+        .frames
+        .iter()
+        .filter(|(from, _, m)| from == "alice" && m.id.as_str() == msg_id)
+        .map(|(_, _, m)| m.metadata.get("__resend").cloned())
+        .collect();
+    let last_three = &stamps[stamps.len() - 3..];
+    assert!(
+        last_three.iter().all(|stamp| stamp.as_deref() == Some("3")),
+        "a capped message must stay capped: {stamps:?}"
+    );
+}
+
+#[test]
+fn a_finished_fan_out_skips_neighbors_that_left_or_handed_over_a_copy() {
+    // alice — bob — {carol, dave, erin}, and bob can afford one forward. While
+    // he waits for the budget one neighbor he owes walks away and the other
+    // hands him a copy, so it holds the frame. Neither gets anything, and the
+    // forward ends there: nothing left over, and not counted a second time.
+    let mut bob = default_config("bob");
+    bob.mesh_relay.burst = 2.0;
+    bob.mesh_relay.rate_per_sec = 2.0;
+    let mut net = Neighborhood::new(&["alice", "carol", "dave", "erin"]);
+    net.add_node("bob", bob);
+    net.link("alice", "bob");
+    let onward = ["carol", "dave", "erin"];
+    for peer in onward {
+        net.link("bob", peer);
+    }
+
+    let msg_id = net.send("alice", "frank", "only part of the way");
+    for _ in 0..4 {
+        net.step();
+        if onward
+            .iter()
+            .any(|peer| net.deliveries_to(peer, &msg_id) > 0)
+        {
+            break;
+        }
+    }
+    let owed: Vec<&str> = onward
+        .into_iter()
+        .filter(|peer| net.deliveries_to(peer, &msg_id) == 0)
+        .collect();
+    assert_eq!(owed.len(), 2, "the budget allows one neighbor");
+    let copy = net
+        .frames
+        .iter()
+        .find(|(from, _, m)| from == "bob" && m.id.as_str() == msg_id)
+        .map(|(_, _, m)| m.clone())
+        .unwrap();
+
+    net.unlink_all(owed[0]);
+    net.radios["bob"].queue_message_from(copy, owed[1].to_string());
+    net.step();
+    std::thread::sleep(Duration::from_millis(700));
+    for _ in 0..3 {
+        net.step();
+    }
+
+    assert_eq!(net.deliveries_to(owed[0], &msg_id), 0);
+    assert_eq!(net.deliveries_to(owed[1], &msg_id), 0);
+    let stats = net.node("bob").mesh_relay_stats();
+    assert_eq!(stats.forwarded, 1);
+    assert_eq!(stats.awaiting_transmission, 0);
+}
+
 /// The distinct receipts `from` has sent for `message_id`, each of which is a
 /// flood of its own.
 fn receipts_sent(net: &Neighborhood, from: &str, message_id: &str) -> usize {
@@ -1782,6 +1873,32 @@ fn a_copy_over_a_carrier_outside_the_mesh_is_answered_every_time() {
         .filter(|m| m.metadata.get("ack_for").map(String::as_str) == Some(id.as_str()))
         .count();
     assert_eq!(answers, 2);
+}
+
+#[test]
+fn an_answer_over_the_relay_does_not_silence_a_copy_over_the_mesh() {
+    // The first copy came over the relay, and the answer went back that way.
+    // That says nothing about a sender only the mesh can reach, so the relayed
+    // copy that follows still gets an answer of its own.
+    let relay = MockTransport::new(TransportType::Internet);
+    relay.start().unwrap();
+    relay.add_connected_peer("alice", -55);
+    let mut net = Neighborhood::new(&["bob", "dave"]);
+    net.node("dave")
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(relay.clone()));
+    net.link("bob", "dave");
+
+    let copy = relayed_copy("alice", "dave", "both ways");
+    let id = copy.id.as_str();
+    relay.queue_message_from(copy.clone(), "alice".to_string());
+    net.step();
+    net.step();
+    net.radios["dave"].queue_message_from(copy, "bob".to_string());
+    net.step();
+    net.step();
+
+    assert_eq!(receipts_sent(&net, "dave", &id), 1);
 }
 
 #[test]

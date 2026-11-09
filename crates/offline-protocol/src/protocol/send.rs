@@ -4373,7 +4373,9 @@ impl OfflineProtocol {
     /// most messages that were never lost. Counting generations by timeout
     /// gives at most one new flood per timeout, whatever the ladder does, and
     /// [`RESEND_MAX_GENERATION`](super::mesh_relay::RESEND_MAX_GENERATION) ends
-    /// them, so a message for a recipient who is gone stops crossing the mesh.
+    /// them. A message stays at the last generation for as long as it lives, so
+    /// one for a recipient who is gone crosses the mesh at most once per
+    /// suppression window from then on, when forwarders have forgotten it.
     ///
     /// Counted from a resend that reached someone rather than from when the
     /// message was written: time spent with nobody in range is not time the
@@ -4383,13 +4385,7 @@ impl OfflineProtocol {
         if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
             return 0;
         }
-        let id = message.id.as_str();
-        let retention = self.mesh_relay.config().seen.retention;
-        let first_resend = self
-            .first_mesh_resend_at
-            .get(&id)
-            .copied()
-            .filter(|at| at.elapsed() < retention);
+        let first_resend = self.first_mesh_resend_at.get(&message.id).copied();
         let period_ms = self.config.reliability.ack.default_timeout_ms.max(1);
         let generation = first_resend.map_or(0, |at| {
             (u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX) / period_ms)
@@ -4409,9 +4405,13 @@ impl OfflineProtocol {
         };
         let handed_to_mesh = self.offer_to_mesh(message);
         if handed_to_mesh > 0 && first_resend.is_none() {
+            let retention = self.mesh_relay.config().seen.retention;
+            let (outbox, media_outbox) = (&self.outbox, &self.media_outbox);
+            self.first_mesh_resend_at.retain(|id, at| {
+                outbox.contains_key(id) || media_outbox.contains_key(id) || at.elapsed() < retention
+            });
             self.first_mesh_resend_at
-                .retain(|_, at| at.elapsed() < retention);
-            self.first_mesh_resend_at.insert(id, Instant::now());
+                .insert(message.id.clone(), Instant::now());
         }
         if handed_to_mesh > 0 {
             debug!(
@@ -5734,14 +5734,14 @@ impl OfflineProtocol {
         status: Option<&str>,
     ) -> Result<()> {
         if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {
-            self.record_answered(message);
+            self.record_answered(message, inbound_transport);
             return Ok(());
         }
         let ack = self.build_ack(message, inbound_transport, status)?;
         // An answer held for the next carrier edge has not answered anything:
         // the copies still arriving are what can get one out sooner.
         if self.route_ack(&ack, inbound_transport) && status.is_none() {
-            self.record_answered(message);
+            self.record_answered(message, inbound_transport);
         }
         Ok(())
     }
@@ -5767,7 +5767,12 @@ impl OfflineProtocol {
                 .is_some_and(|at| at.elapsed() < MESH_COPY_ANSWER_WINDOW)
     }
 
-    fn record_answered(&mut self, message: &Message) {
+    /// Only for an answer to a copy that came over the mesh: an answer over the
+    /// relay says nothing about a sender that can only be reached by the mesh.
+    fn record_answered(&mut self, message: &Message, inbound_transport: TransportType) {
+        if !TransportManager::is_mesh_transport(inbound_transport) {
+            return;
+        }
         let now = Instant::now();
         self.answered_deliveries
             .retain(|_, at| now.saturating_duration_since(*at) < MESH_COPY_ANSWER_WINDOW);

@@ -436,11 +436,12 @@ pub struct OfflineProtocol {
     answered_deliveries: HashMap<String, Instant>,
 
     /// When each message's first resend reached a neighbor, which is what its
-    /// resend generations count from (`offer_resend_to_mesh`). Dropped once
-    /// older than the suppression window, when forwarders have forgotten the
-    /// generations too. In memory only: after a restart the count starts again,
-    /// and forwarders still suppress what they have seen, so it costs no floods.
-    first_mesh_resend_at: HashMap<String, Instant>,
+    /// resend generations count from (`offer_resend_to_mesh`). Kept while the
+    /// message is in an outbox, so it stays at its last generation however long
+    /// it lives, and trimmed on insert, so its size follows the outboxes'. In
+    /// memory only: after a restart the count starts again, and forwarders still
+    /// suppress what they have seen, so it costs no floods.
+    first_mesh_resend_at: HashMap<MessageId, Instant>,
 
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are

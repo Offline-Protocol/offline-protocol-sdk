@@ -1425,7 +1425,14 @@ retention window.
 so one captured id costs at most three more request floods and three more answer
 floods per ten-minute window, and all of them spend the same per-neighbor and
 per-device budgets as any other frame. A sender blocked by the recipient gets no
-answer.
+answer. The bound is on what crosses the mesh: a device beside the recipient can
+send it hop-zero copies, which are answered every time, as they were before
+generations.
+
+**The reverse:** a stamp on a copy with a low hop budget is recorded by the
+forwarders near it, so an attacker can spend a sender's real generations there
+and defeat its recovery around them. That is no worse than poisoning the plain
+id, which has always been possible.
 
 **Why it stands:** signing the stamp would need every forwarder to verify a
 signature it cannot otherwise check, on a field whose only effect is bounded

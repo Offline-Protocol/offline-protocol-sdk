@@ -175,9 +175,9 @@ impl OfflineProtocol {
                         // moments later and a retransmission arriving because
                         // the answer was lost could not be told apart, and
                         // staying quiet for the second turns a delivered
-                        // message into a failed one. A mesh resend now carries
-                        // its generation, which tells them apart; answering
-                        // every relayed copy as well sent one flood per path
+                        // message into a failed one. A mesh resend a timeout on
+                        // now carries its generation, which tells them apart;
+                        // answering every relayed copy as well sent one flood per path
                         // the delivery took, which in a crowd ran the send
                         // budgets dry and lost the very receipts it answered.
                         if !sender_blocked

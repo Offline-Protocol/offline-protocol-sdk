@@ -53,9 +53,10 @@ pub const ACK_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_m
 /// arrives by as many paths as neighbors carried it, so answering every copy
 /// sent up to four floods per message in a crowd of phones holding four links
 /// each, which is what ran the send budgets dry and lost receipts. The copies
-/// of one flood land within seconds of each other; the sender's resend comes
-/// after its acknowledgement timeout (ten seconds) and carries a new
-/// generation, so it is answered whatever the window. Long enough for a flood
+/// of one flood land within seconds of each other; a sender's resend a full
+/// acknowledgement timeout (ten seconds) on carries a new generation, so it is
+/// answered whatever the window. Earlier resends are copies of the first flood
+/// and reach the recipient only if a forwarder never took it. Long enough for a flood
 /// to finish arriving: a forward is abandoned once five seconds overdue.
 pub const MESH_COPY_ANSWER_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
