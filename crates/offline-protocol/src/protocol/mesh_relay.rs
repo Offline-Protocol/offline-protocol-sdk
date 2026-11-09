@@ -148,7 +148,8 @@ pub const MAX_RELAY_RATE_PEERS: usize = 256;
 pub const RELAY_QUEUE_MAX_OVERDUE: Duration = Duration::from_secs(5);
 
 /// The metadata key a sender stamps on a resend it hands to the mesh: its
-/// generation, how many acknowledgement timeouts old the message is, from 1.
+/// generation, how many acknowledgement timeouts have passed since the
+/// message's first resend reached a neighbor, from 1.
 /// Engine-written and unsigned, like the hop fields.
 ///
 /// Every device that carried the first copy suppresses its id for the

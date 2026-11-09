@@ -4358,10 +4358,10 @@ impl OfflineProtocol {
     /// the frame, and one that refused it (rate limit, full queue) is exactly
     /// the one a later offer should reach.
     ///
-    /// A resend made a full acknowledgement timeout or more after the
-    /// message was written is stamped with its generation
-    /// ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)): how many
-    /// timeouts old the message is. That is what carries it past forwarders
+    /// A resend made a full acknowledgement timeout or more after this
+    /// message's first resend that reached a neighbor is stamped with its
+    /// generation ([`RESEND_META_KEY`](super::mesh_relay::RESEND_META_KEY)):
+    /// how many timeouts ago that was. That is what carries it past forwarders
     /// that suppress the first copy's id. To them it is a new flood, and its
     /// own copies are suppressed as usual.
     ///
@@ -4374,14 +4374,27 @@ impl OfflineProtocol {
     /// gives at most one new flood per timeout, whatever the ladder does, and
     /// [`RESEND_MAX_GENERATION`](super::mesh_relay::RESEND_MAX_GENERATION) ends
     /// them, so a message for a recipient who is gone stops crossing the mesh.
+    ///
+    /// Counted from a resend that reached someone rather than from when the
+    /// message was written: time spent with nobody in range is not time the
+    /// mesh failed to answer, and a message that waited longer than the
+    /// generations last would have spent them all on its first hand-off.
     pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
         if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
             return 0;
         }
+        let id = message.id.as_str();
+        let retention = self.mesh_relay.config().seen.retention;
+        let first_resend = self
+            .first_mesh_resend_at
+            .get(&id)
+            .copied()
+            .filter(|at| at.elapsed() < retention);
         let period_ms = self.config.reliability.ack.default_timeout_ms.max(1);
-        let age_ms = u64::try_from(Utc::now().timestamp_millis() - message.timestamp.as_millis())
-            .unwrap_or(0);
-        let generation = (age_ms / period_ms).min(super::mesh_relay::RESEND_MAX_GENERATION);
+        let generation = first_resend.map_or(0, |at| {
+            (u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX) / period_ms)
+                .min(super::mesh_relay::RESEND_MAX_GENERATION)
+        });
         let stamped;
         let message = if generation > 0 {
             let mut resend = message.clone();
@@ -4395,6 +4408,11 @@ impl OfflineProtocol {
             message
         };
         let handed_to_mesh = self.offer_to_mesh(message);
+        if handed_to_mesh > 0 && first_resend.is_none() {
+            self.first_mesh_resend_at
+                .retain(|_, at| at.elapsed() < retention);
+            self.first_mesh_resend_at.insert(id, Instant::now());
+        }
         if handed_to_mesh > 0 {
             debug!(
                 message_id = %message.id,

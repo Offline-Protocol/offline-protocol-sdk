@@ -41,9 +41,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   past the first forwarder could not be recovered by retrying, and neither
   could a lost delivery receipt, since the recipient answers only a copy
   that reaches it. A resend handed to the mesh a full acknowledgement
-  timeout or more after the message was written now carries its generation
-  (how many timeouts old the message is, at most three) in a new reserved
-  metadata key, `__resend`, and a forwarder suppresses each generation
+  timeout or more after the message's first resend reached a neighbor now
+  carries its generation (how many timeouts ago that was, at most three) in a
+  new reserved metadata key, `__resend`, and a forwarder suppresses each generation
   separately, so it is a new flood whose own copies are still suppressed.
   Earlier resends stay copies of the first flood, so a receipt that is merely
   slow costs nothing extra; later ones are copies again, so a message for a

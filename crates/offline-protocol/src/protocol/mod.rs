@@ -435,6 +435,13 @@ pub struct OfflineProtocol {
     /// only the last few seconds of deliveries.
     answered_deliveries: HashMap<String, Instant>,
 
+    /// When each message's first resend reached a neighbor, which is what its
+    /// resend generations count from (`offer_resend_to_mesh`). Dropped once
+    /// older than the suppression window, when forwarders have forgotten the
+    /// generations too. In memory only: after a restart the count starts again,
+    /// and forwarders still suppress what they have seen, so it costs no floods.
+    first_mesh_resend_at: HashMap<String, Instant>,
+
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are
     /// refused.
@@ -1293,6 +1300,7 @@ impl OfflineProtocol {
             peer_coalesced_ack: std::collections::HashSet::new(),
             coalesced_acks_out: HashMap::new(),
             answered_deliveries: HashMap::new(),
+            first_mesh_resend_at: HashMap::new(),
             control_freshness_peers: std::collections::HashSet::new(),
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),

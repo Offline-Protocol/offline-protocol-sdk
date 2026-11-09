@@ -1518,8 +1518,8 @@ fn a_resend_reaches_past_forwarders_that_already_carried_the_first_copy() {
     // and to carol that is an echo. A frame lost past the first forwarder
     // could not be recovered by retrying, and neither could a lost receipt,
     // since the recipient answers only a copy that reaches it.
-    // A one-second acknowledgement timeout, so the resend below is a
-    // generation old rather than ten seconds' wait away.
+    // A one-second acknowledgement timeout, so a resend can be a generation on
+    // from the first without ten seconds' wait.
     let mut alice = default_config("alice");
     alice.reliability.ack.default_timeout_ms = 1_000;
     let mut net = Neighborhood::new(&["bob", "carol", "dave"]);
@@ -1546,12 +1546,58 @@ fn a_resend_reaches_past_forwarders_that_already_carried_the_first_copy() {
         "the first copy should have been lost"
     );
 
-    // A timeout later alice re-drives her outbox, as a retry does.
+    // Alice re-drives her outbox, as a retry does. Her first resend is still a
+    // copy of the first flood, and one a timeout later is not.
+    net.node("alice").flush_outbox_all();
+    net.run_until_quiet(12);
     std::thread::sleep(Duration::from_millis(1_100));
     net.node("alice").flush_outbox_all();
     step_until_delivered(&mut net, &delivered, 24);
 
     assert_eq!(net.inbox("dave"), vec!["worth a second try".to_string()]);
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
+}
+
+#[test]
+fn a_message_that_waited_offline_still_recovers_by_retrying() {
+    // alice — bob — carol — dave, but alice was alone when she wrote, for
+    // longer than the resend generations last. Time alone is not time the mesh
+    // failed to answer: counted from when she wrote, her first hand-off used
+    // the last generation and so did every resend after it, so one flood was
+    // all the message ever got.
+    let mut alice = default_config("alice");
+    alice.reliability.ack.default_timeout_ms = 100;
+    let mut net = Neighborhood::new(&["bob", "carol", "dave"]);
+    net.add_node("alice", alice);
+    net.air.delay_rounds = (1, 1);
+    net.link("bob", "carol");
+    net.link("carol", "dave");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let msg_id = net.send("alice", "dave", "written while alone");
+    std::thread::sleep(Duration::from_millis(500));
+    net.link("alice", "bob");
+    net.node("alice").flush_outbox_all();
+    for _ in 0..12 {
+        if net.deliveries_to("dave", &msg_id) > 0 {
+            break;
+        }
+        net.step();
+    }
+    // The copy is on the air to dave: he steps out of range as it lands.
+    net.unlink_all("dave");
+    net.step();
+    net.link("carol", "dave");
+    assert!(
+        net.inbox("dave").is_empty(),
+        "the first copy should have been lost"
+    );
+
+    std::thread::sleep(Duration::from_millis(110));
+    net.node("alice").flush_outbox_all();
+    step_until_delivered(&mut net, &delivered, 24);
+
+    assert_eq!(net.inbox("dave"), vec!["written while alone".to_string()]);
     assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
 }
 
@@ -1671,6 +1717,8 @@ fn a_resend_is_answered_even_moments_after_the_first_answer() {
         "the answer should have been lost"
     );
 
+    net.node("alice").flush_outbox_all();
+    net.run_until_quiet(12);
     std::thread::sleep(Duration::from_millis(1_100));
     net.node("alice").flush_outbox_all();
     step_until_delivered(&mut net, &delivered, 24);
