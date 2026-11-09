@@ -74,6 +74,12 @@ function die(error) {
 
 const trapped = (error) => error instanceof WebAssembly.RuntimeError;
 
+// Bluetooth fragments handed to the page and not yet written, per peer.
+// ponytail: four is a guess at a few writes of link time, not measured on a
+// phone; the native bridges hold 32 (OutboundFragmentQueue).
+const BLE_WRITES_AHEAD = 4;
+const bleWriting = new Map();
+
 function tick() {
   try {
     engine.process();
@@ -100,11 +106,18 @@ function flush() {
     else carrier?.send(link, data);
   }
   // Bluetooth fragments go to the page, which holds the GATT connections
-  // (W14). Transferred, as a carrier frame is.
-  for (let next = engine.bleNextFragment(); next; next = engine.bleNextFragment()) {
+  // (W14). Transferred, as a carrier frame is. Pulled only while no link has
+  // BLE_WRITES_AHEAD of them unwritten: a fragment left in the engine is one
+  // it still counts as queued, so it holds a resend and puts a receipt ahead
+  // of data. Drained all at once, a slow link's backlog sat in the page where
+  // the engine could see neither, and receipts waited behind resends.
+  while (![...bleWriting.values()].some((n) => n >= BLE_WRITES_AHEAD)) {
+    const next = engine.bleNextFragment();
+    if (!next) break;
     const peer = next.peer;
     const data = next.data;
     next.free();
+    bleWriting.set(peer, (bleWriting.get(peer) ?? 0) + 1);
     self.postMessage({ kind: "bleFragment", peer, data }, [data.buffer]);
   }
   if (nostr?.live) {
@@ -348,7 +361,14 @@ const handlers = {
     engine.bleFragmentReceived(peer, bytes);
   },
   bleLinkDown({ peer }) {
+    bleWriting.delete(peer);
     engine.bleLinkDown(peer);
+  },
+  // The page finished a write to `peer`, or dropped it with its link.
+  bleWritten({ peer }) {
+    const left = (bleWriting.get(peer) ?? 0) - 1;
+    if (left > 0) bleWriting.set(peer, left);
+    else bleWriting.delete(peer);
   },
   sendGroupMessage({ groupId, content, ephemeral = false }) {
     return JSON.parse(engine.sendGroupMessage(groupId, content, Boolean(ephemeral)));
@@ -407,6 +427,7 @@ const handlers = {
     engine.stop();
     flush();
     pageLinks.clear();
+    bleWriting.clear();
     store?.close();
     store = null;
   },

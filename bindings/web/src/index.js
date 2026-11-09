@@ -338,7 +338,9 @@ export class OfflineNode extends EventTarget {
 
   /// Where the engine's outbound Bluetooth fragments go:
   /// `{ write(peer, bytes), close() }`, `close` called once when the node
-  /// stops or fails. One sink per node, which BluetoothCarrier takes:
+  /// stops or fails. A `write` that returns a promise holds the next
+  /// fragments until it settles, a few per peer at most, so a backlog stays
+  /// in the engine, which can see it. One sink per node, which BluetoothCarrier takes:
   /// replacing a sink another carrier holds throws, since that carrier's
   /// links would go deaf with no error. `null` gives it back.
   setBluetoothSink(sink) {
@@ -468,7 +470,9 @@ export class OfflineNode extends EventTarget {
       if (message.error !== undefined) pending?.reject(new Error(message.error));
       else pending?.resolve(message.result);
     } else if (message.kind === "bleFragment") {
-      this.#bleSink?.write(message.peer, new Uint8Array(message.data));
+      // The worker pulls more only as writes finish (worker.js, flush).
+      const written = this.#bleSink?.write(message.peer, new Uint8Array(message.data));
+      Promise.resolve(written).finally(() => this.#call("bleWritten", { peer: message.peer }).catch(() => {}));
     } else if (message.kind === "frame") {
       this.#links.get(message.link)?.send(new Uint8Array(message.data));
     } else if (message.kind === "linkClosed") {

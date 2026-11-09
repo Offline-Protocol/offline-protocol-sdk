@@ -273,12 +273,15 @@ export class BluetoothCarrier extends EventTarget {
     if (this.#released) throw new Error("this Bluetooth carrier was released");
   }
 
+  // Settles once this write is done or its link dropped, which is when the
+  // node hands over the next fragment.
   #write(peer, bytes) {
     const link = this.#links.get(peer);
     if (!link) return;
     link.queue = link.queue
       .then(() => link.message.writeValueWithoutResponse(bytes))
       .catch(() => this.#drop(link));
+    return link.queue;
   }
 
   // Disconnects `link` and reports it lost now, not on an event that a

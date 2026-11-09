@@ -237,7 +237,7 @@ export class OfflineNode extends EventTarget {
    * it. `close` runs once when the node stops or fails. Throws when another
    * carrier holds it; `null` gives it back.
    */
-  setBluetoothSink(sink: { write(peer: string, bytes: Uint8Array): void; close(): void } | null): void;
+  setBluetoothSink(sink: { write(peer: string, bytes: Uint8Array): void | Promise<unknown>; close(): void } | null): void;
   /** Registers a carrier the page opened; resolves to its link id. */
   openLink(carrier: PageCarrier): Promise<number>;
   /** Bytes the carrier delivered; resolves to the reason it was closed, if it was. */
