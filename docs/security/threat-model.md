@@ -1131,7 +1131,10 @@ behalf, and the session it opens is with the attacker's own address only.
 Every device in between applies its per-neighbour forwarding allowance to the
 attacker's link before the package goes further, and its per-second budget
 after, so the rate at which packages reach this device is the forwarding
-rate, not the attacker's. The receiving device sends its two frames from the
+rate, not the attacker's. A link has two allowances, one for frames marked as
+delivery receipts, and nothing authenticates the mark, so an attacker that
+marks its packages as receipts doubles its link's share and no more; the
+per-second budget is the same either way. The receiving device sends its two frames from the
 share of its own budget that its own traffic uses, so a flood delays this
 device's own frames rather than putting more on the air than the budget
 allows. Stored packages are capped at 1000, evicting the soonest to expire,
