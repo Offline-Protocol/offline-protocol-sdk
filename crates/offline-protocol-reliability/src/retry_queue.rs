@@ -217,6 +217,20 @@ impl RetryQueue {
         Some(retry_at)
     }
 
+    /// Moves every matching entry due later than `within_ms` from now to that
+    /// point, keeping its retry count. An entry due sooner keeps its time.
+    pub fn bring_forward(&mut self, within_ms: u64, matches: impl Fn(&Message) -> bool) {
+        let latest =
+            Utc::now() + chrono::Duration::milliseconds(within_ms.min(i64::MAX as u64) as i64);
+        let mut entries = std::mem::take(&mut self.queue).into_vec();
+        for entry in &mut entries {
+            if entry.retry_at > latest && matches(&entry.message) {
+                entry.retry_at = latest;
+            }
+        }
+        self.queue = entries.into();
+    }
+
     /// Dequeues the next message that is ready for retry.
     ///
     /// # Returns

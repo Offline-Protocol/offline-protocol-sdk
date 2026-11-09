@@ -6514,15 +6514,27 @@ impl OfflineProtocol {
             error!("Failed to lock shared state for an ACK event, skipping event emission");
         }
         // The peer answered, so traffic parked on its escalated probe timers can
-        // go now, the same rule as the pending-ACK path. Only when parked: on the
-        // mesh every message of a burst is waiting for its own receipt, so
-        // re-driving on each receipt re-sent all the others, ten messages costing
-        // about forty-five more frames on a neighbor that accepts fifteen at once.
-        // Its refusals lost receipts, which are never resent, and delayed
-        // messages, and each late receipt started another wave. The rest wait out
-        // their own backoff.
+        // go now, the same rule as the pending-ACK path.
+        //
+        // Anything else waiting is not re-sent here. On the mesh every message of
+        // a burst is waiting for its own receipt, so re-sending on each receipt
+        // cost ten messages about forty-five more frames on a neighbor that
+        // accepts fifteen at once. Its refusals lost receipts, which are never
+        // resent, and delayed messages, and each late receipt started another
+        // wave. But a message that backed off while the route was gone has no
+        // other news of it when the recipient is past a neighbor, and could wait
+        // minutes, so its wait is cut to one acknowledgement timeout. A later
+        // receipt finds it already due by then, so this can send a message at
+        // most once per timeout, however many receipts arrive.
         if self.dm_unreachable_parks.contains_key(&recipient) {
             self.flush_outbox_for_peer_via(&recipient, redrive_via);
+        } else {
+            let within_ms = self.config.reliability.ack.default_timeout_ms;
+            let ack_manager = &self.ack_manager;
+            self.retry_queue.bring_forward(within_ms, |waiting| {
+                waiting.recipient.as_str() == recipient
+                    && !ack_manager.is_waiting_for_ack(&waiting.id)
+            });
         }
     }
 

@@ -1752,6 +1752,54 @@ fn a_receipt_does_not_resend_the_messages_still_waiting_for_theirs() {
 }
 
 #[test]
+fn a_receipt_cuts_a_long_backoff_to_one_ack_timeout_and_sends_nothing_itself() {
+    // Alice queues two messages for carol while alone, so they back off: a
+    // minute here, up to five by default. She then walks into range and a new
+    // message is answered. No neighbor edge covers carol, who is two hops away,
+    // so the receipt is the only news that the route is back. It must not send
+    // them itself, or each of their own receipts would re-send the other.
+    let mut alice = default_config("alice");
+    alice.reliability.retry.initial_delay_ms = 60_000;
+    alice.reliability.ack.default_timeout_ms = 500;
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("alice", alice);
+    net.link("bob", "carol");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let waiting = [
+        net.send("alice", "carol", "queued alone 1"),
+        net.send("alice", "carol", "queued alone 2"),
+    ];
+    net.link("alice", "bob");
+    let fresh = net.send("alice", "carol", "in range");
+    net.run_until_quiet(32);
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [fresh],
+        "the receipt sent nothing itself"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    net.run_until_quiet(32);
+
+    let settled = delivered.lock().unwrap();
+    assert!(
+        waiting.iter().all(|id| settled.contains(id)),
+        "the backed-off messages went after one ack timeout, not a minute: {settled:?}"
+    );
+    let handed: Vec<usize> = waiting
+        .iter()
+        .map(|id| {
+            net.transmissions
+                .iter()
+                .filter(|(from, _, sent)| from == "alice" && sent == id)
+                .count()
+        })
+        .collect();
+    assert_eq!(handed, [1, 1], "their receipts did not re-send each other");
+}
+
+#[test]
 fn a_finished_fan_out_skips_neighbors_that_left_or_handed_over_a_copy() {
     // alice — bob — {carol, dave, erin}, and bob can afford one forward. While
     // he waits for the budget one neighbor he owes walks away and the other

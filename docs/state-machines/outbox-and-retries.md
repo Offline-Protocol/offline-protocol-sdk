@@ -468,8 +468,23 @@ can, that this specific peer is not on the relay, and a neighbour may still be
 able to carry it. An offered copy can therefore arrive and be acknowledged while
 no pending acknowledgement exists to match it against, so a message in the
 outbox is **settleable without one**: the recipient's acknowledgement settles it
-`Delivered` directly, emits the delivery event, and flushes the rest of that
-peer's waiting traffic.
+`Delivered` directly and emits the delivery event.
+
+**An acknowledgement sends a peer's other waiting traffic only if the peer is
+parked.** Those messages are on escalated probe timers, so they go at once.
+Otherwise a message waiting on its backoff stays in the retry queue, and its
+wait is cut to at most one acknowledgement timeout. Sending them at once is the
+failure this prevents: every message of a mesh burst is waiting for its own
+receipt, so each receipt re-sent all the others, and ten messages cost about
+forty-five more frames against a next hop that accepts fifteen at once. Its
+refusals lost receipts, which are never resent. Leaving them alone entirely is
+the opposite failure: a message that backed off while the route was gone has no
+neighbor edge to wake it when its recipient is more than one hop away, and could
+wait out five minutes after the route came back.
+
+A parked peer's re-drive is not bounded this way. A re-drive that fails
+everywhere restores the park counter, and a relay verdict on a re-driven frame
+parks it again, so the next acknowledgement can re-drive the same messages.
 
 The park is not the only such offer. A direct send that no carrier takes also
 hands the frame to the mesh, and registers no pending acknowledgement, because
