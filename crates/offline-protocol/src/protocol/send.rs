@@ -5733,14 +5733,17 @@ impl OfflineProtocol {
         inbound_transport: TransportType,
         status: Option<&str>,
     ) -> Result<()> {
-        if status.is_none() {
+        if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {
             self.record_answered(message);
-            if self.try_coalesce_ack(message, inbound_transport) {
-                return Ok(());
-            }
+            return Ok(());
         }
         let ack = self.build_ack(message, inbound_transport, status)?;
-        self.route_ack(&ack, inbound_transport)
+        // An answer held for the next carrier edge has not answered anything:
+        // the copies still arriving are what can get one out sooner.
+        if self.route_ack(&ack, inbound_transport) && status.is_none() {
+            self.record_answered(message);
+        }
+        Ok(())
     }
 
     /// Whether `message` is one more relayed copy of a mesh flood this device
@@ -5869,9 +5872,7 @@ impl OfflineProtocol {
                 return;
             }
         };
-        if let Err(err) = self.route_ack(&ack, batch.transport) {
-            debug!(peer = %peer, error = %err, "Coalesced delivery ACK not routed");
-        }
+        self.route_ack(&ack, batch.transport);
     }
 
     /// Builds the acknowledgement for `message`, optionally carrying
@@ -5947,16 +5948,17 @@ impl OfflineProtocol {
     /// accepted, and the common miss is a carrier that is merely not up yet —
     /// a push-injected frame acknowledged before the relay socket has
     /// authenticated. Held is reported as `Ok`, like any carrier queue.
-    fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> Result<()> {
+    /// Returns whether a route took it; `false` means it is held.
+    fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> bool {
         if self.try_route_ack(ack_message, inbound_transport) {
-            return Ok(());
+            return true;
         }
         debug!(
             ack_to = %ack_message.recipient,
             "No route back for a delivery acknowledgement; holding it for the next carrier edge"
         );
         self.hold_unrouted_ack(ack_message.clone(), inbound_transport, Instant::now());
-        Ok(())
+        false
     }
 
     /// Holds an acknowledgement until [`Self::flush_unrouted_acks`]. Bounded
@@ -6074,7 +6076,8 @@ impl OfflineProtocol {
 
         // Same ladder as a direct-message ACK, mesh fallback included: a group
         // frame reaches its members over the same hops a DM does.
-        self.route_ack(&ack_message, inbound_transport)
+        self.route_ack(&ack_message, inbound_transport);
+        Ok(())
     }
 
     pub(super) fn handle_ack_message(&mut self, message: &Message) {

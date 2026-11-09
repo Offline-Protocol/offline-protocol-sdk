@@ -1680,6 +1680,110 @@ fn a_delivery_heard_over_several_paths_is_answered_once() {
     assert_eq!(*delivered.lock().unwrap(), vec![msg_id]);
 }
 
+/// A relayed copy of a message from `from` to `to`, as carried by a neighbor.
+fn relayed_copy(from: &str, to: &str, content: &str) -> Message {
+    let mut copy = message(from, to, content);
+    copy.requires_ack = true;
+    copy.hop_count = copy.hop_count.increment().unwrap();
+    copy
+}
+
+#[test]
+fn a_copy_is_answered_when_the_answer_to_the_last_one_never_left() {
+    // dave has spent his send budget when the first copy lands, so his answer
+    // goes nowhere and is held for the next carrier edge, which may be a long
+    // way off. The second copy, once the budget has refilled, is the one that
+    // can still get an answer out: an answer that never left is not an answer.
+    let mut dave = default_config("dave");
+    dave.mesh_relay.burst = 1.0;
+    dave.mesh_relay.rate_per_sec = 5.0;
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("dave", dave);
+    net.link("bob", "dave");
+    net.link("carol", "dave");
+
+    net.send("dave", "ghost", "spends the budget");
+    let copy = relayed_copy("alice", "dave", "heard twice");
+    let msg_id = copy.id.as_str();
+    net.radios["dave"].queue_message_from(copy.clone(), "bob".to_string());
+    net.step();
+    net.step();
+    assert_eq!(
+        receipts_sent(&net, "dave", &msg_id),
+        0,
+        "the budget was spent"
+    );
+
+    std::thread::sleep(Duration::from_millis(400));
+    net.radios["dave"].queue_message_from(copy, "carol".to_string());
+    net.step();
+    net.step();
+    assert_eq!(receipts_sent(&net, "dave", &msg_id), 1);
+}
+
+#[test]
+fn only_a_relayed_mesh_copy_inside_the_window_goes_unanswered() {
+    // alice — dave directly. Each exception here is a copy that may be the
+    // sender retrying because the answer was lost, so staying quiet for it
+    // would turn a delivered message into a failed one.
+    let mut net = Neighborhood::new(&["alice", "dave"]);
+    net.link("alice", "dave");
+    let steps = |net: &mut Neighborhood| {
+        net.step();
+        net.step();
+    };
+
+    // A copy straight from the sender is answered every time.
+    let mut direct = message("alice", "dave", "direct");
+    direct.requires_ack = true;
+    let direct_id = direct.id.as_str();
+    for answers in 1..=2 {
+        net.radios["dave"].queue_message_from(direct.clone(), "alice".to_string());
+        steps(&mut net);
+        assert_eq!(receipts_sent(&net, "dave", &direct_id), answers);
+    }
+
+    // A relayed copy is answered once inside the window, and again past it.
+    let relayed = relayed_copy("alice", "dave", "relayed");
+    let relayed_id = relayed.id.as_str();
+    for _ in 0..2 {
+        net.radios["dave"].queue_message_from(relayed.clone(), "alice".to_string());
+        steps(&mut net);
+    }
+    assert_eq!(receipts_sent(&net, "dave", &relayed_id), 1);
+    std::thread::sleep(offline_protocol::constants::MESH_COPY_ANSWER_WINDOW);
+    net.radios["dave"].queue_message_from(relayed, "alice".to_string());
+    steps(&mut net);
+    assert_eq!(receipts_sent(&net, "dave", &relayed_id), 2);
+}
+
+#[test]
+fn a_copy_over_a_carrier_outside_the_mesh_is_answered_every_time() {
+    // The hop count on a frame says nothing about the relay, and a relay's
+    // redelivery is exactly what an answer has to settle.
+    let relay = MockTransport::new(TransportType::Internet);
+    relay.start().unwrap();
+    relay.add_connected_peer("alice", -55);
+    let mut net = Neighborhood::new(&["alice", "dave"]);
+    net.node("dave")
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(relay.clone()));
+
+    let copy = relayed_copy("alice", "dave", "over the relay");
+    let id = copy.id.as_str();
+    for _ in 0..2 {
+        relay.queue_message_from(copy.clone(), "alice".to_string());
+        net.step();
+        net.step();
+    }
+    let answers = relay
+        .sent_messages()
+        .iter()
+        .filter(|m| m.metadata.get("ack_for").map(String::as_str) == Some(id.as_str()))
+        .count();
+    assert_eq!(answers, 2);
+}
+
 #[test]
 fn a_resend_is_answered_even_moments_after_the_first_answer() {
     // alice — bob — dave. Dave's answer is lost on its way back, and alice's
