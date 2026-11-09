@@ -217,10 +217,12 @@ impl RetryQueue {
         Some(retry_at)
     }
 
-    /// Moves each entry `cap` gives a delay for to at most that many
-    /// milliseconds from now, and starts its retry count over: the caller has
-    /// news that the route works. An entry due sooner keeps its time, and one
-    /// `cap` returns `None` for is untouched.
+    /// Moves each entry `cap` gives a delay for, and that is due later, to that
+    /// many milliseconds from now, and starts its retry count over: the caller
+    /// has news that the route works, and the count of a long wait would cut
+    /// the new attempt's budget short. An entry already due sooner keeps its
+    /// time and its count, so repeated calls cannot hold a message that keeps
+    /// failing on the bottom rung of its ladder.
     pub fn bring_forward(&mut self, cap: impl Fn(&Message) -> Option<u64>) {
         let now = Utc::now();
         let mut entries = std::mem::take(&mut self.queue).into_vec();
@@ -228,8 +230,10 @@ impl RetryQueue {
             if let Some(within_ms) = cap(&entry.message) {
                 let latest =
                     now + chrono::Duration::milliseconds(within_ms.min(i64::MAX as u64) as i64);
-                entry.retry_at = entry.retry_at.min(latest);
-                entry.retry_count = 0;
+                if entry.retry_at > latest {
+                    entry.retry_at = latest;
+                    entry.retry_count = 0;
+                }
             }
         }
         self.queue = entries.into();
@@ -698,7 +702,7 @@ mod tests {
             "a later one is capped"
         );
         assert_eq!(due(&late.id).1, 0, "and starts its retry count over");
-        assert_eq!(due(&soon.id).1, 0, "as does one due sooner");
+        assert_eq!(due(&soon.id).1, 1, "one due sooner keeps its count");
         assert!(due(&other.id).0 > 59_000, "one with no cap is untouched");
         assert_eq!(due(&other.id).1, 2, "count and all");
     }

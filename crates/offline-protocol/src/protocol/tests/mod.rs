@@ -10988,6 +10988,14 @@ fn test_a_receipt_schedules_a_dm_resting_with_no_retry_entry() {
     protocol
         .retry_queue
         .enqueue_with_delay(message, max_retries + 2, 300_000);
+    // A sibling whose own sends keep failing, already due inside the timeout.
+    let due_soon = protocol
+        .send_message("bob", "due soon", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.ack_manager.remove_ack(&due_soon);
+    protocol.retry_queue.remove(&due_soon.as_str());
+    let message = protocol.outbox[&due_soon].message.clone();
+    protocol.retry_queue.enqueue_with_delay(message, 3, 1_000);
 
     ble.queue_message_from(
         delivery_ack_frame("bob", "user123", &fresh),
@@ -11015,6 +11023,9 @@ fn test_a_receipt_schedules_a_dm_resting_with_no_retry_entry() {
         Some(&0),
         "and so is the backed-off one"
     );
+    // One the receipt does not move keeps its count, or each receipt would hold
+    // a sibling whose sends keep failing on the bottom rung of its ladder.
+    assert_eq!(scheduled.get(&due_soon.as_str()), Some(&3));
 }
 
 #[test]

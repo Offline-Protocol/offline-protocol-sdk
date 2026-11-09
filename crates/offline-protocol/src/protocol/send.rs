@@ -6534,8 +6534,10 @@ impl OfflineProtocol {
     /// Schedules `recipient`'s other waiting messages to go within one
     /// acknowledgement timeout, one at a time, and sends nothing itself.
     ///
-    /// Each starts its retry budget over, as the flush that used to send them
-    /// did: the receipt proves the peer answers. Carried over, a message that
+    /// Each one this moves starts its retry budget over, as the flush that used
+    /// to send them did: the receipt proves the peer answers. One already due
+    /// sooner keeps its count, so a sibling whose sends keep failing climbs its
+    /// ladder however many receipts arrive. Carried over, a message that
     /// backed off past `max_retries` while alone failed for good after one ack
     /// timeout, delivered or not, and a two-hop receipt can take longer.
     ///
