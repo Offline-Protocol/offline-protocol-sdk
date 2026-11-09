@@ -10962,6 +10962,37 @@ fn test_settling_a_parked_dm_redrives_the_recipients_other_parked_dms() {
 }
 
 #[test]
+fn test_a_receipt_schedules_a_dm_resting_with_no_retry_entry() {
+    // `edge_driven_unreachable_dm` leaves an old undelivered message resting in
+    // the outbox, with no retry entry and no pending ACK, until its peer next
+    // proves reachable. For a peer past a neighbor no neighbor edge ever fires,
+    // so a receipt carried back by the mesh is that proof.
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+    let resting = protocol
+        .send_message("bob", "resting", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let fresh = protocol
+        .send_message("bob", "fresh", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    for id in [&resting, &fresh] {
+        protocol.ack_manager.remove_ack(id);
+        protocol.retry_queue.remove(&id.as_str());
+    }
+
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &fresh),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+
+    assert!(!protocol.outbox.contains_key(&fresh), "the receipt settled");
+    assert!(
+        protocol.retry_queue.contains(&resting.as_str()),
+        "and the resting message is scheduled again"
+    );
+}
+
+#[test]
 fn test_parked_dm_redriven_with_fresh_ack_budget() {
     // Every re-drive registers a fresh pending ACK, so the retry budget
     // only ever burns against a peer believed reachable — attempts spent

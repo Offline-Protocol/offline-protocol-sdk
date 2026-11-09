@@ -23,13 +23,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   never resent, and delayed messages, and each late receipt started another
   wave. A receipt now re-sends only for a peer parked as unreachable, as the
   other settlement path already required, and that re-drive is still unbounded
-  when it fails or the relay parks it again. For anyone else it cuts a message's
-  remaining backoff to one acknowledgement timeout, so a message that backed off
-  while the route was gone doesn't wait out the rest of a wait of up to five
-  minutes. On a two-hop chain of phones, over ten bursts of ten messages each
+  when it fails or the relay parks it again. For anyone else it schedules the peer's
+  other waiting messages one acknowledgement timeout away, spaced at half the
+  rate a neighbor accepts, so a message that backed off while the route was gone
+  doesn't wait out the rest of a wait of up to five minutes, and one resting
+  with `edge_driven_unreachable_dm` still goes when a receipt shows its
+  recipient is back. On a two-hop chain of phones, over ten bursts of ten messages each
   way, the first device's frames for about 107 messages went from 846 to 308,
   receipts over five seconds from 118 of 200 to 68, the slowest from 34 s to
-  18 s, and refused frames from 189 to 13. Those runs predate the backoff cut,
+  18 s, and refused frames from 189 to 13. Those runs predate the scheduling,
   which the simulator covers.
 
 - **A device hands its own frame to every neighbor a phone can hold.** A

@@ -472,15 +472,24 @@ outbox is **settleable without one**: the recipient's acknowledgement settles it
 
 **An acknowledgement sends a peer's other waiting traffic only if the peer is
 parked.** Those messages are on escalated probe timers, so they go at once.
-Otherwise a message waiting on its backoff stays in the retry queue, and its
-wait is cut to at most one acknowledgement timeout. Sending them at once is the
+Otherwise nothing is sent at once: each of the peer's other waiting messages,
+oldest first, gets a slot one acknowledgement timeout away plus one spacing per
+message ahead of it, the spacing being half the rate a neighbor accepts from
+this device. A message on a later backoff moves to its slot, and one resting
+edge-driven with no retry entry (`edge_driven_unreachable_dm`) is scheduled at
+it. A slot only ever moves a message earlier, and a later receipt computes the
+same slots from a later moment, so a message goes at most once per timeout
+however many receipts arrive. Sending them at once is the
 failure this prevents: every message of a mesh burst is waiting for its own
 receipt, so each receipt re-sent all the others, and ten messages cost about
 forty-five more frames against a next hop that accepts fifteen at once. Its
 refusals lost receipts, which are never resent. Leaving them alone entirely is
 the opposite failure: a message that backed off while the route was gone has no
 neighbor edge to wake it when its recipient is more than one hop away, and could
-wait out five minutes after the route came back.
+wait out five minutes after the route came back, and a resting one would never
+go. One shared slot instead of spaced ones is the smaller version of the first
+failure: forty messages put thirty frames on the next hop in a twentieth of a
+second, against a burst of fifteen.
 
 A parked peer's re-drive is not bounded this way. A re-drive that fails
 everywhere restores the park counter, and a relay verdict on a re-driven frame

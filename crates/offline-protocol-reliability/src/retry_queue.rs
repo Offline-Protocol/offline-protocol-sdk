@@ -217,15 +217,17 @@ impl RetryQueue {
         Some(retry_at)
     }
 
-    /// Moves every matching entry due later than `within_ms` from now to that
-    /// point, keeping its retry count. An entry due sooner keeps its time.
-    pub fn bring_forward(&mut self, within_ms: u64, matches: impl Fn(&Message) -> bool) {
-        let latest =
-            Utc::now() + chrono::Duration::milliseconds(within_ms.min(i64::MAX as u64) as i64);
+    /// Moves each entry `cap` gives a delay for to at most that many
+    /// milliseconds from now, keeping its retry count. An entry due sooner
+    /// keeps its time, and so does one `cap` returns `None` for.
+    pub fn bring_forward(&mut self, cap: impl Fn(&Message) -> Option<u64>) {
+        let now = Utc::now();
         let mut entries = std::mem::take(&mut self.queue).into_vec();
         for entry in &mut entries {
-            if entry.retry_at > latest && matches(&entry.message) {
-                entry.retry_at = latest;
+            if let Some(within_ms) = cap(&entry.message) {
+                let latest =
+                    now + chrono::Duration::milliseconds(within_ms.min(i64::MAX as u64) as i64);
+                entry.retry_at = entry.retry_at.min(latest);
             }
         }
         self.queue = entries.into();
@@ -669,6 +671,32 @@ mod tests {
         let delay = retry_at - before;
         assert!(delay >= chrono::Duration::milliseconds(59_000));
         assert!(delay <= chrono::Duration::milliseconds(61_000));
+    }
+
+    #[test]
+    fn bring_forward_only_ever_moves_an_entry_earlier() {
+        let mut queue = RetryQueue::new();
+        let [soon, late, other] = [(); 3].map(|_| create_test_message(MessagePriority::Medium));
+        queue.enqueue_with_delay(soon.clone(), 1, 100);
+        queue.enqueue_with_delay(late.clone(), 7, 60_000);
+        queue.enqueue_with_delay(other.clone(), 2, 60_000);
+
+        queue.bring_forward(|m| (m.id != other.id).then_some(1_000));
+
+        let due = |id: &offline_protocol_core::MessageId| {
+            let entry = queue.queue.iter().find(|e| e.message.id == *id).unwrap();
+            (
+                (entry.retry_at - Utc::now()).num_milliseconds(),
+                entry.retry_count,
+            )
+        };
+        assert!(due(&soon.id).0 <= 100, "an entry due sooner keeps its time");
+        assert!(
+            (900..=1_000).contains(&due(&late.id).0),
+            "a later one is capped"
+        );
+        assert_eq!(due(&late.id).1, 7, "and keeps its retry count");
+        assert!(due(&other.id).0 > 59_000, "one with no cap is untouched");
     }
 
     #[test]
