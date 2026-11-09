@@ -1547,6 +1547,10 @@ pub(crate) struct CoalescedAcks {
     pub(crate) hop_count: String,
     /// The answered message ids, oldest first.
     pub(crate) ids: Vec<String>,
+    /// What each answered copy counts as answered under, once this batch has
+    /// gone out over the mesh (`OfflineProtocol::answered_deliveries`). Held
+    /// here until then because a batch nothing can carry has answered nothing.
+    pub(crate) answered_keys: Vec<String>,
 }
 
 /// Durable record of the end-to-end capability versions a peer last

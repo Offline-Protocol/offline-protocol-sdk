@@ -44376,12 +44376,81 @@ fn resend_generations_are_trimmed_to_what_can_still_resend() {
 
     let settled = signed_frame(&protocol.local_id, "far-away", "settled long ago");
     let next = signed_frame(&protocol.local_id, "far-away", "resending now");
-    assert!(protocol.offer_resend_to_mesh(&settled, false) > 0);
+    let waiting_id = protocol
+        .send_message("far-away", "still waiting", None, None::<String>)
+        .unwrap();
+    let waiting = protocol.outbox[&waiting_id].message.clone();
+    let media = signed_frame(&protocol.local_id, "far-away", "a chunk still waiting");
+    let media_entry = protocol.outbox[&waiting_id].clone();
+    protocol.media_outbox.insert(media.id.clone(), media_entry);
+    for frame in [&settled, &waiting, &media] {
+        assert!(protocol.offer_resend_to_mesh(frame, false) > 0);
+    }
     std::thread::sleep(std::time::Duration::from_millis(5));
     assert!(protocol.offer_resend_to_mesh(&next, false) > 0);
 
     assert!(!protocol.mesh_resend_generations.contains_key(&settled.id));
     assert!(protocol.mesh_resend_generations.contains_key(&next.id));
+    // Past the window, but still able to resend: it keeps its generation.
+    assert!(protocol.mesh_resend_generations.contains_key(&waiting.id));
+    assert!(protocol.mesh_resend_generations.contains_key(&media.id));
+}
+
+#[test]
+fn a_coalesced_answer_that_never_left_does_not_silence_the_next_copy() {
+    // The batch goes out with the send budget spent and the sender out of reach,
+    // so nothing carries it and it is held for the next carrier edge. Counted as
+    // answered when the delivery joined the batch, the copy that follows went
+    // unanswered, on the path phones take for every mesh delivery.
+    let mut config = create_test_config();
+    config.mesh_relay.burst = 1.0;
+    config.mesh_relay.rate_per_sec = 5.0;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.add_connected_peer("bob", -55);
+    ble.set_reject_unknown_recipients(true);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble.clone()));
+    protocol.start().unwrap();
+    protocol.peer_coalesced_ack.insert("alice".to_string());
+    assert!(protocol.offer_to_mesh(&signed_frame("user123", "far-away", "spends it")) > 0);
+
+    let mut copy = Message::builder(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content("heard twice".to_string())
+    .requires_ack(true)
+    .build();
+    copy.hop_count = copy.hop_count.increment().unwrap();
+    let age_the_batch = |protocol: &mut OfflineProtocol| {
+        protocol.coalesced_acks_out.get_mut("alice").unwrap().since =
+            offline_protocol_core::time::Instant::now() - ACK_COALESCE_WINDOW;
+        protocol.flush_due_coalesced_acks();
+    };
+    let answers_carried = |ble: &MockTransport| {
+        ble.peer_sends()
+            .iter()
+            .filter(|(_, m)| m.metadata.contains_key(ACK_FOR_KEY))
+            .count()
+    };
+
+    ble.queue_message_from(copy.clone(), "bob".to_string());
+    while protocol.receive_message().is_some() {}
+    age_the_batch(&mut protocol);
+    assert_eq!(answers_carried(&ble), 0, "the budget was spent");
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    ble.queue_message_from(copy, "bob".to_string());
+    while protocol.receive_message().is_some() {}
+    age_the_batch(&mut protocol);
+    assert!(
+        answers_carried(&ble) > 0,
+        "the second copy got an answer out"
+    );
 }
 
 #[test]

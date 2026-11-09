@@ -169,7 +169,11 @@ is offered.
   answer. Answering every copy sent up to four answer floods per message in a
   simulated crowd of phones holding four links each; it ran the send budgets
   dry, and the receipts it lost were the ones it was sending. Answering once
-  cut the crowd's airtime by up to a half.
+  cut the crowd's airtime by up to a half. Only an answer the mesh took counts:
+  one with no route, held for the next carrier edge, or one only the relay
+  accepted, has not reached a sender that only the mesh can reach, so the copies
+  behind it are still answered. A coalesced batch counts when it goes out, not
+  when a delivery joins it.
 
 ## The deferred-acknowledgement atom
 

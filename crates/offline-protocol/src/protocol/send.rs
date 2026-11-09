@@ -5754,7 +5754,6 @@ impl OfflineProtocol {
         status: Option<&str>,
     ) -> Result<()> {
         if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {
-            self.record_answered(message);
             return Ok(());
         }
         let ack = self.build_ack(message, inbound_transport, status)?;
@@ -5763,7 +5762,7 @@ impl OfflineProtocol {
         // says nothing about a sender only the mesh can reach: the copies still
         // arriving are what can get an answer to them.
         if self.route_ack(&ack, inbound_transport) == AckRoute::Mesh && status.is_none() {
-            self.record_answered(message);
+            self.record_answered(Self::answered_key(message));
         }
         Ok(())
     }
@@ -5789,12 +5788,11 @@ impl OfflineProtocol {
                 .is_some_and(|at| at.elapsed() < MESH_COPY_ANSWER_WINDOW)
     }
 
-    fn record_answered(&mut self, message: &Message) {
+    fn record_answered(&mut self, key: String) {
         let now = Instant::now();
         self.answered_deliveries
             .retain(|_, at| now.saturating_duration_since(*at) < MESH_COPY_ANSWER_WINDOW);
-        self.answered_deliveries
-            .insert(Self::answered_key(message), now);
+        self.answered_deliveries.insert(key, now);
     }
 
     /// The sender is part of it because a duplicate is answered before anything
@@ -5841,10 +5839,15 @@ impl OfflineProtocol {
                 since: Instant::now(),
                 hop_count: message.hop_count.value().to_string(),
                 ids: Vec::new(),
+                answered_keys: Vec::new(),
             });
         let id = message.id.as_str();
         if !batch.ids.contains(&id) {
             batch.ids.push(id);
+        }
+        let answered_key = Self::answered_key(message);
+        if !batch.answered_keys.contains(&answered_key) {
+            batch.answered_keys.push(answered_key);
         }
         if batch.ids.len() >= ACK_COALESCE_MAX {
             self.flush_coalesced_acks_for(&peer);
@@ -5905,7 +5908,11 @@ impl OfflineProtocol {
                 return;
             }
         };
-        self.route_ack(&ack, batch.transport);
+        if self.route_ack(&ack, batch.transport) == AckRoute::Mesh {
+            for key in batch.answered_keys {
+                self.record_answered(key);
+            }
+        }
     }
 
     /// Builds the acknowledgement for `message`, optionally carrying
