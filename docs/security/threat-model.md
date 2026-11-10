@@ -1131,12 +1131,10 @@ behalf, and the session it opens is with the attacker's own address only.
 Every device in between applies its per-neighbour forwarding allowance to the
 attacker's link before the package goes further, and its per-second budget
 after, so the rate at which packages reach this device is the forwarding
-rate, not the attacker's. A link's frames marked as delivery receipts have
-an allowance of their own, half the size, and spend the link's ordinary one
-once it is gone. Nothing authenticates the mark, so an attacker that marks
-its packages as receipts gains half its link's share again and no more; at
-the defaults the two together (7.5 frames a second) stay below the device's
-whole forwarding budget (10). The receiving device sends its two frames from the
+rate, not the attacker's. Marking its packages as acknowledgements (frames
+carrying `ack_for` have half an allowance more of their own, which nothing
+authenticates) buys the attacker nothing here: a marked frame is consumed as
+an acknowledgement at its recipient, never as a key package. The receiving device sends its two frames from the
 share of its own budget that its own traffic uses, so a flood delays this
 device's own frames rather than putting more on the air than the budget
 allows. Stored packages are capped at 1000, evicting the soonest to expire,

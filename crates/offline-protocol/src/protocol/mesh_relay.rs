@@ -124,13 +124,17 @@ pub const RELAY_OWN_TRAFFIC_RESERVE: f32 = 5.0;
 ///
 /// Keeps a single noisy or hostile link from consuming the whole node's
 /// forwarding budget: its frames are refused at the door, leaving the budget
-/// for everyone else's traffic. A link's delivery receipts have half this
-/// again, of their own, and the two together stay below
-/// [`DEFAULT_RELAY_RATE_PER_SEC`].
+/// for everyone else's traffic. A link's acknowledgements have half this
+/// again, of their own.
 pub const DEFAULT_RELAY_PEER_RATE_PER_SEC: f32 = 5.0;
 
 /// Burst allowance for a single neighbor.
 pub const DEFAULT_RELAY_PEER_BURST: f32 = 15.0;
+
+/// The share of a neighbor's allowance its acknowledgements get again, of
+/// their own. The busiest second of the 2026-11-10 phone chain needed three
+/// receipt frames from one neighbor, against 7.5 at the defaults.
+const RECEIPT_ALLOWANCE_SHARE: f32 = 0.5;
 
 /// Maximum forwards waiting for their delay to elapse.
 pub const DEFAULT_RELAY_QUEUE_CAPACITY: usize = 256;
@@ -531,18 +535,19 @@ pub struct MeshRelayStats {
     pub dropped_for_capacity: u64,
 }
 
-/// What one neighbor may hand this device: its delivery receipts have an
-/// allowance its messages cannot spend, and spend the messages' allowance once
-/// their own is gone, so a receipt is never refused where it would have been
-/// admitted with the two sharing one. Sharing one, a sender's own messages and
-/// resends spent the link's share and the next hop refused the receipt frame
-/// behind them; each receipt it carried waited for the sender's retry (15 s on
-/// the 2026-11-10 phone chain). The receipts' own allowance is half the
-/// messages', because the receipt marker cannot be authenticated here: a
-/// neighbor that marks frames as receipts gains half an allowance, and the two
-/// together stay below the device's own forwarding budget at the defaults
-/// (7.5 against 10 per second). Sized like the messages', they equalled it, and
-/// one link marking half its frames could take every forwarding slot.
+/// What one neighbor may hand this device: its acknowledgements (frames
+/// carrying `ack_for`) have an allowance its messages cannot spend, and spend
+/// the messages' allowance once their own is gone, so an acknowledgement is
+/// never refused where it would have been admitted with the two sharing one.
+/// Sharing one, a sender's own messages and resends spent the link's share and
+/// the next hop refused the receipt frame behind them; each receipt it carried
+/// waited for the sender's retry (15 s on the 2026-11-10 phone chain).
+///
+/// The marker cannot be authenticated here, so a neighbor that marks frames
+/// gains [`RECEIPT_ALLOWANCE_SHARE`] of an allowance more admissions, and the
+/// share is kept below a whole one for that reason. That is all it gains: a
+/// marked frame is consumed as an acknowledgement at its recipient, and the
+/// device's forwarding budget still caps what goes on the air.
 #[derive(Debug, Clone)]
 struct PeerAllowance {
     frames: TokenBucket,
@@ -1616,7 +1621,11 @@ impl MeshRelayGovernor {
                 peer_id.to_string(),
                 PeerAllowance {
                     frames: TokenBucket::new(burst, rate, now),
-                    receipts: TokenBucket::new(burst / 2.0, rate / 2.0, now),
+                    receipts: TokenBucket::new(
+                        burst * RECEIPT_ALLOWANCE_SHARE,
+                        rate * RECEIPT_ALLOWANCE_SHARE,
+                        now,
+                    ),
                 },
             );
         }
@@ -1909,9 +1918,7 @@ mod tests {
     /// 2026-11-10 phone chain the next hop refused one coalesced receipt frame
     /// in three of ten rounds, after the sender's messages had spent the link's
     /// allowance, and each of the five receipts it carried waited 15 s for the
-    /// sender's retry. Nothing here can authenticate the receipt marker, so a
-    /// neighbor that labels every frame a receipt gains half an allowance, no
-    /// more: past both, a receipt is refused.
+    /// sender's retry. Past both allowances, a receipt is refused.
     #[test]
     fn a_neighbors_receipts_have_an_allowance_its_messages_cannot_spend() {
         let mut gov = governor();
@@ -1971,13 +1978,11 @@ mod tests {
         );
     }
 
-    /// One link marking frames as receipts is still admitted below the
-    /// device's whole forwarding budget: the receipts' allowance is half the
-    /// messages', so the two together stay under it. Sized like the messages',
-    /// the pair equalled the device's budget at the defaults, and a neighbor
-    /// marking half its frames could take every forwarding slot.
+    /// Marking frames as receipts buys a link at most the receipts' share of
+    /// an allowance more admissions. The marker cannot be authenticated, so
+    /// this is the whole of what lying about it gains at a relay.
     #[test]
-    fn one_link_marking_receipts_cannot_take_the_whole_forwarding_budget() {
+    fn marking_frames_as_receipts_buys_a_link_half_an_allowance() {
         let mut gov = governor();
         let mut admitted = 0;
         for n in 0..400 {
@@ -1987,8 +1992,8 @@ mod tests {
             }
         }
         assert!(
-            (admitted as f32) < DEFAULT_RELAY_BURST,
-            "one link was admitted {admitted} frames, the device's whole burst"
+            admitted as f32 <= (1.0 + RECEIPT_ALLOWANCE_SHARE) * DEFAULT_RELAY_PEER_BURST + 1.0,
+            "one link marking receipts was admitted {admitted} frames"
         );
     }
 
@@ -2844,9 +2849,10 @@ mod tests {
         // copies were still circulating and be forwarded a second time — by
         // every node, which is how a flood becomes a storm.
         let gov = governor();
-        // Two allowances per link: its frames, and half again for receipts.
-        let max_admissions_per_sec =
-            1.5 * DEFAULT_RELAY_PEER_RATE_PER_SEC * MAX_RELAY_RATE_PEERS as f32;
+        // Two allowances per link: its frames, and a share again for receipts.
+        let max_admissions_per_sec = (1.0 + RECEIPT_ALLOWANCE_SHARE)
+            * DEFAULT_RELAY_PEER_RATE_PER_SEC
+            * MAX_RELAY_RATE_PEERS as f32;
         let sustained_ceiling = DEFAULT_RELAY_RATE_PER_SEC.min(max_admissions_per_sec);
         let ids_in_window = sustained_ceiling * gov.config().seen.retention.as_secs_f32();
 

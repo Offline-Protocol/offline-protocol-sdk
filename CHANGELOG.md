@@ -21,14 +21,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   resends could spend it and the next hop then refused the receipt frame
   behind them. Every receipt it carried waited for the sender's retry: on a
   phone chain, one refused receipt frame in each of three rounds out of ten
-  left five receipts 15 s late. A link's receipts now have an allowance of
-  their own, half of `peerBurst` and `peerRatePerSec`, that its messages
-  cannot spend, and spend the ordinary one once theirs is gone, so no
-  receipt is refused that sharing one would have admitted. Nothing
-  authenticates the receipt
-  marker, so a neighbor that marks frames as receipts gains half an
-  allowance and no more, and at the defaults one link's two allowances (7.5
-  frames a second) stay below the device's whole forwarding budget (10).
+  left five receipts 15 s late. A link's acknowledgements (frames carrying
+  `ack_for`) now have an allowance of their own, half of `peerBurst` and
+  `peerRatePerSec`, that its messages cannot spend, and spend the ordinary
+  one once theirs is gone, so none is refused that sharing one would have
+  admitted. Nothing authenticates the marker, so a neighbor that marks
+  frames gains half an allowance more admissions and no more; a marked
+  frame is consumed as an acknowledgement at its recipient, and the
+  device's forwarding budget still caps what goes on the air.
 
 - **A device hands its own frame to every neighbor a phone can hold.** A
   forward's fan-out of three covers every link of a four-link phone but the

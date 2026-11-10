@@ -495,8 +495,8 @@ rebuild the token buckets and suppression cache underneath in-flight forwards.
 | `jitterMaxMs` | number | 200 | Longest pre-transmit delay at low density |
 | `ratePerSec` | number | 10 | Sustained forwarding rate, frames per second |
 | `burst` | number | 30 | Burst allowance above the sustained rate |
-| `peerRatePerSec` | number | 5 | Sustained per-neighbor acceptance rate for messages; delivery receipts have half this again, of their own, before they spend the messages' |
-| `peerBurst` | number | 15 | Per-neighbor burst allowance for messages; delivery receipts have half this again, of their own, before they spend the messages' |
+| `peerRatePerSec` | number | 5 | Sustained per-neighbor acceptance rate for messages; acknowledgements (frames carrying `ack_for`) have half this again, of their own, before they spend the messages' |
+| `peerBurst` | number | 15 | Per-neighbor burst allowance for messages; acknowledgements (frames carrying `ack_for`) have half this again, of their own, before they spend the messages' |
 | `queueCapacity` | number | 256 | Maximum forwards awaiting transmission |
 | `biasMinScale` | number | 0.25 | Smallest share of full forwarding effort capability bias scales down to; `1.0` disables bias |
 | `biasMaxHandicapMs` | number | 400 | Longest extra pre-transmit delay bias adds to a weaker device |
