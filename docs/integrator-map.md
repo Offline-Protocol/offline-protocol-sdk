@@ -94,8 +94,10 @@ Reference storage implementations live in the React Native bridge sources
 **address**, usually from `neighbor_discovered`, QR, or invite flow. A
 human username only works where username resolution is explicitly configured.
 
-Migration detail: [UPGRADING §14](UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210),
-[spec/identity.md](spec/identity.md), [mls-integration.md](mls-integration.md).
+**Canonical guide:** [identity-for-integrators.md](identity-for-integrators.md)
+(mistakes, discovery, copy-paste patterns). Migration:
+[UPGRADING §14](UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210);
+wire format: [spec/identity.md](spec/identity.md).
 
 ---
 

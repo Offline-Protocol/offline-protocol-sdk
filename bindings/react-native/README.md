@@ -124,9 +124,12 @@ protocol.on('message_received', (event) => {
 
 await protocol.start(); // MLS auto-initialized with secure storage
 
-// Messages are automatically encrypted when possible!
+// Use the peer's off1… address from neighbor_discovered — not profile or a username.
+// See docs/identity-for-integrators.md.
+const peerAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn';
+
 const messageId = await protocol.sendMessage({
-  recipient: 'user456',
+  recipient: peerAddress,
   content: 'Hello!',  // Automatically encrypted
   priority: MessagePriority.High,
 });
@@ -1320,14 +1323,15 @@ Create and manage encrypted groups over the mesh:
 // Create a group (you become admin automatically)
 const group = await protocol.meshCreateGroup('Project Team');
 
-// Invite a member (admin only)
-await protocol.meshInviteToGroup(group.groupId, 'bob');
+// Invite a member by mesh address (admin only)
+const inviteeAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn';
+await protocol.meshInviteToGroup(group.groupId, inviteeAddress);
 
 // Send an encrypted group message
 await protocol.meshSendGroupMessage(group.groupId, 'Hello team!');
 
 // Remove a member (admin only)
-await protocol.meshRemoveFromGroup(group.groupId, 'bob');
+await protocol.meshRemoveFromGroup(group.groupId, inviteeAddress);
 
 // Leave a group
 await protocol.meshLeaveGroup(group.groupId);
@@ -1344,15 +1348,13 @@ Groups use role-based access control with two roles: **Admin** and **Member**.
 | `meshGetGroupRoles(groupId)` | Get all roles as `{ userId: role }` |
 
 ```typescript
-// Promote a member to admin
-await protocol.meshSetMemberRole(groupId, 'bob', 'admin');
+// Member ids are off1… addresses, not profiles
+await protocol.meshSetMemberRole(groupId, inviteeAddress, 'admin');
 
-// Check a member's role
-const role = await protocol.meshGetMemberRole(groupId, 'bob'); // "admin"
+const role = await protocol.meshGetMemberRole(groupId, inviteeAddress);
 
-// Get all roles
 const roles = await protocol.meshGetGroupRoles(groupId);
-// { alice: "admin", bob: "admin", charlie: "member" }
+// { "off1q…": "admin", "off1q…": "member", … }
 
 // Listen for role changes
 protocol.on('group_role_changed', (event) => {
@@ -1398,7 +1400,7 @@ Prevents duplicate message processing:
 
 ```typescript
 const fileId = await protocol.sendFile({
-  recipient: 'user456',
+  recipient: peerAddress, // peer off1… from discovery
   fileData: base64Contents,  // the file's bytes as base64; the app reads the file
   fileName: 'document.pdf',
 });
@@ -1420,7 +1422,7 @@ about twice its size while chunking; the read is not streamed.
 
 ```typescript
 const fileId = await protocol.sendFileFromPath({
-  recipient: 'user456',
+  recipient: peerAddress,
   filePath: '/data/user/0/com.example.app/files/report.pdf',
   fileName: 'report.pdf',
 });

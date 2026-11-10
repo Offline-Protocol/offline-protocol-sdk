@@ -18,7 +18,8 @@ cd ios && pod install  # iOS only
 ```
 
 Before `start()` on a real device, add iOS and Android permissions from
-[mobile-permissions.md](docs/mobile-permissions.md).
+[mobile-permissions.md](docs/mobile-permissions.md). For `recipient` and peer
+ids, use `off1…` addresses, not `profile`: [identity-for-integrators.md](docs/identity-for-integrators.md).
 
 ### 2. Initialize
 

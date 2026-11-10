@@ -13,6 +13,7 @@ before changing behaviour, not before using the SDK.
 | Guide | Description |
 |-------|-------------|
 | [Integrator map](integrator-map.md) | **Start here:** platform choice, setup time, lifecycle, links to the right guide |
+| [Identity for integrators](identity-for-integrators.md) | **`profile` vs `off1…`:** what to pass as `recipient`, discovery, common mistakes |
 | [Mobile permissions](mobile-permissions.md) | **iOS and Android:** Info.plist, manifest, runtime grants, background mesh |
 | [Quick Start](../QUICKSTART.md) | Get started in 5 minutes (React Native, iOS, Android) |
 | [Upgrading](UPGRADING.md) | **Breaking changes and required app-side work** (use the [version index](UPGRADING.md#start-here-version-and-surface-index) first) |

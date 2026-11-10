@@ -322,8 +322,9 @@ export default function App() {
   });
 
   const handleSend = async () => {
+    const peerAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn'; // from discovery
     const messageId = await sendMessage(
-      'user456',
+      peerAddress,
       'Hello!',
       MessagePriority.Medium
     );

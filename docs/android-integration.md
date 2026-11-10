@@ -111,9 +111,12 @@ class MainActivity : AppCompatActivity() {
 
         protocol.start()
 
+        val peerAddress =
+            "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn" // from neighbor_discovered
+
         // Send a message (priority is required; replyToMsg is optional)
         val messageId = protocol.sendMessage(
-            recipient = "user456",
+            recipient = peerAddress,
             content = "Hello from Android!",
             priority = MessagePriority.HIGH,
             replyToMsg = null,
@@ -215,6 +218,9 @@ API 37 `ACCESS_LOCAL_NETWORK`, foreground service):
 [mobile-permissions.md](mobile-permissions.md). The snippet below is a common
 app manifest starting point for native integration.
 
+**Identity:** `recipient` and group member ids are peer `off1…` addresses, not
+`profile`. See [identity-for-integrators.md](identity-for-integrators.md).
+
 Add to `AndroidManifest.xml`:
 
 ```xml
@@ -248,8 +254,8 @@ Create and manage encrypted groups over the mesh. The group creator is automatic
 // Create a group
 val group = protocol.createGroup("Project Team")
 
-// Invite a member (admin only)
-protocol.inviteToGroup(group.groupId, "bob")
+val inviteeAddress = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+protocol.inviteToGroup(group.groupId, inviteeAddress)
 
 // Send an encrypted group message
 val messageIds = protocol.sendGroupMessage(
@@ -260,7 +266,7 @@ val messageIds = protocol.sendGroupMessage(
 )
 
 // Remove a member (admin only)
-protocol.removeFromGroup(group.groupId, "bob")
+protocol.removeFromGroup(group.groupId, inviteeAddress)
 
 // Get group info (members, epoch, etc.)
 val info = protocol.getGroupInfo(group.groupId)
@@ -279,14 +285,12 @@ Groups use role-based access control: **Admin** and **Member**.
 
 ```kotlin
 // Promote a member to admin (admin only)
-protocol.setMemberRole(groupId, "bob", "admin")
+protocol.setMemberRole(groupId, inviteeAddress, "admin")
 
-// Check a member's role
-val role = protocol.getMemberRole(groupId, "bob") // "admin" or "member"
+val role = protocol.getMemberRole(groupId, inviteeAddress)
 
-// Get all roles
 val roles = protocol.getGroupRoles(groupId)
-// mapOf("alice" to "admin", "bob" to "admin", "charlie" to "member")
+// map keys are member off1… addresses
 ```
 
 Role changes and renames arrive through the same `EventCallback` as every other event —
