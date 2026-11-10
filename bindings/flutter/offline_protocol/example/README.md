@@ -21,4 +21,4 @@ flutter pub get
 flutter run -d <device-or-simulator-id>
 ```
 
-To enable BLE in your own config, add the Bluetooth keys from [React Native iOS permissions](../../../react-native/README.md#ios-permissions). The example smoke config does not start BLE.
+To enable BLE in your own config, add the Bluetooth keys from [mobile-permissions.md](../../../../docs/mobile-permissions.md). The example smoke config does not start BLE.

@@ -185,12 +185,6 @@ version for the index).
 
 ---
 
-## Maintainer: friction reduction roadmap
-
-Internal plan for DX improvements (groups G0–G14): [integrator-friction.md](integrator-friction.md).
-
----
-
 ## See also
 
 | Resource | Role |
