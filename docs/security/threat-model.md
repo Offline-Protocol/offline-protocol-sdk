@@ -1134,10 +1134,11 @@ after, so the rate at which packages reach this device is the forwarding
 rate, not the attacker's. Marking its packages as acknowledgements (frames
 carrying `ack_for` have half an allowance more of their own, which nothing
 authenticates) buys the attacker nothing here: a marked frame is consumed as
-an acknowledgement at its recipient, never as a key package. The receiving device sends its two frames from the
-share of its own budget that its own traffic uses, so a flood delays this
-device's own frames rather than putting more on the air than the budget
-allows. Stored packages are capped at 1000, evicting the soonest to expire,
+an acknowledgement at its recipient, never as a key package. The receiving
+device sends its two frames from the share of its own budget that its own
+traffic uses, so a flood delays this device's own frames rather than putting
+more on the air than the budget allows. Stored packages are capped at 1000,
+evicting the soonest to expire,
 the push pool stops minting at 64 and shares a package past that, and a
 Welcome's lifecycle expires after 300 seconds of retries. A device does not
 answer a package from a sender only the mesh reaches with one of its own
@@ -1431,8 +1432,8 @@ the whole generation, so copies of one generation spread further apart than that
 each earn one), and all of them spend the same per-neighbor and
 per-device budgets as any other frame (an answer is a receipt, so its
 per-neighbor share is the receipts' allowance and then the ordinary one). A
-sender blocked by the recipient gets no
-answer. A forged copy earns its claimed sender an answer but cannot use up the
+sender blocked by the recipient gets no answer. A forged copy earns its
+claimed sender an answer but cannot use up the
 answer another sender is owed, because answers are tracked per sender. The bound is on what crosses the mesh: a device beside the recipient can
 send it hop-zero copies, which are answered every time, as they were before
 generations.

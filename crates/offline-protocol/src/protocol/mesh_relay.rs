@@ -1937,7 +1937,7 @@ mod tests {
             }
         }
         assert!(
-            receipts <= (DEFAULT_RELAY_PEER_BURST / 2.0) as usize + 2,
+            receipts <= (DEFAULT_RELAY_PEER_BURST * RECEIPT_ALLOWANCE_SHARE) as usize + 2,
             "accepted {receipts} receipts from one neighbor"
         );
     }
