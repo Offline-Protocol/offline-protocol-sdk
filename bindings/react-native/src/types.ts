@@ -994,6 +994,13 @@ export interface ProtocolConfig {
    * too high is worse than no lever. The nested value wins if both are set.
    */
   controlFreshnessEnforced?: boolean;
+  /**
+   * Log a console warning when a peer id passed to send, invite, or MLS APIs
+   * does not look like a canonical `off1…` address. Never blocks the call.
+   * Defaults to on in React Native development builds (`__DEV__`); off in
+   * production unless set to `true` explicitly.
+   */
+  devPeerAddressWarnings?: boolean;
 }
 
 /**
