@@ -190,7 +190,7 @@ Emitted when a provider responds to a discovery query you sent.
   "query_id": "550e8400-e29b-41d4-a716-446655440000",
   "service_id": "weather.v1",
   "version": "2.0",
-  "provider_peer_id": "bob",
+  "provider_peer_id": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
   "capabilities": { "format": "json", "coverage": "us,eu" },
   "hop_count": 1
 }
@@ -218,7 +218,7 @@ Emitted on the **provider** node when a consumer sends a request to a locally re
   "service_id": "weather.v1",
   "method": "get_forecast",
   "body": "{\"city\": \"NYC\"}",
-  "sender": "alice",
+  "sender": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
   "encrypted": true
 }
 ```
@@ -243,7 +243,7 @@ Emitted on the **consumer** node when a provider responds to a request.
   "service_id": "weather.v1",
   "status": "ok",
   "body": "{\"temp\": 72, \"unit\": \"F\"}",
-  "provider_peer_id": "bob",
+  "provider_peer_id": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
   "encrypted": true
 }
 ```

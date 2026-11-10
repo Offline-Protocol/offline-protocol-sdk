@@ -2,12 +2,9 @@
 
 This guide explains how to integrate MLS (Message Layer Security) end-to-end encryption into your app using the Offline Protocol SDK.
 
-> **Peer ids in these examples are shortened for readability.** Wherever an
-> example passes `"bob"` as a `userId` / `otherUserId` / `recipient`, the real
-> value is that peer's 44-character `off1…` address. Those parameters keep the
-> `userId` name, but the value they take is an address — a username reaches
-> nobody. Get one from an invite/QR exchange or the `neighbor_discovered`
-> event, and read your own with `localAddress()`. See
+> **Address-shaped examples only.** Parameters may still be named `userId` or
+> `otherUserId`, but the value is always a peer's `off1…` address. See
+> [identity-for-integrators.md](./identity-for-integrators.md) and
 > [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210).
 
 ## Overview
@@ -69,9 +66,10 @@ await protocol.start();
 // await protocol.initializeMlsWithSecureStorage();
 
 // Just send messages - encryption happens automatically!
+const peerAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn';
 await protocol.sendMessage({
-  recipient: 'bob',
-  content: 'Hello Bob!',  // Automatically encrypted
+  recipient: peerAddress,
+  content: 'Hello!',  // Automatically encrypted
 });
 
 // Receive messages - decryption happens automatically!
@@ -249,21 +247,20 @@ uploadKeyPackage(keyPackage.keyPackageData, userId: keyPackage.userId)
 #### 1:1 Messaging
 
 ```swift
-// First, import the recipient's key package
+let peerAddress = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+
 try mesh.mlsImportKeyPackage(
-    userId: "bob",
+    userId: peerAddress,
     keyPackageData: bobsKeyPackage
 )
 
-// Send an encrypted message
 let encrypted = try mesh.mlsEncryptForUser(
-    otherUserId: "bob",
-    plaintext: "Hello, Bob!".data(using: .utf8)!
+    otherUserId: peerAddress,
+    plaintext: "Hello!".data(using: .utf8)!
 )
 
-// Send the encrypted message using existing transport
 _ = try mesh.sendMessage(
-    recipient: "bob",
+    recipient: peerAddress,
     content: encryptedToJson(encrypted),
     priority: .medium,
     replyToMsg: nil
@@ -277,7 +274,10 @@ _ = try mesh.sendMessage(
 let group = try mesh.createGroup(groupName: "Project Team")
 
 // Invite members (admin only — handles key exchange + Welcome automatically)
-try mesh.inviteToGroup(groupId: group.groupId, inviteeUserId: "alice")
+try mesh.inviteToGroup(
+    groupId: group.groupId,
+    inviteeUserId: "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0"
+)
 
 // Send encrypted group message. Returns one id per recipient: the same MLS
 // ciphertext is fanned out per member, so each copy carries its own outbox
@@ -885,7 +885,8 @@ await OfflineProtocolModule.initializeMlsWithSecureStorage();
 const keyPackage = await OfflineProtocolModule.mlsGenerateKeyPackage();
 
 // Encrypt message
-const encrypted = await OfflineProtocolModule.mlsEncryptForUser('bob', plaintext);
+const peerAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn';
+const encrypted = await OfflineProtocolModule.mlsEncryptForUser(peerAddress, plaintext);
 ```
 
 ---
@@ -936,8 +937,8 @@ for pkg in pending {
 }
 
 // Fetch a contact's key package before messaging
-let keyPackageData = try await fetchKeyPackage(userId: "bob")
-try mesh.mlsImportKeyPackage(userId: "bob", keyPackageData: keyPackageData)
+let keyPackageData = try await fetchKeyPackage(userId: peerAddress)
+try mesh.mlsImportKeyPackage(userId: peerAddress, keyPackageData: keyPackageData)
 ```
 
 ### Offline Key Exchange
