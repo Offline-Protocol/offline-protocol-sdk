@@ -2,8 +2,8 @@
 
 Two kinds of document live here, and they answer different questions.
 
-**Guides** answer "how do I use this". Start with the Quick Start and the
-integration guide for your platform.
+**Guides** answer "how do I use this". Start with the [integrator map](integrator-map.md)
+to pick a platform, then the Quick Start or integration guide for that path.
 
 **Reference** answers "what is the contract" and "why is it like this". Read it
 before changing behaviour, not before using the SDK.
@@ -12,8 +12,9 @@ before changing behaviour, not before using the SDK.
 
 | Guide | Description |
 |-------|-------------|
+| [Integrator map](integrator-map.md) | **Start here:** platform choice, setup time, lifecycle, links to the right guide |
 | [Quick Start](../QUICKSTART.md) | Get started in 5 minutes (React Native, iOS, Android) |
-| [Upgrading](UPGRADING.md) | **Breaking changes and required app-side work** |
+| [Upgrading](UPGRADING.md) | **Breaking changes and required app-side work** (use the [version index](UPGRADING.md#start-here-version-and-surface-index) first) |
 | [React Native Integration](react-native-integration.md) | Full SDK integration guide with complete API reference |
 | [iOS Integration](ios-integration.md) | Native iOS (Swift) setup and usage |
 | [Android Integration](android-integration.md) | Native Android (Kotlin) setup and usage |
