@@ -22,12 +22,37 @@ introduction (v0.20.0, v0.21.0, …).
 | You are on… | Goal | Read (in order) | Skip unless noted |
 |-------------|------|-----------------|-------------------|
 | **No SDK yet** | Integrate fresh | [integrator-map.md](integrator-map.md), platform guide in that map | This file |
-| **`v0.16.x` or earlier** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§1–§13](#1-initialize_mls-now-takes-two-storage-providers), then [§14](#14-your-identity-is-derived-not-chosen-v0210) and every **§15–§30** section whose version appears in your jump range | Nothing in §1–§13 |
-| **`v0.17.x`–`v0.19.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), skim [This release at a glance](#this-release-at-a-glance) for gaps, then [§14](#14-your-identity-is-derived-not-chosen-v0210)+ for each release you have not shipped | §1–§3 if storage split already done |
-| **`v0.20.x`–`v0.22.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§14](#14-your-identity-is-derived-not-chosen-v0210) if before v0.21, [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) if RN iOS, then §15+ for versions after your pin | Earlier storage sections |
-| **`v0.23.x`–`v0.26.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), behavioural sections for each skipped minor (§16, §20, §21, …) | §1–§14 if already migrated |
-| **`v0.27.x`–`v0.31.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) | Earlier major migrations |
+| **`v0.16.x` or earlier** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§1–§13](#1-initialize_mls-now-takes-two-storage-providers) (including §11.1–§11.3 and §12.1), then §14–§30 | Nothing |
+| **`v0.17.x`–`v0.19.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §1.10 and §1.11 (`v0.19.0`), §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §12.1 (`v0.20.0`, React Native iOS), §14–§30 | The rest of §1–§13 (the `v0.17.0` storage split) |
+| **`v0.20.x`–`v0.22.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §14 (`v0.21.0`), §15–§30 | §1–§13 apart from those; §12.1 (`v0.20.0`) |
+| **`v0.23.x`–`v0.26.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §17 (`v0.24.0`), §18 (`v0.24.1`), §19 (`v0.25.0`), §20 and §21 (`v0.26.0`), §22–§30 | §1–§16 |
+| **`v0.27.x`–`v0.31.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §26 (`v0.28.0`), §27 (`v0.29.0`), §28 (`v0.30.0`), §29 (`v0.31.0`), [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) (`v0.32.0`) | §1–§25 |
 | **`v0.32.x`** | Patch bump within series | [CHANGELOG](../CHANGELOG.md) `[Unreleased]` and the matching subsection in §30 only if the release note points here | Rest of this file |
+
+In a range row, skip any listed section tagged at or below your exact version:
+on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
+
+| Version | Sections |
+|---------|----------|
+| `v0.19.0` | [§1.10](#110-the-inbound-plaintext-gate-no-longer-reads-session_states), [§1.11](#111-key-packages-are-checked-against-the-peers-identity) (tagged in the section's first line) |
+| `v0.20.0` | [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) |
+| `v0.20.1` | [§11.1](#111-messagedecryptionfailed-is-advisory-not-terminal-v0201) |
+| `v0.21.0` | [§11.2](#112-secure_session_failed-no-longer-implies-the-session-is-gone-v0210), [§14](#14-your-identity-is-derived-not-chosen-v0210) |
+| `v0.22.0` | [§11.3](#113-relay_promoted-and-relay_demoted-can-now-actually-fire-v0220) |
+| `v0.23.0` | [§15](#15-the-learned-route-api-is-gone-v0230), [§16](#16-replicated-documents-are-available-11-and-in-groups-v0230) |
+| `v0.24.0` | [§17](#17-two-refusals-that-are-new-and-one-rotation-you-now-owe-v0240) |
+| `v0.24.1` | [§18](#18-settings-you-already-pass-start-applying-on-ios-v0241) |
+| `v0.25.0` | [§19](#19-the-reticulum-transports-inert-configuration-is-gone-v0250) |
+| `v0.26.0` | [§20](#20-the-sdk-uploads-its-own-telemetry-v0260), [§21](#21-delivery-state-survives-a-restart-and-two-defaults-grow-v0260) |
+| `v0.27.0` | [§22](#22-documents-can-be-removed-from-every-replica-v0270), [§23](#23-a-space-can-replicate-in-part-v0270), [§24](#24-attachment-bytes-inside-a-group-v0270), [§25](#25-behaviour-that-changes-without-a-compile-error-v0270) |
+| `v0.28.0` | [§26](#26-behaviour-that-changes-without-a-compile-error-v0280) |
+| `v0.29.0` | [§27](#27-behaviour-that-changes-without-a-compile-error-v0290) |
+| `v0.30.0` | [§28](#28-behaviour-that-changes-without-a-compile-error-v0300) |
+| `v0.31.0` | [§29](#29-behaviour-that-changes-without-a-compile-error-v0310) |
+| `v0.32.0` | [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) |
+
+Every other part of sections 1–13 covers the `v0.17.0` storage split, and §13
+is the test checklist.
 
 ### By platform (same target `v0.32.x`)
 

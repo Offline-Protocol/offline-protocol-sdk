@@ -50,13 +50,20 @@ dependencies:
 
 ## Platform setup
 
-Flutter host apps use the same iOS and Android permission rules as React Native.
 **Canonical guide:** [mobile-permissions.md](../../docs/mobile-permissions.md)
 (Info.plist, manifest, grant timing before `start()`, background mesh on Android).
 
-- **iOS:** usage descriptions, `UIBackgroundModes`, and local network keys when needed.
-- **Android:** runtime Bluetooth; nearby Wi‑Fi or location by API level; API 37
-  `ACCESS_LOCAL_NETWORK` in the **app** manifest when targeting API 37+.
+- **iOS:** the same `Info.plist` rules as React Native: usage descriptions,
+  `UIBackgroundModes`, and local network keys when needed.
+- **Android:** unlike React Native, the plugin's manifest declares only
+  `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`,
+  `CHANGE_WIFI_STATE` and its foreground service. Declare the Bluetooth,
+  location (`maxSdkVersion="32"`), Wi‑Fi Direct, LAN and `INTERNET`
+  permissions in `android/app/src/main/AndroidManifest.xml` yourself; the
+  exact block is in [mobile-permissions.md § Flutter](../../docs/mobile-permissions.md#flutter).
+  Then request Bluetooth, and nearby Wi‑Fi or location by API level, at
+  runtime before `start()`; the plugin does not prompt. Add
+  `ACCESS_LOCAL_NETWORK` to the **app** manifest when targeting API 37+.
 
 ### iOS: shared bridge copy (`BridgeRN`)
 

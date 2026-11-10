@@ -81,10 +81,6 @@ Add required permissions to `ios/YourApp/Info.plist`:
 <key>NSBluetoothPeripheralUsageDescription</key>
 <string>This app uses Bluetooth to communicate with nearby devices when offline</string>
 
-<!-- Location permission (required for BLE scanning) -->
-<key>NSLocationWhenInUseUsageDescription</key>
-<string>This app needs location access to discover nearby devices for offline messaging</string>
-
 <!-- Local network permission -->
 <key>NSLocalNetworkUsageDescription</key>
 <string>This app uses local network to discover and communicate with nearby devices</string>
@@ -154,9 +150,10 @@ Add required permissions to `android/app/src/main/AndroidManifest.xml`:
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     
-    <!-- Location permissions (required for BLE scanning) -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Location: BLE scanning on API 30 and lower, Wi-Fi Direct discovery
+         on API 32 and lower. The SDK does not declare it, so the app must. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
     
     <!-- Wi-Fi Direct permissions -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -434,11 +431,15 @@ import { PermissionsAndroid, Platform } from 'react-native';
 
 async function requestPermissions() {
   if (Platform.OS === 'android') {
-    const granted = await PermissionsAndroid.requestMultiple([
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-    ]);
+    const P = PermissionsAndroid.PERMISSIONS;
+    // Location is declared with maxSdkVersion 32, so it is only requested
+    // where BLE needs it (API 30 and lower); asking on newer versions is
+    // denied without a prompt.
+    const granted = await PermissionsAndroid.requestMultiple(
+      Number(Platform.Version) >= 31
+        ? [P.BLUETOOTH_CONNECT, P.BLUETOOTH_SCAN, P.BLUETOOTH_ADVERTISE]
+        : [P.ACCESS_FINE_LOCATION],
+    );
 
     return Object.values(granted).every(
       (status) => status === PermissionsAndroid.RESULTS.GRANTED

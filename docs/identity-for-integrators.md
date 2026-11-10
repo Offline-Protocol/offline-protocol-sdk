@@ -19,9 +19,15 @@ strings go in `profile`, which go in `recipient`, and where to get a peer's
 
 | Name | Example | On the wire? | Used for |
 |------|---------|--------------|----------|
-| **`appId`** | `my-chat-app` | No | Application id, telemetry, storage namespace |
-| **`profile`** | `default`, `user123` | **No** | Local account slot on **this** device only |
+| **`appId`** | `my-chat-app` | Yes, as routing metadata (see below) | Application id, telemetry, storage namespace |
+| **`profile`** | `default`, `user123` | **No**, unless you turn on username discovery, which publishes it as your username | Local account slot on **this** device only |
 | **Mesh address** | `off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn` | **Yes** | `recipient`, group membership, `sender` on frames |
+
+`appId` is stamped in cleartext on every frame the instance sends, outside
+every signature, so any carrier can read or rewrite it. Treat it as a routing
+stamp, never as a secret or an authorization input. BLE also serves an 8-byte
+hash of it (the app tag) so a central can find its own app's service on a phone
+running several SDK apps.
 
 Your device does **not** choose its address. The SDK derives it from an
 identity key it generates and stores per `(appId, profile)`. Peers verify a
@@ -38,8 +44,9 @@ claimed address against the key material the peer presents.
 - your own `profile`,
 - a login username,
 - a phone number,
-- or a shortened nickname like `bob` (unless you built your own resolver on
-  top; the SDK does not ship one).
+- or a shortened nickname like `bob`. To get from a name to an address, use
+  an invite or the opt-in username lookup ([A peer](#a-peer)), then pass the
+  address.
 
 **`profile` is only for `ProtocolConfig` / constructor config** to pick which
 stored identity this install runs as. It never substitutes for a peer address.
@@ -68,7 +75,8 @@ Until the address is known, `localAddress()` may return `null`. UI that shows
 |--------|--------|
 | Discovery | `neighbor_discovered` → `peer_id` |
 | Incoming message | `message_received` → `sender` |
-| Invite / QR / deep link | Your app's exchange payload (must carry `off1…`) |
+| Invite / QR / deep link (primary path) | `createInvite()` on the sharing device; `parseInvite(blob)` → `address` on the scanning one, verified offline |
+| Username (opt-in, not authoritative) | `resolveUsername(name)` → `username_resolved` → `claims`. Needs `transports.nostr.usernameDiscoveryEnabled`. Anyone can claim any name, so let the user choose and store the address, not the name ([UPGRADING §14](UPGRADING.md#cold-contact-by-username)) |
 | HTTP front aliases | Map display names to addresses in **your** config (see [http-front](spec/http-front.md)) |
 
 Store the address your product shows to users separately from the mesh address
@@ -130,7 +138,7 @@ protocol.send_message(peer, "Hello!", Some(MessagePriority::High), None::<String
 |---------|---------|-----|
 | `recipient: profile` or `recipient: 'user456'` | No delivery, encrypt failures, empty sessions | Use peer `off1…` from discovery |
 | Show `profile` in "share my id" UI | Other devices cannot reach you | Show `localAddress()` |
-| Reinstall app, expect same address without restoring keys | New `off1…`, old peers still have the old one | Treat as new device; migrate via UPGRADING §14 |
+| Reinstall on Android, expect the same address | New `off1…`, old peers still have the old one | Treat as a new device; share the new address by invite |
 | Invite flow stores username only | Handshake never completes | Exchange and store `off1…` |
 
 ---
@@ -139,8 +147,15 @@ protocol.send_message(peer, "Hello!", Some(MessagePriority::High), None::<String
 
 - **Same `appId` + `profile` + intact MLS storage:** address stays stable across
   restarts.
-- **New install or wiped secure storage:** new identity key → **new `off1…`**.
-  Peers must learn the new address through discovery or your invite channel.
+- **Reinstall on Android:** uninstalling removes the app's storage, so the
+  reinstalled app mints a new identity key → **new `off1…`**. Peers must learn
+  the new address through discovery or your invite channel.
+- **Reinstall on iOS:** the Keychain survives an uninstall, so a reinstall
+  running the same `appId` + `profile` adopts the old identity again and keeps
+  the old address. To start over, call `wipePersistedState(appId, profile)`
+  (React Native, Flutter) after `destroy()`; see
+  [UPGRADING](UPGRADING.md#logging-out-and-switching-accounts).
+- **Wiped secure storage:** new identity key → **new `off1…`**.
 - **Multiple profiles on one device:** each profile has its own address and MLS
   state. `profile` selects which one runs; it is not a peer id.
 

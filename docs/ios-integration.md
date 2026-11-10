@@ -312,6 +312,7 @@ Groups use role-based access control: **Admin** and **Member**.
 
 ```swift
 // Promote a member to admin (admin only)
+let inviteeAddress = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn" // a member's address
 try offlineProtocol.setMemberRole(groupId: groupId, userId: inviteeAddress, role: "admin")
 
 let role = try offlineProtocol.getMemberRole(groupId: groupId, userId: inviteeAddress)
