@@ -42977,32 +42977,48 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
     use crate::protocol::state_crypto::StateRecordCipher;
     use crate::protocol_state_storage::{ProtocolStateResult, ProtocolStateStorage};
     use crate::telemetry::{AppState, TelemetryHost, TelemetryOs};
-    use offline_protocol_core::time::Instant;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Every read sleeps, as a slow disk would. One reaching the caller is
-    /// worth 100 ms; the load path makes several.
-    struct SlowStateStorage;
+    /// Every read sleeps, as a slow disk would. If any method runs on the thread
+    /// that called `enable_telemetry`, the load path reached the caller.
+    struct SlowStateStorage {
+        caller: std::thread::ThreadId,
+        on_caller: Arc<AtomicBool>,
+    }
+    impl SlowStateStorage {
+        fn touch(&self) {
+            if std::thread::current().id() == self.caller {
+                self.on_caller.store(true, Ordering::SeqCst);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
     impl ProtocolStateStorage for SlowStateStorage {
         fn store(&self, _: &str, _: &str, _: &[u8]) -> ProtocolStateResult<()> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(())
         }
         fn load(&self, _: &str, _: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(None)
         }
         fn delete(&self, _: &str, _: &str) -> ProtocolStateResult<()> {
             Ok(())
         }
         fn list_keys(&self, _: &str) -> ProtocolStateResult<Vec<String>> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(Vec::new())
         }
     }
 
+    let on_caller = Arc::new(AtomicBool::new(false));
+    let caller = std::thread::current().id();
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     // What `initialize_mls` leaves behind, without paying for its own I/O.
-    protocol.protocol_state_storage = Some(Arc::new(SlowStateStorage));
+    protocol.protocol_state_storage = Some(Arc::new(SlowStateStorage {
+        caller,
+        on_caller: on_caller.clone(),
+    }));
     protocol.state_record_cipher = Some(StateRecordCipher::new(&[7u8; 32]));
 
     let config = TelemetryConfig::default()
@@ -43010,12 +43026,10 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
         .with_app_id("app_test");
     let host = TelemetryHost::new(TelemetryOs::Ios, 18).with_app_state(AppState::Active);
 
-    let started = Instant::now();
     protocol.enable_telemetry(config, host).expect("enables");
-    let elapsed = started.elapsed();
     assert!(
-        elapsed < Duration::from_millis(50),
-        "enable_telemetry blocked the caller on storage for {elapsed:?}"
+        !on_caller.load(Ordering::SeqCst),
+        "enable_telemetry ran protocol-state storage I/O on the caller"
     );
 
     // Nothing was emitted, so the worker drains an empty ring and opens no

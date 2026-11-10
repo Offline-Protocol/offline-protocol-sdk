@@ -132,7 +132,8 @@ Checklist at end of upgrade guide:
 
 **Canonical guide:** [mobile-permissions.md](mobile-permissions.md) (manifest,
 Info.plist, runtime grant order, background modes, Android foreground service,
-API 37 `ACCESS_LOCAL_NETWORK`).
+API 37 `ACCESS_LOCAL_NETWORK`). React Native apps may call
+`requestMeshPermissions()` before `start()` (see that guide).
 
 | Need | Where to read |
 |------|----------------|
@@ -181,12 +182,6 @@ version for the index).
 | [Storage adapters](../examples/storage-adapters/README.md) | Custom protocol-state storage (Swift/Kotlin/Python) |
 | `offline-protocol-verify` (Python) | Smoke test pairing/delivery against a running service |
 | [Mesh between tabs](../examples/web-two-tabs/README.md) | Browser worker mesh |
-
----
-
-## Maintainer: friction reduction roadmap
-
-Internal plan for DX improvements (groups G0–G14): [integrator-friction.md](integrator-friction.md).
 
 ---
 
