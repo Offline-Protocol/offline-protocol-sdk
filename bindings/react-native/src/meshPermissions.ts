@@ -23,12 +23,24 @@ export const ANDROID_API_NEARBY_WIFI = 33;
 /** Android 17 (API 37): LAN discovery needs ACCESS_LOCAL_NETWORK when targeted. */
 export const ANDROID_API_LOCAL_NETWORK = 37;
 
+/**
+ * Spelled out rather than read from `PermissionsAndroid.PERMISSIONS`: that
+ * constant only exists from React Native 0.87, and this package supports 0.70+.
+ * The native module takes any permission string.
+ */
+const ACCESS_LOCAL_NETWORK_PERMISSION =
+  'android.permission.ACCESS_LOCAL_NETWORK' as string as Permission;
+
 const IOS_PREFLIGHT_MESSAGE =
   'iOS permissions are prompted when mesh starts. Add the Info.plist keys in docs/mobile-permissions.md before calling start().';
 
 /**
  * Builds the Android dangerous-permission list to request for the given options.
- * Exported for unit tests; matches BleTransportFacade and WifiDirectManager checks.
+ * Exported for unit tests. The BLE and Wi-Fi Direct entries match the
+ * BleTransportFacade and WifiDirectManager checks. `ACCESS_LOCAL_NETWORK` is
+ * keyed off the device API level only because JS cannot read the app's
+ * `targetSdkVersion`, which is what LanPeerDiscovery checks; it is requested
+ * only when the caller opts in with `localNetwork: true`.
  */
 export function buildAndroidMeshPermissionList(
   options: MeshPermissionRequestOptions,
@@ -58,7 +70,7 @@ export function buildAndroidMeshPermissionList(
   }
 
   if (localNetwork && apiLevel >= ANDROID_API_LOCAL_NETWORK) {
-    permissions.push(P.ACCESS_LOCAL_NETWORK);
+    permissions.push(ACCESS_LOCAL_NETWORK_PERMISSION);
   }
 
   return [...new Set(permissions)];
@@ -82,6 +94,14 @@ function mapAndroidResult(
 
 /**
  * Derives permission options from transport toggles in a {@link ProtocolConfig}.
+ *
+ * Never sets `localNetwork`: whether the app needs `ACCESS_LOCAL_NETWORK`
+ * depends on its `targetSdkVersion` (37+) and its own manifest declaration,
+ * neither of which the config or JS can see. Requesting an undeclared
+ * permission is denied without a prompt, which would report `granted: false`
+ * for an app that needs nothing more. Apps that target API 37+ and declare
+ * the permission pass `{ ...meshPermissionOptionsFromConfig(config),
+ * localNetwork: true }` to {@link requestMeshPermissions}.
  */
 export function meshPermissionOptionsFromConfig(
   config: Pick<ProtocolConfig, 'transports'>,
@@ -93,8 +113,7 @@ export function meshPermissionOptionsFromConfig(
   return {
     ble,
     wifiDirect,
-    // LAN rides the same peer-stream slot; API 37+ apps need the grant when that slot is on.
-    localNetwork: wifiDirect,
+    localNetwork: false,
   };
 }
 

@@ -294,13 +294,17 @@ Simulators do not validate BLE or Wi‑Fi Direct behaviour. Use hardware for mes
 
 ## React Native helper (optional)
 
+> **Available from the next release** of `@offline-protocol/mesh-sdk`. Version
+> 0.32.0 and earlier do not export these functions; request the grants in the
+> tables above yourself with `PermissionsAndroid`.
+
 `@offline-protocol/mesh-sdk` exports:
 
 | API | Role |
 |-----|------|
 | `requestMeshPermissions(options?)` | Request Android dangerous grants before `start()` |
 | `requestMeshPermissionsForConfig(config)` | Same, with options derived from `transports` |
-| `meshPermissionOptionsFromConfig(config)` | Build options without prompting |
+| `meshPermissionOptionsFromConfig(config)` | Build options without prompting (never sets `localNetwork`) |
 
 ```typescript
 import { OfflineProtocol, requestMeshPermissionsForConfig } from '@offline-protocol/mesh-sdk';
@@ -320,8 +324,26 @@ await protocol.start();
 Bluetooth and local network prompts appear when mesh starts.
 
 **Android:** the helper requests only permissions that are not already granted.
-It does not add manifest entries or replace `ACCESS_LOCAL_NETWORK` in the app
-manifest for API 37+ targets.
+It does not add manifest entries; every permission it requests must already be
+declared in the merged manifest, or Android denies it without a prompt.
 
-This document remains the contract for what must be granted; the helpers mirror
-the native permission checks in the React Native Android bridge.
+**`ACCESS_LOCAL_NETWORK` is opt-in.** The `localNetwork` option defaults to
+`false`, and `meshPermissionOptionsFromConfig` never sets it, even with Wi‑Fi
+Direct on. Set it `true` only if your app targets API 37+ and declares
+`ACCESS_LOCAL_NETWORK` in its own manifest:
+
+```typescript
+import { meshPermissionOptionsFromConfig, requestMeshPermissions } from '@offline-protocol/mesh-sdk';
+
+await requestMeshPermissions({ ...meshPermissionOptionsFromConfig(config), localNetwork: true });
+```
+
+The LAN carrier checks this grant only when the app's `targetSdkVersion` is 37
+or higher, and JavaScript cannot read the target SDK. The helper can only see
+the device's API level, so it leaves the decision to you rather than prompt
+for, and fail on, a permission an app targeting API 36 or lower neither
+declares nor needs.
+
+This document remains the contract for what must be granted. The helper's
+Bluetooth and Wi‑Fi Direct requests follow the checks in the React Native
+Android bridge; `ACCESS_LOCAL_NETWORK` does not, for the reason above.

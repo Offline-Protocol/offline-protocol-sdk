@@ -89,7 +89,7 @@ Quick pointers:
 The SDK manifest merges Wi‑Fi, internet, multicast, and foreground-service
 permissions; you still own runtime prompts and API 37 local network.
 
-**Optional:** request Android runtime grants before `start()`:
+**Optional (from the next release):** request Android runtime grants before `start()`:
 
 ```typescript
 import { requestMeshPermissionsForConfig, OfflineProtocol } from '@offline-protocol/mesh-sdk';
@@ -102,7 +102,7 @@ await protocol.start();
 ```
 
 See [mobile-permissions.md](../../docs/mobile-permissions.md#react-native-helper-optional) and
-`requestMeshPermissions` in the API table below.
+[Module functions](#module-functions) below.
 
 ---
 
@@ -727,11 +727,20 @@ interface TransportMetrics {
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `requestMeshPermissions(options?)` | `Promise<MeshPermissionRequestResult>` | Request Android mesh runtime grants (see [mobile permissions](../../docs/mobile-permissions.md)) |
-| `requestMeshPermissionsForConfig(config)` | `Promise<MeshPermissionRequestResult>` | Same, options from `transports` |
 | `isBluetoothEnabled()` | `Promise<boolean>` | Check if Bluetooth is enabled |
 | `requestEnableBluetooth()` | `Promise<boolean>` | Request to enable Bluetooth (Android only) |
 | `getBLePeerCount()` | `Promise<number>` | Get number of discovered BLE peers |
+
+### Module functions
+
+Imported from the package, not called on an `OfflineProtocol` instance.
+Available from the next release.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `requestMeshPermissions(options?)` | `Promise<MeshPermissionRequestResult>` | Request Android mesh runtime grants (see [mobile permissions](../../docs/mobile-permissions.md#react-native-helper-optional)) |
+| `requestMeshPermissionsForConfig(config)` | `Promise<MeshPermissionRequestResult>` | Same, options from `transports` |
+| `meshPermissionOptionsFromConfig(config)` | `MeshPermissionRequestOptions` | Build those options without prompting |
 
 ### Network Topology
 
