@@ -292,8 +292,36 @@ Simulators do not validate BLE or Wi‑Fi Direct behaviour. Use hardware for mes
 
 ---
 
-## Planned follow-up (G1 PR2)
+## React Native helper (optional)
 
-A React Native helper (`requestMeshPermissions()` or similar) may be added in a
-later PR to request the standard grant set in the right order. **This document
-remains the contract** for what must be granted; helpers only automate it.
+`@offline-protocol/mesh-sdk` exports:
+
+| API | Role |
+|-----|------|
+| `requestMeshPermissions(options?)` | Request Android dangerous grants before `start()` |
+| `requestMeshPermissionsForConfig(config)` | Same, with options derived from `transports` |
+| `meshPermissionOptionsFromConfig(config)` | Build options without prompting |
+
+```typescript
+import { OfflineProtocol, requestMeshPermissionsForConfig } from '@offline-protocol/mesh-sdk';
+
+const config = { appId: 'my-app', profile: 'default', transports: { ble: { enabled: true } } };
+
+const permissions = await requestMeshPermissionsForConfig(config);
+if (!permissions.granted) {
+  // User denied a grant; avoid start() or enableTransport later when fixed
+}
+
+const protocol = new OfflineProtocol(config);
+await protocol.start();
+```
+
+**iOS:** the helper does not show dialogs. Add Info.plist keys from this guide;
+Bluetooth and local network prompts appear when mesh starts.
+
+**Android:** the helper requests only permissions that are not already granted.
+It does not add manifest entries or replace `ACCESS_LOCAL_NETWORK` in the app
+manifest for API 37+ targets.
+
+This document remains the contract for what must be granted; the helpers mirror
+the native permission checks in the React Native Android bridge.

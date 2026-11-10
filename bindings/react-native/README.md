@@ -89,6 +89,21 @@ Quick pointers:
 The SDK manifest merges Wi‑Fi, internet, multicast, and foreground-service
 permissions; you still own runtime prompts and API 37 local network.
 
+**Optional:** request Android runtime grants before `start()`:
+
+```typescript
+import { requestMeshPermissionsForConfig, OfflineProtocol } from '@offline-protocol/mesh-sdk';
+
+const config = { appId: 'my-app', profile: 'default', transports: { ble: { enabled: true } } };
+await requestMeshPermissionsForConfig(config);
+
+const protocol = new OfflineProtocol(config);
+await protocol.start();
+```
+
+See [mobile-permissions.md](../../docs/mobile-permissions.md#react-native-helper-optional) and
+`requestMeshPermissions` in the API table below.
+
 ---
 
 ## Quick Start
@@ -709,6 +724,8 @@ interface TransportMetrics {
 
 | Method | Returns | Description |
 |--------|---------|-------------|
+| `requestMeshPermissions(options?)` | `Promise<MeshPermissionRequestResult>` | Request Android mesh runtime grants (see [mobile permissions](../../docs/mobile-permissions.md)) |
+| `requestMeshPermissionsForConfig(config)` | `Promise<MeshPermissionRequestResult>` | Same, options from `transports` |
 | `isBluetoothEnabled()` | `Promise<boolean>` | Check if Bluetooth is enabled |
 | `requestEnableBluetooth()` | `Promise<boolean>` | Request to enable Bluetooth (Android only) |
 | `getBLePeerCount()` | `Promise<number>` | Get number of discovered BLE peers |

@@ -84,6 +84,15 @@ import {
 
 export * from './types';
 export * from './constants';
+export {
+  requestMeshPermissions,
+  requestMeshPermissionsForConfig,
+  meshPermissionOptionsFromConfig,
+  buildAndroidMeshPermissionList,
+  ANDROID_API_BLUETOOTH_RUNTIME,
+  ANDROID_API_NEARBY_WIFI,
+  ANDROID_API_LOCAL_NETWORK,
+} from './meshPermissions';
 
 const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
   ? NativeModules.OfflineProtocolModule
