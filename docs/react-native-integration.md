@@ -105,9 +105,16 @@ transports: {
 
 ## 4. Enabling Transports
 
+**Permissions and background setup:** [mobile-permissions.md](mobile-permissions.md)
+is the single reference for Info.plist, Android manifest, runtime grant order,
+and when to call `start()`. The sections below describe transport behaviour once
+permissions are in place.
+
 ### 4.1 BLE
 
-- **Permissions**: Bluetooth, Bluetooth Advertise/Connect/Scan (Android 12+), Location (Android), `NSBluetoothAlwaysUsageDescription` (iOS).
+- **Permissions:** see [mobile-permissions.md](mobile-permissions.md). Short
+  summary: Bluetooth runtime grants on Android; `NSBluetoothAlwaysUsageDescription`
+  and background modes on iOS.
 - BLE scanning/advertising and fragmentation are handled automatically; 512-fragment cap per message.
 
 ### 4.2 Wi‑Fi Direct (Android)

@@ -130,19 +130,15 @@ Checklist at end of upgrade guide:
 
 ## Permissions and transports (mobile)
 
-Platform-specific keys and grant timing are still spread across READMEs until
-[unified mobile permissions](integrator-friction.md) (planned G1) lands. Until
-then:
+**Canonical guide:** [mobile-permissions.md](mobile-permissions.md) (manifest,
+Info.plist, runtime grant order, background modes, Android foreground service,
+API 37 `ACCESS_LOCAL_NETWORK`).
 
 | Need | Where to read |
 |------|----------------|
-| iOS Bluetooth + background | [RN README iOS permissions](../bindings/react-native/README.md#ios-permissions), [example app Info.plist](../examples/react-native-app/INTEGRATION_GUIDE.md#ios-configuration) |
-| Android Bluetooth + Wi‑Fi Direct + LAN | [RN README Android](../bindings/react-native/README.md#android-permissions), [react-native-integration §4](react-native-integration.md#4-enabling-transports) |
-| Internet / relay | [configuration.md](configuration.md), [react-native-integration §4.3](react-native-integration.md#43-internet) |
-
-**Android 17 (API 37):** apps targeting API 37 must declare and request
-`ACCESS_LOCAL_NETWORK` before `start()` for LAN peer discovery. The SDK does
-not declare it (see [UPGRADING](UPGRADING.md) and RN README).
+| Permissions + background | [mobile-permissions.md](mobile-permissions.md) |
+| Transport toggles and DORS | [react-native-integration §4](react-native-integration.md#4-enabling-transports), [configuration.md](configuration.md) |
+| Example app copy-paste blocks | [example app integration guide](../examples/react-native-app/INTEGRATION_GUIDE.md) (should match the canonical guide) |
 
 **Testing:** BLE and Wi‑Fi Direct need **physical devices**; simulators are not
 enough for mesh QA.

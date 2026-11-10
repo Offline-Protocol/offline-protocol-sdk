@@ -70,59 +70,24 @@ Pre-built native libraries are included. No additional setup required.
 
 ## Platform Setup
 
-### iOS Permissions
+**Use the canonical guide:** [Mobile permissions and background setup](../../docs/mobile-permissions.md)
+covers Info.plist, Android manifest, what the SDK merges, runtime grant order
+(**before** `start()` for Wi‑Fi Direct and API 37 LAN), `neverForLocation` edge
+cases, and the Android foreground service notification.
 
-Add to `Info.plist`:
+Quick pointers:
 
-```xml
-<key>NSBluetoothAlwaysUsageDescription</key>
-<string>Required for offline mesh communication</string>
+- **iOS:** `NSBluetoothAlwaysUsageDescription`, `NSBluetoothPeripheralUsageDescription`,
+  and `UIBackgroundModes` (`bluetooth-central`, `bluetooth-peripheral`) are required
+  for reliable BLE in production. Add local network + Bonjour keys when the Wi‑Fi
+  slot is on (see the guide).
+- **Android:** request Bluetooth permissions (and on older APIs, fine location) before
+  `start()`. Request `NEARBY_WIFI_DEVICES` (13+) or fine location (≤12) before
+  `start()` when Wi‑Fi Direct is enabled. If `targetSdkVersion` is 37+, declare and
+  request `ACCESS_LOCAL_NETWORK` in the **app** for LAN discovery.
 
-<key>NSBluetoothPeripheralUsageDescription</key>
-<string>Required for offline mesh communication</string>
-
-<key>UIBackgroundModes</key>
-<array>
-    <string>bluetooth-central</string>
-    <string>bluetooth-peripheral</string>
-</array>
-```
-
-### Android Permissions
-
-Add to `AndroidManifest.xml`:
-
-```xml
-<!-- Bluetooth (Android 12+) -->
-<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
-<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-
-<!-- Bluetooth (Android 11 and below) -->
-<uses-permission android:name="android.permission.BLUETOOTH" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-
-```
-
-Wi-Fi Direct and the internet need nothing in your manifest: the SDK's own
-manifest declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET`,
-`ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE` and `NEARBY_WIFI_DEVICES`, and the build merges them
-into your app. The peer-stream slot also finds iPhones and hosts on the Wi-Fi
-network the phone is on, which needs no runtime grant unless your app
-targets Android 17 (API 37): then an app targeting Android 17 (API 37) must declare `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier stays off with a warning diagnostic. The SDK does not declare it, because a declaration revokes the grant apps targeting 36 and lower hold by default. The SDK's manifest declares
-`NEARBY_WIFI_DEVICES` with `android:usesPermissionFlags="neverForLocation"`,
-and that flag reaches your merged manifest too: the transport derives no
-location from Wi-Fi, so on Android 13+ it needs `NEARBY_WIFI_DEVICES` alone.
-Request it at runtime before `start()`. On Android 12 and lower, request
-`ACCESS_FINE_LOCATION`, which peer discovery needs there.
-
-If your app does derive location from Wi-Fi scans, it must not inherit that
-assertion. Replace the declaration in your manifest with
-`tools:node="replace"` and no `usesPermissionFlags`, and also hold
-`ACCESS_FINE_LOCATION` on Android 13+: the SDK checks only
-`NEARBY_WIFI_DEVICES` there, so without the location grant peer discovery
-fails rather than the transport reporting itself unavailable.
+The SDK manifest merges Wi‑Fi, internet, multicast, and foreground-service
+permissions; you still own runtime prompts and API 37 local network.
 
 ---
 
