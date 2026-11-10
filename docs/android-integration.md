@@ -210,6 +210,11 @@ provider interfaces.
 
 ## Permissions
 
+Complete Android rules (SDK merge vs app manifest, runtime order, Wi‑Fi Direct,
+API 37 `ACCESS_LOCAL_NETWORK`, foreground service):
+[mobile-permissions.md](mobile-permissions.md). The snippet below is a common
+app manifest starting point for native integration.
+
 Add to `AndroidManifest.xml`:
 
 ```xml

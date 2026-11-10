@@ -68,6 +68,9 @@ picks the matching slice out of the SDK's XCFramework.
 
 ### 2. Configure Info.plist
 
+> **Canonical reference:** [mobile-permissions.md](../../docs/mobile-permissions.md).
+> Keep this app's plist aligned with that guide when you change transports.
+
 Add required permissions to `ios/YourApp/Info.plist`:
 
 ```xml
@@ -133,6 +136,8 @@ npm run ios
 ## Android Configuration
 
 ### 1. Update AndroidManifest.xml
+
+> **Canonical reference:** [mobile-permissions.md](../../docs/mobile-permissions.md).
 
 Add required permissions to `android/app/src/main/AndroidManifest.xml`:
 

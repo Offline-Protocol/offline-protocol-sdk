@@ -17,6 +17,9 @@ npm install @offline-protocol/mesh-sdk
 cd ios && pod install  # iOS only
 ```
 
+Before `start()` on a real device, add iOS and Android permissions from
+[mobile-permissions.md](docs/mobile-permissions.md).
+
 ### 2. Initialize
 
 ```typescript

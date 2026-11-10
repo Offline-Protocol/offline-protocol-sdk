@@ -213,6 +213,10 @@ provider interfaces.
 
 ## Permissions
 
+Complete iOS rules (Bluetooth, local network, Bonjour, background modes):
+[mobile-permissions.md](mobile-permissions.md). The snippet below is the minimum
+for BLE mesh; add local network keys from that guide when the Wi‑Fi slot is enabled.
+
 Add to `Info.plist`:
 
 ```xml
