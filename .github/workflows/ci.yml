@@ -66,7 +66,6 @@ jobs:
       manifests: ${{ steps.gate.outputs.manifests }}
       spec_vectors: ${{ steps.gate.outputs.spec_vectors }}
       notices: ${{ steps.gate.outputs.notices }}
-      deps: ${{ steps.gate.outputs.deps }}
       embedded: ${{ steps.gate.outputs.embedded }}
       mls_interop: ${{ steps.gate.outputs.mls_interop }}
       c_binding: ${{ steps.gate.outputs.c_binding }}
@@ -169,12 +168,6 @@ jobs:
               - 'about.hbs'
               - 'scripts/generate-third-party-notices.sh'
               - '**/THIRD-PARTY-NOTICES.md'
-
-            deps:
-              - 'Cargo.lock'
-              - '**/Cargo.toml'
-              - 'deny.toml'
-              - '.cargo/audit.toml'
 
             # The three crates a leaf links, and the two harnesses that build
             # them in their own workspaces.
@@ -397,7 +390,7 @@ jobs:
             echo "| filter | runs |"
             echo "| --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
-          for name in rust rust_tests manifests spec_vectors notices deps embedded \
+          for name in rust rust_tests manifests spec_vectors notices embedded \
                       mls_interop c_binding java ruby csharp web python python_wheel \
                       release_packaging rn_typecheck android_unit ios_unit \
                       native_scripts swift_package android_library \
@@ -1281,10 +1274,15 @@ jobs:
           GECKODRIVER="$GECKOWEBDRIVER/geckodriver" \
             bash bindings/web/scripts/test-conformance.sh
 
+  # Not gated. An advisory is published against a version already in
+  # Cargo.lock, so the pull request that meets it first has usually changed
+  # no dependency. Gated on the dependency files, this job was skipped on
+  # those pull requests and ran on the push to main that followed, where
+  # RUSTSEC-2026-0486 turned main red for six merges in a row. It reads the
+  # lock file and takes about a minute. audit.yml runs the same check daily,
+  # so an advisory shows up there before it shows up on somebody's change.
   security:
     name: Dependency Audit
-    needs: changes
-    if: needs.changes.outputs.deps == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -1740,7 +1738,12 @@ jobs:
       # type-checked directly against the iphoneos SDK plus the checked-in
       # Generated/ modulemap, which at least catches API drift and syntax
       # breakage before a release.
-      # `-typecheck` emits no binary; warnings do not fail the build.
+      # `-emit-sil` rather than `-typecheck`: a missing return and a use before
+      # initialisation are reported by the passes that run after type
+      # checking, so `-typecheck` accepts a file with either. #717 merged two missing returns in
+      # ProtocolEngineHost.swift that both steps here passed. Whole-module so
+      # that there is one output, which is discarded; no binary is produced
+      # and warnings do not fail the build.
       #
       # BleManager / WifiDirectManager / ReticulumManager joined this list in
       # #300: only their mesh/ and ble/ collaborators were missing, and adding
@@ -1750,7 +1753,7 @@ jobs:
       - name: iOS bridge typecheck (files excluded from the SwiftPM harness)
         working-directory: bindings/react-native/ios
         run: |
-          xcrun --sdk iphoneos swiftc -typecheck \
+          xcrun --sdk iphoneos swiftc -emit-sil -whole-module-optimization -o /dev/null \
             -target arm64-apple-ios15.1 \
             -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
             -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap \
@@ -1809,7 +1812,7 @@ jobs:
           for f in *.swift; do [ "$f" = Package.swift ] || FILES+=("$f"); done
           # An empty or partial list would pass vacuously.
           printf '%s\n' "${FILES[@]}" | grep -qx OfflineProtocolModule.swift
-          xcrun --sdk iphoneos swiftc -typecheck \
+          xcrun --sdk iphoneos swiftc -emit-sil -whole-module-optimization -o /dev/null \
             -target arm64-apple-ios15.1 \
             -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
             -I"$OUT" -Xcc -I"$OUT" \

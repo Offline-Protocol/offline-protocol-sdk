@@ -5479,7 +5479,7 @@ Used by:
 - [pin-project-lite 0.2.16](https://github.com/taiki-e/pin-project-lite)
 - [proc-macro2 1.0.103](https://github.com/dtolnay/proc-macro2)
 - [quote 1.0.41](https://github.com/dtolnay/quote)
-- [rustix 1.1.5](https://github.com/bytecodealliance/rustix)
+- [rustix 1.1.6](https://github.com/bytecodealliance/rustix)
 - [semver 1.0.27](https://github.com/dtolnay/semver)
 - [serde 1.0.229](https://github.com/serde-rs/serde)
 - [serde_bytes 0.11.19](https://github.com/serde-rs/bytes)

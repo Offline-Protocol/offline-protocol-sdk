@@ -300,8 +300,9 @@ H
 printf 'module React {\n  header "ReactUmbrella.h"\n  export *\n}\n' > "$OUT/React/module.modulemap"
 printf 'module RCTDeprecation {\n  header "RCTDeprecation.h"\n  export *\n}\n' > "$OUT/RCTDeprecation/module.modulemap"
 
-# Typecheck the whole hand-written source set together.
-xcrun --sdk iphoneos swiftc -typecheck \
+# Check the whole hand-written source set together. -emit-sil, not -typecheck:
+# a missing return is reported after type checking, and -typecheck accepts it.
+xcrun --sdk iphoneos swiftc -emit-sil -whole-module-optimization -o /dev/null \
   -target arm64-apple-ios15.1 -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
   -I"$OUT" -Xcc -I"$OUT" \
   -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap -Xcc -IGenerated \

@@ -1,0 +1,27 @@
+name: Dependency Audit
+
+# The advisory half of cargo-deny, daily. An advisory is published against a
+# version already in Cargo.lock, so nothing in the repository changes when one
+# lands. CI runs the full check on every pull request and push, which keeps a
+# new advisory off main but makes the next pull request, whatever it changes,
+# the one that finds it. This run finds it first, on no one's change. The fix
+# is a pull request that moves the dependency or records a waiver in deny.toml
+# with the reason it does not apply.
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: New advisories against Cargo.lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories

@@ -703,7 +703,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     func sendMessage(recipient: String, content: String, priority: Int, replyToMsg: String?) throws -> String {
         warnLifecycleNeedsEngine("sendMessage")
         warnLifecycleSendMls("sendMessage")
-        try requireProtocol().sendMessage(
+        return try requireProtocol().sendMessage(
             recipient: recipient,
             content: content,
             priority: Self.messagePriority(fromInt: priority),
@@ -714,7 +714,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     func sendMessageRich(recipient: String, content: String, options: SendMessageOptions) throws -> String {
         warnLifecycleNeedsEngine("sendMessageRich")
         warnLifecycleSendMls("sendMessageRich")
-        try requireProtocol().sendMessageRich(recipient: recipient, content: content, options: options)
+        return try requireProtocol().sendMessageRich(recipient: recipient, content: content, options: options)
     }
 
     func receiveMessage() -> String? {
