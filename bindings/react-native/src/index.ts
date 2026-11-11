@@ -94,6 +94,12 @@ export {
   ANDROID_API_LOCAL_NETWORK,
 } from './meshPermissions';
 export {
+  CONFIG_SCENARIO_IDS,
+  forScenario,
+  scenarioPreset,
+} from './configScenarios';
+export type { ConfigScenario, ForScenarioParams } from './configScenarios';
+export {
   looksLikeMeshAddress,
   MESH_ADDRESS_ENCODED_LEN,
   MESH_ADDRESS_PREFIX,

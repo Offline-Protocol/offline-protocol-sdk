@@ -491,6 +491,22 @@ protocol.on('diagnostic', (event) => {
 
 ## Configuration
 
+### Config presets (`forScenario`)
+
+For common transport mixes without copying DORS defaults from five documents,
+use [`forScenario`](../../docs/react-native-config-presets.md):
+
+```typescript
+import { OfflineProtocol, forScenario } from '@offline-protocol/mesh-sdk';
+
+const protocol = new OfflineProtocol(
+  forScenario('localBle', { appId: 'my-app', profile: 'default' })
+);
+```
+
+Scenarios: `localBle`, `proximityMesh`, `internetRelay`, `nostrMesh`,
+`developmentCleartext` (lab only). See the [preset tables](../../docs/react-native-config-presets.md#scenario-table).
+
 ### ProtocolConfig
 
 ```typescript
