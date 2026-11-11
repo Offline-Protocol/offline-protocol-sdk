@@ -10962,6 +10962,73 @@ fn test_settling_a_parked_dm_redrives_the_recipients_other_parked_dms() {
 }
 
 #[test]
+fn test_a_receipt_schedules_a_dm_resting_with_no_retry_entry() {
+    // `edge_driven_unreachable_dm` leaves an old undelivered message resting in
+    // the outbox, with no retry entry and no pending ACK, until its peer next
+    // proves reachable. For a peer past a neighbor no neighbor edge ever fires,
+    // so a receipt carried back by the mesh is that proof.
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+    let resting = protocol
+        .send_message("bob", "resting", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let fresh = protocol
+        .send_message("bob", "fresh", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let backed_off = protocol
+        .send_message("bob", "backed off", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    for id in [&resting, &fresh, &backed_off] {
+        protocol.ack_manager.remove_ack(id);
+        protocol.retry_queue.remove(&id.as_str());
+    }
+    // Both past the retry budget, as a long wait alone leaves them.
+    let max_retries = protocol.config.reliability.retry.max_retries;
+    protocol.outbox.get_mut(&resting).unwrap().attempt_count = max_retries + 2;
+    let message = protocol.outbox[&backed_off].message.clone();
+    protocol
+        .retry_queue
+        .enqueue_with_delay(message, max_retries + 2, 300_000);
+    // A sibling whose own sends keep failing, already due inside the timeout.
+    let due_soon = protocol
+        .send_message("bob", "due soon", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.ack_manager.remove_ack(&due_soon);
+    protocol.retry_queue.remove(&due_soon.as_str());
+    let message = protocol.outbox[&due_soon].message.clone();
+    protocol.retry_queue.enqueue_with_delay(message, 3, 1_000);
+
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &fresh),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+
+    assert!(!protocol.outbox.contains_key(&fresh), "the receipt settled");
+    let scheduled: HashMap<String, u32> = protocol
+        .retry_queue
+        .drain_all()
+        .into_iter()
+        .map(|entry| (entry.message.id.as_str(), entry.retry_count))
+        .collect();
+    // The receipt proves the peer answers, so each starts its budget over, as
+    // the flush that used to send them did. Carried over, one ack timeout
+    // without an answer failed them for good, delivered or not.
+    assert_eq!(
+        scheduled.get(&resting.as_str()),
+        Some(&0),
+        "the resting message is scheduled again, with a fresh budget"
+    );
+    assert_eq!(
+        scheduled.get(&backed_off.as_str()),
+        Some(&0),
+        "and so is the backed-off one"
+    );
+    // One the receipt does not move keeps its count, or each receipt would hold
+    // a sibling whose sends keep failing on the bottom rung of its ladder.
+    assert_eq!(scheduled.get(&due_soon.as_str()), Some(&3));
+}
+
+#[test]
 fn test_parked_dm_redriven_with_fresh_ack_budget() {
     // Every re-drive registers a fresh pending ACK, so the retry budget
     // only ever burns against a peer believed reachable — attempts spent
