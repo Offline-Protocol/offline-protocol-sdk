@@ -29,6 +29,10 @@ macOS, Linux, and Windows can use the Python binding's snake_case
   reliability?: ReliabilityConfig,
   data?: DataConfig,
   security?: SecurityConfig,
+
+  // React Native only: development warnings (see below)
+  devPeerAddressWarnings?: boolean,
+  devLifecycleWarnings?: boolean,
 }
 ```
 
@@ -826,6 +830,24 @@ is refused, so a document can be brought back under the cap.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `initialTtl` | number | 8 | Initial TTL for messages |
+
+### Development Warnings (React Native)
+
+Both keys are read by the React Native package only and never reach the
+engine. Each distinct warning is logged once with `console.warn`, and it never
+blocks or changes the call. Available from 0.33.0.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `devPeerAddressWarnings` | boolean | `__DEV__` | Warn when a peer id passed to a send, invite, MLS, service, attachment or block call is not a 44-character `off1…` address, which is what a username, a `profile` or a phone number passed as a recipient looks like. The warning prints the id, so do not set it to `true` in a build you ship ([identity for integrators](identity-for-integrators.md)) |
+| `devLifecycleWarnings` | boolean | `__DEV__` | Warn when calls come in the wrong order: a send or `enableTransport` before `await start()`, a `DataStore` call other than `setInterest` before the store opens, `start()` with no listener registered, a send with encryption on and MLS not initialized, and a `setInterest` after `start()` that narrows a space's interest ([integrator map](integrator-map.md#react-native-lifecycle-ordering)) |
+
+A host built on `ProtocolEngineHost` (the Flutter plugin, or a native host on
+the shared bridge sources) gets the ordering hints through `onDiagnostic` at
+level `warning` instead: on iOS they follow `DEBUG` in the application's
+build, and on Android the host takes `integratorLifecycleWarnings`, off by
+default, which the Flutter plugin sets from the application's
+`FLAG_DEBUGGABLE`.
 
 ## Validation Rules
 
