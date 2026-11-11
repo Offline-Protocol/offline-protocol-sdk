@@ -767,8 +767,14 @@ fn a_fan_out_cut_short_by_the_send_budget_is_finished_when_it_refills() {
     bob.mesh_relay.burst = 2.0;
     bob.mesh_relay.rate_per_sec = 8.0;
     let onward = ["carol", "dave", "erin", "grace"];
+    // Alice's own retries would reach bob again, and he forwards a sender's
+    // resend by design, so the count below holds only until her first retry
+    // (1 s by default). A slow CI runner stepping twelve times took longer.
+    let mut alice = default_config("alice");
+    alice.reliability.retry.initial_delay_ms = 60_000;
 
-    let mut net = Neighborhood::new(&["alice", "carol", "dave", "erin", "grace"]);
+    let mut net = Neighborhood::new(&["carol", "dave", "erin", "grace"]);
+    net.add_node("alice", alice);
     net.add_node("bob", bob);
     net.link("alice", "bob");
     for peer in onward {
@@ -1710,6 +1716,139 @@ fn a_sender_that_lost_its_neighbors_does_not_skip_generations() {
         );
     }
     assert_eq!(stamps, ["1", "2", "3", "3"]);
+}
+
+#[test]
+fn a_receipt_does_not_resend_the_messages_still_waiting_for_theirs() {
+    // alice — bob — carol, and alice sends a burst. Every message is waiting for
+    // its receipt, so each receipt that settled one re-sent all the others: ten
+    // messages cost about forty-five more frames, on a neighbor that accepts
+    // fifteen at once. Its refusals then lost receipts, which are never resent,
+    // and each late receipt started another wave.
+    let roomy = |id: &str| {
+        let mut config = default_config(id);
+        config.mesh_relay.burst = 1_000.0;
+        config.mesh_relay.peer_burst = 1_000.0;
+        config
+    };
+    let mut net = Neighborhood::new(&[]);
+    for id in ["alice", "bob", "carol"] {
+        net.add_node(id, roomy(id));
+    }
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let ids: Vec<String> = (0..10)
+        .map(|n| net.send("alice", "carol", &format!("burst {n}")))
+        .collect();
+    net.run_until_quiet(32);
+
+    assert_eq!(delivered.lock().unwrap().len(), 10, "all ten answered");
+    let handed: Vec<usize> = ids
+        .iter()
+        .map(|id| {
+            net.transmissions
+                .iter()
+                .filter(|(from, _, sent)| from == "alice" && sent == id)
+                .count()
+        })
+        .collect();
+    assert_eq!(handed, vec![1; 10], "each message handed over once");
+}
+
+#[test]
+fn a_receipt_cuts_a_long_backoff_to_one_ack_timeout_and_sends_nothing_itself() {
+    // Alice queues two messages for carol while alone, so they back off: a
+    // minute here, up to five by default. She then walks into range and a new
+    // message is answered. No neighbor edge covers carol, who is two hops away,
+    // so the receipt is the only news that the route is back. It must not send
+    // them itself, or each of their own receipts would re-send the other.
+    let mut alice = default_config("alice");
+    alice.reliability.retry.initial_delay_ms = 60_000;
+    alice.reliability.ack.default_timeout_ms = 500;
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("alice", alice);
+    net.link("bob", "carol");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    let waiting = [
+        net.send("alice", "carol", "queued alone 1"),
+        net.send("alice", "carol", "queued alone 2"),
+    ];
+    net.link("alice", "bob");
+    let fresh = net.send("alice", "carol", "in range");
+    net.run_until_quiet(32);
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [fresh],
+        "the receipt sent nothing itself"
+    );
+
+    // One timeout, then one slot of 400 ms (half of five frames a second).
+    std::thread::sleep(std::time::Duration::from_millis(1_000));
+    net.run_until_quiet(32);
+
+    let settled = delivered.lock().unwrap();
+    assert!(
+        waiting.iter().all(|id| settled.contains(id)),
+        "the backed-off messages went within a second, not a minute: {settled:?}"
+    );
+    let handed: Vec<usize> = waiting
+        .iter()
+        .map(|id| {
+            net.transmissions
+                .iter()
+                .filter(|(from, _, sent)| from == "alice" && sent == id)
+                .count()
+        })
+        .collect();
+    assert_eq!(handed, [1, 1], "their receipts did not re-send each other");
+}
+
+#[test]
+fn a_backlog_a_receipt_brings_forward_goes_at_a_pace_the_next_hop_accepts() {
+    // Forty messages queued alone all back off, and the receipt that cut their
+    // wait sent them at one instant: thirty frames in a twentieth of a second,
+    // on a neighbor that accepts fifteen at once. The refusals spend the same
+    // allowance alice's own receipts need.
+    // Ten times the default rates so the test takes seconds, not minutes; the
+    // bursts stay at their defaults, since they are what a burst runs into.
+    let quick = |id: &str| {
+        let mut config = default_config(id);
+        config.mesh_relay.rate_per_sec = 100.0;
+        config.mesh_relay.peer_rate_per_sec = 50.0;
+        config
+    };
+    let mut alice = quick("alice");
+    alice.reliability.retry.initial_delay_ms = 60_000;
+    alice.reliability.ack.default_timeout_ms = 500;
+    let mut net = Neighborhood::new(&[]);
+    net.add_node("bob", quick("bob"));
+    net.add_node("carol", quick("carol"));
+    net.add_node("alice", alice);
+    net.link("bob", "carol");
+
+    let delivered = watch_deliveries(&mut net, "alice");
+    for n in 0..40 {
+        net.send("alice", "carol", &format!("queued alone {n}"));
+    }
+    net.link("alice", "bob");
+    net.send("alice", "carol", "in range");
+    for _ in 0..300 {
+        net.step();
+        if delivered.lock().unwrap().len() == 41 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    assert_eq!(delivered.lock().unwrap().len(), 41, "all answered");
+    assert_eq!(
+        net.node("bob").mesh_relay_stats().peer_rate_limited,
+        0,
+        "bob refused none of alice's frames"
+    );
 }
 
 #[test]

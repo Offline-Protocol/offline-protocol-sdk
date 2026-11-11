@@ -2,6 +2,10 @@
 
 Get started with the Offline Protocol SDK in 5 minutes.
 
+> **Not sure this is the right entry point?** See the
+> [integrator map](docs/integrator-map.md) for every platform (Flutter, Python,
+> Web, native iOS/Android, C#, and more) and when to read [UPGRADING](docs/UPGRADING.md).
+
 > **Want to see a complete working example?** Check out the [React Native Example App](examples/react-native-app/README.md) that demonstrates all SDK features.
 
 ## For React Native Developers
@@ -12,6 +16,10 @@ Get started with the Offline Protocol SDK in 5 minutes.
 npm install @offline-protocol/mesh-sdk
 cd ios && pod install  # iOS only
 ```
+
+Before `start()` on a real device, add iOS and Android permissions from
+[mobile-permissions.md](docs/mobile-permissions.md). For `recipient` and peer
+ids, use `off1…` addresses, not `profile`: [identity-for-integrators.md](docs/identity-for-integrators.md).
 
 ### 2. Initialize
 

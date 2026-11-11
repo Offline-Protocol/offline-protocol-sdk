@@ -15,6 +15,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A delivery receipt no longer re-sends every message still waiting for one,
+  unless the peer is parked.** When a receipt settled a message carried across
+  the mesh, the engine re-sent all the peer's other waiting messages at once.
+  Every message of a burst is waiting, so ten messages cost 45 more frames on a
+  neighbor that accepts fifteen at once. Its refusals lost receipts, which are
+  never resent, and delayed messages, and each late receipt started another
+  wave. A receipt now re-sends only for a peer parked as unreachable, as the
+  other settlement path already required, and that re-drive is still unbounded
+  when it fails or the relay parks it again. For anyone else it schedules the
+  peer's other waiting messages one acknowledgement timeout away, spaced at half
+  the rate a neighbor accepts, so a message that backed off while the route was
+  gone doesn't wait out the rest of a wait of up to five minutes, and one
+  resting with `edge_driven_unreachable_dm` still goes when a receipt shows its
+  recipient is back. On a two-hop chain of phones, over ten bursts of ten
+  messages each way, the first device's frames for about 107 messages went from
+  846 to 308, receipts over five seconds from 118 of 200 to 68, the slowest from
+  34 s to 18 s, and refused frames from 189 to 13. Those runs predate the
+  scheduling, which the simulator covers.
+
 - **A resend no longer queues behind its own first copy.** A frame whose
   earlier copy is still waiting in a local carrier queue has not gone out, so
   nothing can have answered it, and the retry ladder resent it anyway. On a

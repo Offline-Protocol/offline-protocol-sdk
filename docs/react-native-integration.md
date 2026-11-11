@@ -105,9 +105,16 @@ transports: {
 
 ## 4. Enabling Transports
 
+**Permissions and background setup:** [mobile-permissions.md](mobile-permissions.md)
+is the single reference for Info.plist, Android manifest, runtime grant order,
+and when to call `start()`. The sections below describe transport behaviour once
+permissions are in place.
+
 ### 4.1 BLE
 
-- **Permissions**: Bluetooth, Bluetooth Advertise/Connect/Scan (Android 12+), Location (Android), `NSBluetoothAlwaysUsageDescription` (iOS).
+- **Permissions:** see [mobile-permissions.md](mobile-permissions.md). Short
+  summary: Bluetooth runtime grants on Android; `NSBluetoothAlwaysUsageDescription`
+  and background modes on iOS.
 - BLE scanning/advertising and fragmentation are handled automatically; 512-fragment cap per message.
 
 ### 4.2 Wi‑Fi Direct (Android)
@@ -309,8 +316,9 @@ The relay does play two roles over the Internet transport, neither of which can 
 // Create a group — the creator is the admin. Returns MlsGroupInfo.
 const group = await protocol.meshCreateGroup('My Group');
 
-// Invite a member by user ID (admin only). Sends MLS Welcome + Commit.
-await protocol.meshInviteToGroup(group.groupId, 'user456');
+// Invite by peer off1… address (admin only). Sends MLS Welcome + Commit.
+const inviteeAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn';
+await protocol.meshInviteToGroup(group.groupId, inviteeAddress);
 
 // Send an encrypted message to all members.
 // Signature: meshSendGroupMessage(groupId, content, priority?, replyToMsg?)
@@ -424,7 +432,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 **Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `peer_rssi`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`, `connection_request_received`, `connection_request_undeliverable`, `connection_accepted`, `connection_rejected`, `connection_request_cancelled`, `group_created`, `group_message_received`, `group_member_added`, `group_member_removed`, `group_unauthorized_membership_change`, `group_message_sent`, `group_message_partial_failure`, `group_message_delivery_report`, `group_epoch_fork_detected`, `group_epoch_fork_resolved`, `group_role_changed`, `service_discovered`, `service_request_received`, `service_response_received`, `presence_updated`, `typing_indicator_received`, `read_receipt_received`, `message_relayed`, `message_deferred`, `data_changed`, `data_doc_size_warning`, `data_attachment_requested`, `data_attachment_received`, `data_attachment_unavailable`, `data_doc_unsyncable`.
 
-**Identity**: `neighbor_discovered.peer_id` is the peer's canonical address — the `off1…` value that peer derived from its own identity key, on every transport — and is what you pass as `recipient` to `sendMessage` / `sendConnectionRequest`. Your own is `localAddress()`; no app chooses its address, so a peer claiming one can be checked by re-deriving it from the key it presents.
+**Identity**: `neighbor_discovered.peer_id` is the peer's canonical address — the `off1…` value that peer derived from its own identity key, on every transport — and is what you pass as `recipient` to `sendMessage` / `sendConnectionRequest`. Your own is `localAddress()`; no app chooses its address, so a peer claiming one can be checked by re-deriving it from the key it presents. Full guide: [identity-for-integrators.md](identity-for-integrators.md).
 
 ---
 

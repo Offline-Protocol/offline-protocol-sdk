@@ -70,59 +70,39 @@ Pre-built native libraries are included. No additional setup required.
 
 ## Platform Setup
 
-### iOS Permissions
+**Use the canonical guide:** [Mobile permissions and background setup](../../docs/mobile-permissions.md)
+covers Info.plist, Android manifest, what the SDK merges, runtime grant order
+(**before** `start()` for Wi‑Fi Direct and API 37 LAN), `neverForLocation` edge
+cases, and the Android foreground service notification.
 
-Add to `Info.plist`:
+Quick pointers:
 
-```xml
-<key>NSBluetoothAlwaysUsageDescription</key>
-<string>Required for offline mesh communication</string>
+- **iOS:** `NSBluetoothAlwaysUsageDescription`, `NSBluetoothPeripheralUsageDescription`,
+  and `UIBackgroundModes` (`bluetooth-central`, `bluetooth-peripheral`) are required
+  for reliable BLE in production. Add local network + Bonjour keys when the Wi‑Fi
+  slot is on (see the guide).
+- **Android:** request Bluetooth permissions (and on older APIs, fine location) before
+  `start()`. Request `NEARBY_WIFI_DEVICES` (13+) or fine location (≤12) before
+  `start()` when Wi‑Fi Direct is enabled. If `targetSdkVersion` is 37+, declare and
+  request `ACCESS_LOCAL_NETWORK` in the **app** for LAN discovery.
 
-<key>NSBluetoothPeripheralUsageDescription</key>
-<string>Required for offline mesh communication</string>
+The SDK manifest merges Wi‑Fi, internet, multicast, and foreground-service
+permissions; you still own runtime prompts and API 37 local network.
 
-<key>UIBackgroundModes</key>
-<array>
-    <string>bluetooth-central</string>
-    <string>bluetooth-peripheral</string>
-</array>
+**Optional:** request Android runtime grants before `start()`:
+
+```typescript
+import { requestMeshPermissionsForConfig, OfflineProtocol } from '@offline-protocol/mesh-sdk';
+
+const config = { appId: 'my-app', profile: 'default', transports: { ble: { enabled: true } } };
+await requestMeshPermissionsForConfig(config);
+
+const protocol = new OfflineProtocol(config);
+await protocol.start();
 ```
 
-### Android Permissions
-
-Add to `AndroidManifest.xml`:
-
-```xml
-<!-- Bluetooth (Android 12+) -->
-<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
-<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-
-<!-- Bluetooth (Android 11 and below) -->
-<uses-permission android:name="android.permission.BLUETOOTH" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-
-```
-
-Wi-Fi Direct and the internet need nothing in your manifest: the SDK's own
-manifest declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET`,
-`ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE` and `NEARBY_WIFI_DEVICES`, and the build merges them
-into your app. The peer-stream slot also finds iPhones and hosts on the Wi-Fi
-network the phone is on, which needs no runtime grant unless your app
-targets Android 17 (API 37): then an app targeting Android 17 (API 37) must declare `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier stays off with a warning diagnostic. The SDK does not declare it, because a declaration revokes the grant apps targeting 36 and lower hold by default. The SDK's manifest declares
-`NEARBY_WIFI_DEVICES` with `android:usesPermissionFlags="neverForLocation"`,
-and that flag reaches your merged manifest too: the transport derives no
-location from Wi-Fi, so on Android 13+ it needs `NEARBY_WIFI_DEVICES` alone.
-Request it at runtime before `start()`. On Android 12 and lower, request
-`ACCESS_FINE_LOCATION`, which peer discovery needs there.
-
-If your app does derive location from Wi-Fi scans, it must not inherit that
-assertion. Replace the declaration in your manifest with
-`tools:node="replace"` and no `usesPermissionFlags`, and also hold
-`ACCESS_FINE_LOCATION` on Android 13+: the SDK checks only
-`NEARBY_WIFI_DEVICES` there, so without the location grant peer discovery
-fails rather than the transport reporting itself unavailable.
+See [mobile-permissions.md](../../docs/mobile-permissions.md#react-native-helper-optional) and
+`requestMeshPermissions` in the API table below.
 
 ---
 
@@ -144,9 +124,12 @@ protocol.on('message_received', (event) => {
 
 await protocol.start(); // MLS auto-initialized with secure storage
 
-// Messages are automatically encrypted when possible!
+// Use the peer's off1… address from neighbor_discovered — not profile or a username.
+// See docs/identity-for-integrators.md.
+const peerAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn';
+
 const messageId = await protocol.sendMessage({
-  recipient: 'user456',
+  recipient: peerAddress,
   content: 'Hello!',  // Automatically encrypted
   priority: MessagePriority.High,
 });
@@ -744,6 +727,8 @@ interface TransportMetrics {
 
 | Method | Returns | Description |
 |--------|---------|-------------|
+| `requestMeshPermissions(options?)` | `Promise<MeshPermissionRequestResult>` | Request Android mesh runtime grants (see [mobile permissions](../../docs/mobile-permissions.md)) |
+| `requestMeshPermissionsForConfig(config)` | `Promise<MeshPermissionRequestResult>` | Same, options from `transports` |
 | `isBluetoothEnabled()` | `Promise<boolean>` | Check if Bluetooth is enabled |
 | `requestEnableBluetooth()` | `Promise<boolean>` | Request to enable Bluetooth (Android only) |
 | `getBLePeerCount()` | `Promise<number>` | Get number of discovered BLE peers |
@@ -1338,14 +1323,15 @@ Create and manage encrypted groups over the mesh:
 // Create a group (you become admin automatically)
 const group = await protocol.meshCreateGroup('Project Team');
 
-// Invite a member (admin only)
-await protocol.meshInviteToGroup(group.groupId, 'bob');
+// Invite a member by mesh address (admin only)
+const inviteeAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn';
+await protocol.meshInviteToGroup(group.groupId, inviteeAddress);
 
 // Send an encrypted group message
 await protocol.meshSendGroupMessage(group.groupId, 'Hello team!');
 
 // Remove a member (admin only)
-await protocol.meshRemoveFromGroup(group.groupId, 'bob');
+await protocol.meshRemoveFromGroup(group.groupId, inviteeAddress);
 
 // Leave a group
 await protocol.meshLeaveGroup(group.groupId);
@@ -1362,15 +1348,13 @@ Groups use role-based access control with two roles: **Admin** and **Member**.
 | `meshGetGroupRoles(groupId)` | Get all roles as `{ userId: role }` |
 
 ```typescript
-// Promote a member to admin
-await protocol.meshSetMemberRole(groupId, 'bob', 'admin');
+// Member ids are off1… addresses, not profiles
+await protocol.meshSetMemberRole(groupId, inviteeAddress, 'admin');
 
-// Check a member's role
-const role = await protocol.meshGetMemberRole(groupId, 'bob'); // "admin"
+const role = await protocol.meshGetMemberRole(groupId, inviteeAddress);
 
-// Get all roles
 const roles = await protocol.meshGetGroupRoles(groupId);
-// { alice: "admin", bob: "admin", charlie: "member" }
+// { "off1q…": "admin", "off1q…": "member", … }
 
 // Listen for role changes
 protocol.on('group_role_changed', (event) => {
@@ -1416,7 +1400,7 @@ Prevents duplicate message processing:
 
 ```typescript
 const fileId = await protocol.sendFile({
-  recipient: 'user456',
+  recipient: peerAddress, // peer off1… from discovery
   fileData: base64Contents,  // the file's bytes as base64; the app reads the file
   fileName: 'document.pdf',
 });
@@ -1438,7 +1422,7 @@ about twice its size while chunking; the read is not streamed.
 
 ```typescript
 const fileId = await protocol.sendFileFromPath({
-  recipient: 'user456',
+  recipient: peerAddress,
   filePath: '/data/user/0/com.example.app/files/report.pdf',
   fileName: 'report.pdf',
 });

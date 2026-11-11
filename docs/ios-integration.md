@@ -148,9 +148,10 @@ final class MeshController {
 
             try mesh.start()
 
-            // Send a message (priority is required; replyToMsg is optional)
+            // recipient is the peer's off1… address (from discovery), not profile
+            let peerAddress = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
             let messageId = try mesh.sendMessage(
-                recipient: "user456",
+                recipient: peerAddress,
                 content: "Hello from iOS!",
                 priority: .high,
                 replyToMsg: nil
@@ -213,6 +214,13 @@ provider interfaces.
 
 ## Permissions
 
+Complete iOS rules (Bluetooth, local network, Bonjour, background modes):
+[mobile-permissions.md](mobile-permissions.md). The snippet below is the minimum
+for BLE mesh; add local network keys from that guide when the Wi‑Fi slot is enabled.
+
+**Identity:** `recipient` and group member ids are peer `off1…` addresses, not
+`profile`. See [identity-for-integrators.md](identity-for-integrators.md).
+
 Add to `Info.plist`:
 
 ```xml
@@ -272,8 +280,8 @@ Create and manage encrypted groups over the mesh. The group creator is automatic
 // Create a group
 let group = try offlineProtocol.createGroup(groupName: "Project Team")
 
-// Invite a member (admin only)
-try offlineProtocol.inviteToGroup(groupId: group.groupId, inviteeUserId: "bob")
+let inviteeAddress = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+try offlineProtocol.inviteToGroup(groupId: group.groupId, inviteeUserId: inviteeAddress)
 
 // Send an encrypted group message
 let messageIds = try offlineProtocol.sendGroupMessage(
@@ -284,7 +292,7 @@ let messageIds = try offlineProtocol.sendGroupMessage(
 )
 
 // Remove a member (admin only)
-try offlineProtocol.removeFromGroup(groupId: group.groupId, memberId: "bob")
+try offlineProtocol.removeFromGroup(groupId: group.groupId, memberId: inviteeAddress)
 
 // Get group info (members, epoch, etc.)
 if let info = try offlineProtocol.getGroupInfo(groupId: group.groupId) {
@@ -304,14 +312,12 @@ Groups use role-based access control: **Admin** and **Member**.
 
 ```swift
 // Promote a member to admin (admin only)
-try offlineProtocol.setMemberRole(groupId: groupId, userId: "bob", role: "admin")
+try offlineProtocol.setMemberRole(groupId: groupId, userId: inviteeAddress, role: "admin")
 
-// Check a member's role
-let role = try offlineProtocol.getMemberRole(groupId: groupId, userId: "bob") // "admin" or "member"
+let role = try offlineProtocol.getMemberRole(groupId: groupId, userId: inviteeAddress)
 
-// Get all roles
 let roles = try offlineProtocol.getGroupRoles(groupId: groupId)
-// ["alice": "admin", "bob": "admin", "charlie": "member"]
+// keys are member off1… addresses
 ```
 
 Role changes and renames arrive through the same `EventCallback` as every other event —

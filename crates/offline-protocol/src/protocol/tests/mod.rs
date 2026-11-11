@@ -10962,6 +10962,73 @@ fn test_settling_a_parked_dm_redrives_the_recipients_other_parked_dms() {
 }
 
 #[test]
+fn test_a_receipt_schedules_a_dm_resting_with_no_retry_entry() {
+    // `edge_driven_unreachable_dm` leaves an old undelivered message resting in
+    // the outbox, with no retry entry and no pending ACK, until its peer next
+    // proves reachable. For a peer past a neighbor no neighbor edge ever fires,
+    // so a receipt carried back by the mesh is that proof.
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+    let resting = protocol
+        .send_message("bob", "resting", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let fresh = protocol
+        .send_message("bob", "fresh", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let backed_off = protocol
+        .send_message("bob", "backed off", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    for id in [&resting, &fresh, &backed_off] {
+        protocol.ack_manager.remove_ack(id);
+        protocol.retry_queue.remove(&id.as_str());
+    }
+    // Both past the retry budget, as a long wait alone leaves them.
+    let max_retries = protocol.config.reliability.retry.max_retries;
+    protocol.outbox.get_mut(&resting).unwrap().attempt_count = max_retries + 2;
+    let message = protocol.outbox[&backed_off].message.clone();
+    protocol
+        .retry_queue
+        .enqueue_with_delay(message, max_retries + 2, 300_000);
+    // A sibling whose own sends keep failing, already due inside the timeout.
+    let due_soon = protocol
+        .send_message("bob", "due soon", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.ack_manager.remove_ack(&due_soon);
+    protocol.retry_queue.remove(&due_soon.as_str());
+    let message = protocol.outbox[&due_soon].message.clone();
+    protocol.retry_queue.enqueue_with_delay(message, 3, 1_000);
+
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &fresh),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+
+    assert!(!protocol.outbox.contains_key(&fresh), "the receipt settled");
+    let scheduled: HashMap<String, u32> = protocol
+        .retry_queue
+        .drain_all()
+        .into_iter()
+        .map(|entry| (entry.message.id.as_str(), entry.retry_count))
+        .collect();
+    // The receipt proves the peer answers, so each starts its budget over, as
+    // the flush that used to send them did. Carried over, one ack timeout
+    // without an answer failed them for good, delivered or not.
+    assert_eq!(
+        scheduled.get(&resting.as_str()),
+        Some(&0),
+        "the resting message is scheduled again, with a fresh budget"
+    );
+    assert_eq!(
+        scheduled.get(&backed_off.as_str()),
+        Some(&0),
+        "and so is the backed-off one"
+    );
+    // One the receipt does not move keeps its count, or each receipt would hold
+    // a sibling whose sends keep failing on the bottom rung of its ladder.
+    assert_eq!(scheduled.get(&due_soon.as_str()), Some(&3));
+}
+
+#[test]
 fn test_parked_dm_redriven_with_fresh_ack_budget() {
     // Every re-drive registers a fresh pending ACK, so the retry budget
     // only ever burns against a peer believed reachable — attempts spent
@@ -42977,32 +43044,48 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
     use crate::protocol::state_crypto::StateRecordCipher;
     use crate::protocol_state_storage::{ProtocolStateResult, ProtocolStateStorage};
     use crate::telemetry::{AppState, TelemetryHost, TelemetryOs};
-    use offline_protocol_core::time::Instant;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Every read sleeps, as a slow disk would. One reaching the caller is
-    /// worth 100 ms; the load path makes several.
-    struct SlowStateStorage;
+    /// Every read sleeps, as a slow disk would. If any method runs on the thread
+    /// that called `enable_telemetry`, the load path reached the caller.
+    struct SlowStateStorage {
+        caller: std::thread::ThreadId,
+        on_caller: Arc<AtomicBool>,
+    }
+    impl SlowStateStorage {
+        fn touch(&self) {
+            if std::thread::current().id() == self.caller {
+                self.on_caller.store(true, Ordering::SeqCst);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
     impl ProtocolStateStorage for SlowStateStorage {
         fn store(&self, _: &str, _: &str, _: &[u8]) -> ProtocolStateResult<()> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(())
         }
         fn load(&self, _: &str, _: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(None)
         }
         fn delete(&self, _: &str, _: &str) -> ProtocolStateResult<()> {
             Ok(())
         }
         fn list_keys(&self, _: &str) -> ProtocolStateResult<Vec<String>> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(Vec::new())
         }
     }
 
+    let on_caller = Arc::new(AtomicBool::new(false));
+    let caller = std::thread::current().id();
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     // What `initialize_mls` leaves behind, without paying for its own I/O.
-    protocol.protocol_state_storage = Some(Arc::new(SlowStateStorage));
+    protocol.protocol_state_storage = Some(Arc::new(SlowStateStorage {
+        caller,
+        on_caller: on_caller.clone(),
+    }));
     protocol.state_record_cipher = Some(StateRecordCipher::new(&[7u8; 32]));
 
     let config = TelemetryConfig::default()
@@ -43010,12 +43093,10 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
         .with_app_id("app_test");
     let host = TelemetryHost::new(TelemetryOs::Ios, 18).with_app_state(AppState::Active);
 
-    let started = Instant::now();
     protocol.enable_telemetry(config, host).expect("enables");
-    let elapsed = started.elapsed();
     assert!(
-        elapsed < Duration::from_millis(50),
-        "enable_telemetry blocked the caller on storage for {elapsed:?}"
+        !on_caller.load(Ordering::SeqCst),
+        "enable_telemetry ran protocol-state storage I/O on the caller"
     );
 
     // Nothing was emitted, so the worker drains an empty ring and opens no

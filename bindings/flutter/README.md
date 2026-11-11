@@ -50,14 +50,13 @@ dependencies:
 
 ## Platform setup
 
-Use the same host permissions and manifests as React Native:
+Flutter host apps use the same iOS and Android permission rules as React Native.
+**Canonical guide:** [mobile-permissions.md](../../docs/mobile-permissions.md)
+(Info.plist, manifest, grant timing before `start()`, background mesh on Android).
 
-- **iOS:** Bluetooth usage descriptions and `UIBackgroundModes` (`bluetooth-central`,
-  `bluetooth-peripheral`) before BLE starts. See
-  [React Native iOS permissions](../react-native/README.md#ios-permissions).
-- **Android:** Runtime Bluetooth and (where applicable) location / nearby Wi‑Fi
-  permissions. See
-  [React Native Android permissions](../react-native/README.md#android-permissions).
+- **iOS:** usage descriptions, `UIBackgroundModes`, and local network keys when needed.
+- **Android:** runtime Bluetooth; nearby Wi‑Fi or location by API level; API 37
+  `ACCESS_LOCAL_NETWORK` in the **app** manifest when targeting API 37+.
 
 ### iOS: shared bridge copy (`BridgeRN`)
 
