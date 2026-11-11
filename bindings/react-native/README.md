@@ -92,7 +92,7 @@ Quick pointers:
 The SDK manifest merges Wi‑Fi, internet, multicast, and foreground-service
 permissions; you still own runtime prompts and API 37 local network.
 
-**Optional (from the next release):** request Android runtime grants before `start()`:
+**Optional (from 0.33.0):** request Android runtime grants before `start()`:
 
 ```typescript
 import { requestMeshPermissionsForConfig, OfflineProtocol } from '@offline-protocol/mesh-sdk';
@@ -749,7 +749,7 @@ interface TransportMetrics {
 ### Module functions
 
 Imported from the package, not called on an `OfflineProtocol` instance.
-Available from the next release.
+Available from 0.33.0.
 
 | Function | Returns | Description |
 |----------|---------|-------------|

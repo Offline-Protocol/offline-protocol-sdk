@@ -358,7 +358,7 @@ Simulators do not validate BLE or Wi‑Fi Direct behaviour. Use hardware for mes
 
 ## React Native helper (optional)
 
-> **Available from the next release** of `@offline-protocol/mesh-sdk`. Version
+> **Available from 0.33.0** of `@offline-protocol/mesh-sdk`. Version
 > 0.32.0 and earlier do not export these functions; request the grants in the
 > tables above yourself with `PermissionsAndroid`.
 
