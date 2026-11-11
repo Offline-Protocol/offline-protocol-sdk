@@ -167,7 +167,9 @@ is offered.
   to a neighbor. Past it the resend goes, so a dead link cannot pin the
   message. Bounded by the direct send alone, a message the mesh carries (whose
   direct sends fail) stopped being held a minute after its first attempt, and
-  every rung after that queued one more copy. Neither path asks which carrier holds the copy, so within that
+  every rung after that queued one more copy. A held resend spends no place
+  in the ladder's batch and no resend token, which a slow link's held entries
+  otherwise used up ahead of resends that could go. Neither path asks which carrier holds the copy, so within that
   minute a resend that could have gone by another carrier waits too; a
   carrier, discovery or session edge still flushes past the hold. On
   the 2026-11-09 phone chain the ladder did not, and its 1 s and 3 s resends

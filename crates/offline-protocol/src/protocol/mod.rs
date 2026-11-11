@@ -4117,30 +4117,19 @@ impl OfflineProtocol {
         // Asked for only once an entry is ready: it locks the carriers' queues
         // and copies every id, and most ticks have nothing ready.
         let mut queued = None;
+        // An entry held behind a queued copy is not counted in `processed`, so
+        // it spends neither the batch nor a resend token. This bounds the loop
+        // instead: a held entry whose rung is shorter than this call would
+        // otherwise come round again without end.
+        let mut looked = 0;
+        let look_limit = self.retry_queue.len();
 
-        while processed < max_batch_size {
+        while processed < max_batch_size && looked < look_limit {
             let mut entry = match self.retry_queue.dequeue_ready() {
                 Some(e) => e,
                 None => break,
             };
-
-            processed += 1;
-
-            // No slot to track this resend: put it back unchanged and try
-            // again shortly. Checked before the re-seal, so a held resend
-            // burns no ratchet generation, and before the send, so nothing
-            // goes out that cannot be tracked. The retry count is not
-            // advanced: being held is not an attempt, so the wait is the
-            // ladder's first rung rather than this entry's next one.
-            if entry.message.requires_ack && !self.ack_manager.has_capacity_for(&entry.message.id) {
-                let recheck_ms = self.config.reliability.retry.initial_delay_ms;
-                let _ = self.retry_queue.enqueue_with_delay(
-                    entry.message,
-                    entry.retry_count,
-                    recheck_ms,
-                );
-                continue;
-            }
+            looked += 1;
 
             // An earlier copy still in a local carrier queue has not gone out,
             // so it cannot have been answered, and a resend would queue another
@@ -4159,6 +4148,11 @@ impl OfflineProtocol {
             // `last_sent_at` that stays at its first attempt). Holding past
             // that would pin the message to a link that died without telling
             // the transport, never failing it.
+            //
+            // Not counted as processed: on a slow link most ready entries are
+            // held, and counted, they spent the batch and, under
+            // `edge_driven_unreachable_dm`, the resend tokens that resends to
+            // other peers needed.
             let handed_off_recently = || {
                 let recent = |age: std::time::Duration| age < QUEUED_ACK_GRACE_MAX;
                 let sent = self
@@ -4182,6 +4176,24 @@ impl OfflineProtocol {
                 && handed_off_recently()
             {
                 let _ = self.retry_queue.enqueue(entry.message, entry.retry_count);
+                continue;
+            }
+
+            processed += 1;
+
+            // No slot to track this resend: put it back unchanged and try
+            // again shortly. Checked before the re-seal, so a held resend
+            // burns no ratchet generation, and before the send, so nothing
+            // goes out that cannot be tracked. The retry count is not
+            // advanced: being held is not an attempt, so the wait is the
+            // ladder's first rung rather than this entry's next one.
+            if entry.message.requires_ack && !self.ack_manager.has_capacity_for(&entry.message.id) {
+                let recheck_ms = self.config.reliability.retry.initial_delay_ms;
+                let _ = self.retry_queue.enqueue_with_delay(
+                    entry.message,
+                    entry.retry_count,
+                    recheck_ms,
+                );
                 continue;
             }
 

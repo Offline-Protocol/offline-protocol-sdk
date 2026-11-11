@@ -44267,6 +44267,67 @@ fn a_resend_the_mesh_carries_waits_behind_a_copy_handed_over_within_the_minute()
     );
 }
 
+/// A resend held behind a queued copy spends no place in the batch. On a slow
+/// link most ready entries are held, and counted, a full batch of them kept a
+/// resend that could go from going.
+#[test]
+fn resends_held_behind_queued_copies_leave_the_batch_to_one_that_can_go() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let carrier = BackloggedTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+
+    let held: Vec<MessageId> = (0..crate::constants::FLUSH_BATCH_LIMIT)
+        .map(|n| {
+            protocol
+                .send_message(
+                    &format!("peer-{n}"),
+                    "queued",
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect();
+    let free = protocol
+        .send_message(
+            "peer-free",
+            "left the queue",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    let message_of =
+        |protocol: &OfflineProtocol, id: &MessageId| protocol.outbox[id].message.clone();
+    // Its first copy is written; every other one is still queued.
+    carrier.sent.lock().unwrap().retain(|m| m.id != free);
+
+    protocol.retry_queue.drain_all();
+    for id in &held {
+        let message = message_of(&protocol, id);
+        protocol.retry_queue.enqueue_with_delay(message, 1, 0);
+    }
+    // Due after every held one.
+    thread::sleep(Duration::from_millis(3));
+    let message = message_of(&protocol, &free);
+    protocol.retry_queue.enqueue_with_delay(message, 1, 0);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+
+    let sent = carrier.sent.lock().unwrap();
+    assert_eq!(
+        sent.len(),
+        held.len() + 1,
+        "the free one was resent, and only it"
+    );
+    assert!(sent.iter().any(|m| m.id == free));
+}
+
 /// A sender stops re-sealing a peer's resends once it has sealed the budget
 /// past that peer's last acknowledgement, and an acknowledgement re-opens it.
 /// Every re-seal spends a generation the receiver must fast-forward over; in

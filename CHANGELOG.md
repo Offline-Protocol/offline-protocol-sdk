@@ -43,7 +43,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   in a fast round, twenty in a slow one. The ladder now holds such a resend
   for one more rung, and only within a minute of the last copy handed to a
   carrier, directly or to a neighbor, so a link that died without telling the
-  transport still cannot pin a message to it.
+  transport still cannot pin a message to it. A held resend spends no place
+  in the ladder's batch and no resend token.
 
 - **The browser hands its Bluetooth link a few fragments at a time.** The
   worker passed every fragment to the page at once, into one write queue per
