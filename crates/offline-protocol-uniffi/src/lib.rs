@@ -24348,9 +24348,9 @@ mod tests {
     }
 
     /// Scenario ids in `bindings/react-native/src/configScenarios.ts` must match
-    /// the mobile bridge presets on iOS and Android (G4).
+    /// every G4 preset helper (mobile bridges + JVM).
     #[test]
-    fn config_scenario_ids_match_between_react_native_and_mobile_bridges() {
+    fn config_scenario_ids_match_across_config_preset_helpers() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo = manifest.parent().unwrap().parent().unwrap();
 
@@ -24364,6 +24364,10 @@ mod tests {
             repo.join("bindings/react-native/android/src/main/java/com/offlineprotocol/ConfigScenarios.kt"),
         )
         .expect("ConfigScenarios.kt must exist after G4 PR3");
+        let java = std::fs::read_to_string(
+            repo.join("bindings/java/src/main/java/com/offlineprotocol/config/ConfigScenarios.java"),
+        )
+        .expect("ConfigScenarios.java must exist after G4 PR4");
 
         for id in [
             "localBle",
@@ -24383,6 +24387,10 @@ mod tests {
             assert!(
                 kotlin.contains(&format!("{id},")) || kotlin.contains(&format!("{id}\n")),
                 "missing ConfigScenario.{id} in ConfigScenarios.kt"
+            );
+            assert!(
+                java.contains(&format!("{id},")) || java.contains(&format!("{id}\n")),
+                "missing ConfigScenario.{id} in ConfigScenarios.java"
             );
         }
     }

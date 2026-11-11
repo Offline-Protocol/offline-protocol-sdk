@@ -24,7 +24,7 @@ before reading all of [UPGRADING.md](UPGRADING.md).
 | Local API (multi-app on one host) | [local-api.md](local-api.md) | ~1 h | Service + policy file; clients over socket. |
 | C / C++ / Go (via C) | [bindings/c/README.md](../bindings/c/README.md) | 1–2 h | Build or ship `liboffline_protocol_uniffi`; JSON config + callbacks. |
 | C# / .NET 8 | [bindings/csharp/README.md](../bindings/csharp/README.md) | 1–2 h | `OFFLINE_PROTOCOL_LIBRARY_DIR` + engine thread rules. |
-| Java (JVM 22+) | [bindings/java/README.md](../bindings/java/README.md) | 1–2 h | `--enable-native-access`; positional `ProtocolConfig`. |
+| Java (JVM 22+) | [bindings/java/README.md](../bindings/java/README.md) → [Java config presets](java-config-presets.md) | 1–2 h | `--enable-native-access`; `ConfigScenarios` or positional `ProtocolConfig`. |
 | Ruby | [bindings/ruby/README.md](../bindings/ruby/README.md) | ~1 h | Keep engine alive while callbacks exist. |
 | Web (browser) | [bridges/web.md](bridges/web.md) | days (experimental) | Worker + OPFS; not a drop-in npm widget. |
 

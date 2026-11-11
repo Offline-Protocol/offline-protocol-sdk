@@ -40,20 +40,15 @@ java --enable-native-access=ALL-UNNAMED \
 ## Quick start
 
 ```java
+import com.offlineprotocol.config.ConfigScenario;
+import com.offlineprotocol.config.ConfigScenarios;
 import com.offlineprotocol.sdk.*;
 
-// The generated record has no defaults: every field is spelled out, in the
-// order of the definition (ProtocolConfig in offline_protocol.udl). Optional
-// fields (mesh relay, custody) take null.
-ProtocolConfig config = new ProtocolConfig(
-    "com.example.app", "default",
-    false, false, true, false, false, false, // ble, wifi direct, internet, reticulum, nostr, prefer online
-    (byte) 8, true, true, true, true,        // ttl, encryption, auto key exchange, store pending, require encryption
-    64L, 4096L, 86_400_000L, OverflowPolicy.DROP_OLDEST, // pending queue: per peer, global, ttl (24 h), overflow
-    false, 256, true, true, false, false,
-    true, true, true, false, true, true, true,
-    null, null,
-    true, true, true);
+// Preset for a BLE-first integration; see docs/java-config-presets.md. Or spell
+// out all 35 ProtocolConfig fields yourself (ConsumerCheckTest.config() is the
+// reference for definition defaults).
+ProtocolConfig config = ConfigScenarios.forScenario(
+    ConfigScenario.localBle, "com.example.app", "default");
 
 try (OfflineProtocol engine = new OfflineProtocol(config)) {
     // Storage before start(). The store key seals key material at rest;

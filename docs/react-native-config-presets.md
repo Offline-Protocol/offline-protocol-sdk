@@ -59,6 +59,9 @@ iOS bridge (same scenario ids). See [ios-config-presets.md](ios-config-presets.m
 Kotlin hosts use the same API on the shared Android bridge. See
 [android-config-presets.md](android-config-presets.md).
 
+JVM (desktop/server) hosts use `com.offlineprotocol.config.ConfigScenarios`. See
+[java-config-presets.md](java-config-presets.md).
+
 ## Related
 
 | Topic | Document |
