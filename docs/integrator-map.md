@@ -83,11 +83,22 @@ Details: [RN README Protocol Lifecycle](../bindings/react-native/README.md#proto
 [data interest ordering](../bindings/react-native/js-ci-harness/data-interest-order.test.js)
 (comment block at top).
 
-**Native iOS / Android / Flutter** hosts that use `ProtocolEngineHost` (not the RN
-JavaScript wrapper) get matching **DEBUG-only** `Log` / `print` warnings on
-`sendMessage`, `enableTransport`, and data APIs when called out of order.
-React Native disables the native duplicate because `devLifecycleWarnings` on the
-JS side already covers the same mistakes.
+**Hosts built on `ProtocolEngineHost`** (the Flutter plugin, or a native host
+written against the shared bridge sources) get the same hints as development
+warnings through the host's `onDiagnostic` callback, at level `warning`:
+`sendMessage` or `enableTransport` before `start()`, `start()` or a send with
+encryption on and MLS not initialized, a data call the engine refuses for want
+of storage, and a `setInterest` after `start()` that narrows the interest. The
+data hint reacts to the engine's `DataStorageUnavailable` refusal rather than
+guessing from engine state, because data calls are gated on storage, not on
+running.
+
+They are on in a debug build only: on iOS the default follows `DEBUG` in the
+application's build, which compiles these sources; on Android the host takes
+`integratorLifecycleWarnings`, which the Flutter plugin sets from the
+application's `FLAG_DEBUGGABLE` (a library's own `BuildConfig.DEBUG` is false in
+every published build). React Native turns them off, because
+`devLifecycleWarnings` on the JavaScript side already covers the same mistakes.
 
 ---
 

@@ -104,8 +104,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     @HostGuarded private var emitEventJson: ((String) -> Void)?
 
     private let onDiagnostic: DiagnosticHandler
-    /// DEBUG-default-on; React Native passes `false` because JS warns first (G3 PR1).
-    private let integratorLifecycleWarnings: Bool
+    private let lifecycleHints: IntegratorLifecycleHints
 
     private(set) lazy var backgroundProcessor = ProtocolBackgroundProcessor(
         protocolProvider: { [weak self] in self?.protocolInstance },
@@ -114,6 +113,12 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         }
     )
 
+    /// `integratorLifecycleWarnings` turns on the development-only ordering
+    /// hints (`IntegratorLifecycleHints`), delivered through `onDiagnostic` at
+    /// level `warning`. The default follows `DEBUG` in the build that compiles
+    /// this file, which is the application's own: the Swift package and the
+    /// Flutter pod ship these sources, not a binary. React Native passes
+    /// `false`, because its TypeScript layer gives the same hints.
     init(
         onDiagnostic: @escaping DiagnosticHandler,
         integratorLifecycleWarnings: Bool = {
@@ -125,35 +130,31 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         }()
     ) {
         self.onDiagnostic = onDiagnostic
-        self.integratorLifecycleWarnings = integratorLifecycleWarnings
+        lifecycleHints = IntegratorLifecycleHints(enabled: integratorLifecycleWarnings) { message in
+            onDiagnostic("warning", message, [:])
+        }
     }
 
     private func encryptionEnabledForHints() -> Bool {
         currentConfig?.encryptionEnabled ?? true
     }
 
-    private func warnLifecycleNeedsEngine(_ context: String) {
-        IntegratorLifecycleHints.warnIfCallBeforeEngineStarted(
-            context: context,
-            proto: protocolInstance,
-            enabled: integratorLifecycleWarnings
-        )
+    private func engineRunning() -> Bool {
+        protocolInstance?.getState() == .running
     }
 
-    private func warnLifecycleDataMutation(_ context: String) {
-        IntegratorLifecycleHints.warnIfDataMutationBeforeEngine(
-            context: context,
-            proto: protocolInstance,
-            enabled: integratorLifecycleWarnings
-        )
+    private func warnLifecycleNeedsEngine(_ context: String) {
+        guard lifecycleHints.enabled, protocolInstance != nil else { return }
+        lifecycleHints.callBeforeEngineStart(context: context, engineRunning: engineRunning())
     }
 
     private func warnLifecycleSendMls(_ context: String) {
-        IntegratorLifecycleHints.warnIfSendWithoutMls(
+        guard lifecycleHints.enabled, let proto = protocolInstance else { return }
+        lifecycleHints.sendWithoutMls(
             context: context,
             encryptionEnabled: encryptionEnabledForHints(),
-            proto: protocolInstance,
-            enabled: integratorLifecycleWarnings
+            mlsReady: proto.isMlsInitialized(),
+            engineRunning: proto.getState() == .running
         )
     }
 
@@ -268,15 +269,16 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         meshServices = nil
         currentConfig = nil
         emitEventJson = nil
-        IntegratorLifecycleHints.resetSession()
+        lifecycleHints.reset()
     }
 
     func startProtocolCore() throws {
-        IntegratorLifecycleHints.warnIfStartWithoutMls(
-            encryptionEnabled: encryptionEnabledForHints(),
-            proto: protocolInstance,
-            enabled: integratorLifecycleWarnings
-        )
+        if lifecycleHints.enabled, let proto = protocolInstance {
+            lifecycleHints.startWithoutMls(
+                encryptionEnabled: encryptionEnabledForHints(),
+                mlsReady: proto.isMlsInitialized()
+            )
+        }
         try requireProtocol().start()
         onDiagnostic("info", "Protocol core started", [:])
     }
@@ -728,154 +730,167 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         return store
     }
 
+    /// Runs `body` on the data store. When the engine refuses it for want of
+    /// storage, a debug host also gets the ordering hint: reacting to the
+    /// refusal is what keeps the hint off every valid order.
+    private func withDataStore<T>(_ context: String, _ body: (DataStore) throws -> T) throws -> T {
+        let store = try requireDataStore()
+        do {
+            return try body(store)
+        } catch let error as ProtocolError {
+            if case .DataStorageUnavailable = error {
+                lifecycleHints.dataStorageUnavailable(context: context)
+            }
+            throw error
+        }
+    }
+
     func dataCreateDoc(spaceId: String, docId: String) throws {
-        warnLifecycleDataMutation("dataCreateDoc")
-        try requireDataStore().createDoc(spaceId: spaceId, docId: docId)
+        try withDataStore("dataCreateDoc") { try $0.createDoc(spaceId: spaceId, docId: docId) }
     }
 
     func dataDeleteDoc(spaceId: String, docId: String) throws {
-        try requireDataStore().deleteDoc(spaceId: spaceId, docId: docId)
+        try withDataStore("dataDeleteDoc") { try $0.deleteDoc(spaceId: spaceId, docId: docId) }
     }
 
     func dataRemoveDoc(spaceId: String, docId: String) throws {
-        try requireDataStore().removeDoc(spaceId: spaceId, docId: docId)
+        try withDataStore("dataRemoveDoc") { try $0.removeDoc(spaceId: spaceId, docId: docId) }
     }
 
     func dataRemoveSpace(spaceId: String) throws {
-        try requireDataStore().removeSpace(spaceId: spaceId)
+        try withDataStore("dataRemoveSpace") { try $0.removeSpace(spaceId: spaceId) }
     }
 
     func dataFetchAttachmentFrom(spaceId: String, peerId: String, hash: String) throws {
-        try requireDataStore().fetchAttachmentFrom(spaceId: spaceId, peerId: peerId, hash: hash)
+        try withDataStore("dataFetchAttachmentFrom") { try $0.fetchAttachmentFrom(spaceId: spaceId, peerId: peerId, hash: hash) }
     }
 
     func dataSetInterest(spaceId: String, patterns: [String]) throws {
-        if protocolInstance?.getState() == .running {
-            IntegratorLifecycleHints.warnIfInterestAfterStart(enabled: integratorLifecycleWarnings)
+        try withDataStore("dataSetInterest") { try $0.setInterest(spaceId: spaceId, patterns: patterns) }
+        if lifecycleHints.enabled {
+            lifecycleHints.interestApplied(spaceId: spaceId, patterns: patterns, engineRunning: engineRunning())
         }
-        try requireDataStore().setInterest(spaceId: spaceId, patterns: patterns)
     }
 
     func dataListDocs(spaceId: String) throws -> String {
-        try Self.jsonString(try requireDataStore().listDocs(spaceId: spaceId))
+        try Self.jsonString(try withDataStore("dataListDocs") { try $0.listDocs(spaceId: spaceId) })
     }
 
     func dataListSpaces() throws -> String {
-        try Self.jsonString(try requireDataStore().listSpaces())
+        try Self.jsonString(try withDataStore("dataListSpaces") { try $0.listSpaces() })
     }
 
     func dataMapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String) throws {
-        warnLifecycleDataMutation("dataMapSet")
-        try requireDataStore().mapSet(
+        try withDataStore("dataMapSet") { try $0.mapSet(
             spaceId: spaceId, docId: docId, collection: collection, key: key, valueJson: valueJson
-        )
+        ) }
     }
 
     func dataMapDelete(spaceId: String, docId: String, collection: String, key: String) throws {
-        try requireDataStore().mapDelete(spaceId: spaceId, docId: docId, collection: collection, key: key)
+        try withDataStore("dataMapDelete") { try $0.mapDelete(spaceId: spaceId, docId: docId, collection: collection, key: key) }
     }
 
     func dataMapGetJson(spaceId: String, docId: String, collection: String, key: String) throws -> String? {
-        try requireDataStore().mapGetJson(spaceId: spaceId, docId: docId, collection: collection, key: key)
+        try withDataStore("dataMapGetJson") { try $0.mapGetJson(spaceId: spaceId, docId: docId, collection: collection, key: key) }
     }
 
     func dataListPush(spaceId: String, docId: String, collection: String, valueJson: String) throws {
-        try requireDataStore().listPush(
+        try withDataStore("dataListPush") { try $0.listPush(
             spaceId: spaceId, docId: docId, collection: collection, valueJson: valueJson
-        )
+        ) }
     }
 
     func dataListDelete(spaceId: String, docId: String, collection: String, index: Double, count: Double) throws {
-        try requireDataStore().listDelete(
+        try withDataStore("dataListDelete") { try $0.listDelete(
             spaceId: spaceId,
             docId: docId,
             collection: collection,
             index: try Self.uint32(index, "index"),
             count: try Self.uint32(count, "count")
-        )
+        ) }
     }
 
     func dataListLen(spaceId: String, docId: String, collection: String) throws -> Double {
-        Double(try requireDataStore().listLen(spaceId: spaceId, docId: docId, collection: collection))
+        Double(try withDataStore("dataListLen") { try $0.listLen(spaceId: spaceId, docId: docId, collection: collection) })
     }
 
     func dataTextInsert(spaceId: String, docId: String, collection: String, position: Double, text: String) throws {
-        try requireDataStore().textInsert(
+        try withDataStore("dataTextInsert") { try $0.textInsert(
             spaceId: spaceId,
             docId: docId,
             collection: collection,
             position: try Self.uint32(position, "position"),
             text: text
-        )
+        ) }
     }
 
     func dataTextDelete(spaceId: String, docId: String, collection: String, position: Double, count: Double) throws {
-        try requireDataStore().textDelete(
+        try withDataStore("dataTextDelete") { try $0.textDelete(
             spaceId: spaceId,
             docId: docId,
             collection: collection,
             position: try Self.uint32(position, "position"),
             count: try Self.uint32(count, "count")
-        )
+        ) }
     }
 
     func dataTextValue(spaceId: String, docId: String, collection: String) throws -> String {
-        try requireDataStore().textValue(spaceId: spaceId, docId: docId, collection: collection)
+        try withDataStore("dataTextValue") { try $0.textValue(spaceId: spaceId, docId: docId, collection: collection) }
     }
 
     func dataCounterIncrement(spaceId: String, docId: String, collection: String, amount: Double) throws {
-        try requireDataStore().counterIncrement(
+        try withDataStore("dataCounterIncrement") { try $0.counterIncrement(
             spaceId: spaceId, docId: docId, collection: collection, amount: amount
-        )
+        ) }
     }
 
     func dataCounterValue(spaceId: String, docId: String, collection: String) throws -> Double {
-        try requireDataStore().counterValue(spaceId: spaceId, docId: docId, collection: collection)
+        try withDataStore("dataCounterValue") { try $0.counterValue(spaceId: spaceId, docId: docId, collection: collection) }
     }
 
     func dataDocJson(spaceId: String, docId: String) throws -> String {
-        try requireDataStore().docJson(spaceId: spaceId, docId: docId)
+        try withDataStore("dataDocJson") { try $0.docJson(spaceId: spaceId, docId: docId) }
     }
 
     func dataExportRaw(spaceId: String, docId: String) throws -> Data {
-        try requireDataStore().exportRaw(spaceId: spaceId, docId: docId)
+        try withDataStore("dataExportRaw") { try $0.exportRaw(spaceId: spaceId, docId: docId) }
     }
 
     func dataFlush(spaceId: String, docId: String) throws {
-        try requireDataStore().flush(spaceId: spaceId, docId: docId)
+        try withDataStore("dataFlush") { try $0.flush(spaceId: spaceId, docId: docId) }
     }
 
     func dataFlushAll() throws {
-        try requireDataStore().flushAll()
+        try withDataStore("dataFlushAll") { try $0.flushAll() }
     }
 
     func dataDocSize(spaceId: String, docId: String) throws -> Double {
-        Double(try requireDataStore().docSize(spaceId: spaceId, docId: docId))
+        Double(try withDataStore("dataDocSize") { try $0.docSize(spaceId: spaceId, docId: docId) })
     }
 
     func dataAttachmentHash(bytesBase64: String) throws -> String {
-        try requireDataStore().attachmentHash(data: try Self.base64Data(bytesBase64, "bytesBase64"))
+        try withDataStore("dataAttachmentHash") { try $0.attachmentHash(data: try Self.base64Data(bytesBase64, "bytesBase64")) }
     }
 
     func dataFetchAttachment(spaceId: String, hash: String) throws {
-        try requireDataStore().fetchAttachment(spaceId: spaceId, hash: hash)
+        try withDataStore("dataFetchAttachment") { try $0.fetchAttachment(spaceId: spaceId, hash: hash) }
     }
 
     func dataProvideAttachment(spaceId: String, peerId: String, hash: String, bytesBase64: String) throws {
-        try requireDataStore().provideAttachment(
+        try withDataStore("dataProvideAttachment") { try $0.provideAttachment(
             spaceId: spaceId,
             peerId: peerId,
             hash: hash,
             data: try Self.base64Data(bytesBase64, "bytesBase64")
-        )
+        ) }
     }
 
     func dataDeclineAttachment(spaceId: String, peerId: String, hash: String) throws {
-        try requireDataStore().declineAttachment(spaceId: spaceId, peerId: peerId, hash: hash)
+        try withDataStore("dataDeclineAttachment") { try $0.declineAttachment(spaceId: spaceId, peerId: peerId, hash: hash) }
     }
 
     func dataWipeAll() throws {
-        try requireDataStore().wipeAll()
+        try withDataStore("dataWipeAll") { try $0.wipeAll() }
     }
 
     // MARK: - Mesh / MLS groups

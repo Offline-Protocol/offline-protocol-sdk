@@ -148,10 +148,10 @@ final class MeshController {
 
             try mesh.start()
 
-            // Flutter and other hosts that route through ProtocolEngineHost get
-            // DEBUG-only ordering warnings (send before start, MLS before send,
-            // data before start) — see docs/integrator-map.md. Direct UniFFI
-            // callers rely on this ordering; the core does not always surface it.
+            // Keep this order: event callback, MLS, start(), then send. Hosts
+            // built on ProtocolEngineHost (the Flutter plugin) get development
+            // hints when it is broken; see docs/integrator-map.md. A direct
+            // UniFFI caller like this one gets none.
 
             // recipient is the peer's off1… address (from discovery), not profile
             let peerAddress = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"

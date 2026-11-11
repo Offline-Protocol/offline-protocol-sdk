@@ -17,8 +17,17 @@ import java.net.URI
  */
 class ProtocolEngineHost(
     private val logTag: String,
+    /**
+     * Development-only ordering hints ([IntegratorLifecycleHints]), delivered
+     * through [onDiagnostic] at level `warning`. Off unless the host asks:
+     * a library's own `BuildConfig.DEBUG` is false in every published build,
+     * so only the application knows whether it is a debug build. The Flutter
+     * plugin passes the application's `FLAG_DEBUGGABLE`; React Native passes
+     * false, because its TypeScript layer gives the same hints.
+     */
+    integratorLifecycleWarnings: Boolean = false,
+    // Last, so a trailing lambda still binds to it.
     private val onDiagnostic: (level: String, message: String, context: Map<String, Any?>) -> Unit,
-    private val integratorLifecycleWarnings: Boolean = BuildConfig.DEBUG,
 ) {
     @Volatile
     var protocol: OfflineProtocol? = null
@@ -45,31 +54,28 @@ class ProtocolEngineHost(
         logTag = logTag,
     )
 
+    private val lifecycleHints = IntegratorLifecycleHints(integratorLifecycleWarnings) { message ->
+        onDiagnostic("warning", message, emptyMap())
+    }
+
     private fun encryptionEnabledForHints(): Boolean =
         currentConfig?.encryptionEnabled ?: true
 
-    private fun warnLifecycleNeedsEngine(context: String) {
-        IntegratorLifecycleHints.warnIfCallBeforeEngineStarted(
-            context,
-            protocol,
-            integratorLifecycleWarnings,
-        )
-    }
+    private fun engineRunning(): Boolean = protocol?.getState() == ProtocolState.RUNNING
 
-    private fun warnLifecycleDataMutation(context: String) {
-        IntegratorLifecycleHints.warnIfDataMutationBeforeEngine(
-            context,
-            protocol,
-            integratorLifecycleWarnings,
-        )
+    private fun warnLifecycleNeedsEngine(context: String) {
+        if (!lifecycleHints.enabled || protocol == null) return
+        lifecycleHints.callBeforeEngineStart(context, engineRunning())
     }
 
     private fun warnLifecycleSendMls(context: String) {
-        IntegratorLifecycleHints.warnIfSendWithoutMls(
+        if (!lifecycleHints.enabled) return
+        val proto = protocol ?: return
+        lifecycleHints.sendWithoutMls(
             context,
             encryptionEnabledForHints(),
-            protocol,
-            integratorLifecycleWarnings,
+            proto.isMlsInitialized(),
+            proto.getState() == ProtocolState.RUNNING,
         )
     }
 
@@ -233,15 +239,13 @@ class ProtocolEngineHost(
         meshServices = null
         currentConfig = null
         bleAdvertiseNodeHash = false
-        IntegratorLifecycleHints.resetSession()
+        lifecycleHints.reset()
     }
 
     fun startProtocolCore() {
-        IntegratorLifecycleHints.warnIfStartWithoutMls(
-            encryptionEnabledForHints(),
-            protocol,
-            integratorLifecycleWarnings,
-        )
+        if (lifecycleHints.enabled) {
+            protocol?.let { lifecycleHints.startWithoutMls(encryptionEnabledForHints(), it.isMlsInitialized()) }
+        }
         requireProtocol().start()
         onDiagnostic("info", "Protocol core started", emptyMap())
     }
@@ -537,67 +541,75 @@ class ProtocolEngineHost(
     private fun requireDataStore(): DataStore =
         dataStore ?: throw IllegalStateException("DataStore not initialized")
 
-    fun dataCreateDoc(spaceId: String, docId: String) {
-        warnLifecycleDataMutation("dataCreateDoc")
-        requireDataStore().createDoc(spaceId, docId)
+    /**
+     * Runs [block] on the data store. When the engine refuses it for want of
+     * storage, a debug host also gets the ordering hint: reacting to the
+     * refusal is what keeps the hint off every valid order.
+     */
+    private inline fun <T> withDataStore(context: String, block: (DataStore) -> T): T {
+        val store = requireDataStore()
+        try {
+            return block(store)
+        } catch (e: ProtocolException.DataStorageUnavailable) {
+            lifecycleHints.dataStorageUnavailable(context)
+            throw e
+        }
     }
-    fun dataDeleteDoc(spaceId: String, docId: String) = requireDataStore().deleteDoc(spaceId, docId)
-    fun dataRemoveDoc(spaceId: String, docId: String) = requireDataStore().removeDoc(spaceId, docId)
-    fun dataRemoveSpace(spaceId: String) = requireDataStore().removeSpace(spaceId)
+
+    fun dataCreateDoc(spaceId: String, docId: String) = withDataStore("dataCreateDoc") { it.createDoc(spaceId, docId) }
+    fun dataDeleteDoc(spaceId: String, docId: String) = withDataStore("dataDeleteDoc") { it.deleteDoc(spaceId, docId) }
+    fun dataRemoveDoc(spaceId: String, docId: String) = withDataStore("dataRemoveDoc") { it.removeDoc(spaceId, docId) }
+    fun dataRemoveSpace(spaceId: String) = withDataStore("dataRemoveSpace") { it.removeSpace(spaceId) }
     fun dataFetchAttachmentFrom(spaceId: String, peerId: String, hash: String) =
-        requireDataStore().fetchAttachmentFrom(spaceId, peerId, hash)
+        withDataStore("dataFetchAttachmentFrom") { it.fetchAttachmentFrom(spaceId, peerId, hash) }
 
     fun dataSetInterest(spaceId: String, patterns: List<String>) {
-        if (protocol?.getState() == ProtocolState.RUNNING) {
-            IntegratorLifecycleHints.warnIfInterestAfterStart(integratorLifecycleWarnings)
-        }
-        requireDataStore().setInterest(spaceId, patterns)
-    }
-    fun dataListDocs(spaceId: String): String = JSONArray(requireDataStore().listDocs(spaceId)).toString()
-    fun dataListSpaces(): String = JSONArray(requireDataStore().listSpaces()).toString()
-    fun dataMapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String) {
-        warnLifecycleDataMutation("dataMapSet")
-        requireDataStore().mapSet(spaceId, docId, collection, key, valueJson)
+        withDataStore("dataSetInterest") { it.setInterest(spaceId, patterns) }
+        if (lifecycleHints.enabled) lifecycleHints.interestApplied(spaceId, patterns, engineRunning())
     }
 
+    fun dataListDocs(spaceId: String): String = JSONArray(withDataStore("dataListDocs") { it.listDocs(spaceId) }).toString()
+    fun dataListSpaces(): String = JSONArray(withDataStore("dataListSpaces") { it.listSpaces() }).toString()
+    fun dataMapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String) =
+        withDataStore("dataMapSet") { it.mapSet(spaceId, docId, collection, key, valueJson) }
     fun dataMapDelete(spaceId: String, docId: String, collection: String, key: String) =
-        requireDataStore().mapDelete(spaceId, docId, collection, key)
+        withDataStore("dataMapDelete") { it.mapDelete(spaceId, docId, collection, key) }
     fun dataMapGetJson(spaceId: String, docId: String, collection: String, key: String) =
-        requireDataStore().mapGetJson(spaceId, docId, collection, key)
+        withDataStore("dataMapGetJson") { it.mapGetJson(spaceId, docId, collection, key) }
     fun dataListPush(spaceId: String, docId: String, collection: String, valueJson: String) =
-        requireDataStore().listPush(spaceId, docId, collection, valueJson)
+        withDataStore("dataListPush") { it.listPush(spaceId, docId, collection, valueJson) }
     fun dataListDelete(spaceId: String, docId: String, collection: String, index: Double, count: Double) =
-        requireDataStore().listDelete(spaceId, docId, collection, index.toUInt(), count.toUInt())
+        withDataStore("dataListDelete") { it.listDelete(spaceId, docId, collection, index.toUInt(), count.toUInt()) }
     fun dataListLen(spaceId: String, docId: String, collection: String): Double =
-        requireDataStore().listLen(spaceId, docId, collection).toDouble()
+        withDataStore("dataListLen") { it.listLen(spaceId, docId, collection) }.toDouble()
     fun dataTextInsert(spaceId: String, docId: String, collection: String, position: Double, text: String) =
-        requireDataStore().textInsert(spaceId, docId, collection, position.toUInt(), text)
+        withDataStore("dataTextInsert") { it.textInsert(spaceId, docId, collection, position.toUInt(), text) }
     fun dataTextDelete(spaceId: String, docId: String, collection: String, position: Double, count: Double) =
-        requireDataStore().textDelete(spaceId, docId, collection, position.toUInt(), count.toUInt())
+        withDataStore("dataTextDelete") { it.textDelete(spaceId, docId, collection, position.toUInt(), count.toUInt()) }
     fun dataTextValue(spaceId: String, docId: String, collection: String) =
-        requireDataStore().textValue(spaceId, docId, collection)
+        withDataStore("dataTextValue") { it.textValue(spaceId, docId, collection) }
     fun dataCounterIncrement(spaceId: String, docId: String, collection: String, amount: Double) =
-        requireDataStore().counterIncrement(spaceId, docId, collection, amount)
+        withDataStore("dataCounterIncrement") { it.counterIncrement(spaceId, docId, collection, amount) }
     fun dataCounterValue(spaceId: String, docId: String, collection: String) =
-        requireDataStore().counterValue(spaceId, docId, collection)
-    fun dataDocJson(spaceId: String, docId: String) = requireDataStore().docJson(spaceId, docId)
-    fun dataExportRaw(spaceId: String, docId: String) = requireDataStore().exportRaw(spaceId, docId)
-    fun dataFlush(spaceId: String, docId: String) = requireDataStore().flush(spaceId, docId)
-    fun dataFlushAll() = requireDataStore().flushAll()
+        withDataStore("dataCounterValue") { it.counterValue(spaceId, docId, collection) }
+    fun dataDocJson(spaceId: String, docId: String) = withDataStore("dataDocJson") { it.docJson(spaceId, docId) }
+    fun dataExportRaw(spaceId: String, docId: String) = withDataStore("dataExportRaw") { it.exportRaw(spaceId, docId) }
+    fun dataFlush(spaceId: String, docId: String) = withDataStore("dataFlush") { it.flush(spaceId, docId) }
+    fun dataFlushAll() = withDataStore("dataFlushAll") { it.flushAll() }
     fun dataDocSize(spaceId: String, docId: String): Double =
-        requireDataStore().docSize(spaceId, docId).toLong().toDouble()
+        withDataStore("dataDocSize") { it.docSize(spaceId, docId) }.toLong().toDouble()
     fun dataAttachmentHash(bytesBase64: String): String {
         val bytes = android.util.Base64.decode(bytesBase64, android.util.Base64.DEFAULT)
-        return requireDataStore().attachmentHash(bytes)
+        return withDataStore("dataAttachmentHash") { it.attachmentHash(bytes) }
     }
-    fun dataFetchAttachment(spaceId: String, hash: String) = requireDataStore().fetchAttachment(spaceId, hash)
+    fun dataFetchAttachment(spaceId: String, hash: String) = withDataStore("dataFetchAttachment") { it.fetchAttachment(spaceId, hash) }
     fun dataProvideAttachment(spaceId: String, peerId: String, hash: String, bytesBase64: String) {
         val bytes = android.util.Base64.decode(bytesBase64, android.util.Base64.DEFAULT)
-        requireDataStore().provideAttachment(spaceId, peerId, hash, bytes)
+        withDataStore("dataProvideAttachment") { it.provideAttachment(spaceId, peerId, hash, bytes) }
     }
     fun dataDeclineAttachment(spaceId: String, peerId: String, hash: String) =
-        requireDataStore().declineAttachment(spaceId, peerId, hash)
-    fun dataWipeAll() = requireDataStore().wipeAll()
+        withDataStore("dataDeclineAttachment") { it.declineAttachment(spaceId, peerId, hash) }
+    fun dataWipeAll() = withDataStore("dataWipeAll") { it.wipeAll() }
 
     // --- Mesh / MLS groups ---
 

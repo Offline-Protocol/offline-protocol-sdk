@@ -123,7 +123,6 @@ let package = Package(
                 "AdapterArgumentReadTests.swift",
                 "BleDiscoveryBootstrapPolicyTests.swift",
                 "ConnectionRequestKeyPackageTests.swift",
-                "IntegratorLifecycleHintsTests.swift",
                 "MeshControllerTests.swift",
                 "ProtocolErrorBridgeTests.swift"
             ],
@@ -143,6 +142,7 @@ let package = Package(
                 "GatewayVerdictTrackerTests.swift",
                 "EventReplayRingTests.swift",
                 "InboundEventBufferTests.swift",
+                "IntegratorLifecycleHintsTests.swift",
                 "ForegroundReconnectPolicyTests.swift",
                 "InboundFragmentBufferTests.swift",
                 "LegacyRelayMessageTests.swift",
