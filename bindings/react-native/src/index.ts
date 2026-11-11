@@ -105,6 +105,7 @@ export {
   MESH_ADDRESS_PREFIX,
 } from './peerAddressHints';
 import { setDevPeerAddressWarnings, warnPeerIdIfMisshapen } from './peerAddressHints';
+import { formatNativeLinkingError } from './hostCompatibility';
 import {
   bindDevLifecycleWarningsFromConfig,
   isModuleEngineStarted,
@@ -122,7 +123,7 @@ const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
       {},
       {
         get() {
-          throw new Error(LINKING_ERROR);
+          throw new Error(formatNativeLinkingError(LINKING_ERROR));
         },
       }
     )) as any; // Type assertion to allow all native module methods including group management

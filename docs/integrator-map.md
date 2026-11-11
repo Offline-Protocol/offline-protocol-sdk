@@ -209,6 +209,17 @@ object with sensible defaults for app development.
 
 ---
 
+## React Native host compatibility
+
+Before debugging "native module not linked" for hours:
+
+1. Run **`npx mesh-sdk-doctor`** from the app root (after `npm install @offline-protocol/mesh-sdk`).
+2. Read [react-native-host-doctor.md](react-native-host-doctor.md) (Expo Go,
+   legacy `pod 'MeshSdk'`, stale linker flags).
+3. iOS upgrades: [UPGRADING §12.1](UPGRADING.md#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200).
+
+---
+
 ## Upgrading the SDK
 
 Do not read [UPGRADING.md](UPGRADING.md) cover to cover on first install.

@@ -38,6 +38,17 @@ Offline-first mesh networking SDK for React Native. Enables peer-to-peer messagi
 | Android | >= API 24 (Android 7.0) |
 | Node.js | >= 16 |
 
+**Expo Go is not supported.** This package is a native module. Use
+[expo-dev-client](https://docs.expo.dev/develop/development-builds/introduction/)
+(a development build) or bare React Native. See
+[react-native-host-doctor.md](../../docs/react-native-host-doctor.md).
+
+After install, run the host doctor from your app root:
+
+```bash
+npx mesh-sdk-doctor
+```
+
 ---
 
 ## Installation
