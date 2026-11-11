@@ -174,7 +174,8 @@ const SITES = [
 ];
 
 test('devPeerAddressWarnings: false silences DataStore and MeshServices in a dev build', async () => {
-  const protocol = fresh({ devPeerAddressWarnings: false });
+  // Lifecycle warnings are on in a dev build too; this test is about peer ids only.
+  const protocol = fresh({ devPeerAddressWarnings: false, devLifecycleWarnings: false });
   globalThis.__DEV__ = true;
   captureWarnings();
   try {

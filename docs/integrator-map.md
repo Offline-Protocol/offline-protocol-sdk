@@ -58,6 +58,33 @@ Full walkthrough: [QUICKSTART.md](../QUICKSTART.md). Complete UI example:
 
 ---
 
+## React Native lifecycle ordering
+
+Violating this order drops startup events or pulls the wrong documents with no
+loud error unless you are in a development build (see `devLifecycleWarnings` on
+`ProtocolConfig`).
+
+```
+new OfflineProtocol(config)
+  → protocol.on(...)            // listeners before start
+  → dataStore.setInterest(...)  // optional; before start for a tight filter
+  → await protocol.start()      // MLS, interest, then engine
+  → send / enableTransport / data edits
+```
+
+| Step | Mistake | Symptom |
+|------|---------|---------|
+| Listeners | `start()` before `on(...)` | Missed `neighbor_discovered`, first `message_received` |
+| Interest | `setInterest` only after `start()` when narrowing | Whole space replicated on first exchange |
+| Engine | `sendMessage` before `start()` | Send fails or never reaches mesh |
+| MLS | `encryption.enabled: true` but MLS init failed at `start()` | Handshake never completes |
+
+Details: [RN README Protocol Lifecycle](../bindings/react-native/README.md#protocol-lifecycle),
+[data interest ordering](../bindings/react-native/js-ci-harness/data-interest-order.test.js)
+(comment block at top).
+
+---
+
 ## Native mobile (iOS / Android): extra steps
 
 React Native initializes MLS and storage inside `start()`. **Native** apps must:
