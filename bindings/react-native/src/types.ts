@@ -1005,6 +1005,13 @@ export interface ProtocolConfig {
    * id, which may be a username or phone number, so do not ship `true`.
    */
   devPeerAddressWarnings?: boolean;
+  /**
+   * Log console warnings when integrator lifecycle ordering is wrong (listeners
+   * after start, send before start, data mutations before start, and similar).
+   * Never blocks the call. Defaults to on in React Native development builds
+   * (`__DEV__`); off in production unless set to `true` explicitly.
+   */
+  devLifecycleWarnings?: boolean;
 }
 
 /**

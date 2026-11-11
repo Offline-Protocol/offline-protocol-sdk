@@ -99,6 +99,16 @@ export {
   MESH_ADDRESS_PREFIX,
 } from './peerAddressHints';
 import { setDevPeerAddressWarnings, warnPeerIdIfMisshapen } from './peerAddressHints';
+import {
+  bindDevLifecycleWarningsFromConfig,
+  isModuleEngineStarted,
+  setModuleEngineStartedForHints,
+  warnIfCallBeforeEngineStart,
+  warnIfDataCallBeforeStoreReady,
+  warnIfInterestNarrowedAfterStart,
+  warnIfNoListenersAtStart,
+  warnIfSendWithoutMls,
+} from './lifecycleHints';
 
 const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
   ? NativeModules.OfflineProtocolModule
@@ -448,6 +458,18 @@ const pendingInterest: Map<string, string[]> = new Map();
 let dataStoreReady = false;
 
 /**
+ * The interest the native store last accepted, by space; a space absent here
+ * has the default `['*']`. Read only by the dev hint that tells a post-start
+ * narrowing (which cannot delete what is already held) from a widening (the
+ * supported post-start use). Cleared with `pendingInterest` by `destroy()`.
+ */
+const appliedInterest: Map<string, string[]> = new Map();
+
+function warnDataStoreLifecycle(context: string): void {
+  warnIfDataCallBeforeStoreReady(context, dataStoreReady);
+}
+
+/**
  * The two data-layer answers that mean the layer stores and replicates
  * nothing at all. A held interest that meets one of them cannot be violated
  * by starting, so `start()` warns rather than refusing.
@@ -496,6 +518,7 @@ async function applyPendingInterest(): Promise<void> {
     const [spaceId, patterns] = next.value;
     try {
       await OfflineProtocolNativeModule.dataSetInterest(spaceId, patterns);
+      appliedInterest.set(spaceId, patterns);
     } catch (error) {
       const offCode = await dataLayerOffCode(error);
       if (offCode !== null) {
@@ -583,6 +606,15 @@ export class OfflineProtocol {
    */
   private cachedLocalAddress: string | null = null;
   private isCreated: boolean = false;
+  /** Native `start()` completed for this session; cleared on `stop()` / `destroy()`. */
+  private isEngineStarted: boolean = false;
+  /**
+   * Whether MLS is known to be initialized (encryption on only): set by
+   * `start()`'s readiness check and by a later successful
+   * {@link initializeMlsWithSecureStorage}, so a recovered init stops the
+   * send hint.
+   */
+  private mlsReady: boolean = true;
   /** What the engine was last told about `peer_rssi`; see {@link syncPeerRssiEvents}. */
   private peerRssiEventsOn: boolean = false;
   private initialRuntimeConfig: InitialRuntimeConfig | null = null;
@@ -596,8 +628,28 @@ export class OfflineProtocol {
   constructor(config: ProtocolConfig) {
     this.config = config;
     setDevPeerAddressWarnings(config.devPeerAddressWarnings);
+    bindDevLifecycleWarningsFromConfig(config.devLifecycleWarnings);
     this.eventEmitter = new NativeEventEmitter(OfflineProtocolNativeModule);
     this.setupEventSubscription();
+  }
+
+  private warnLifecycleNeedsEngine(context: string): void {
+    warnIfCallBeforeEngineStart(
+      context,
+      this.isEngineStarted,
+      this.config.devLifecycleWarnings
+    );
+  }
+
+  private warnLifecycleSendMls(context: string): void {
+    const encryptionEnabled = this.config.encryption?.enabled ?? true;
+    warnIfSendWithoutMls(
+      context,
+      encryptionEnabled,
+      this.mlsReady,
+      this.isEngineStarted,
+      this.config.devLifecycleWarnings
+    );
   }
 
   /**
@@ -1551,6 +1603,11 @@ export class OfflineProtocol {
    * @throws Error if protocol is already started or fails to start
    */
   async start(): Promise<void> {
+    warnIfNoListenersAtStart(
+      this.eventListeners.size,
+      this.config.devLifecycleWarnings
+    );
+
     // Create protocol instance if not already created
     if (!this.isCreated) {
       const nativeConfig = this.transformConfigForNative();
@@ -1593,6 +1650,12 @@ export class OfflineProtocol {
     dataStoreReady = true;
 
     await OfflineProtocolNativeModule.start();
+    // Started from here on, not at the end of this method: the transport
+    // auto-enables below call `enableTransport`, and a listener may send
+    // from `neighbor_discovered` while they are awaited. Both are correctly
+    // ordered and must not see the "call start() first" hint.
+    this.isEngineStarted = true;
+    setModuleEngineStartedForHints(true);
 
     // A session is starting, so nothing held from before it can still be
     // true. Redelivering a stale one-shot event is not a milder version of
@@ -1615,11 +1678,14 @@ export class OfflineProtocol {
 
     if (encryptionEnabled) {
       const mlsReady = await OfflineProtocolNativeModule.isMlsInitialized();
+      this.mlsReady = mlsReady;
       if (!mlsReady) {
         console.warn(
           "[OfflineProtocol] Encryption enabled but MLS is not initialized — key exchange and secure sessions will not work"
         );
       }
+    } else {
+      this.mlsReady = true;
     }
 
     // Auto-enable internet transport if configured with a server address
@@ -1721,6 +1787,8 @@ export class OfflineProtocol {
    */
   async stop(): Promise<void> {
     await OfflineProtocolNativeModule.stop();
+    this.isEngineStarted = false;
+    setModuleEngineStartedForHints(false);
   }
 
   /**
@@ -1750,6 +1818,8 @@ export class OfflineProtocol {
    */
   async sendMessage(params: SendMessageParams): Promise<string> {
     warnPeerIdIfMisshapen(params.recipient, 'sendMessage');
+    this.warnLifecycleNeedsEngine('sendMessage');
+    this.warnLifecycleSendMls('sendMessage');
     const priority = params.priority ?? MessagePriority.Medium;
 
     // Rich params route to the rich native method; the plain path is left
@@ -1838,6 +1908,8 @@ export class OfflineProtocol {
    */
   async forwardMessage(params: ForwardMessageParams): Promise<string> {
     warnPeerIdIfMisshapen(params.newRecipient, 'forwardMessage');
+    this.warnLifecycleNeedsEngine('forwardMessage');
+    this.warnLifecycleSendMls('forwardMessage');
     const priority = params.priority ?? MessagePriority.Medium;
     const messageId = await OfflineProtocolNativeModule.forwardMessage(
       params.originalMessageJson,
@@ -1868,6 +1940,7 @@ export class OfflineProtocol {
    */
   async sendConnectionRequest(params: SendConnectionRequestParams): Promise<string> {
     warnPeerIdIfMisshapen(params.recipient, 'sendConnectionRequest');
+    this.warnLifecycleNeedsEngine('sendConnectionRequest');
     const messageId = await OfflineProtocolNativeModule.sendConnectionRequest(
       params.recipient,
       params.senderName,
@@ -1957,6 +2030,7 @@ export class OfflineProtocol {
     type: TransportType,
     config?: InternetTransportConfig | WifiDirectTransportConfig | NostrTransportConfig | ReticulumTransportConfig
   ): Promise<void> {
+    this.warnLifecycleNeedsEngine(`enableTransport(${type})`);
     const result = await OfflineProtocolNativeModule.enableTransport(
       type,
       config
@@ -1976,6 +2050,7 @@ export class OfflineProtocol {
    * @throws Error if transport fails to disable
    */
   async disableTransport(type: TransportType): Promise<void> {
+    this.warnLifecycleNeedsEngine(`disableTransport(${type})`);
     return await OfflineProtocolNativeModule.disableTransport(type);
   }
 
@@ -2063,6 +2138,8 @@ export class OfflineProtocol {
    */
   async sendMedia(params: SendMediaParams): Promise<string> {
     warnPeerIdIfMisshapen(params.recipient, 'sendMedia');
+    this.warnLifecycleNeedsEngine('sendMedia');
+    this.warnLifecycleSendMls('sendMedia');
     // Rich params — and any of the extended (cloud/sticker) metadata
     // fields, which the plain native method does not map — route to the
     // rich native method; the plain path is left untouched. Rich fields
@@ -3161,7 +3238,8 @@ export class OfflineProtocol {
    * @throws Error if initialization fails
    */
   async initializeMlsWithSecureStorage(): Promise<void> {
-    return await OfflineProtocolNativeModule.initializeMlsWithSecureStorage();
+    await OfflineProtocolNativeModule.initializeMlsWithSecureStorage();
+    this.mlsReady = true;
   }
 
   /**
@@ -3558,6 +3636,7 @@ export class OfflineProtocol {
    */
   async establishSecureSession(peerId: string): Promise<MlsWelcome | null> {
     warnPeerIdIfMisshapen(peerId, 'establishSecureSession');
+    this.warnLifecycleNeedsEngine('establishSecureSession');
     const result = await OfflineProtocolNativeModule.establishSecureSession(
       peerId
     );
@@ -4156,9 +4235,14 @@ export class OfflineProtocol {
       // instance's running store as not ready.
       dataStoreReady = false;
       pendingInterest.clear();
+      appliedInterest.clear();
       await OfflineProtocolNativeModule.destroy();
       this.isCreated = false;
     }
+
+    this.isEngineStarted = false;
+    this.mlsReady = true;
+    setModuleEngineStartedForHints(false);
 
     this.initialRuntimeConfigApplied = false;
 
@@ -4608,6 +4692,7 @@ export type DataValue =
 export class DataStore {
   /** Creates a document, or does nothing if it already exists. */
   async createDoc(spaceId: string, docId: string): Promise<void> {
+    warnDataStoreLifecycle('createDoc');
     await OfflineProtocolNativeModule.dataCreateDoc(spaceId, docId);
   }
 
@@ -4620,6 +4705,7 @@ export class DataStore {
    * {@link removeDoc} to remove content from the room.
    */
   async deleteDoc(spaceId: string, docId: string): Promise<void> {
+    warnDataStoreLifecycle('deleteDoc');
     await OfflineProtocolNativeModule.dataDeleteDoc(spaceId, docId);
   }
 
@@ -4642,11 +4728,13 @@ export class DataStore {
    * fresh name.
    */
   async removeDoc(spaceId: string, docId: string): Promise<void> {
+    warnDataStoreLifecycle('removeDoc');
     await OfflineProtocolNativeModule.dataRemoveDoc(spaceId, docId);
   }
 
   /** Removes every document a space holds, from every replica of it. */
   async removeSpace(spaceId: string): Promise<void> {
+    warnDataStoreLifecycle('removeSpace');
     await OfflineProtocolNativeModule.dataRemoveSpace(spaceId);
   }
 
@@ -4668,6 +4756,7 @@ export class DataStore {
     hash: string
   ): Promise<void> {
     warnPeerIdIfMisshapen(peerId, 'fetchAttachmentFrom');
+    warnDataStoreLifecycle('fetchAttachmentFrom');
     await OfflineProtocolNativeModule.dataFetchAttachmentFrom(
       spaceId,
       peerId,
@@ -4716,16 +4805,25 @@ export class DataStore {
       pendingInterest.set(spaceId, [...patterns]);
       return;
     }
-    await OfflineProtocolNativeModule.dataSetInterest(spaceId, patterns);
+    const next = [...patterns];
+    warnIfInterestNarrowedAfterStart(
+      spaceId,
+      appliedInterest.get(spaceId) ?? ['*'],
+      next
+    );
+    await OfflineProtocolNativeModule.dataSetInterest(spaceId, next);
+    appliedInterest.set(spaceId, next);
   }
 
   /** The documents in a space. */
   async listDocs(spaceId: string): Promise<string[]> {
+    warnDataStoreLifecycle('listDocs');
     return JSON.parse(await OfflineProtocolNativeModule.dataListDocs(spaceId));
   }
 
   /** Every space that holds at least one document. */
   async listSpaces(): Promise<string[]> {
+    warnDataStoreLifecycle('listSpaces');
     return JSON.parse(await OfflineProtocolNativeModule.dataListSpaces());
   }
 
@@ -4737,6 +4835,7 @@ export class DataStore {
     key: string,
     value: DataValue
   ): Promise<void> {
+    warnDataStoreLifecycle('mapSet');
     await OfflineProtocolNativeModule.dataMapSet(
       spaceId,
       docId,
@@ -4753,6 +4852,7 @@ export class DataStore {
     collection: string,
     key: string
   ): Promise<void> {
+    warnDataStoreLifecycle('mapDelete');
     await OfflineProtocolNativeModule.dataMapDelete(
       spaceId,
       docId,
@@ -4768,6 +4868,7 @@ export class DataStore {
     collection: string,
     key: string
   ): Promise<DataValue | null> {
+    warnDataStoreLifecycle('mapGet');
     const json = await OfflineProtocolNativeModule.dataMapGetJson(
       spaceId,
       docId,
@@ -4784,6 +4885,7 @@ export class DataStore {
     collection: string,
     value: DataValue
   ): Promise<void> {
+    warnDataStoreLifecycle('listPush');
     await OfflineProtocolNativeModule.dataListPush(
       spaceId,
       docId,
@@ -4800,6 +4902,7 @@ export class DataStore {
     index: number,
     count: number
   ): Promise<void> {
+    warnDataStoreLifecycle('listDelete');
     await OfflineProtocolNativeModule.dataListDelete(
       spaceId,
       docId,
@@ -4815,6 +4918,7 @@ export class DataStore {
     docId: string,
     collection: string
   ): Promise<number> {
+    warnDataStoreLifecycle('listLength');
     return await OfflineProtocolNativeModule.dataListLen(
       spaceId,
       docId,
@@ -4834,6 +4938,7 @@ export class DataStore {
     position: number,
     text: string
   ): Promise<void> {
+    warnDataStoreLifecycle('textInsert');
     await OfflineProtocolNativeModule.dataTextInsert(
       spaceId,
       docId,
@@ -4851,6 +4956,7 @@ export class DataStore {
     position: number,
     count: number
   ): Promise<void> {
+    warnDataStoreLifecycle('textDelete');
     await OfflineProtocolNativeModule.dataTextDelete(
       spaceId,
       docId,
@@ -4866,6 +4972,7 @@ export class DataStore {
     docId: string,
     collection: string
   ): Promise<string> {
+    warnDataStoreLifecycle('textValue');
     return await OfflineProtocolNativeModule.dataTextValue(
       spaceId,
       docId,
@@ -4880,6 +4987,7 @@ export class DataStore {
     collection: string,
     amount: number
   ): Promise<void> {
+    warnDataStoreLifecycle('counterIncrement');
     await OfflineProtocolNativeModule.dataCounterIncrement(
       spaceId,
       docId,
@@ -4894,6 +5002,7 @@ export class DataStore {
     docId: string,
     collection: string
   ): Promise<number> {
+    warnDataStoreLifecycle('counterValue');
     return await OfflineProtocolNativeModule.dataCounterValue(
       spaceId,
       docId,
@@ -4908,6 +5017,7 @@ export class DataStore {
    * and this half needs no knowledge of the SDK to read.
    */
   async docJson(spaceId: string, docId: string): Promise<unknown> {
+    warnDataStoreLifecycle('docJson');
     return JSON.parse(
       await OfflineProtocolNativeModule.dataDocJson(spaceId, docId)
     );
@@ -4920,6 +5030,7 @@ export class DataStore {
    * history itself is what you need.
    */
   async exportRaw(spaceId: string, docId: string): Promise<string> {
+    warnDataStoreLifecycle('exportRaw');
     return await OfflineProtocolNativeModule.dataExportRaw(spaceId, docId);
   }
 
@@ -4932,16 +5043,19 @@ export class DataStore {
    * flushes on shutdown.
    */
   async flush(spaceId: string, docId: string): Promise<void> {
+    warnDataStoreLifecycle('flush');
     await OfflineProtocolNativeModule.dataFlush(spaceId, docId);
   }
 
   /** {@link flush} for every open document. */
   async flushAll(): Promise<void> {
+    warnDataStoreLifecycle('flushAll');
     await OfflineProtocolNativeModule.dataFlushAll();
   }
 
   /** The compacted size of a document, in bytes. */
   async docSize(spaceId: string, docId: string): Promise<number> {
+    warnDataStoreLifecycle('docSize');
     return await OfflineProtocolNativeModule.dataDocSize(spaceId, docId);
   }
 
@@ -4964,6 +5078,7 @@ export class DataStore {
    * clears the device; {@link removeSpace} is what clears the room.
    */
   async wipeAll(): Promise<void> {
+    warnDataStoreLifecycle('wipeAll');
     await OfflineProtocolNativeModule.dataWipeAll();
   }
 
@@ -4995,6 +5110,7 @@ export class DataStore {
    * @param bytesBase64 The blob, base64.
    */
   async attachmentHash(bytesBase64: string): Promise<string> {
+    warnDataStoreLifecycle('attachmentHash');
     return await OfflineProtocolNativeModule.dataAttachmentHash(bytesBase64);
   }
 
@@ -5012,6 +5128,7 @@ export class DataStore {
    * confirmed 1:1 session, and two group members need not have one.
    */
   async fetchAttachment(spaceId: string, hash: string): Promise<void> {
+    warnDataStoreLifecycle('fetchAttachment');
     await OfflineProtocolNativeModule.dataFetchAttachment(spaceId, hash);
   }
 
@@ -5031,6 +5148,7 @@ export class DataStore {
     bytesBase64: string
   ): Promise<void> {
     warnPeerIdIfMisshapen(peerId, 'provideAttachment');
+    warnDataStoreLifecycle('provideAttachment');
     await OfflineProtocolNativeModule.dataProvideAttachment(spaceId, peerId, hash, bytesBase64);
   }
 
@@ -5076,6 +5194,10 @@ export class MeshServices {
     version: string,
     capabilities: Record<string, string> = {}
   ): Promise<void> {
+    warnIfCallBeforeEngineStart(
+      'registerService',
+      isModuleEngineStarted()
+    );
     await OfflineProtocolNativeModule.registerService(
       serviceId,
       version,
@@ -5121,6 +5243,10 @@ export class MeshServices {
     body: string
   ): Promise<string> {
     warnPeerIdIfMisshapen(provider, 'sendServiceRequest');
+    warnIfCallBeforeEngineStart(
+      'sendServiceRequest',
+      isModuleEngineStarted()
+    );
     return await OfflineProtocolNativeModule.sendServiceRequest(
       provider,
       serviceId,
