@@ -1512,6 +1512,10 @@ await protocol.cancelFileTransfer(fileId);
 
 ## Troubleshooting
 
+**Transport timing and several apps on one phone:** see
+[docs/troubleshooting.md](../../docs/troubleshooting.md) (G6). Wi‑Fi Direct
+`autoAccept` often needs **1–2 minutes** before switching; that is not a hang.
+
 ### Messages Not Delivering
 
 1. Verify both devices have protocol started
@@ -1527,6 +1531,8 @@ await protocol.cancelFileTransfer(fileId);
 4. Verify devices are within range
 
 ### Several Apps on This SDK on One Phone
+
+Full dogfood guidance: [docs/troubleshooting.md § Several SDK apps](../../docs/troubleshooting.md#several-sdk-apps-on-one-phone).
 
 Every app built on this SDK serves the same Bluetooth service, so a phone
 running two of them presents two instances of it. Each app reads a small tag
