@@ -158,6 +158,25 @@ is offered.
   An acknowledgement per frame was a third of the frames a phone sent in that
   test. A held batch is in memory only; one lost with a restart is answered
   again when the resend arrives as a duplicate.
+- **No resend behind a queued copy.** A frame whose earlier copy is still in a
+  local carrier queue is not resent, by the acknowledgement timeout or by the
+  retry ladder: that copy has not gone out, so nothing can have answered it.
+  The ladder holds such a resend for one more rung and keeps its count, and
+  holds it only within a minute of the last copy handed to a carrier: a direct
+  send, the minute that also bounds the timeout's extension, or a copy handed
+  to a neighbor. Past it the resend goes, so a dead link cannot pin the
+  message. Bounded by the direct send alone, a message the mesh carries (whose
+  direct sends fail) stopped being held a minute after its first attempt, and
+  every rung after that queued one more copy. A held resend spends no place
+  in the ladder's batch and no resend token, which a slow link's held entries
+  otherwise used up ahead of resends that could go. Neither path asks which carrier holds the copy, so within that
+  minute a resend that could have gone by another carrier waits too; a
+  carrier, discovery or session edge still flushes past the hold. On
+  the 2026-11-09 phone chain the ladder did not, and its 1 s and 3 s resends
+  queued behind the first copy on a slow link. The receipt that completed a
+  round had ten copies ahead of it in a fast round and twenty in a slow one.
+  The rule sees only what a carrier reports as queued: a binding that drains
+  every fragment into a queue of its own hides it.
 - **One answer per flood.** A delivery carried across the mesh arrives by as
   many paths as neighbors carried it, and each answer is a flood of its own
   back. So a copy a relay carried (hop spent, over a mesh carrier) is not

@@ -16,7 +16,9 @@
 // first is released. Of two instances behind one device, the carrier binds
 // the one tagged with this application. A disconnect reports the peer lost,
 // and so does closing a link whose server is already gone, with no event to
-// say so. Stopping the node closes the carrier's links. The title ends as
+// say so. Stopping the node closes the carrier's links. On a slow link a
+// receipt overtakes queued data; a sink that throws is still offered
+// fragments; a write that never settles closes its link. The title ends as
 // PASS or FAIL: <step>.
 import { OfflineNode, BluetoothCarrier } from "../src/index.js";
 import { FakeBluetooth, peripheral, foreignInstance } from "./fake-bluetooth.js";
@@ -72,6 +74,44 @@ await run(async (step) => {
   await b.sendMessage(a.address, long);
   await toA;
   log("a message of several fragments crossed each way");
+
+  step.name = "receipt ahead";
+  // A slow link: nothing is written until released. The browser queues five
+  // messages, then hears one from the phone, whose receipt must be written
+  // before the last of them. The node hands the page only a few fragments
+  // ahead, so the rest wait in the engine, which puts a receipt ahead of data.
+  // Drained all at once, every fragment sat in the page's write queue and the
+  // receipt went last, which on phones held receipts behind resends.
+  let release;
+  const held = new Promise((r) => (release = r));
+  const takeWrite = device.message.onWrite;
+  device.message.onWrite = async (bytes, how) => {
+    await held;
+    return takeWrite(bytes, how);
+  };
+  const seen = [];
+  const onReceived = ({ detail }) => seen.push(`received ${detail.content.slice(0, 7)}`);
+  const onDelivered = ({ detail }) => seen.push(`delivered ${detail.message_id}`);
+  b.addEventListener("message_received", onReceived);
+  b.addEventListener("message_delivered", onDelivered);
+  for (let n = 0; n < 5; n++) await a.sendMessage(b.address, `queued${n} ${"x".repeat(600)}`);
+  const lastToB = waitFor(b, "message_received", (e) => e.content.startsWith("queued4"));
+  const fromB = waitFor(a, "message_received", (e) => e.content === "while the link is slow");
+  const ask = await b.sendMessage(a.address, "while the link is slow");
+  await fromB;
+  // The receipt is held up to 500 ms to be coalesced before it is queued.
+  await new Promise((r) => setTimeout(r, 800));
+  release();
+  await lastToB;
+  await waitFor(b, "message_delivered", (e) => e.message_id === ask, 10000).catch(() => {});
+  device.message.onWrite = takeWrite;
+  b.removeEventListener("message_received", onReceived);
+  b.removeEventListener("message_delivered", onDelivered);
+  const receipt = seen.indexOf(`delivered ${ask}`);
+  if (receipt === -1 || receipt > seen.indexOf("received queued4")) {
+    throw new Error(`the receipt went behind the data: ${seen.join(", ")}`);
+  }
+  log(`on a slow link the receipt overtook queued data: ${seen.join(", ")}`);
 
   step.name = "relink";
   // Linking a device already linked hands back the peer, and every fragment
@@ -201,6 +241,41 @@ await run(async (step) => {
   if (next.peers.length !== 0 || third.gatt.connected) throw new Error("stopping left a link open");
   log("stopping the node closed the carrier's links");
 
-  await Promise.all([b, c, d, e, f, g, h, k, t].map((node) => node.stop()));
+  step.name = "a throwing sink";
+  // A sink whose write throws still hands its slot back: the worker counts a
+  // fragment as unwritten until the page reports it, and stops pulling for
+  // every link at four, so a throw that never reported stopped all Bluetooth
+  // output after four.
+  const [x, y] = await Promise.all([start("thrower"), start("throwee")]);
+  let attempts = 0;
+  x.setBluetoothSink({
+    write: () => {
+      attempts += 1;
+      throw new Error("the sink failed");
+    },
+  });
+  await x.bleVerify(new TextEncoder().encode(y.address), await y.bleHello());
+  await x.bleLinkUp(y.address, 180);
+  for (let n = 0; n < 3; n++) await x.sendMessage(y.address, `thrown${n} ${"x".repeat(600)}`);
+  await new Promise((r) => setTimeout(r, 1500));
+  if (attempts <= 4) throw new Error(`the sink was offered ${attempts} fragments, then nothing`);
+  log(`a sink that threw was still offered ${attempts} fragments`);
+
+  step.name = "a stalled write";
+  // A write that never settles closes its link once writeTimeoutMs passes.
+  // The node holds every link's output while one has four writes unsettled,
+  // so without it one stuck write stopped all of them, with nothing reported.
+  const [p, q] = await Promise.all([start("stalled-browser"), start("stalled-phone")]);
+  const stalled = await peripheral(q, p.address);
+  const stalledCarrier = new BluetoothCarrier(p, { bluetooth: new FakeBluetooth([stalled]), writeTimeoutMs: 300 });
+  await stalledCarrier.request();
+  const lostQ = waitFor(p, "neighbor_lost", (ev) => ev.peer_id === q.address, 5000);
+  stalled.message.onWrite = () => new Promise(() => {});
+  await p.sendMessage(q.address, "into a write that never settles");
+  await lostQ;
+  if (stalledCarrier.peers.length !== 0) throw new Error(`the carrier still holds ${stalledCarrier.peers}`);
+  log("a write that never settled closed its link");
+
+  await Promise.all([b, c, d, e, f, g, h, k, t, x, y, p, q].map((node) => node.stop()));
 });
 </script>

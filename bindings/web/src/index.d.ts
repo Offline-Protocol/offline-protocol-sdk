@@ -237,7 +237,7 @@ export class OfflineNode extends EventTarget {
    * it. `close` runs once when the node stops or fails. Throws when another
    * carrier holds it; `null` gives it back.
    */
-  setBluetoothSink(sink: { write(peer: string, bytes: Uint8Array): void; close(): void } | null): void;
+  setBluetoothSink(sink: { write(peer: string, bytes: Uint8Array): void | Promise<unknown>; close(): void } | null): void;
   /** Registers a carrier the page opened; resolves to its link id. */
   openLink(carrier: PageCarrier): Promise<number>;
   /** Bytes the carrier delivered; resolves to the reason it was closed, if it was. */
@@ -409,10 +409,12 @@ export function publicAddress(
  */
 export class BluetoothCarrier extends EventTarget {
   /**
-   * `bluetooth` defaults to `navigator.bluetooth`. One carrier per node:
-   * throws while another carrier on `node` has not been released.
+   * `bluetooth` defaults to `navigator.bluetooth`. A write still pending after
+   * `writeTimeoutMs` (default 10 000) closes its link, since the node holds
+   * every link's output while one has four writes unsettled. One carrier per
+   * node: throws while another carrier on `node` has not been released.
    */
-  constructor(node: OfflineNode, options?: { bluetooth?: unknown });
+  constructor(node: OfflineNode, options?: { bluetooth?: unknown; writeTimeoutMs?: number });
   /** Whether this browser exposes Web Bluetooth at all. */
   static readonly supported: boolean;
   /** The addresses linked now. */

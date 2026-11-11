@@ -4400,10 +4400,10 @@ impl OfflineProtocol {
             StdDuration::from_millis(self.config.reliability.ack.default_timeout_ms.max(1));
         let generation = match last {
             None => 0,
-            Some((generation, since)) if since.elapsed() >= period => {
-                (generation + 1).min(super::mesh_relay::RESEND_MAX_GENERATION)
+            Some(last) if last.since.elapsed() >= period => {
+                (last.generation + 1).min(super::mesh_relay::RESEND_MAX_GENERATION)
             }
-            Some((generation, _)) => generation,
+            Some(last) => last.generation,
         };
         let stamped;
         let message = if generation > 0 {
@@ -4422,16 +4422,26 @@ impl OfflineProtocol {
             if last.is_none() {
                 let retention = self.mesh_relay.config().seen.retention;
                 let (outbox, media_outbox) = (&self.outbox, &self.media_outbox);
-                self.mesh_resend_generations.retain(|id, (_, since)| {
+                self.mesh_resend_generations.retain(|id, resend| {
                     outbox.contains_key(id)
                         || media_outbox.contains_key(id)
-                        || since.elapsed() < retention
+                        || resend.since.elapsed() < retention
                 });
             }
-            if last.is_none_or(|(previous, _)| generation > previous) {
-                self.mesh_resend_generations
-                    .insert(message.id.clone(), (generation, Instant::now()));
+            let now = Instant::now();
+            let resend = self
+                .mesh_resend_generations
+                .entry(message.id.clone())
+                .or_insert(super::MeshResend {
+                    generation,
+                    since: now,
+                    handed_at: now,
+                });
+            if generation > resend.generation {
+                resend.generation = generation;
+                resend.since = now;
             }
+            resend.handed_at = now;
         }
         if handed_to_mesh > 0 {
             debug!(
