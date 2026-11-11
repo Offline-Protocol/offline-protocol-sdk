@@ -3,6 +3,12 @@
  *
  * Never blocks calls; mirrors the integrator map ordering (listeners →
  * interest → start → send).
+ *
+ * Internal to the package: `index.ts` imports these and re-exports none of
+ * them, so the helpers and the module state below can change without a
+ * breaking release. A hint that fires on correct code teaches developers to
+ * ignore the channel, so every warning here must be one a correctly ordered
+ * app never sees.
  */
 
 declare const __DEV__: boolean | undefined;
@@ -40,17 +46,15 @@ export function devLifecycleWarningsEnabled(
   if (flag === true) {
     return true;
   }
-  return typeof __DEV__ !== 'undefined' && __DEV__;
+  return typeof __DEV__ !== 'undefined' && __DEV__ === true;
 }
 
 export function currentDevLifecycleWarnings(): boolean {
   return devLifecycleWarningsEnabled(moduleDevLifecycleWarnings);
 }
 
-function warnOnce(key: string, message: string, enabled: boolean): void {
-  if (!enabled) {
-    return;
-  }
+/** Logs `message` the first time `key` is seen in this process. */
+function warnOnce(key: string, message: string): void {
   if (warnedKeys.has(key)) {
     return;
   }
@@ -68,33 +72,39 @@ export function lifecycleNeedsEngineMessage(context: string): string {
 
 export function lifecycleNoListenersMessage(): string {
   return (
-    '[OfflineProtocol] start() with no on(...) listeners registered. ' +
-    'Startup events (neighbor_discovered, message_received, …) may be dropped. ' +
-    `Register listeners before start(). See ${LIFECYCLE_DOC}`
+    '[OfflineProtocol] start() with no on(...) listeners registered. Inbound ' +
+    'messages are held for the first listener, but status events that arrive ' +
+    'before one is registered (neighbor_discovered, network_metrics, …) are ' +
+    `dropped. Register listeners before start(). See ${LIFECYCLE_DOC}`
   );
 }
 
 export function lifecycleDataBeforeStartMessage(context: string): string {
   return (
     `[OfflineProtocol] ${context}: the data store is not open yet. ` +
-    'Call await protocol.start() first, or use setInterest() before start() for ' +
-    'replication policy. See data-interest-order in the RN package js-ci-harness.'
+    'Call await protocol.start() first; setInterest() is the one data call ' +
+    'that may come before start(). See docs/data.md.'
   );
 }
 
-export function lifecycleInterestAfterStartMessage(): string {
+export function lifecycleInterestNarrowedAfterStartMessage(
+  spaceId: string
+): string {
   return (
-    '[OfflineProtocol] setInterest after start() can only widen what is replicated; ' +
-    'narrowing does not delete documents already pulled during start-up. ' +
-    'Declare interest before start() when you need a tight filter from the first exchange.'
+    `[OfflineProtocol] setInterest("${spaceId}") after start() narrowed the ` +
+    'interest. The narrower filter refuses documents from now on, but does not ' +
+    'delete what this device already holds, including what the start-up ' +
+    'exchange pulled in. Declare interest before start() when you need a tight ' +
+    'filter from the first exchange.'
   );
 }
 
 export function lifecycleSendWithoutMlsMessage(context: string): string {
   return (
-    `[OfflineProtocol] ${context}: encryption is enabled but MLS did not initialize during ` +
-    'start(). Secure send and handshake may fail until MLS is ready. ' +
-    'Fix MLS init errors logged at start(), or set encryption.enabled: false for cleartext-only tests.'
+    `[OfflineProtocol] ${context}: encryption is enabled but MLS is not ` +
+    'initialized. Secure send and handshake may fail until it is. Fix the MLS ' +
+    'init errors logged at start() (or call initializeMlsWithSecureStorage()), ' +
+    'or set encryption.enabled: false for cleartext-only tests.'
   );
 }
 
@@ -105,72 +115,101 @@ function lifecycleWarningsOn(devFlag?: boolean): boolean {
   return currentDevLifecycleWarnings();
 }
 
+/**
+ * Whether interest pattern `outer` matches every document `inner` matches.
+ * A pattern is a document name, or a prefix ending in `*`.
+ */
+function patternCovers(outer: string, inner: string): boolean {
+  if (outer === inner) {
+    return true;
+  }
+  if (!outer.endsWith('*')) {
+    return false;
+  }
+  return inner.startsWith(outer.slice(0, -1));
+}
+
+/**
+ * Whether replacing interest `previous` with `next` drops any document
+ * `previous` matched. Conservative: a pattern counts as kept only when one
+ * pattern of `next` covers it whole, so splitting `a*` into `ab*` and `a*x`
+ * style unions reads as a narrowing.
+ */
+export function isInterestNarrowing(
+  previous: readonly string[],
+  next: readonly string[]
+): boolean {
+  return previous.some(
+    (old) => !next.some((candidate) => patternCovers(candidate, old))
+  );
+}
+
 export function warnIfCallBeforeEngineStart(
   context: string,
   engineStarted: boolean,
   devFlag?: boolean
 ): void {
-  const enabled = lifecycleWarningsOn(devFlag);
-  if (engineStarted || !enabled) {
+  if (engineStarted || !lifecycleWarningsOn(devFlag)) {
     return;
   }
-  warnOnce(
-    `engine:${context}`,
-    lifecycleNeedsEngineMessage(context),
-    true
-  );
+  warnOnce(`engine:${context}`, lifecycleNeedsEngineMessage(context));
 }
 
 export function warnIfNoListenersAtStart(
   listenerCount: number,
   devFlag?: boolean
 ): void {
-  const enabled = lifecycleWarningsOn(devFlag);
-  if (listenerCount > 0 || !enabled) {
+  if (listenerCount > 0 || !lifecycleWarningsOn(devFlag)) {
     return;
   }
-  warnOnce('start:no-listeners', lifecycleNoListenersMessage(), true);
+  warnOnce('start:no-listeners', lifecycleNoListenersMessage());
 }
 
-export function warnIfDataMutationBeforeStoreReady(
+export function warnIfDataCallBeforeStoreReady(
   context: string,
   storeReady: boolean,
   devFlag?: boolean
 ): void {
-  const enabled = lifecycleWarningsOn(devFlag);
-  if (storeReady || !enabled) {
+  if (storeReady || !lifecycleWarningsOn(devFlag)) {
+    return;
+  }
+  warnOnce(`data:${context}`, lifecycleDataBeforeStartMessage(context));
+}
+
+/**
+ * Warns when a post-start `setInterest` narrows the space's interest. A
+ * widening is the supported post-start use (it asks peers for what it adds)
+ * and never warns.
+ */
+export function warnIfInterestNarrowedAfterStart(
+  spaceId: string,
+  previous: readonly string[],
+  next: readonly string[],
+  devFlag?: boolean
+): void {
+  if (!lifecycleWarningsOn(devFlag) || !isInterestNarrowing(previous, next)) {
     return;
   }
   warnOnce(
-    `data:${context}`,
-    lifecycleDataBeforeStartMessage(context),
-    true
+    `interest:narrowed:${spaceId}`,
+    lifecycleInterestNarrowedAfterStartMessage(spaceId)
   );
-}
-
-export function warnIfInterestAfterStart(devFlag?: boolean): void {
-  const enabled = lifecycleWarningsOn(devFlag);
-  if (!enabled) {
-    return;
-  }
-  warnOnce('interest:after-start', lifecycleInterestAfterStartMessage(), true);
 }
 
 export function warnIfSendWithoutMls(
   context: string,
   encryptionEnabled: boolean,
-  mlsReadyAfterStart: boolean,
+  mlsReady: boolean,
   engineStarted: boolean,
   devFlag?: boolean
 ): void {
-  const enabled = lifecycleWarningsOn(devFlag);
   if (
-    !enabled ||
     !engineStarted ||
     !encryptionEnabled ||
-    mlsReadyAfterStart
+    mlsReady ||
+    !lifecycleWarningsOn(devFlag)
   ) {
     return;
   }
-  warnOnce(`mls:${context}`, lifecycleSendWithoutMlsMessage(context), true);
+  warnOnce(`mls:${context}`, lifecycleSendWithoutMlsMessage(context));
 }

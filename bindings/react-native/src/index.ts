@@ -99,28 +99,13 @@ export {
   MESH_ADDRESS_PREFIX,
 } from './peerAddressHints';
 import { setDevPeerAddressWarnings, warnPeerIdIfMisshapen } from './peerAddressHints';
-export {
-  bindDevLifecycleWarningsFromConfig,
-  currentDevLifecycleWarnings,
-  devLifecycleWarningsEnabled,
-  lifecycleDataBeforeStartMessage,
-  lifecycleInterestAfterStartMessage,
-  lifecycleNeedsEngineMessage,
-  lifecycleNoListenersMessage,
-  lifecycleSendWithoutMlsMessage,
-  warnIfCallBeforeEngineStart,
-  warnIfDataMutationBeforeStoreReady,
-  warnIfInterestAfterStart,
-  warnIfNoListenersAtStart,
-  warnIfSendWithoutMls,
-} from './lifecycleHints';
 import {
   bindDevLifecycleWarningsFromConfig,
   isModuleEngineStarted,
   setModuleEngineStartedForHints,
   warnIfCallBeforeEngineStart,
-  warnIfDataMutationBeforeStoreReady,
-  warnIfInterestAfterStart,
+  warnIfDataCallBeforeStoreReady,
+  warnIfInterestNarrowedAfterStart,
   warnIfNoListenersAtStart,
   warnIfSendWithoutMls,
 } from './lifecycleHints';
@@ -472,8 +457,16 @@ const pendingInterest: Map<string, string[]> = new Map();
  */
 let dataStoreReady = false;
 
+/**
+ * The interest the native store last accepted, by space; a space absent here
+ * has the default `['*']`. Read only by the dev hint that tells a post-start
+ * narrowing (which cannot delete what is already held) from a widening (the
+ * supported post-start use). Cleared with `pendingInterest` by `destroy()`.
+ */
+const appliedInterest: Map<string, string[]> = new Map();
+
 function warnDataStoreLifecycle(context: string): void {
-  warnIfDataMutationBeforeStoreReady(context, dataStoreReady);
+  warnIfDataCallBeforeStoreReady(context, dataStoreReady);
 }
 
 /**
@@ -525,6 +518,7 @@ async function applyPendingInterest(): Promise<void> {
     const [spaceId, patterns] = next.value;
     try {
       await OfflineProtocolNativeModule.dataSetInterest(spaceId, patterns);
+      appliedInterest.set(spaceId, patterns);
     } catch (error) {
       const offCode = await dataLayerOffCode(error);
       if (offCode !== null) {
@@ -614,8 +608,13 @@ export class OfflineProtocol {
   private isCreated: boolean = false;
   /** Native `start()` completed for this session; cleared on `stop()` / `destroy()`. */
   private isEngineStarted: boolean = false;
-  /** Whether MLS reported ready after the last successful `start()` (encryption on only). */
-  private mlsReadyAfterStart: boolean = true;
+  /**
+   * Whether MLS is known to be initialized (encryption on only): set by
+   * `start()`'s readiness check and by a later successful
+   * {@link initializeMlsWithSecureStorage}, so a recovered init stops the
+   * send hint.
+   */
+  private mlsReady: boolean = true;
   /** What the engine was last told about `peer_rssi`; see {@link syncPeerRssiEvents}. */
   private peerRssiEventsOn: boolean = false;
   private initialRuntimeConfig: InitialRuntimeConfig | null = null;
@@ -647,7 +646,7 @@ export class OfflineProtocol {
     warnIfSendWithoutMls(
       context,
       encryptionEnabled,
-      this.mlsReadyAfterStart,
+      this.mlsReady,
       this.isEngineStarted,
       this.config.devLifecycleWarnings
     );
@@ -1651,6 +1650,12 @@ export class OfflineProtocol {
     dataStoreReady = true;
 
     await OfflineProtocolNativeModule.start();
+    // Started from here on, not at the end of this method: the transport
+    // auto-enables below call `enableTransport`, and a listener may send
+    // from `neighbor_discovered` while they are awaited. Both are correctly
+    // ordered and must not see the "call start() first" hint.
+    this.isEngineStarted = true;
+    setModuleEngineStartedForHints(true);
 
     // A session is starting, so nothing held from before it can still be
     // true. Redelivering a stale one-shot event is not a milder version of
@@ -1673,14 +1678,14 @@ export class OfflineProtocol {
 
     if (encryptionEnabled) {
       const mlsReady = await OfflineProtocolNativeModule.isMlsInitialized();
-      this.mlsReadyAfterStart = mlsReady;
+      this.mlsReady = mlsReady;
       if (!mlsReady) {
         console.warn(
           "[OfflineProtocol] Encryption enabled but MLS is not initialized — key exchange and secure sessions will not work"
         );
       }
     } else {
-      this.mlsReadyAfterStart = true;
+      this.mlsReady = true;
     }
 
     // Auto-enable internet transport if configured with a server address
@@ -1766,9 +1771,6 @@ export class OfflineProtocol {
         );
       }
     }
-
-    this.isEngineStarted = true;
-    setModuleEngineStartedForHints(true);
   }
 
   /**
@@ -3236,7 +3238,8 @@ export class OfflineProtocol {
    * @throws Error if initialization fails
    */
   async initializeMlsWithSecureStorage(): Promise<void> {
-    return await OfflineProtocolNativeModule.initializeMlsWithSecureStorage();
+    await OfflineProtocolNativeModule.initializeMlsWithSecureStorage();
+    this.mlsReady = true;
   }
 
   /**
@@ -4232,12 +4235,13 @@ export class OfflineProtocol {
       // instance's running store as not ready.
       dataStoreReady = false;
       pendingInterest.clear();
+      appliedInterest.clear();
       await OfflineProtocolNativeModule.destroy();
       this.isCreated = false;
     }
 
     this.isEngineStarted = false;
-    this.mlsReadyAfterStart = true;
+    this.mlsReady = true;
     setModuleEngineStartedForHints(false);
 
     this.initialRuntimeConfigApplied = false;
@@ -4801,8 +4805,14 @@ export class DataStore {
       pendingInterest.set(spaceId, [...patterns]);
       return;
     }
-    warnIfInterestAfterStart();
-    await OfflineProtocolNativeModule.dataSetInterest(spaceId, patterns);
+    const next = [...patterns];
+    warnIfInterestNarrowedAfterStart(
+      spaceId,
+      appliedInterest.get(spaceId) ?? ['*'],
+      next
+    );
+    await OfflineProtocolNativeModule.dataSetInterest(spaceId, next);
+    appliedInterest.set(spaceId, next);
   }
 
   /** The documents in a space. */

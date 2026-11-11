@@ -147,11 +147,11 @@ you pass a non-`off1…` peer id to `sendMessage` and related APIs. Toggle with
 [identity-for-integrators.md](../../docs/identity-for-integrators.md)).
 
 The same builds warn when lifecycle ordering is wrong: `sendMessage` or
-`enableTransport` before `await start()`, `DataStore` mutations before the
-store opens, `start()` with no `on(...)` listeners, or `setInterest` after
-`start()` when you meant to narrow the first replication exchange. Toggle with
-`devLifecycleWarnings` on `ProtocolConfig` (default: `__DEV__` only). Warnings
-never block calls.
+`enableTransport` before `await start()`, `DataStore` calls other than
+`setInterest` before the store opens, `start()` with no `on(...)` listeners, or
+a `setInterest` after `start()` that narrows a space's interest (a widening is
+fine). Toggle with `devLifecycleWarnings` on `ProtocolConfig` (default:
+`__DEV__` only). Warnings never block calls.
 
 Built-in secure and restartable-state stores are isolated by both `appId` and
 `profile`. Changing either value selects a fresh storage namespace.

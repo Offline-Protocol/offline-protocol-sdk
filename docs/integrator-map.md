@@ -74,8 +74,8 @@ new OfflineProtocol(config)
 
 | Step | Mistake | Symptom |
 |------|---------|---------|
-| Listeners | `start()` before `on(...)` | Missed `neighbor_discovered`, first `message_received` |
-| Interest | `setInterest` only after `start()` when narrowing | Whole space replicated on first exchange |
+| Listeners | `start()` before `on(...)` | Missed `neighbor_discovered` and other status events (inbound messages are held for the first listener) |
+| Interest | Narrowing with `setInterest` only after `start()` | Whole space replicated on first exchange; narrowing does not delete it |
 | Engine | `sendMessage` before `start()` | Send fails or never reaches mesh |
 | MLS | `encryption.enabled: true` but MLS init failed at `start()` | Handshake never completes |
 
