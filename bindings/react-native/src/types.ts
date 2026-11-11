@@ -782,8 +782,9 @@ export interface MeshPermissionRequestOptions {
   wifiDirect?: boolean;
   /**
    * Request `ACCESS_LOCAL_NETWORK` on Android API 37+.
-   * Default `false`; use `true` when the peer-stream / LAN slot is enabled and
-   * the app targets API 37+.
+   * Default `false`; set `true` only if your app targets API 37+ and declares
+   * `ACCESS_LOCAL_NETWORK` in its own manifest. `meshPermissionOptionsFromConfig`
+   * never sets it.
    */
   localNetwork?: boolean;
 }

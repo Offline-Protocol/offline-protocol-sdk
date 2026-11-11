@@ -13,6 +13,22 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+### Added
+
+- **React Native can request the mesh's Android runtime grants in one call.**
+  `requestMeshPermissions(options?)`, `requestMeshPermissionsForConfig(config)`
+  and `meshPermissionOptionsFromConfig(config)` are exported from
+  `@offline-protocol/mesh-sdk`. They request, before `start()`, the Bluetooth
+  grants (or fine location on Android 11 and lower) and, with Wi-Fi Direct on,
+  `NEARBY_WIFI_DEVICES` (or fine location on Android 12 and lower), prompting
+  only for what is not already granted. On iOS they return at once: the system
+  prompts when the transports start. `ACCESS_LOCAL_NETWORK` is requested only
+  when the caller passes `localNetwork: true`, since only an app that targets
+  API 37 and declares it needs it, and JavaScript cannot read the target. The
+  permission is named by its string, so the helpers work on React Native
+  releases before 0.87, which lack the constant
+  ([mobile permissions](docs/mobile-permissions.md#react-native-helper-optional)).
+
 ### Fixed
 
 - **A delivery receipt no longer re-sends every message still waiting for one,
