@@ -26,6 +26,7 @@ PROFILE  ?= debug
 LIBDIR   ?= $(ROOT)/target/$(PROFILE)
 LIBNAME  := offline_protocol_uniffi
 INCLUDE  := $(ROOT)/bindings/c/include
+SCENARIO := $(ROOT)/bindings/c/src/config_scenarios.c
 SANITIZE ?= 0
 ifeq ($(SANITIZE),1)
 SAN      := -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined
@@ -76,8 +77,8 @@ README   := $(ROOT)/bindings/c/README.md
 $(BUILD)/quickstart.c: $(README) quickstart.sh | $(BUILD)
 	./quickstart.sh $(README) $@
 
-$(BUILD)/quickstart: $(BUILD)/quickstart.c $(INCLUDE)/offline_protocol.h
-	$(CC) $(CFLAGS) $(BUILD)/quickstart.c $(SHARED) -o $@
+$(BUILD)/quickstart: $(BUILD)/quickstart.c $(INCLUDE)/offline_protocol.h $(SCENARIO)
+	$(CC) $(CFLAGS) $(BUILD)/quickstart.c $(SCENARIO) $(SHARED) -o $@
 
 # The archive is named by path: with both libraries in one directory a
 # linker given -l picks the shared one.
@@ -87,13 +88,17 @@ $(BUILD)/check-static: main.c $(INCLUDE)/offline_protocol.h | $(BUILD)
 $(BUILD)/header-cxx.o: header_check.cpp $(INCLUDE)/offline_protocol.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c header_check.cpp -o $@
 
-run: $(BUILD)/check-shared $(BUILD)/check-static $(BUILD)/exchange $(BUILD)/quickstart $(BUILD)/header-cxx.o
+$(BUILD)/config-scenarios-smoke: config_scenarios_smoke.c $(INCLUDE)/config_scenarios.h $(SCENARIO) | $(BUILD)
+	$(CC) $(CFLAGS) config_scenarios_smoke.c $(SCENARIO) -o $@
+
+run: $(BUILD)/check-shared $(BUILD)/check-static $(BUILD)/exchange $(BUILD)/quickstart $(BUILD)/header-cxx.o $(BUILD)/config-scenarios-smoke
 	./$(BUILD)/check-shared
 	./$(BUILD)/check-static
+	./$(BUILD)/config-scenarios-smoke
 	./$(BUILD)/exchange
 	set -e; dir="$$(mktemp -d)"; trap 'rm -rf "$$dir"' EXIT; \
 	  ./quickstart.sh $(README) "$$dir/quickstart.c" "$$dir"; \
-	  $(CC) $(CFLAGS) "$$dir/quickstart.c" $(SHARED) -o "$$dir/quickstart"; \
+	  $(CC) $(CFLAGS) "$$dir/quickstart.c" $(SCENARIO) $(SHARED) -o "$$dir/quickstart"; \
 	  out="$$("$$dir/quickstart")"; \
 	  case "$$out" in *'this device is "off1'*) ;; *) echo "quick start printed: $$out"; exit 1;; esac; \
 	  test -d "$$dir/mls" && test -d "$$dir/state"; \

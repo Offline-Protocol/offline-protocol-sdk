@@ -42,6 +42,7 @@ in the Android builds ([which builds carry it](../../docs/bridges/c.md#which-bui
 
 ```c
 #include <stdio.h>
+#include "config_scenarios.h"
 #include "offline_protocol.h"
 
 int main(void) {
@@ -49,15 +50,13 @@ int main(void) {
   OfflineProtocolError err = {0};
   char *result = NULL;
 
-  /* Every ProtocolConfig field without a default in the interface
-   * definition; the rest take the definition's defaults. */
-  const char *config =
-      "{\"app_id\":\"com.example.app\",\"profile\":\"default\","
-      "\"ble_enabled\":false,\"wifi_direct_enabled\":false,\"internet_enabled\":true,"
-      "\"reticulum_enabled\":false,\"nostr_enabled\":false,\"prefer_online\":false,"
-      "\"initial_ttl\":8,\"encryption_enabled\":true,\"auto_key_exchange\":true,"
-      "\"store_pending\":true,\"max_pending_per_peer\":64,\"max_pending_global\":4096,"
-      "\"pending_ttl_ms\":60000,\"overflow_policy\":\"DropOldest\"}";
+  /* BLE-first preset; see docs/c-config-presets.md and config_scenarios.h */
+  char config[4096];
+  if (op_config_scenario_json(config, sizeof config, OpConfigScenario_LocalBle,
+                              "com.example.app", "default") != 0) {
+    fprintf(stderr, "config scenario buffer too small\n");
+    return 1;
+  }
 
   if (offline_protocol_create(config, &engine, &err) != OfflineProtocolStatus_Ok) {
     fprintf(stderr, "create: %s\n", err.message);

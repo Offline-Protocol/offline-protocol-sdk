@@ -50,6 +50,7 @@ dotnet run --project consumer-check/ConsumerCheck.csproj -c Release
 | Path | Role |
 |------|------|
 | `src/OfflineProtocol.Sdk/` | Hand-written SDK: engine thread, storage, telemetry, events |
+| `src/OfflineProtocol.Sdk/Config/ConfigScenarios.cs` | G4 scenario presets (`ForScenario`, `ForScenarioJson`) |
 | `src/OfflineProtocol.Sdk/Generated/` | Generated from the interface definition: the local API wrappers, `ProtocolConfig` and its enums. Do not edit |
 | `local_api_methods.txt` | Every wire name with a generated wrapper |
 | `tests/OfflineProtocol.Sdk.Tests/` | The engine facade against the native library |

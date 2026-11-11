@@ -24368,6 +24368,12 @@ mod tests {
             repo.join("bindings/java/src/main/java/com/offlineprotocol/config/ConfigScenarios.java"),
         )
         .expect("ConfigScenarios.java must exist after G4 PR4");
+        let csharp = std::fs::read_to_string(
+            repo.join("bindings/csharp/src/OfflineProtocol.Sdk/Config/ConfigScenarios.cs"),
+        )
+        .expect("ConfigScenarios.cs must exist after G4 PR5");
+        let c_header = std::fs::read_to_string(repo.join("bindings/c/include/config_scenarios.h"))
+            .expect("config_scenarios.h must exist after G4 PR5");
 
         for id in [
             "localBle",
@@ -24391,6 +24397,14 @@ mod tests {
             assert!(
                 java.contains(&format!("{id},")) || java.contains(&format!("{id}\n")),
                 "missing ConfigScenario.{id} in ConfigScenarios.java"
+            );
+            assert!(
+                csharp.contains(&format!("{id},")) || csharp.contains(&format!("{id}\n")),
+                "missing ConfigScenario.{id} in ConfigScenarios.cs"
+            );
+            assert!(
+                c_header.contains(id),
+                "missing scenario wire id '{id}' in config_scenarios.h"
             );
         }
     }

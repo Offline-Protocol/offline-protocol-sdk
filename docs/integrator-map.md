@@ -22,8 +22,8 @@ before reading all of [UPGRADING.md](UPGRADING.md).
 | Flutter | [bindings/flutter/README.md](../bindings/flutter/README.md) | 1–4 h | Path dependency today; build UniFFI natives like React Native. |
 | Python (desktop / gateway) | [bindings/python/README.md](../bindings/python/README.md) | ~30 min with wheels | `pip install offline-protocol-sdk`; set `state_root` explicitly. |
 | Local API (multi-app on one host) | [local-api.md](local-api.md) | ~1 h | Service + policy file; clients over socket. |
-| C / C++ / Go (via C) | [bindings/c/README.md](../bindings/c/README.md) | 1–2 h | Build or ship `liboffline_protocol_uniffi`; JSON config + callbacks. |
-| C# / .NET 8 | [bindings/csharp/README.md](../bindings/csharp/README.md) | 1–2 h | `OFFLINE_PROTOCOL_LIBRARY_DIR` + engine thread rules. |
+| C / C++ / Go (via C) | [bindings/c/README.md](../bindings/c/README.md) → [C config presets](c-config-presets.md) | 1–2 h | Build or ship `liboffline_protocol_uniffi`; `op_config_scenario_json` or hand-built JSON. |
+| C# / .NET 8 | [bindings/csharp/README.md](../bindings/csharp/README.md) → [C# config presets](csharp-config-presets.md) | 1–2 h | `OFFLINE_PROTOCOL_LIBRARY_DIR` + `ConfigScenarios` or full `ProtocolConfig`. |
 | Java (JVM 22+) | [bindings/java/README.md](../bindings/java/README.md) → [Java config presets](java-config-presets.md) | 1–2 h | `--enable-native-access`; `ConfigScenarios` or positional `ProtocolConfig`. |
 | Ruby | [bindings/ruby/README.md](../bindings/ruby/README.md) | ~1 h | Keep engine alive while callbacks exist. |
 | Web (browser) | [bridges/web.md](bridges/web.md) | days (experimental) | Worker + OPFS; not a drop-in npm widget. |

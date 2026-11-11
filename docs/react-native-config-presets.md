@@ -62,6 +62,12 @@ Kotlin hosts use the same API on the shared Android bridge. See
 JVM (desktop/server) hosts use `com.offlineprotocol.config.ConfigScenarios`. See
 [java-config-presets.md](java-config-presets.md).
 
+C# hosts use `OfflineProtocol.Sdk.Config.ConfigScenarios`. See
+[csharp-config-presets.md](csharp-config-presets.md).
+
+C hosts use `op_config_scenario_json` from `config_scenarios.h`. See
+[c-config-presets.md](c-config-presets.md).
+
 ## Related
 
 | Topic | Document |
