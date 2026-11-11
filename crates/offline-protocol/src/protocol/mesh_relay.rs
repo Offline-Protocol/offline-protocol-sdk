@@ -124,8 +124,8 @@ pub const RELAY_OWN_TRAFFIC_RESERVE: f32 = 5.0;
 ///
 /// Keeps a single noisy or hostile link from consuming the whole node's
 /// forwarding budget: its frames are refused at the door, leaving the budget
-/// for everyone else's traffic. A link's acknowledgements have half this
-/// again, of their own.
+/// for everyone else's traffic. A link's acknowledgements also have a
+/// separate allowance of half this, which its messages cannot spend.
 pub const DEFAULT_RELAY_PEER_RATE_PER_SEC: f32 = 5.0;
 
 /// Burst allowance for a single neighbor.
@@ -272,10 +272,10 @@ pub struct MeshRelayConfig {
     /// Burst allowance above the sustained rate.
     pub burst: f32,
     /// Sustained per-neighbor acceptance rate. A neighbor's delivery receipts
-    /// have half this again, of their own.
+    /// also have a separate allowance of half this.
     pub peer_rate_per_sec: f32,
-    /// Per-neighbor burst allowance. A neighbor's delivery receipts have half
-    /// this again, of their own.
+    /// Per-neighbor burst allowance. A neighbor's delivery receipts also have
+    /// a separate allowance of half this.
     pub peer_burst: f32,
     /// Maximum forwards awaiting transmission.
     pub queue_capacity: usize,
@@ -1020,7 +1020,9 @@ impl MeshRelayGovernor {
     /// peer sent anything. It still takes the queue capacity (evicting a
     /// lower-priority forward as `admit` would) and the per-neighbor rate
     /// toward the target, and the send budget is checked at release like
-    /// every other forward.
+    /// every other forward. A held acknowledgement spends the target's
+    /// receipts allowance first and then its ordinary one, as it would
+    /// arriving from that neighbor.
     ///
     /// Nothing is recorded in the suppression cache, so a refusal here and
     /// an abandonment later both leave the cache exactly as they found it.
