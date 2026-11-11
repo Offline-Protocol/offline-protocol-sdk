@@ -17,7 +17,7 @@ before reading all of [UPGRADING.md](UPGRADING.md).
 |----------------|------------|----------------------------|-------|
 | React Native / Expo (dev client) | [QUICKSTART](../QUICKSTART.md) → [RN package README](../bindings/react-native/README.md) → [config presets](react-native-config-presets.md) | ~15–30 min to first `start()` | Expo Go is not supported (native module). |
 | React Native (deep dive) | [react-native-integration.md](react-native-integration.md) | 1–2 h for transports + events | Package README is the API reference. |
-| Native iOS (Swift) | [ios-integration.md](ios-integration.md) | 2 h–2 days | RN path is much faster; native needs storage providers + XCFramework or SwiftPM release. |
+| Native iOS (Swift) | [ios-integration.md](ios-integration.md) → [iOS config presets](ios-config-presets.md) | 2 h–2 days | RN path is much faster; native needs storage providers + XCFramework or SwiftPM release. |
 | Native Android (Kotlin) | [android-integration.md](android-integration.md) | 2 h–2 days | Same parity gap as iOS for MLS storage. |
 | Flutter | [bindings/flutter/README.md](../bindings/flutter/README.md) | 1–4 h | Path dependency today; build UniFFI natives like React Native. |
 | Python (desktop / gateway) | [bindings/python/README.md](../bindings/python/README.md) | ~30 min with wheels | `pip install offline-protocol-sdk`; set `state_root` explicitly. |

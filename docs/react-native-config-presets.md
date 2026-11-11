@@ -51,6 +51,11 @@ Those defaults live in the Rust core and cross the bridge only when your config
 names them. Overriding a scenario with `overrides` merges one level deep
 (`transports.ble`, `dors.preferOnline`, and similar).
 
+## Native iOS / Flutter
+
+Swift hosts use `ConfigScenarios.forScenario` / `forScenarioJson` on the shared
+bridge (same scenario ids). See [ios-config-presets.md](ios-config-presets.md).
+
 ## Related
 
 | Topic | Document |

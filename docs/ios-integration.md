@@ -100,33 +100,11 @@ final class MeshController {
     private let eventHandler = MeshEventHandler()
 
     func startMesh() {
-        // ProtocolConfig has 16 required fields (+ 19 with defaults). See
-        // docs/configuration.md for what each one controls.
-        let config = ProtocolConfig(
+        // Preset for BLE-only first integration; see docs/ios-config-presets.md.
+        let config = ConfigScenarios.forScenario(
+            .localBle,
             appId: "my-ios-app",
-            profile: "user123",
-            bleEnabled: true,
-            wifiDirectEnabled: false,   // the peer-stream slot; TCP over a LAN or AWDL on iOS
-            internetEnabled: true,
-            reticulumEnabled: false,
-            nostrEnabled: false,
-            preferOnline: false,
-            initialTtl: 8,
-            encryptionEnabled: true,
-            autoKeyExchange: true,
-            storePending: true,
-            maxPendingPerPeer: 100,
-            maxPendingGlobal: 1000,
-            pendingTtlMs: 86_400_000,   // 24 h (the SDK default)
-            overflowPolicy: .dropOldest
-            // Among those left at their defaults: requireEncryption (true),
-            // maxGroupMembers (256), groupRelayEnabled (true),
-            // groupRelayBroadcastEnabled (true, used only against a relay
-            // that advertises group_delivery_v3; see
-            // docs/configuration.md#group-configuration),
-            // requireTransportIdentity (false), binaryWireEnabled (true),
-            // compactEnvelopeEnabled (true), richPayloadEnabled (true),
-            // cryptoRecoveryEnabled (true), encryptServiceMessages (true).
+            profile: "user123"
         )
 
         do {

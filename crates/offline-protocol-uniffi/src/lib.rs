@@ -24347,6 +24347,38 @@ mod tests {
         }
     }
 
+    /// Scenario ids in `bindings/react-native/src/configScenarios.ts` must match
+    /// `ConfigScenario` cases in `bindings/react-native/ios/ConfigScenarios.swift`.
+    #[test]
+    fn config_scenario_ids_match_between_react_native_and_ios_bridge() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = manifest.parent().unwrap().parent().unwrap();
+
+        let ts = std::fs::read_to_string(
+            repo.join("bindings/react-native/src/configScenarios.ts"),
+        )
+        .expect("configScenarios.ts must exist after G4 PR1");
+        let swift = std::fs::read_to_string(repo.join("bindings/react-native/ios/ConfigScenarios.swift"))
+            .expect("ConfigScenarios.swift must exist after G4 PR2");
+
+        for id in [
+            "localBle",
+            "proximityMesh",
+            "internetRelay",
+            "nostrMesh",
+            "developmentCleartext",
+        ] {
+            assert!(
+                ts.contains(&format!("'{id}'")),
+                "missing scenario id '{id}' in configScenarios.ts"
+            );
+            assert!(
+                swift.contains(&format!("case {id}")),
+                "missing ConfigScenario.{id} in ConfigScenarios.swift"
+            );
+        }
+    }
+
     /// The local API chapter, the interface definition and the reference
     /// server's dispatch table name every declaration exactly once, and the
     /// chapter's catalogue names every event tag the engine can emit
