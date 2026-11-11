@@ -164,6 +164,11 @@ a `setInterest` after `start()` that narrows a space's interest (a widening is
 fine). Toggle with `devLifecycleWarnings` on `ProtocolConfig` (default:
 `__DEV__` only). Warnings never block calls.
 
+Development builds can also map transport expectation diagnostics to one-time
+console hints (Wi‑Fi Direct formation timing, multi-app BLE on one phone) with
+`devTransportDiagnostics` (default: `__DEV__` only). See
+[docs/troubleshooting.md](../../docs/troubleshooting.md).
+
 Built-in secure and restartable-state stores are isolated by both `appId` and
 `profile`. Changing either value selects a fresh storage namespace.
 

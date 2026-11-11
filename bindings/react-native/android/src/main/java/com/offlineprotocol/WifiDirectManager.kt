@@ -114,6 +114,10 @@ class WifiDirectManager(
         // failure up to the ceiling, so a forged or stale record cannot keep
         // the radio busy. A record not heard again within the TTL is dropped.
         private const val FORMATION_TICK_MS = 10_000L
+        /** Integrator progress diagnostic (G6): emitted while group formation runs. */
+        private const val FORMATION_PROGRESS_INTERVAL_MS = 60_000L
+        const val DIAG_WIFI_DIRECT_FORMATION_PROGRESS =
+            "transport_expectation_wifi_direct_formation_progress"
         private const val FORMATION_RETRY_MS = 30_000L
         private const val FORMATION_MAX_BACKOFF_MS = 120_000L
         private const val ADVERT_TTL_MS = 180_000L
@@ -243,6 +247,8 @@ class WifiDirectManager(
     // registered, so stop() clears exactly what start registered, whatever
     // [formGroups] says by then.
     private var formationRegistered = false
+    private var formationStartedAtMs = 0L
+    private var lastFormationProgressEmitMs = 0L
     // Discovery backoff: rounds in a row that heard no record, and whether a
     // record arrived since the last round was asked.
     private var quietDiscoveryRounds = 0
@@ -938,9 +944,24 @@ class WifiDirectManager(
     private val formationTick = object : Runnable {
         override fun run() {
             if (state != TransportState.RUNNING || !formGroups) return
+            maybeEmitFormationProgress()
             if (!isPaused) formationStep()
             transportHandler.postDelayed(this, FORMATION_TICK_MS)
         }
+    }
+
+    private fun maybeEmitFormationProgress() {
+        if (!formGroups || !formationRegistered || inAppGroup) return
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - formationStartedAtMs
+        if (elapsed < FORMATION_PROGRESS_INTERVAL_MS) return
+        if (now - lastFormationProgressEmitMs < FORMATION_PROGRESS_INTERVAL_MS) return
+        lastFormationProgressEmitMs = now
+        emitDiagnostic(
+            "info",
+            DIAG_WIFI_DIRECT_FORMATION_PROGRESS,
+            mapOf("elapsedMs" to elapsed),
+        )
     }
 
     @SuppressLint("MissingPermission")
@@ -976,6 +997,8 @@ class WifiDirectManager(
             },
         )
         formationRegistered = true
+        formationStartedAtMs = SystemClock.elapsedRealtime()
+        lastFormationProgressEmitMs = 0L
         heardSinceLastDiscovery = true
         quietDiscoveryRounds = 0
         addServiceRequest()
@@ -1041,6 +1064,8 @@ class WifiDirectManager(
             if (createdNetwork != null) p2p.removeGroup(channel, quietListener("remove group"))
         }
         formationRegistered = false
+        formationStartedAtMs = 0L
+        lastFormationProgressEmitMs = 0L
         createdNetwork = null
         ownsFormationGroup = false
         inAppGroup = false

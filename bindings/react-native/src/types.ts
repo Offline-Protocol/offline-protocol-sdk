@@ -1012,6 +1012,14 @@ export interface ProtocolConfig {
    * (`__DEV__`); off in production unless set to `true` explicitly.
    */
   devLifecycleWarnings?: boolean;
+
+  /**
+   * When enabled, maps selected native `diagnostic` events to one-time console
+   * hints about Wi‑Fi Direct timing and multi-app BLE (G6). Defaults to on in
+   * development builds (`__DEV__`); off in production unless set to `true`
+   * explicitly.
+   */
+  devTransportDiagnostics?: boolean;
 }
 
 /**

@@ -24347,6 +24347,30 @@ mod tests {
         }
     }
 
+    /// G6 PR2: the Wi‑Fi Direct formation progress diagnostic wire string must
+    /// match between the RN hints layer and the Android bridge.
+    #[test]
+    fn transport_formation_progress_diagnostic_is_pinned_in_rn_and_android() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = manifest.parent().unwrap().parent().unwrap();
+        const PROGRESS: &str = "transport_expectation_wifi_direct_formation_progress";
+        let ts = std::fs::read_to_string(
+            repo.join("bindings/react-native/src/transportDiagnostics.ts"),
+        )
+        .expect("transportDiagnostics.ts must exist after G6 PR2");
+        let kotlin = std::fs::read_to_string(
+            repo.join("bindings/react-native/android/src/main/java/com/offlineprotocol/WifiDirectManager.kt"),
+        )
+        .expect("WifiDirectManager.kt must exist");
+        assert!(
+            ts.contains(PROGRESS),
+            "transportDiagnostics.ts must name the formation progress diagnostic"
+        );
+        assert!(
+            kotlin.contains(PROGRESS),
+            "WifiDirectManager.kt must emit the formation progress diagnostic"
+        );
+    }
     /// The local API chapter, the interface definition and the reference
     /// server's dispatch table name every declaration exactly once, and the
     /// chapter's catalogue names every event tag the engine can emit

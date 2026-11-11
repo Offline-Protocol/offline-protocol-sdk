@@ -1,6 +1,6 @@
 # Transport troubleshooting
 
-G6: reduce false **"SDK broken"** reports during QA. This page covers behaviour
+Reduce false **"SDK broken"** reports during QA. This page covers behaviour
 that looks like a hang or a bad peer but is expected, especially **Wi‑Fi Direct
 group formation time** and **several SDK apps on one phone**.
 
@@ -115,6 +115,22 @@ Details: [changelog 0.32](changelog/0.32.md), [UPGRADING](UPGRADING.md).
    [mobile-permissions.md](mobile-permissions.md).
 3. Simulators are **not** sufficient for BLE or Wi‑Fi Direct mesh QA.
 4. Run `npx mesh-sdk-doctor` for linking and Expo issues.
+
+---
+
+## React Native: development console hints (G6)
+
+In development builds (`__DEV__`), set `devTransportDiagnostics: true` on
+`ProtocolConfig` (default **on** in dev, **off** in production unless you opt in)
+to map selected native `diagnostic` events to one-time `console.warn` messages
+that point back to this page. The hints never block calls.
+
+Recognized messages include Wi‑Fi Direct **group formation started/resumed**,
+**periodic formation progress** on Android (about once per minute while
+formation runs), and **several BLE service instances on one phone** when the
+stack is choosing the instance for your `appId`.
+
+Full behaviour: [bindings/react-native/README §Configuration](../bindings/react-native/README.md#configuration).
 
 ---
 
