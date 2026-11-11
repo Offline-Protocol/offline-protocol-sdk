@@ -42,6 +42,7 @@ Pod::Spec.new do |s|
     "ios/ForcedPresenceCheckQueue.swift",
     "ios/EventReplayRing.swift",
     "ios/InboundEventBuffer.swift",
+    "ios/IntegratorLifecycleHints.swift",
     "ios/InboundFragmentBuffer.swift",
     "ios/OutboundFragmentQueue.swift",
     "ios/AddressDeclarationPolicy.swift",

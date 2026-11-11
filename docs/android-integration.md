@@ -111,6 +111,11 @@ class MainActivity : AppCompatActivity() {
 
         protocol.start()
 
+        // Keep this order: event callback, MLS, start(), then send. Hosts
+        // built on ProtocolEngineHost (the Flutter plugin) get development
+        // hints when it is broken; see docs/integrator-map.md. A direct
+        // UniFFI caller like this one gets none.
+
         val peerAddress =
             "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn" // from neighbor_discovered
 

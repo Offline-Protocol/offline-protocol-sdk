@@ -46,9 +46,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * telemetry session that notification would have closed.
      */
     internal val engineHost by lazy {
-        ProtocolEngineHost(logTag = NAME) { level, message, context ->
-            emitDiagnostic(level, message, context)
-        }
+        ProtocolEngineHost(
+            logTag = NAME,
+            onDiagnostic = { level, message, context ->
+                emitDiagnostic(level, message, context)
+            },
+            integratorLifecycleWarnings = false,
+        )
     }
 
     /** React context for shared bridge adapters (same module, not subclass-accessible). */

@@ -54,7 +54,12 @@ class OfflineProtocolPlugin :
     private var applicationContext: android.content.Context? = null
 
     private val engineHost by lazy {
-        ProtocolEngineHost(logTag = TAG) { level, message, context ->
+        // Ordering hints only in a debuggable app: the plugin's own build type
+        // says nothing about the application's.
+        val debuggable = applicationContext?.applicationInfo?.let {
+            (it.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        } ?: false
+        ProtocolEngineHost(logTag = TAG, integratorLifecycleWarnings = debuggable) { level, message, context ->
             Log.println(
                 when (level) {
                     "error" -> Log.ERROR

@@ -23,9 +23,12 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// Shared engine host for Flutter-parity bridge delegation (ADR 0025).
     /// Module state forwards here, matching Android `OfflineProtocolModule.engineHost`.
     lazy var engineHost: ProtocolEngineHost = {
-        ProtocolEngineHost(onDiagnostic: { [weak self] level, message, context in
-            self?.emitDiagnostic(level: level, message: message, context: context)
-        })
+        ProtocolEngineHost(
+            onDiagnostic: { [weak self] level, message, context in
+                self?.emitDiagnostic(level: level, message: message, context: context)
+            },
+            integratorLifecycleWarnings: false
+        )
     }()
 
     private var protocolInstance: OfflineProtocol? {
