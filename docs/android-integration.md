@@ -53,6 +53,8 @@ The generated Kotlin bindings live in the `uniffi.offline_protocol` package, so 
 that (not `com.offlineprotocol.*`, which is the React Native wrapper).
 
 ```kotlin
+import com.offlineprotocol.ConfigScenario
+import com.offlineprotocol.ConfigScenarios
 import uniffi.offline_protocol.*
 import org.json.JSONObject
 
@@ -62,34 +64,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ProtocolConfig has 16 required fields (+ 19 with defaults). See
-        // docs/configuration.md for what each one controls.
-        val config = ProtocolConfig(
+        // Preset for BLE-only first integration; see docs/android-config-presets.md.
+        val config = ConfigScenarios.forScenario(
+            ConfigScenario.localBle,
             appId = "my-android-app",
             profile = "user123",
-            bleEnabled = true,
-            wifiDirectEnabled = true,
-            internetEnabled = true,
-            reticulumEnabled = false,
-            nostrEnabled = false,
-            preferOnline = false,
-            initialTtl = 8.toUByte(),
-            encryptionEnabled = true,
-            autoKeyExchange = true,
-            storePending = true,
-            maxPendingPerPeer = 100.toULong(),
-            maxPendingGlobal = 1_000.toULong(),
-            pendingTtlMs = 86_400_000.toULong(),  // 24 h (the SDK default)
-            overflowPolicy = OverflowPolicy.DROP_OLDEST,
-            // Among those left at their defaults: requireEncryption (true),
-            // maxGroupMembers (256u), groupRelayEnabled (true),
-            // groupRelayBroadcastEnabled (true — capability-gated, and it
-            // falls back to per-member fan-out against any relay that did not
-            // advertise group_delivery_v3; see
-            // docs/configuration.md#group-configuration),
-            // requireTransportIdentity (false), binaryWireEnabled (true),
-            // compactEnvelopeEnabled (true), richPayloadEnabled (true),
-            // cryptoRecoveryEnabled (true), encryptServiceMessages (true).
         )
 
         protocol = OfflineProtocol(config)
