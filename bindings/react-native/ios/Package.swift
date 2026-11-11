@@ -90,6 +90,7 @@ let package = Package(
                 "GatewayVerdictTracker.swift",
                 "EventReplayRing.swift",
                 "InboundEventBuffer.swift",
+                "IntegratorLifecycleHints.swift",
                 "PeripheralRestorationAgeOutPolicy.swift",
                 "PresenceWatchPolicy.swift",
                 "ProtocolStateStorage.swift",
@@ -122,6 +123,7 @@ let package = Package(
                 "AdapterArgumentReadTests.swift",
                 "BleDiscoveryBootstrapPolicyTests.swift",
                 "ConnectionRequestKeyPackageTests.swift",
+                "IntegratorLifecycleHintsTests.swift",
                 "MeshControllerTests.swift",
                 "ProtocolErrorBridgeTests.swift"
             ],

@@ -83,6 +83,12 @@ Details: [RN README Protocol Lifecycle](../bindings/react-native/README.md#proto
 [data interest ordering](../bindings/react-native/js-ci-harness/data-interest-order.test.js)
 (comment block at top).
 
+**Native iOS / Android / Flutter** hosts that use `ProtocolEngineHost` (not the RN
+JavaScript wrapper) get matching **DEBUG-only** `Log` / `print` warnings on
+`sendMessage`, `enableTransport`, and data APIs when called out of order.
+React Native disables the native duplicate because `devLifecycleWarnings` on the
+JS side already covers the same mistakes.
+
 ---
 
 ## Native mobile (iOS / Android): extra steps

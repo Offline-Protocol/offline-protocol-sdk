@@ -18,6 +18,7 @@ import java.net.URI
 class ProtocolEngineHost(
     private val logTag: String,
     private val onDiagnostic: (level: String, message: String, context: Map<String, Any?>) -> Unit,
+    private val integratorLifecycleWarnings: Boolean = BuildConfig.DEBUG,
 ) {
     @Volatile
     var protocol: OfflineProtocol? = null
@@ -43,6 +44,34 @@ class ProtocolEngineHost(
         onDiagnostic = onDiagnostic,
         logTag = logTag,
     )
+
+    private fun encryptionEnabledForHints(): Boolean =
+        currentConfig?.encryptionEnabled ?: true
+
+    private fun warnLifecycleNeedsEngine(context: String) {
+        IntegratorLifecycleHints.warnIfCallBeforeEngineStarted(
+            context,
+            protocol,
+            integratorLifecycleWarnings,
+        )
+    }
+
+    private fun warnLifecycleDataMutation(context: String) {
+        IntegratorLifecycleHints.warnIfDataMutationBeforeEngine(
+            context,
+            protocol,
+            integratorLifecycleWarnings,
+        )
+    }
+
+    private fun warnLifecycleSendMls(context: String) {
+        IntegratorLifecycleHints.warnIfSendWithoutMls(
+            context,
+            encryptionEnabledForHints(),
+            protocol,
+            integratorLifecycleWarnings,
+        )
+    }
 
     data class InternetTransportEventHandlers(
         val serverMessageEmitter: (String) -> Unit,
@@ -204,9 +233,15 @@ class ProtocolEngineHost(
         meshServices = null
         currentConfig = null
         bleAdvertiseNodeHash = false
+        IntegratorLifecycleHints.resetSession()
     }
 
     fun startProtocolCore() {
+        IntegratorLifecycleHints.warnIfStartWithoutMls(
+            encryptionEnabledForHints(),
+            protocol,
+            integratorLifecycleWarnings,
+        )
         requireProtocol().start()
         onDiagnostic("info", "Protocol core started", emptyMap())
     }
@@ -250,6 +285,7 @@ class ProtocolEngineHost(
         internetHandlers: InternetTransportEventHandlers?,
         onInternetTransportEnabled: (() -> Unit)? = null,
     ) {
+        warnLifecycleNeedsEngine("enableTransport($type)")
         val proto = requireProtocol()
         when (type.lowercase()) {
             "internet" -> {
@@ -482,12 +518,17 @@ class ProtocolEngineHost(
     // --- Messaging ---
 
     fun sendMessage(recipient: String, content: String, priority: Int, replyToMsg: String?): String {
+        warnLifecycleNeedsEngine("sendMessage")
+        warnLifecycleSendMls("sendMessage")
         val msgPriority = messagePriorityFromInt(priority)
         return requireProtocol().sendMessage(recipient, content, msgPriority, replyToMsg)
     }
 
-    fun sendMessageRich(recipient: String, content: String, options: SendMessageOptions): String =
-        requireProtocol().sendMessageRich(recipient, content, options)
+    fun sendMessageRich(recipient: String, content: String, options: SendMessageOptions): String {
+        warnLifecycleNeedsEngine("sendMessageRich")
+        warnLifecycleSendMls("sendMessageRich")
+        return requireProtocol().sendMessageRich(recipient, content, options)
+    }
 
     fun receiveMessage(): String? = protocol?.receiveMessage()
 
@@ -496,18 +537,29 @@ class ProtocolEngineHost(
     private fun requireDataStore(): DataStore =
         dataStore ?: throw IllegalStateException("DataStore not initialized")
 
-    fun dataCreateDoc(spaceId: String, docId: String) = requireDataStore().createDoc(spaceId, docId)
+    fun dataCreateDoc(spaceId: String, docId: String) {
+        warnLifecycleDataMutation("dataCreateDoc")
+        requireDataStore().createDoc(spaceId, docId)
+    }
     fun dataDeleteDoc(spaceId: String, docId: String) = requireDataStore().deleteDoc(spaceId, docId)
     fun dataRemoveDoc(spaceId: String, docId: String) = requireDataStore().removeDoc(spaceId, docId)
     fun dataRemoveSpace(spaceId: String) = requireDataStore().removeSpace(spaceId)
     fun dataFetchAttachmentFrom(spaceId: String, peerId: String, hash: String) =
         requireDataStore().fetchAttachmentFrom(spaceId, peerId, hash)
-    fun dataSetInterest(spaceId: String, patterns: List<String>) =
+
+    fun dataSetInterest(spaceId: String, patterns: List<String>) {
+        if (protocol?.getState() == ProtocolState.RUNNING) {
+            IntegratorLifecycleHints.warnIfInterestAfterStart(integratorLifecycleWarnings)
+        }
         requireDataStore().setInterest(spaceId, patterns)
+    }
     fun dataListDocs(spaceId: String): String = JSONArray(requireDataStore().listDocs(spaceId)).toString()
     fun dataListSpaces(): String = JSONArray(requireDataStore().listSpaces()).toString()
-    fun dataMapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String) =
+    fun dataMapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String) {
+        warnLifecycleDataMutation("dataMapSet")
         requireDataStore().mapSet(spaceId, docId, collection, key, valueJson)
+    }
+
     fun dataMapDelete(spaceId: String, docId: String, collection: String, key: String) =
         requireDataStore().mapDelete(spaceId, docId, collection, key)
     fun dataMapGetJson(spaceId: String, docId: String, collection: String, key: String) =

@@ -111,6 +111,11 @@ class MainActivity : AppCompatActivity() {
 
         protocol.start()
 
+        // Flutter and other hosts that route through ProtocolEngineHost get
+        // DEBUG-only Log.w ordering hints (send before start, MLS before send,
+        // data before start) — see docs/integrator-map.md. Direct UniFFI
+        // callers rely on this ordering; the core does not always surface it.
+
         val peerAddress =
             "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn" // from neighbor_discovered
 

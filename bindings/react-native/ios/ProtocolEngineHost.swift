@@ -104,6 +104,8 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     @HostGuarded private var emitEventJson: ((String) -> Void)?
 
     private let onDiagnostic: DiagnosticHandler
+    /// DEBUG-default-on; React Native passes `false` because JS warns first (G3 PR1).
+    private let integratorLifecycleWarnings: Bool
 
     private(set) lazy var backgroundProcessor = ProtocolBackgroundProcessor(
         protocolProvider: { [weak self] in self?.protocolInstance },
@@ -112,8 +114,47 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         }
     )
 
-    init(onDiagnostic: @escaping DiagnosticHandler) {
+    init(
+        onDiagnostic: @escaping DiagnosticHandler,
+        integratorLifecycleWarnings: Bool = {
+            #if DEBUG
+            return true
+            #else
+            return false
+            #endif
+        }()
+    ) {
         self.onDiagnostic = onDiagnostic
+        self.integratorLifecycleWarnings = integratorLifecycleWarnings
+    }
+
+    private func encryptionEnabledForHints() -> Bool {
+        currentConfig?.encryptionEnabled ?? true
+    }
+
+    private func warnLifecycleNeedsEngine(_ context: String) {
+        IntegratorLifecycleHints.warnIfCallBeforeEngineStarted(
+            context: context,
+            proto: protocolInstance,
+            enabled: integratorLifecycleWarnings
+        )
+    }
+
+    private func warnLifecycleDataMutation(_ context: String) {
+        IntegratorLifecycleHints.warnIfDataMutationBeforeEngine(
+            context: context,
+            proto: protocolInstance,
+            enabled: integratorLifecycleWarnings
+        )
+    }
+
+    private func warnLifecycleSendMls(_ context: String) {
+        IntegratorLifecycleHints.warnIfSendWithoutMls(
+            context: context,
+            encryptionEnabled: encryptionEnabledForHints(),
+            proto: protocolInstance,
+            enabled: integratorLifecycleWarnings
+        )
     }
 
     // MARK: - Lifecycle
@@ -227,9 +268,15 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         meshServices = nil
         currentConfig = nil
         emitEventJson = nil
+        IntegratorLifecycleHints.resetSession()
     }
 
     func startProtocolCore() throws {
+        IntegratorLifecycleHints.warnIfStartWithoutMls(
+            encryptionEnabled: encryptionEnabledForHints(),
+            proto: protocolInstance,
+            enabled: integratorLifecycleWarnings
+        )
         try requireProtocol().start()
         onDiagnostic("info", "Protocol core started", [:])
     }
@@ -310,6 +357,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     /// from `config` and starts it. A transport that is already running or
     /// connecting is stopped first, so a re-enable is a clean restart.
     func enableTransport(type: String, config: [String: Any]?) throws {
+        warnLifecycleNeedsEngine("enableTransport(\(type))")
         let proto = try requireProtocol()
         switch type.lowercased() {
         case "internet":
@@ -651,6 +699,8 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     // MARK: - Messaging
 
     func sendMessage(recipient: String, content: String, priority: Int, replyToMsg: String?) throws -> String {
+        warnLifecycleNeedsEngine("sendMessage")
+        warnLifecycleSendMls("sendMessage")
         try requireProtocol().sendMessage(
             recipient: recipient,
             content: content,
@@ -660,6 +710,8 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     }
 
     func sendMessageRich(recipient: String, content: String, options: SendMessageOptions) throws -> String {
+        warnLifecycleNeedsEngine("sendMessageRich")
+        warnLifecycleSendMls("sendMessageRich")
         try requireProtocol().sendMessageRich(recipient: recipient, content: content, options: options)
     }
 
@@ -677,6 +729,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     }
 
     func dataCreateDoc(spaceId: String, docId: String) throws {
+        warnLifecycleDataMutation("dataCreateDoc")
         try requireDataStore().createDoc(spaceId: spaceId, docId: docId)
     }
 
@@ -697,6 +750,9 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     }
 
     func dataSetInterest(spaceId: String, patterns: [String]) throws {
+        if protocolInstance?.getState() == .running {
+            IntegratorLifecycleHints.warnIfInterestAfterStart(enabled: integratorLifecycleWarnings)
+        }
         try requireDataStore().setInterest(spaceId: spaceId, patterns: patterns)
     }
 
@@ -709,6 +765,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     }
 
     func dataMapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String) throws {
+        warnLifecycleDataMutation("dataMapSet")
         try requireDataStore().mapSet(
             spaceId: spaceId, docId: docId, collection: collection, key: key, valueJson: valueJson
         )
