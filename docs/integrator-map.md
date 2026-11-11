@@ -87,12 +87,15 @@ Reference storage implementations live in the React Native bridge sources
 | Name | What it is | Who sees it |
 |------|------------|-------------|
 | `appId` | Application id (stable across builds of one app) | Protocol + store namespaces |
-| `profile` | Local account slot on this device (`default`, user id, etc.) | Never on the wire |
+| `profile` | Local account slot on this device (`default`, user id, etc.) | Not on the wire, unless username discovery publishes it |
 | `localAddress()` / `off1…` | This device's mesh identity | Peers, `recipient`, groups |
 
 **Rule:** `sendMessage`, invites, and `recipient` fields take a peer's
-**address**, usually from `neighbor_discovered`, QR, or invite flow. A
-human username only works where username resolution is explicitly configured.
+**address**, usually from `neighbor_discovered` or an invite
+(`createInvite` / `parseInvite`, the primary path). A username never goes in
+`recipient`. The opt-in `resolveUsername` lookup is not authoritative: it
+returns every device claiming the name, the user picks one, and you store its
+address.
 
 **Canonical guide:** [identity-for-integrators.md](identity-for-integrators.md)
 (mistakes, discovery, copy-paste patterns). Migration:

@@ -225,19 +225,23 @@ Add to `AndroidManifest.xml`:
 
 ```xml
 <!-- Bluetooth permissions -->
-<uses-permission android:name="android.permission.BLUETOOTH" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+    android:usesPermissionFlags="neverForLocation" />
 <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-<!-- Location (required for BLE scanning on Android) -->
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<!-- Location: BLE scanning on API 30 and lower, Wi-Fi Direct discovery on
+     API 32 and lower. Not needed for BLE from Android 12 (API 31). -->
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+    android:maxSdkVersion="32" />
 
 <!-- Wi-Fi Direct permissions -->
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+    android:usesPermissionFlags="neverForLocation" />
 <!-- The same slot on the Wi-Fi network (LAN peers) -->
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
@@ -285,6 +289,7 @@ Groups use role-based access control: **Admin** and **Member**.
 
 ```kotlin
 // Promote a member to admin (admin only)
+val inviteeAddress = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn" // a member's address
 protocol.setMemberRole(groupId, inviteeAddress, "admin")
 
 val role = protocol.getMemberRole(groupId, inviteeAddress)

@@ -937,6 +937,7 @@ for pkg in pending {
 }
 
 // Fetch a contact's key package before messaging
+let peerAddress = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn" // the contact's address
 let keyPackageData = try await fetchKeyPackage(userId: peerAddress)
 try mesh.mlsImportKeyPackage(userId: peerAddress, keyPackageData: keyPackageData)
 ```
@@ -1012,12 +1013,15 @@ Groups use a role-based permission model:
 The SDK enforces a **last-admin invariant**: the last remaining admin cannot be demoted, removed, or leave the group. If the last admin leaves unexpectedly (e.g., crash), a deterministic election promotes the lexicographically smallest member ID to admin.
 
 ```typescript
+// Member ids are off1… addresses
+const memberAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn';
+
 // Set a member's role (admin only)
-await protocol.meshSetMemberRole(groupId, userId, 'admin');
+await protocol.meshSetMemberRole(groupId, memberAddress, 'admin');
 
 // Query roles
-const role = await protocol.meshGetMemberRole(groupId, userId); // "admin" | "member"
-const allRoles = await protocol.meshGetGroupRoles(groupId);     // { alice: "admin", bob: "member" }
+const role = await protocol.meshGetMemberRole(groupId, memberAddress); // "admin" | "member"
+const allRoles = await protocol.meshGetGroupRoles(groupId);     // { "off1q…": "admin", "off1q…": "member" }
 
 // Listen for role changes
 protocol.on('group_role_changed', (event) => {

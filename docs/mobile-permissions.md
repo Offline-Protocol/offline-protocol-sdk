@@ -29,7 +29,8 @@ user allows access (see [grant timing](#runtime-grant-timing)).
 | iOS LAN / peer-stream on Wi‑Fi | `NSLocalNetworkUsageDescription`, `NSBonjourServices` (first `start()` with Wi‑Fi slot enabled may prompt) |
 
 Internet relay needs no extra runtime permission beyond what your app already
-uses for network access. The SDK merges `INTERNET` on Android.
+uses for network access. The React Native library merges `INTERNET` on Android;
+Flutter apps declare it (see [Flutter](#flutter)).
 
 ---
 
@@ -47,7 +48,7 @@ uses for network access. The SDK merges `INTERNET` on Android.
 
 ## What the SDK already merges (Android)
 
-The React Native / Flutter Android library manifest declares install-time
+The React Native Android library manifest declares install-time
 permissions and its own `MeshForegroundService`. Your app's manifest **merges**
 these declarations. You do **not** need to duplicate Wi‑Fi state, multicast, or
 SDK service entries unless your tooling strips library manifests.
@@ -61,10 +62,21 @@ Bluetooth with `neverForLocation` on scan, Wi‑Fi Direct permissions with
 
 Source of truth: `bindings/react-native/android/src/main/AndroidManifest.xml`.
 
+**Flutter is different:** the plugin's manifest declares only the foreground
+service and three permissions, so a Flutter app declares the rest itself. See
+[Flutter](#flutter) for the exact list.
+
 **Your app still owns:**
 
 - Runtime **requests** for dangerous permissions (Bluetooth, nearby Wi‑Fi,
   location on older API levels).
+- The **declaration** of `ACCESS_FINE_LOCATION`. The SDK does not declare it,
+  but BLE scanning needs it on API 30 and lower, and Wi‑Fi Direct discovery
+  needs it on API 32 and lower. Declare it with
+  `android:maxSdkVersion="32"` (see [Android Bluetooth](#android-bluetooth)),
+  unless your app uses location for its own features: then omit
+  `maxSdkVersion`, or the bound takes location away from those features on
+  Android 13 and later.
 - Any permission the SDK **deliberately does not** declare (`ACCESS_LOCAL_NETWORK`
   for API 37+ targets; see [Android 17](#android-17-api-37-local-network)).
 - Optional feature declarations (`uses-feature`) if you want Play filtering.
@@ -82,6 +94,7 @@ Add usage descriptions and background modes to your app's `Info.plist`:
 <key>NSBluetoothAlwaysUsageDescription</key>
 <string>Bluetooth is used for offline peer-to-peer messaging.</string>
 
+<!-- Optional: iOS reads this key only below iOS 13, the SDK's minimum. -->
 <key>NSBluetoothPeripheralUsageDescription</key>
 <string>Bluetooth is used for offline peer-to-peer messaging.</string>
 
@@ -96,12 +109,6 @@ Add usage descriptions and background modes to your app's `Info.plist`:
 `bluetooth-peripheral`, iOS throttles or stops BLE in the background. Symptom:
 false `peer_lost` events and missed discovery. This applies to production apps
 that expect mesh while backgrounded.
-
-Apple may show a location permission on some OS versions when BLE scanning runs
-in the foreground. If you see that prompt, provide a truthful
-`NSLocationWhenInUseUsageDescription` only when your app actually uses location
-for a purpose the user understands. Mesh discovery alone does not require you to
-use GPS in your app logic.
 
 ### iOS local network and Bonjour
 
@@ -134,31 +141,40 @@ permissions remain as on this page.
 
 ### Android Bluetooth
 
-**Manifest (app):** declare permissions your minSdk needs. Many teams keep both
-legacy and Android 12+ entries during a transition:
+**Manifest (app):** the React Native library already merges the Bluetooth
+entries below (Flutter apps declare them; see [Flutter](#flutter)). Location is
+the one entry **every** app declares itself, because no SDK manifest does:
 
 ```xml
-<!-- Android 12 (API 31) and newer -->
-<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+<!-- Android 12 (API 31) and newer (merged by the React Native library) -->
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+    android:usesPermissionFlags="neverForLocation" />
 <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-<!-- Android 11 (API 30) and older -->
+<!-- Android 11 (API 30) and older (merged by the React Native library) -->
 <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
 <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+<!-- Your app declares this: BLE scan on API 30 and lower, Wi-Fi Direct
+     discovery on API 32 and lower. Drop maxSdkVersion if your app uses
+     location for its own features. -->
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+    android:maxSdkVersion="32" />
 ```
 
 **Runtime:** on API 31+, request the Bluetooth permissions. On API 30 and below,
 request `ACCESS_FINE_LOCATION` before BLE scan (platform rule).
 
-The SDK's merged manifest marks `BLUETOOTH_SCAN` with `neverForLocation` where
-applicable. Your app should not request location for BLE on Android 13+ unless
-you have an unrelated location feature.
+The SDK's merged manifest marks `BLUETOOTH_SCAN` with `neverForLocation`, so
+from Android 12 (API 31) BLE needs no location grant. Your app should not
+request location for BLE on API 31+ unless you have an unrelated location
+feature.
 
-### Android Wi‑Fi Direct and LAN peer discovery
+### Android Wi-Fi Direct and LAN peer discovery
 
-The SDK merges Wi‑Fi and nearby-device permissions. **You** request at runtime:
+The React Native library merges Wi‑Fi and nearby-device permissions (Flutter
+apps declare them; see [Flutter](#flutter)). **You** request at runtime:
 
 | API level | Request before `start()` when Wi‑Fi Direct is enabled |
 |-----------|--------------------------------------------------------|
@@ -201,10 +217,14 @@ BLE and connected-device work can continue with the screen off. The SDK merges:
 - `FOREGROUND_SERVICE_CONNECTED_DEVICE`
 - A non-exported service with `foregroundServiceType="connectedDevice"`
 
-**Apps targeting Android 14 (API 34) and later** must declare the matching
-foreground service type on **their** application or service elements if Play
-or the merger requires an explicit type on the merging app. Follow current
-Android documentation for your `targetSdkVersion`.
+The service's `connectedDevice` type is declared in the library manifest, so
+your app declares no foreground service type of its own. From Android 14
+(API 34), a `connectedDevice` service may start only if the app holds one of
+the prerequisite permissions Android lists for that type. The SDK satisfies
+this with `CHANGE_WIFI_STATE`, an install-time permission in that list declared
+by both the React Native and the Flutter manifest, so the service starts even
+before the user has answered a Bluetooth prompt. Do not remove it with
+`tools:node="remove"`.
 
 The notification is part of normal mesh operation on Android, not an optional
 debug feature.
@@ -243,9 +263,53 @@ flowchart LR
 
 ## Flutter
 
-Flutter uses the same iOS and Android bridge sources as React Native. Apply
-**identical** `Info.plist` and Android manifest rules to your Flutter **host**
-app (`ios/Runner`, `android/app`).
+Flutter uses the same iOS and Android bridge sources as React Native. The
+`Info.plist` rules above apply unchanged to `ios/Runner`.
+
+The Android manifest is **not** the same. The plugin's manifest
+(`bindings/flutter/offline_protocol/android/src/main/AndroidManifest.xml`)
+declares only `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`,
+`CHANGE_WIFI_STATE` and the `MeshForegroundService` entry. Declare everything
+else in `android/app/src/main/AndroidManifest.xml`. The bounds match the React
+Native library manifest, plus the location entry every app owns:
+
+```xml
+<!-- Bluetooth LE, Android 11 (API 30) and older -->
+<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+
+<!-- Bluetooth LE, Android 12 (API 31) and newer -->
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+    android:usesPermissionFlags="neverForLocation" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+<!-- BLE scan on API 30 and lower, Wi-Fi Direct discovery on API 32 and lower.
+     Drop maxSdkVersion if your app uses location for its own features. -->
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+    android:maxSdkVersion="32" />
+
+<!-- Wi-Fi Direct (CHANGE_WIFI_STATE comes from the plugin) -->
+<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+    android:usesPermissionFlags="neverForLocation" />
+
+<!-- LAN carrier on the same Wi-Fi network -->
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+<!-- Internet relay, and the peer-stream sockets -->
+<uses-permission android:name="android.permission.INTERNET" />
+
+<uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+```
+
+`flutter create` puts `INTERNET` only in the debug and profile manifests, so a
+release build without the line above has no internet relay. Add
+`ACCESS_LOCAL_NETWORK` as well if you target API 37+ (see
+[Android 17](#android-17-api-37-local-network)). The plugin does not prompt for
+anything: request the runtime grants in
+[Before you call `start()`](#before-you-call-start) from your app.
 
 Platform setup in the plugin README points here:
 [bindings/flutter/README.md](../bindings/flutter/README.md#platform-setup).
@@ -313,7 +377,8 @@ const config = { appId: 'my-app', profile: 'default', transports: { ble: { enabl
 
 const permissions = await requestMeshPermissionsForConfig(config);
 if (!permissions.granted) {
-  // User denied a grant; avoid start() or enableTransport later when fixed
+  // A grant was refused: the transport that needs it stays off. Once the user
+  // allows it, call enableTransport(...) for that transport after start().
 }
 
 const protocol = new OfflineProtocol(config);

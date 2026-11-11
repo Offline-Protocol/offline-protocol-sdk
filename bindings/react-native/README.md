@@ -77,11 +77,14 @@ cases, and the Android foreground service notification.
 
 Quick pointers:
 
-- **iOS:** `NSBluetoothAlwaysUsageDescription`, `NSBluetoothPeripheralUsageDescription`,
-  and `UIBackgroundModes` (`bluetooth-central`, `bluetooth-peripheral`) are required
-  for reliable BLE in production. Add local network + Bonjour keys when the Wi‑Fi
-  slot is on (see the guide).
-- **Android:** request Bluetooth permissions (and on older APIs, fine location) before
+- **iOS:** `NSBluetoothAlwaysUsageDescription` and `UIBackgroundModes`
+  (`bluetooth-central`, `bluetooth-peripheral`) are required for reliable BLE in
+  production. `NSBluetoothPeripheralUsageDescription` is optional: iOS reads it
+  only below iOS 13, the SDK's minimum. Add local network + Bonjour keys when the
+  Wi‑Fi slot is on (see the guide).
+- **Android:** declare `ACCESS_FINE_LOCATION` with `android:maxSdkVersion="32"` in
+  your **app** manifest; the SDK does not declare it. Request Bluetooth permissions
+  (and on older APIs, fine location) before
   `start()`. Request `NEARBY_WIFI_DEVICES` (13+) or fine location (≤12) before
   `start()` when Wi‑Fi Direct is enabled. If `targetSdkVersion` is 37+, declare and
   request `ACCESS_LOCAL_NETWORK` in the **app** for LAN discovery.
@@ -1363,6 +1366,7 @@ Groups use role-based access control with two roles: **Admin** and **Member**.
 
 ```typescript
 // Member ids are off1… addresses, not profiles
+const inviteeAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn'; // a member's address
 await protocol.meshSetMemberRole(groupId, inviteeAddress, 'admin');
 
 const role = await protocol.meshGetMemberRole(groupId, inviteeAddress);
@@ -1413,6 +1417,8 @@ Prevents duplicate message processing:
 ### Sending Files
 
 ```typescript
+const peerAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn'; // from discovery
+
 const fileId = await protocol.sendFile({
   recipient: peerAddress, // peer off1… from discovery
   fileData: base64Contents,  // the file's bytes as base64; the app reads the file
@@ -1435,6 +1441,8 @@ file is still read whole into the Rust heap and chunked there, which costs
 about twice its size while chunking; the read is not streamed.
 
 ```typescript
+const peerAddress = 'off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn'; // from discovery
+
 const fileId = await protocol.sendFileFromPath({
   recipient: peerAddress,
   filePath: '/data/user/0/com.example.app/files/report.pdf',
