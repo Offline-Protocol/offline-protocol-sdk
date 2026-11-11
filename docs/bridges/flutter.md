@@ -151,7 +151,7 @@ either runs without it and nothing reports it.
 Shared `BleManager` uses CoreBluetooth state restoration. Before `BleManager.start()`
 runs, the host app must declare `NSBluetoothAlwaysUsageDescription` and
 `UIBackgroundModes` (`bluetooth-central`, `bluetooth-peripheral`). Same keys as
-[React Native iOS setup](../../bindings/react-native/README.md#ios-permissions).
+[mobile-permissions.md](../../docs/mobile-permissions.md) (iOS Info.plist keys).
 The example smoke path enables the Internet transport flag only so it can boot
 without starting BLE; enabling BLE in config requires those plist entries.
 

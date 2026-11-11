@@ -217,6 +217,27 @@ impl RetryQueue {
         Some(retry_at)
     }
 
+    /// Moves each entry `cap` gives a delay for, and that is due later, to that
+    /// many milliseconds from now, and starts its retry count over: the caller
+    /// has news that the route works, and the count of a long wait would cut
+    /// the new attempt's budget short. An entry already due sooner keeps its
+    /// time and its count.
+    pub fn bring_forward(&mut self, cap: impl Fn(&Message) -> Option<u64>) {
+        let now = Utc::now();
+        let mut entries = std::mem::take(&mut self.queue).into_vec();
+        for entry in &mut entries {
+            if let Some(within_ms) = cap(&entry.message) {
+                let latest =
+                    now + chrono::Duration::milliseconds(within_ms.min(i64::MAX as u64) as i64);
+                if entry.retry_at > latest {
+                    entry.retry_at = latest;
+                    entry.retry_count = 0;
+                }
+            }
+        }
+        self.queue = entries.into();
+    }
+
     /// Dequeues the next message that is ready for retry.
     ///
     /// # Returns
@@ -655,6 +676,34 @@ mod tests {
         let delay = retry_at - before;
         assert!(delay >= chrono::Duration::milliseconds(59_000));
         assert!(delay <= chrono::Duration::milliseconds(61_000));
+    }
+
+    #[test]
+    fn bring_forward_only_ever_moves_an_entry_earlier() {
+        let mut queue = RetryQueue::new();
+        let [soon, late, other] = [(); 3].map(|_| create_test_message(MessagePriority::Medium));
+        queue.enqueue_with_delay(soon.clone(), 1, 100);
+        queue.enqueue_with_delay(late.clone(), 7, 60_000);
+        queue.enqueue_with_delay(other.clone(), 2, 60_000);
+
+        queue.bring_forward(|m| (m.id != other.id).then_some(1_000));
+
+        let due = |id: &offline_protocol_core::MessageId| {
+            let entry = queue.queue.iter().find(|e| e.message.id == *id).unwrap();
+            (
+                (entry.retry_at - Utc::now()).num_milliseconds(),
+                entry.retry_count,
+            )
+        };
+        assert!(due(&soon.id).0 <= 100, "an entry due sooner keeps its time");
+        assert!(
+            (900..=1_000).contains(&due(&late.id).0),
+            "a later one is capped"
+        );
+        assert_eq!(due(&late.id).1, 0, "and starts its retry count over");
+        assert_eq!(due(&soon.id).1, 1, "one due sooner keeps its count");
+        assert!(due(&other.id).0 > 59_000, "one with no cap is untouched");
+        assert_eq!(due(&other.id).1, 2, "count and all");
     }
 
     #[test]

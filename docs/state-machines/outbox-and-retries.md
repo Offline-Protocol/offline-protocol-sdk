@@ -156,11 +156,16 @@ so the cost is wasted work rather than loss, but the effect is real past roughly
 of a retry.** When an acknowledgement times out, the sender asks its carriers
 which frames they have accepted but not started writing (only BLE knows today:
 a message counts as queued until the bridge pulls its first fragment, which is
-why each bridge stops pulling once a peer holds 32 fragments; at 576 the
-extension saw almost nothing). Such a
-frame gets one more full timeout, repeatedly, until a minute has passed since
-the attempt, and only then falls through to the ladder. The bound is what keeps
-a link that died without telling the transport from pinning a message to it.
+why each native bridge stops pulling once a peer holds 32 fragments, and the
+browser at 4; at 576 the extension saw almost nothing). Such a frame gets one
+more full timeout, repeatedly, until a minute has passed since the attempt, and
+only then falls through to the ladder. The ladder holds a resend behind a
+queued copy for one more rung, and only within a minute of the last copy
+handed to a carrier: the direct send, whose minute is the timeout's (it hands
+the message over exactly when that minute runs out), or a copy handed to a
+neighbor, which is the only hand-off a message the mesh carries has. The bound is
+what keeps a link that died without telling the transport from pinning a
+message to it, never failing it and never offering it to another carrier.
 
 The failure this prevents is a feedback loop on a link carrying less than it
 is offered. Each retry appended a second copy behind the first, re-sealed under
@@ -468,8 +473,41 @@ can, that this specific peer is not on the relay, and a neighbour may still be
 able to carry it. An offered copy can therefore arrive and be acknowledged while
 no pending acknowledgement exists to match it against, so a message in the
 outbox is **settleable without one**: the recipient's acknowledgement settles it
-`Delivered` directly, emits the delivery event, and flushes the rest of that
-peer's waiting traffic.
+`Delivered` directly and emits the delivery event.
+
+**An acknowledgement sends a peer's other waiting traffic only if the peer is
+parked.** Those messages are on escalated probe timers, so they go at once.
+Otherwise nothing is sent at once: each of the peer's other waiting messages,
+oldest first, gets a slot one acknowledgement timeout away plus one spacing per
+message ahead of it, the spacing being half the rate a neighbor accepts from
+this device. Each one moved starts its retry budget over, as a re-drive does:
+the receipt proves the peer answers, and a message carrying the count of a long
+wait alone would fail for good one timeout later, delivered or not. One already
+due sooner keeps its count. The reset cannot tell whether a message failed
+before or after the route came back, so while other receipts keep arriving, a
+sibling that keeps failing cycles through the rungs below about one timeout,
+and only its outbox lifetime ends it, as on the
+re-drive this replaced, which sent it on every receipt. The spacing is per
+recipient; backlogs for several recipients behind one neighbor still add up
+there. A message on a later backoff moves to its slot, and one resting
+edge-driven with no retry entry (`edge_driven_unreachable_dm`) is scheduled at
+it. A slot only ever moves a message earlier, and a later receipt computes the
+same slots from a later moment, so however many receipts arrive, none makes a
+message go sooner than one timeout after it. Sending them at once is the
+failure this prevents: every message of a mesh burst is waiting for its own
+receipt, so each receipt re-sent all the others, and ten messages cost about
+forty-five more frames against a next hop that accepts fifteen at once. Its
+refusals lost receipts, which are never resent. Leaving them alone entirely is
+the opposite failure: a message that backed off while the route was gone has no
+neighbor edge to wake it when its recipient is more than one hop away, and could
+wait out five minutes after the route came back, and a resting one would never
+go. One shared slot instead of spaced ones is the smaller version of the first
+failure: forty messages put thirty frames on the next hop in a twentieth of a
+second, against a burst of fifteen.
+
+A parked peer's re-drive is not bounded this way. A re-drive that fails
+everywhere restores the park counter, and a relay verdict on a re-driven frame
+parks it again, so the next acknowledgement can re-drive the same messages.
 
 The park is not the only such offer. A direct send that no carrier takes also
 hands the frame to the mesh, and registers no pending acknowledgement, because

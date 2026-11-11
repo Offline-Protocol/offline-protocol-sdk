@@ -110,7 +110,8 @@ generates for itself, and read back with `local_address()` (or the
 the storage namespace and nothing else. It never leaves the device and no peer
 can see it. On a device with one account, a constant like `"default"` is fine.
 
-See [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210)
+See [identity-for-integrators.md](./identity-for-integrators.md) for what to pass
+as `recipient`, and [UPGRADING §14](./UPGRADING.md#14-your-identity-is-derived-not-chosen-v0210)
 for the migration, including the two ways an app can lose data by re-keying its
 own storage to the address.
 
@@ -336,7 +337,8 @@ See [Configuration](configuration.md#reliability-configuration).
 
 **Example**:
 ```rust
-match protocol.send_message("user456", "Hello!", Some(MessagePriority::High), None::<String>) {
+let peer = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"; // peer off1… from discovery
+match protocol.send_message(peer, "Hello!", Some(MessagePriority::High), None::<String>) {
     Ok(msg_id) => println!("Sent: {msg_id}"),
     Err(e) => println!("Deferred for retry: {e}"),
 }

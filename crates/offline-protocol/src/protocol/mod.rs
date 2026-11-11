@@ -101,6 +101,23 @@ fn relay_push_window_closed(now: DateTime<Utc>, entry: &OutboxEntry) -> bool {
         )
 }
 
+/// A message's place in the mesh's resend generations, and when a copy of it
+/// was last handed to a neighbor.
+///
+/// `handed_at` is what bounds the retry ladder's hold behind a queued copy for
+/// a message the mesh carries. Such a message's direct sends fail, so
+/// `OutboxEntry::last_sent_at` stays at its first attempt; bounded by that
+/// alone, the hold ended a minute after the first attempt, and every rung after
+/// it queued one more copy behind the one still waiting.
+#[derive(Debug, Clone, Copy)]
+struct MeshResend {
+    generation: u64,
+    /// When a resend last moved the message to `generation`.
+    since: Instant,
+    /// When a copy last went to a neighbor, under any generation.
+    handed_at: Instant,
+}
+
 /// Main entry point for the Offline Protocol SDK.
 ///
 /// This struct combines all protocol components and provides a unified API
@@ -444,7 +461,7 @@ pub struct OfflineProtocol {
     /// seen; past it, a message still waiting can flood up to its full count
     /// again, a cost accepted for each stuck message at each relaunch rather
     /// than persisting this.
-    mesh_resend_generations: HashMap<MessageId, (u64, Instant)>,
+    mesh_resend_generations: HashMap<MessageId, MeshResend>,
 
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are
@@ -4097,12 +4114,70 @@ impl OfflineProtocol {
         }
 
         let mut processed = 0;
+        // Asked for only once an entry is ready: it locks the carriers' queues
+        // and copies every id, and most ticks have nothing ready.
+        let mut queued = None;
+        // An entry held behind a queued copy is not counted in `processed`, so
+        // it spends neither the batch nor a resend token. This bounds the loop
+        // instead: a held entry whose rung is shorter than this call would
+        // otherwise come round again without end.
+        let mut looked = 0;
+        let look_limit = self.retry_queue.len();
 
-        while processed < max_batch_size {
+        while processed < max_batch_size && looked < look_limit {
             let mut entry = match self.retry_queue.dequeue_ready() {
                 Some(e) => e,
                 None => break,
             };
+            looked += 1;
+
+            // An earlier copy still in a local carrier queue has not gone out,
+            // so it cannot have been answered, and a resend would queue another
+            // copy behind it. The acknowledgement timeout already holds such a
+            // frame; this ladder did not, and on the 2026-11-09 phone chain its
+            // 1 s and 3 s resends queued behind the first copy on a slow
+            // Bluetooth link, with the receipts for the sender's other messages
+            // waiting behind them. When the copy leaves is not known here, so
+            // the entry waits out its current rung again and keeps its count.
+            //
+            // Only within a minute of the last copy handed to a carrier: a
+            // direct send (`last_sent_at`, the minute the timeout's extension
+            // also grants, after which it hands a still-queued message here)
+            // or a copy handed to a neighbor (`MeshResend::handed_at`, since a
+            // message the mesh carries has direct sends that fail and a
+            // `last_sent_at` that stays at its first attempt). Holding past
+            // that would pin the message to a link that died without telling
+            // the transport, never failing it.
+            //
+            // Not counted as processed: on a slow link most ready entries are
+            // held, and counted, they spent the batch and, under
+            // `edge_driven_unreachable_dm`, the resend tokens that resends to
+            // other peers needed.
+            let handed_off_recently = || {
+                let recent = |age: std::time::Duration| age < QUEUED_ACK_GRACE_MAX;
+                let sent = self
+                    .outbox
+                    .get(&entry.message.id)
+                    .or_else(|| self.media_outbox.get(&entry.message.id));
+                sent.is_some_and(|sent| {
+                    Utc::now()
+                        .signed_duration_since(sent.last_sent_at)
+                        .to_std()
+                        .map_or(true, recent)
+                        || self
+                            .mesh_resend_generations
+                            .get(&entry.message.id)
+                            .is_some_and(|resend| recent(resend.handed_at.elapsed()))
+                })
+            };
+            if queued
+                .get_or_insert_with(|| self.transport_manager.queued_message_ids())
+                .contains(entry.message.id.as_str().as_str())
+                && handed_off_recently()
+            {
+                let _ = self.retry_queue.enqueue(entry.message, entry.retry_count);
+                continue;
+            }
 
             processed += 1;
 

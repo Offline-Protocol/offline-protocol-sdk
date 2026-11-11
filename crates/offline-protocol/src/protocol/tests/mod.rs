@@ -10962,6 +10962,73 @@ fn test_settling_a_parked_dm_redrives_the_recipients_other_parked_dms() {
 }
 
 #[test]
+fn test_a_receipt_schedules_a_dm_resting_with_no_retry_entry() {
+    // `edge_driven_unreachable_dm` leaves an old undelivered message resting in
+    // the outbox, with no retry entry and no pending ACK, until its peer next
+    // proves reachable. For a peer past a neighbor no neighbor edge ever fires,
+    // so a receipt carried back by the mesh is that proof.
+    let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
+    let resting = protocol
+        .send_message("bob", "resting", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let fresh = protocol
+        .send_message("bob", "fresh", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let backed_off = protocol
+        .send_message("bob", "backed off", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    for id in [&resting, &fresh, &backed_off] {
+        protocol.ack_manager.remove_ack(id);
+        protocol.retry_queue.remove(&id.as_str());
+    }
+    // Both past the retry budget, as a long wait alone leaves them.
+    let max_retries = protocol.config.reliability.retry.max_retries;
+    protocol.outbox.get_mut(&resting).unwrap().attempt_count = max_retries + 2;
+    let message = protocol.outbox[&backed_off].message.clone();
+    protocol
+        .retry_queue
+        .enqueue_with_delay(message, max_retries + 2, 300_000);
+    // A sibling whose own sends keep failing, already due inside the timeout.
+    let due_soon = protocol
+        .send_message("bob", "due soon", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.ack_manager.remove_ack(&due_soon);
+    protocol.retry_queue.remove(&due_soon.as_str());
+    let message = protocol.outbox[&due_soon].message.clone();
+    protocol.retry_queue.enqueue_with_delay(message, 3, 1_000);
+
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &fresh),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+
+    assert!(!protocol.outbox.contains_key(&fresh), "the receipt settled");
+    let scheduled: HashMap<String, u32> = protocol
+        .retry_queue
+        .drain_all()
+        .into_iter()
+        .map(|entry| (entry.message.id.as_str(), entry.retry_count))
+        .collect();
+    // The receipt proves the peer answers, so each starts its budget over, as
+    // the flush that used to send them did. Carried over, one ack timeout
+    // without an answer failed them for good, delivered or not.
+    assert_eq!(
+        scheduled.get(&resting.as_str()),
+        Some(&0),
+        "the resting message is scheduled again, with a fresh budget"
+    );
+    assert_eq!(
+        scheduled.get(&backed_off.as_str()),
+        Some(&0),
+        "and so is the backed-off one"
+    );
+    // One the receipt does not move keeps its count, or each receipt would hold
+    // a sibling whose sends keep failing on the bottom rung of its ladder.
+    assert_eq!(scheduled.get(&due_soon.as_str()), Some(&3));
+}
+
+#[test]
 fn test_parked_dm_redriven_with_fresh_ack_budget() {
     // Every re-drive registers a fresh pending ACK, so the retry budget
     // only ever burns against a peer believed reachable — attempts spent
@@ -42977,32 +43044,48 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
     use crate::protocol::state_crypto::StateRecordCipher;
     use crate::protocol_state_storage::{ProtocolStateResult, ProtocolStateStorage};
     use crate::telemetry::{AppState, TelemetryHost, TelemetryOs};
-    use offline_protocol_core::time::Instant;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Every read sleeps, as a slow disk would. One reaching the caller is
-    /// worth 100 ms; the load path makes several.
-    struct SlowStateStorage;
+    /// Every read sleeps, as a slow disk would. If any method runs on the thread
+    /// that called `enable_telemetry`, the load path reached the caller.
+    struct SlowStateStorage {
+        caller: std::thread::ThreadId,
+        on_caller: Arc<AtomicBool>,
+    }
+    impl SlowStateStorage {
+        fn touch(&self) {
+            if std::thread::current().id() == self.caller {
+                self.on_caller.store(true, Ordering::SeqCst);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
     impl ProtocolStateStorage for SlowStateStorage {
         fn store(&self, _: &str, _: &str, _: &[u8]) -> ProtocolStateResult<()> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(())
         }
         fn load(&self, _: &str, _: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(None)
         }
         fn delete(&self, _: &str, _: &str) -> ProtocolStateResult<()> {
             Ok(())
         }
         fn list_keys(&self, _: &str) -> ProtocolStateResult<Vec<String>> {
-            thread::sleep(Duration::from_millis(100));
+            self.touch();
             Ok(Vec::new())
         }
     }
 
+    let on_caller = Arc::new(AtomicBool::new(false));
+    let caller = std::thread::current().id();
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     // What `initialize_mls` leaves behind, without paying for its own I/O.
-    protocol.protocol_state_storage = Some(Arc::new(SlowStateStorage));
+    protocol.protocol_state_storage = Some(Arc::new(SlowStateStorage {
+        caller,
+        on_caller: on_caller.clone(),
+    }));
     protocol.state_record_cipher = Some(StateRecordCipher::new(&[7u8; 32]));
 
     let config = TelemetryConfig::default()
@@ -43010,12 +43093,10 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
         .with_app_id("app_test");
     let host = TelemetryHost::new(TelemetryOs::Ios, 18).with_app_state(AppState::Active);
 
-    let started = Instant::now();
     protocol.enable_telemetry(config, host).expect("enables");
-    let elapsed = started.elapsed();
     assert!(
-        elapsed < Duration::from_millis(50),
-        "enable_telemetry blocked the caller on storage for {elapsed:?}"
+        !on_caller.load(Ordering::SeqCst),
+        "enable_telemetry ran protocol-state storage I/O on the caller"
     );
 
     // Nothing was emitted, so the worker drains an empty ring and opens no
@@ -43957,6 +44038,294 @@ fn test_a_frame_still_in_the_local_queue_is_not_retried() {
         1,
         "a frame that has left the queue times out as before"
     );
+}
+
+/// The retry ladder holds a resend whose earlier copy is still in the local
+/// queue, as the acknowledgement timeout does: on the 2026-11-09 phone chain,
+/// the 1 s and 3 s resends queued behind the first copy on a slow Bluetooth
+/// link, and every receipt for that sender's other messages waited behind
+/// them, ten copies ahead in a fast round and twenty in a slow one.
+#[test]
+fn test_a_resend_waits_while_its_earlier_copy_is_still_queued() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let carrier = BackloggedTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+
+    let id = protocol
+        .send_message("bob", "slow link", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    // On the retry ladder, as a frame no carrier took directly is.
+    protocol.ack_manager.remove_ack(&id);
+    let message = carrier.sent.lock().unwrap()[0].clone();
+    protocol
+        .retry_queue
+        .enqueue_with_delay(message.clone(), 2, 0);
+
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        carrier.sent.lock().unwrap().len(),
+        1,
+        "no second copy behind the first"
+    );
+    let held: Vec<u32> = protocol
+        .retry_queue
+        .drain_all()
+        .into_iter()
+        .map(|entry| entry.retry_count)
+        .collect();
+    assert_eq!(held, [2], "held on its rung, not spent");
+
+    // Once the copy has left the queue, the ladder resends.
+    protocol.retry_queue.enqueue_with_delay(message, 2, 0);
+    carrier
+        .drained
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        carrier.sent.lock().unwrap().len(),
+        2,
+        "resent once the copy left"
+    );
+}
+
+/// The ladder holds a resend behind a queued copy only as long as the
+/// acknowledgement timeout would: a minute from the last send. The timeout
+/// hands such a message to the ladder exactly when that minute runs out, so an
+/// unbounded hold here would pin it to a link that died without telling the
+/// transport, never failing it and never offering it to another carrier.
+#[test]
+fn test_a_resend_held_behind_a_queued_copy_goes_after_a_minute() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let carrier = BackloggedTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+
+    let id = protocol
+        .send_message("bob", "dead link", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.ack_manager.remove_ack(&id);
+    protocol.outbox.get_mut(&id).unwrap().last_sent_at = Utc::now() - chrono::Duration::seconds(61);
+    let message = carrier.sent.lock().unwrap()[0].clone();
+    protocol.retry_queue.enqueue_with_delay(message, 2, 0);
+
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        carrier.sent.lock().unwrap().len(),
+        2,
+        "a copy queued past the bound no longer holds the resend"
+    );
+}
+
+/// A carrier that cannot reach anyone directly and hands copies to one
+/// neighbor, `bob`, where they wait in its queue until `drained` is set: a
+/// message the mesh carries, on a slow link.
+#[derive(Clone)]
+struct BackloggedMeshCarrier {
+    carried: Arc<Mutex<Vec<Message>>>,
+    drained: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BackloggedMeshCarrier {
+    fn new() -> Self {
+        Self {
+            carried: Arc::new(Mutex::new(Vec::new())),
+            drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn copies_of(&self, id: &MessageId) -> usize {
+        let carried = self.carried.lock().unwrap();
+        carried.iter().filter(|m| m.id == *id).count()
+    }
+}
+
+impl Transport for BackloggedMeshCarrier {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn transport_type(&self) -> TransportType {
+        TransportType::BLE
+    }
+    fn status(&self) -> TransportStatus {
+        TransportStatus::Available
+    }
+    fn metrics(&self) -> TransportMetrics {
+        TransportMetrics::default()
+    }
+    fn send(&self, message: &Message) -> offline_protocol_transport::Result<()> {
+        Err(offline_protocol_transport::Error::PeerNotReachable(
+            message.recipient.as_str().to_string(),
+        ))
+    }
+    fn send_to_peer(
+        &self,
+        peer_id: &str,
+        message: &Message,
+    ) -> offline_protocol_transport::Result<()> {
+        if peer_id != "bob" {
+            return self.send(message);
+        }
+        self.carried.lock().unwrap().push(message.clone());
+        Ok(())
+    }
+    fn connected_peers(&self) -> Vec<offline_protocol_transport::PeerLink> {
+        vec![offline_protocol_transport::PeerLink::new("bob")]
+    }
+    fn receive(&self) -> offline_protocol_transport::Result<Option<Message>> {
+        Ok(None)
+    }
+    fn start(&self) -> offline_protocol_transport::Result<()> {
+        Ok(())
+    }
+    fn stop(&self) -> offline_protocol_transport::Result<()> {
+        Ok(())
+    }
+    fn on_status_changed(&self, _status: TransportStatus) {}
+    fn queued_message_ids(&self) -> Vec<String> {
+        if self.drained.load(std::sync::atomic::Ordering::SeqCst) {
+            return Vec::new();
+        }
+        let carried = self.carried.lock().unwrap();
+        carried.iter().map(|m| m.id.as_str()).collect()
+    }
+}
+
+/// The hold's minute runs from the last copy handed to a carrier, including a
+/// copy handed to a neighbor. A message the mesh carries has direct sends that
+/// fail, so its `last_sent_at` stays at the first attempt: bounded by that
+/// alone, the hold ended a minute in, and every rung after it queued one more
+/// copy behind the one still waiting on the slow link.
+#[test]
+fn a_resend_the_mesh_carries_waits_behind_a_copy_handed_over_within_the_minute() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let carrier = BackloggedMeshCarrier::new();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+
+    let id = protocol
+        .send_message(
+            "far-away",
+            "over the mesh",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    assert_eq!(carrier.copies_of(&id), 1, "the first copy went to bob");
+    // The first attempt was long ago.
+    protocol.outbox.get_mut(&id).unwrap().last_sent_at = Utc::now() - chrono::Duration::seconds(61);
+
+    // The copy left bob's queue, so the ladder resends, through bob again.
+    carrier
+        .drained
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let message = protocol.outbox[&id].message.clone();
+    protocol.retry_queue.drain_all();
+    protocol
+        .retry_queue
+        .enqueue_with_delay(message.clone(), 2, 0);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(carrier.copies_of(&id), 2, "resent once the copy left");
+
+    // That copy is still queued: the next rung waits behind it.
+    carrier
+        .drained
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    protocol.retry_queue.drain_all();
+    protocol.retry_queue.enqueue_with_delay(message, 3, 0);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        carrier.copies_of(&id),
+        2,
+        "no third copy behind the one handed over a moment ago"
+    );
+}
+
+/// A resend held behind a queued copy spends no place in the batch. On a slow
+/// link most ready entries are held, and counted, a full batch of them kept a
+/// resend that could go from going.
+#[test]
+fn resends_held_behind_queued_copies_leave_the_batch_to_one_that_can_go() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let carrier = BackloggedTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+
+    let held: Vec<MessageId> = (0..crate::constants::FLUSH_BATCH_LIMIT)
+        .map(|n| {
+            protocol
+                .send_message(
+                    &format!("peer-{n}"),
+                    "queued",
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect();
+    let free = protocol
+        .send_message(
+            "peer-free",
+            "left the queue",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    let message_of =
+        |protocol: &OfflineProtocol, id: &MessageId| protocol.outbox[id].message.clone();
+    // Its first copy is written; every other one is still queued.
+    carrier.sent.lock().unwrap().retain(|m| m.id != free);
+
+    protocol.retry_queue.drain_all();
+    for id in &held {
+        let message = message_of(&protocol, id);
+        protocol.retry_queue.enqueue_with_delay(message, 1, 0);
+    }
+    // Due after every held one.
+    thread::sleep(Duration::from_millis(3));
+    let message = message_of(&protocol, &free);
+    protocol.retry_queue.enqueue_with_delay(message, 1, 0);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+
+    let sent = carrier.sent.lock().unwrap();
+    assert_eq!(
+        sent.len(),
+        held.len() + 1,
+        "the free one was resent, and only it"
+    );
+    assert!(sent.iter().any(|m| m.id == free));
 }
 
 /// A sender stops re-sealing a peer's resends once it has sealed the budget

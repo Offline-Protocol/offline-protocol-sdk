@@ -4400,10 +4400,10 @@ impl OfflineProtocol {
             StdDuration::from_millis(self.config.reliability.ack.default_timeout_ms.max(1));
         let generation = match last {
             None => 0,
-            Some((generation, since)) if since.elapsed() >= period => {
-                (generation + 1).min(super::mesh_relay::RESEND_MAX_GENERATION)
+            Some(last) if last.since.elapsed() >= period => {
+                (last.generation + 1).min(super::mesh_relay::RESEND_MAX_GENERATION)
             }
-            Some((generation, _)) => generation,
+            Some(last) => last.generation,
         };
         let stamped;
         let message = if generation > 0 {
@@ -4422,16 +4422,26 @@ impl OfflineProtocol {
             if last.is_none() {
                 let retention = self.mesh_relay.config().seen.retention;
                 let (outbox, media_outbox) = (&self.outbox, &self.media_outbox);
-                self.mesh_resend_generations.retain(|id, (_, since)| {
+                self.mesh_resend_generations.retain(|id, resend| {
                     outbox.contains_key(id)
                         || media_outbox.contains_key(id)
-                        || since.elapsed() < retention
+                        || resend.since.elapsed() < retention
                 });
             }
-            if last.is_none_or(|(previous, _)| generation > previous) {
-                self.mesh_resend_generations
-                    .insert(message.id.clone(), (generation, Instant::now()));
+            let now = Instant::now();
+            let resend = self
+                .mesh_resend_generations
+                .entry(message.id.clone())
+                .or_insert(super::MeshResend {
+                    generation,
+                    since: now,
+                    handed_at: now,
+                });
+            if generation > resend.generation {
+                resend.generation = generation;
+                resend.since = now;
             }
+            resend.handed_at = now;
         }
         if handed_to_mesh > 0 {
             debug!(
@@ -6513,9 +6523,81 @@ impl OfflineProtocol {
         } else {
             error!("Failed to lock shared state for an ACK event, skipping event emission");
         }
-        // The peer answered, so the rest of their waiting traffic can go now
-        // rather than waiting out its own backoff or escalated probe timers.
-        self.flush_outbox_for_peer_via(&recipient, redrive_via);
+        // The peer answered, so traffic parked on its escalated probe timers can
+        // go now, the same rule as the pending-ACK path.
+        //
+        // Anything else waiting is not re-sent here. On the mesh every message of
+        // a burst is waiting for its own receipt, so re-sending on each receipt
+        // cost ten messages about forty-five more frames on a neighbor that
+        // accepts fifteen at once. Its refusals lost receipts, which are never
+        // resent, and delayed messages, and each late receipt started another
+        // wave. But a message that backed off while the route was gone, or rests
+        // edge-driven with no retry entry at all, has no other news of it when
+        // the recipient is past a neighbor: no neighbor edge fires for them.
+        if self.dm_unreachable_parks.contains_key(&recipient) {
+            self.flush_outbox_for_peer_via(&recipient, redrive_via);
+        } else {
+            self.schedule_waiting_after_receipt(&recipient);
+        }
+    }
+
+    /// Schedules `recipient`'s other waiting messages to go within one
+    /// acknowledgement timeout, one at a time, and sends nothing itself.
+    ///
+    /// Each one this moves starts its retry budget over, as the flush that used
+    /// to send them did: the receipt proves the peer answers. Carried over, a
+    /// message that backed off past `max_retries` while alone failed for good
+    /// after one ack timeout, delivered or not, and a two-hop receipt can take
+    /// longer. One already due sooner keeps its count. The reset does not know
+    /// whether a message failed before or after the route came back, so while
+    /// other receipts keep arriving, a sibling that keeps failing cycles through
+    /// the rungs below about one ack timeout and only its outbox lifetime ends
+    /// it, as on the flush, which sent it on every receipt.
+    ///
+    /// Spaced per recipient at half the rate a neighbor accepts from us (our
+    /// own `peer_rate_per_sec`, so it assumes neighbors share the setting), in
+    /// the order they were first sent. Backlogs for several recipients behind
+    /// one neighbor still add up there; past two the spacing leaves no margin.
+    /// One instant for all was the failure: forty messages were thirty frames
+    /// in a twentieth of a second on a neighbor that accepts fifteen at once,
+    /// and its refusals spend the allowance our own receipts need. Each
+    /// message's slot only ever moves earlier, and a later receipt computes the
+    /// same slots from a later now, so however many receipts arrive, none
+    /// makes a message go sooner than one timeout after it.
+    fn schedule_waiting_after_receipt(&mut self, recipient: &str) {
+        let timeout_ms = self.config.reliability.ack.default_timeout_ms;
+        let spacing_ms = (2_000.0 / self.mesh_relay.config().peer_rate_per_sec.max(0.1)) as u64;
+        let held = self.window_held.get(recipient);
+        let mut waiting: Vec<&OutboxEntry> = self
+            .outbox
+            .values()
+            .chain(self.media_outbox.values())
+            .filter(|entry| {
+                entry.message.recipient.as_str() == recipient
+                    && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+                    && !held.is_some_and(|held| held.contains(&entry.message.id))
+            })
+            .collect();
+        waiting.sort_by_key(|entry| (entry.first_sent_at, entry.message.id.as_str()));
+        let mut slots = HashMap::with_capacity(waiting.len());
+        for (rank, entry) in waiting.into_iter().enumerate() {
+            let slot = timeout_ms.saturating_add(spacing_ms.saturating_mul(rank as u64));
+            // A message resting with no retry entry gets one; enqueue keeps an
+            // existing entry, which `bring_forward` caps instead.
+            self.retry_queue
+                .enqueue_with_delay(entry.message.clone(), 0, slot);
+            slots.insert(entry.message.id.as_str(), slot);
+        }
+        if slots.is_empty() {
+            return;
+        }
+        debug!(
+            recipient = %recipient,
+            scheduled = slots.len(),
+            "A receipt scheduled the recipient's other waiting messages"
+        );
+        self.retry_queue
+            .bring_forward(|message| slots.get(&message.id.as_str()).copied());
     }
 
     pub(super) fn handle_missing_outbox_entry(

@@ -3,6 +3,49 @@
 Everything an application team has to change to move off `v0.16.x` and onto the
 current `v0.32.x` line.
 
+> **New integrator?** You probably do not need this file yet. Use the
+> [integrator map](integrator-map.md) to pick a platform and a quick start.
+> Return here when you change the SDK version in an existing app.
+
+---
+
+## Start here: version and surface index
+
+Use this table to **limit** what you read. The sections below are complete;
+most upgrades only need a subset plus the version-tagged sections in the
+introduction (v0.20.0, v0.21.0, …).
+
+**Current SDK line documented here:** `v0.32.x` (see [CHANGELOG](../CHANGELOG.md)).
+
+### By where you are today
+
+| You are on… | Goal | Read (in order) | Skip unless noted |
+|-------------|------|-----------------|-------------------|
+| **No SDK yet** | Integrate fresh | [integrator-map.md](integrator-map.md), platform guide in that map | This file |
+| **`v0.16.x` or earlier** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§1–§13](#1-initialize_mls-now-takes-two-storage-providers), then [§14](#14-your-identity-is-derived-not-chosen-v0210) and every **§15–§30** section whose version appears in your jump range | Nothing in §1–§13 |
+| **`v0.17.x`–`v0.19.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), skim [This release at a glance](#this-release-at-a-glance) for gaps, then [§14](#14-your-identity-is-derived-not-chosen-v0210)+ for each release you have not shipped | §1–§3 if storage split already done |
+| **`v0.20.x`–`v0.22.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§14](#14-your-identity-is-derived-not-chosen-v0210) if before v0.21, [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) if RN iOS, then §15+ for versions after your pin | Earlier storage sections |
+| **`v0.23.x`–`v0.26.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), behavioural sections for each skipped minor (§16, §20, §21, …) | §1–§14 if already migrated |
+| **`v0.27.x`–`v0.31.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) | Earlier major migrations |
+| **`v0.32.x`** | Patch bump within series | [CHANGELOG](../CHANGELOG.md) `[Unreleased]` and the matching subsection in §30 only if the release note points here | Rest of this file |
+
+### By platform (same target `v0.32.x`)
+
+| Surface | Always check | Usually check on jump | Rare |
+|---------|--------------|----------------------|------|
+| **React Native** | [§8](#8-react-native-bridge-fallbacks-now-match-the-sdk-defaults), [§11](#11-events-you-must-now-handle), [§12](#12-build-and-packaging), [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) (iOS), [§13](#13-upgrade-test-checklist) | §14 identity, §16 data layer, §20 telemetry, §25–§30 behaviour | §1–§7 if never on pre-0.17 |
+| **Native Swift / Kotlin** | [§1](#1-initialize_mls-now-takes-two-storage-providers), [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence) (custom storage), [§14](#14-your-identity-is-derived-not-chosen-v0210), [§12](#12-build-and-packaging) (regenerate bindings) | §11 events, version-tagged iOS/Android behaviour in §18, §25–§30 | RN-only §8–§9 |
+| **Python** | [§1](#1-initialize_mls-now-takes-two-storage-providers) (`state_root`), [§14](#14-your-identity-is-derived-not-chosen-v0210) | §16 data, §25+ behaviour | RN §8–§9 |
+| **Rust app on crates** | [This release at a glance](#this-release-at-a-glance) Rust column, §15 API removals, §19 Reticulum crate | §25–§30 exhaustive `Event` / config field matches | Binding-only packaging |
+| **C / C# / Java** | [§12](#12-build-and-packaging), [§14](#14-your-identity-is-derived-not-chosen-v0210) | Same as native for storage if you implement providers | RN sections |
+| **Web** | [bridges/web.md](bridges/web.md), §25–§30 behaviour that touches workers/events | §14 identity model | Mobile-only §12.1 |
+
+### One-page checklist after code changes
+
+[§13 Upgrade test checklist](#13-upgrade-test-checklist) (all platforms).
+
+---
+
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections

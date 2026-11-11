@@ -770,6 +770,40 @@ export interface PendingQueueConfig {
 }
 
 /**
+ * Options for {@link requestMeshPermissions}.
+ *
+ * Defaults match a typical BLE mesh app: request BLE grants, not Wi‑Fi Direct or
+ * API 37 local network unless opted in. See docs/mobile-permissions.md.
+ */
+export interface MeshPermissionRequestOptions {
+  /** Request BLE-related Android runtime grants. Default `true`. */
+  ble?: boolean;
+  /** Request Wi‑Fi Direct discovery grants (Android only). Default `false`. */
+  wifiDirect?: boolean;
+  /**
+   * Request `ACCESS_LOCAL_NETWORK` on Android API 37+.
+   * Default `false`; use `true` when the peer-stream / LAN slot is enabled and
+   * the app targets API 37+.
+   */
+  localNetwork?: boolean;
+}
+
+export type MeshPermissionStatus = 'granted' | 'denied' | 'never_ask_again';
+
+/**
+ * Result of {@link requestMeshPermissions}.
+ */
+export interface MeshPermissionRequestResult {
+  /** `true` when every permission this call attempted is granted (or iOS preflight). */
+  granted: boolean;
+  platform: 'ios' | 'android' | 'other';
+  /** Per-permission status on Android after `requestMultiple`. */
+  android?: Record<string, MeshPermissionStatus>;
+  /** iOS preflight note or Android summary when nothing was prompted. */
+  message?: string;
+}
+
+/**
  * Protocol configuration
  */
 /**
