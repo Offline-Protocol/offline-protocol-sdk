@@ -76,7 +76,7 @@ mls-rs = { version = "=0.56.0", default-features = false, features = [
     "prior_epoch",
     "by_ref_proposal",
 ] }
-mls-rs-crypto-rustcrypto = { version = "=0.22.1", default-features = false }
+mls-rs-crypto-rustcrypto = { version = "=0.23.0", default-features = false }
 # Named directly because this crate implements two of its traits
 # (`GroupStateStorage`, `KeyPackageStorage`) and `mls-rs` does not re-export
 # the types they carry. Pinned with the same `=` and for the same reason.
