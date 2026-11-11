@@ -162,9 +162,12 @@ is offered.
   local carrier queue is not resent, by the acknowledgement timeout or by the
   retry ladder: that copy has not gone out, so nothing can have answered it.
   The ladder holds such a resend for one more rung and keeps its count, and
-  holds it only within the minute from the last send that bounds the
-  timeout's extension; past it the resend goes, so a dead link cannot pin the
-  message. Neither path asks which carrier holds the copy, so within that
+  holds it only within a minute of the last copy handed to a carrier: a direct
+  send, the minute that also bounds the timeout's extension, or a copy handed
+  to a neighbor. Past it the resend goes, so a dead link cannot pin the
+  message. Bounded by the direct send alone, a message the mesh carries (whose
+  direct sends fail) stopped being held a minute after its first attempt, and
+  every rung after that queued one more copy. Neither path asks which carrier holds the copy, so within that
   minute a resend that could have gone by another carrier waits too; a
   carrier, discovery or session edge still flushes past the hold. On
   the 2026-11-09 phone chain the ladder did not, and its 1 s and 3 s resends

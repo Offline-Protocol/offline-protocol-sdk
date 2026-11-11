@@ -44136,6 +44136,137 @@ fn test_a_resend_held_behind_a_queued_copy_goes_after_a_minute() {
     );
 }
 
+/// A carrier that cannot reach anyone directly and hands copies to one
+/// neighbor, `bob`, where they wait in its queue until `drained` is set: a
+/// message the mesh carries, on a slow link.
+#[derive(Clone)]
+struct BackloggedMeshCarrier {
+    carried: Arc<Mutex<Vec<Message>>>,
+    drained: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BackloggedMeshCarrier {
+    fn new() -> Self {
+        Self {
+            carried: Arc::new(Mutex::new(Vec::new())),
+            drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn copies_of(&self, id: &MessageId) -> usize {
+        let carried = self.carried.lock().unwrap();
+        carried.iter().filter(|m| m.id == *id).count()
+    }
+}
+
+impl Transport for BackloggedMeshCarrier {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn transport_type(&self) -> TransportType {
+        TransportType::BLE
+    }
+    fn status(&self) -> TransportStatus {
+        TransportStatus::Available
+    }
+    fn metrics(&self) -> TransportMetrics {
+        TransportMetrics::default()
+    }
+    fn send(&self, message: &Message) -> offline_protocol_transport::Result<()> {
+        Err(offline_protocol_transport::Error::PeerNotReachable(
+            message.recipient.as_str().to_string(),
+        ))
+    }
+    fn send_to_peer(
+        &self,
+        peer_id: &str,
+        message: &Message,
+    ) -> offline_protocol_transport::Result<()> {
+        if peer_id != "bob" {
+            return self.send(message);
+        }
+        self.carried.lock().unwrap().push(message.clone());
+        Ok(())
+    }
+    fn connected_peers(&self) -> Vec<offline_protocol_transport::PeerLink> {
+        vec![offline_protocol_transport::PeerLink::new("bob")]
+    }
+    fn receive(&self) -> offline_protocol_transport::Result<Option<Message>> {
+        Ok(None)
+    }
+    fn start(&self) -> offline_protocol_transport::Result<()> {
+        Ok(())
+    }
+    fn stop(&self) -> offline_protocol_transport::Result<()> {
+        Ok(())
+    }
+    fn on_status_changed(&self, _status: TransportStatus) {}
+    fn queued_message_ids(&self) -> Vec<String> {
+        if self.drained.load(std::sync::atomic::Ordering::SeqCst) {
+            return Vec::new();
+        }
+        let carried = self.carried.lock().unwrap();
+        carried.iter().map(|m| m.id.as_str()).collect()
+    }
+}
+
+/// The hold's minute runs from the last copy handed to a carrier, including a
+/// copy handed to a neighbor. A message the mesh carries has direct sends that
+/// fail, so its `last_sent_at` stays at the first attempt: bounded by that
+/// alone, the hold ended a minute in, and every rung after it queued one more
+/// copy behind the one still waiting on the slow link.
+#[test]
+fn a_resend_the_mesh_carries_waits_behind_a_copy_handed_over_within_the_minute() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let carrier = BackloggedMeshCarrier::new();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+
+    let id = protocol
+        .send_message(
+            "far-away",
+            "over the mesh",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    assert_eq!(carrier.copies_of(&id), 1, "the first copy went to bob");
+    // The first attempt was long ago.
+    protocol.outbox.get_mut(&id).unwrap().last_sent_at = Utc::now() - chrono::Duration::seconds(61);
+
+    // The copy left bob's queue, so the ladder resends, through bob again.
+    carrier
+        .drained
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let message = protocol.outbox[&id].message.clone();
+    protocol.retry_queue.drain_all();
+    protocol
+        .retry_queue
+        .enqueue_with_delay(message.clone(), 2, 0);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(carrier.copies_of(&id), 2, "resent once the copy left");
+
+    // That copy is still queued: the next rung waits behind it.
+    carrier
+        .drained
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    protocol.retry_queue.drain_all();
+    protocol.retry_queue.enqueue_with_delay(message, 3, 0);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        carrier.copies_of(&id),
+        2,
+        "no third copy behind the one handed over a moment ago"
+    );
+}
+
 /// A sender stops re-sealing a peer's resends once it has sealed the budget
 /// past that peer's last acknowledgement, and an acknowledgement re-opens it.
 /// Every re-seal spends a generation the receiver must fast-forward over; in

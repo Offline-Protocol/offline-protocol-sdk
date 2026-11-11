@@ -160,9 +160,10 @@ why each native bridge stops pulling once a peer holds 32 fragments, and the
 browser at 4; at 576 the extension saw almost nothing). Such a frame gets one
 more full timeout, repeatedly, until a minute has passed since the attempt, and
 only then falls through to the ladder. The ladder holds a resend behind a
-queued copy for one more rung, and decides to only within the same minute
-from the last send: the timeout hands the message over exactly when the
-minute runs out. The bound is
+queued copy for one more rung, and only within a minute of the last copy
+handed to a carrier: the direct send, whose minute is the timeout's (it hands
+the message over exactly when that minute runs out), or a copy handed to a
+neighbor, which is the only hand-off a message the mesh carries has. The bound is
 what keeps a link that died without telling the transport from pinning a
 message to it, never failing it and never offering it to another carrier.
 
