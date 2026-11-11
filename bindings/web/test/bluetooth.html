@@ -16,7 +16,9 @@
 // first is released. Of two instances behind one device, the carrier binds
 // the one tagged with this application. A disconnect reports the peer lost,
 // and so does closing a link whose server is already gone, with no event to
-// say so. Stopping the node closes the carrier's links. The title ends as
+// say so. Stopping the node closes the carrier's links. On a slow link a
+// receipt overtakes queued data; a sink that throws is still offered
+// fragments; a write that never settles closes its link. The title ends as
 // PASS or FAIL: <step>.
 import { OfflineNode, BluetoothCarrier } from "../src/index.js";
 import { FakeBluetooth, peripheral, foreignInstance } from "./fake-bluetooth.js";
@@ -259,6 +261,21 @@ await run(async (step) => {
   if (attempts <= 4) throw new Error(`the sink was offered ${attempts} fragments, then nothing`);
   log(`a sink that threw was still offered ${attempts} fragments`);
 
-  await Promise.all([b, c, d, e, f, g, h, k, t, x, y].map((node) => node.stop()));
+  step.name = "a stalled write";
+  // A write that never settles closes its link once writeTimeoutMs passes.
+  // The node holds every link's output while one has four writes unsettled,
+  // so without it one stuck write stopped all of them, with nothing reported.
+  const [p, q] = await Promise.all([start("stalled-browser"), start("stalled-phone")]);
+  const stalled = await peripheral(q, p.address);
+  const stalledCarrier = new BluetoothCarrier(p, { bluetooth: new FakeBluetooth([stalled]), writeTimeoutMs: 300 });
+  await stalledCarrier.request();
+  const lostQ = waitFor(p, "neighbor_lost", (ev) => ev.peer_id === q.address, 5000);
+  stalled.message.onWrite = () => new Promise(() => {});
+  await p.sendMessage(q.address, "into a write that never settles");
+  await lostQ;
+  if (stalledCarrier.peers.length !== 0) throw new Error(`the carrier still holds ${stalledCarrier.peers}`);
+  log("a write that never settled closed its link");
+
+  await Promise.all([b, c, d, e, f, g, h, k, t, x, y, p, q].map((node) => node.stop()));
 });
 </script>

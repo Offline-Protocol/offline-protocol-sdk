@@ -43,6 +43,25 @@ const HELLO = "6e400006-b5a3-f393-e0a9-e50e24dcca9e";
 // fragment floor every binding falls back to (BLE_MAX_FRAGMENT_SIZE).
 const FLOOR_PAYLOAD = 185;
 
+// How long one write may take before its link is taken as dead. The worker
+// stops pulling fragments for every link while any one holds four unwritten,
+// so a write that never settled stopped all Bluetooth output, not just its
+// own link's, until the browser reported that link gone. A write without
+// response settles once the browser has handed it to the radio, in well under
+// a second on a working link.
+// ponytail: ten seconds is a guess at "well past any working link", not
+// measured on a phone.
+const WRITE_TIMEOUT_MS = 10_000;
+
+// `promise`, or a rejection once `ms` pass without it settling.
+function within(promise, ms) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(reject, ms, new Error(`a write took more than ${ms} ms`));
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
 const bytesOf = (view) => new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
 
 async function characteristics(service) {
@@ -68,12 +87,14 @@ export class BluetoothCarrier extends EventTarget {
   #released = false;
   // device -> the handshake in flight for it, which a second connect joins.
   #connecting = new Map();
+  #writeTimeoutMs;
 
-  constructor(node, { bluetooth = globalThis.navigator?.bluetooth } = {}) {
+  constructor(node, { bluetooth = globalThis.navigator?.bluetooth, writeTimeoutMs = WRITE_TIMEOUT_MS } = {}) {
     super();
     if (!bluetooth) throw new Error("this browser has no Web Bluetooth");
     this.#node = node;
     this.#bluetooth = bluetooth;
+    this.#writeTimeoutMs = writeTimeoutMs;
     // Throws when another carrier holds the node's sink.
     node.setBluetoothSink({
       write: (peer, bytes) => this.#write(peer, bytes),
@@ -274,12 +295,14 @@ export class BluetoothCarrier extends EventTarget {
   }
 
   // Settles once this write is done or its link dropped, which is when the
-  // node hands over the next fragment.
+  // node hands over the next fragment. A write still pending after
+  // `writeTimeoutMs` drops its link, so it cannot hold every other link's
+  // output with it.
   #write(peer, bytes) {
     const link = this.#links.get(peer);
     if (!link) return;
     link.queue = link.queue
-      .then(() => link.message.writeValueWithoutResponse(bytes))
+      .then(() => within(link.message.writeValueWithoutResponse(bytes), this.#writeTimeoutMs))
       .catch(() => this.#drop(link));
     return link.queue;
   }

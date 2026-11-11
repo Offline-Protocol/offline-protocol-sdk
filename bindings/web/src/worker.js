@@ -79,6 +79,10 @@ const trapped = (error) => error instanceof WebAssembly.RuntimeError;
 // phone; the native bridges hold 32 (OutboundFragmentQueue).
 const BLE_WRITES_AHEAD = 4;
 const bleWriting = new Map();
+const bleLinkFull = () => {
+  for (const n of bleWriting.values()) if (n >= BLE_WRITES_AHEAD) return true;
+  return false;
+};
 
 function tick() {
   try {
@@ -112,7 +116,7 @@ function flush() {
   // message none of whose fragments was pulled still counts as queued, so it
   // holds a resend. Drained all at once, a slow link's backlog sat in the page where
   // the engine could see neither, and receipts waited behind resends.
-  while (![...bleWriting.values()].some((n) => n >= BLE_WRITES_AHEAD)) {
+  while (!bleLinkFull()) {
     const next = engine.bleNextFragment();
     if (!next) break;
     const peer = next.peer;

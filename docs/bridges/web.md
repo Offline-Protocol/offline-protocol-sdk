@@ -590,8 +590,15 @@ counts as queued, so it is not resent while that copy waits. Drained all at
 once, a slow link's backlog sat in the page's write queue, where the engine
 saw nothing queued. On the 2026-11-09 phone chain its resends then queued
 behind the first copies, and the receipts for other messages waited behind
-them. Four is not measured on a
-phone; the native bridges hold 32. A peer linked over a peer stream as well as
+them. Four is not measured on a phone; the native bridges hold 32.
+
+**A write that does not settle in ten seconds closes its link.** The stop
+above covers every link, so one GATT write that never settled stopped all
+Bluetooth output until the browser reported that link gone, which it may
+never do. A write without response settles once the browser has handed it to
+the radio, so ten seconds is far past any working link; it is not measured on
+a phone either. `BluetoothCarrier` takes `writeTimeoutMs` to change it. A peer
+linked over a peer stream as well as
 Bluetooth is lost only when the last link goes, and stopping the node
 reports every Bluetooth link lost and closes the carrier's connections.
 

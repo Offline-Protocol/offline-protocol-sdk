@@ -409,10 +409,12 @@ export function publicAddress(
  */
 export class BluetoothCarrier extends EventTarget {
   /**
-   * `bluetooth` defaults to `navigator.bluetooth`. One carrier per node:
-   * throws while another carrier on `node` has not been released.
+   * `bluetooth` defaults to `navigator.bluetooth`. A write still pending after
+   * `writeTimeoutMs` (default 10 000) closes its link, since the node holds
+   * every link's output while one has four writes unsettled. One carrier per
+   * node: throws while another carrier on `node` has not been released.
    */
-  constructor(node: OfflineNode, options?: { bluetooth?: unknown });
+  constructor(node: OfflineNode, options?: { bluetooth?: unknown; writeTimeoutMs?: number });
   /** Whether this browser exposes Web Bluetooth at all. */
   static readonly supported: boolean;
   /** The addresses linked now. */

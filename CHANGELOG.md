@@ -52,7 +52,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   ahead of data nor hold a resend behind its first copy. It now keeps at most
   four unwritten fragments per link with the page, and a Bluetooth sink's
   `write` may return a promise that settles when the write does, which paces
-  the node. A sink that returns nothing paces nothing, as before. In one run
+  the node. A sink that returns nothing paces nothing, as before. A write
+  still pending after ten seconds closes its link (`writeTimeoutMs` on
+  `BluetoothCarrier`), since one that never settled held every link's
+  output. In one run
   of ten rounds on the phone chain, with the fix above and #706, receipts
   over 5 s fell from 68 of 200 to 15, each of the 15 a receipt the next hop
   refused under its rate limit.
