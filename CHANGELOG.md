@@ -81,6 +81,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   plugin sets from the application's `FLAG_DEBUGGABLE`
   ([integrator map](docs/integrator-map.md#react-native-lifecycle-ordering)).
 
+### Changed
+
+- **The shipped libraries build on `rustix` 1.1.6.** RUSTSEC-2026-0486, an
+  unsoundness notice (not a vulnerability), reports that the
+  extended-attribute functions of `rustix` 1.0.0 to 1.1.5 mark unwritten
+  bytes as initialized when handed a zero-length buffer. 0.32.0 was built on
+  1.1.5. The SDK calls none of those functions: it uses `rustix` only to lock
+  the file store's record file, so no released library was affected. The
+  dependency audit now runs on every pull request and once a day, where it
+  used to run only when a dependency file changed.
+
 ### Fixed
 
 - **A delivery receipt no longer re-sends every message still waiting for one,

@@ -91,7 +91,7 @@ if you need human-readable labels. The protocol routes on `off1…` only.
 ```typescript
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  profile: 'default', // local account slot — never the peer address
+  profile: 'default', // local account slot, never the peer address
 });
 
 protocol.on('neighbor_discovered', (e) => {
@@ -121,11 +121,11 @@ your invite flow.
 ### Rust (engine)
 
 ```rust
-// profile in config — local only
+// profile in config: local only
 let config = ProtocolConfig::builder("my-app", "default")
     .build()?;
 
-// recipient — peer's off1… address
+// recipient: peer's off1… address
 let peer = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn";
 protocol.send_message(peer, "Hello!", Some(MessagePriority::High), None::<String>)?;
 ```
@@ -209,6 +209,6 @@ the same rule in your own UI before calling the SDK.
 
 ## See also
 
-- [configuration.md](configuration.md) — `appId`, `profile`, and storage namespaces
-- [react-native-integration.md](react-native-integration.md) — events and `localAddress`
-- [mobile-permissions.md](mobile-permissions.md) — platform setup (orthogonal to identity)
+- [configuration.md](configuration.md): `appId`, `profile`, and storage namespaces
+- [react-native-integration.md](react-native-integration.md): events and `localAddress`
+- [mobile-permissions.md](mobile-permissions.md): platform setup (orthogonal to identity)
