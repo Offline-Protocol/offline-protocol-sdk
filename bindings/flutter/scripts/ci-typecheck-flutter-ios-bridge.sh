@@ -45,7 +45,9 @@ if ((${#BRIDGE_SWIFT[@]} == 0)); then
   exit 1
 fi
 
-xcrun --sdk iphonesimulator swiftc -typecheck \
+# -emit-sil, not -typecheck: a missing return is reported after type checking,
+# and -typecheck accepts it (see the iOS bridge steps in ci.yml).
+xcrun --sdk iphonesimulator swiftc -emit-sil -whole-module-optimization -o /dev/null \
   -target "${SIM_TARGET}" \
   -sdk "$SDK" \
   -F "$ENGINE_FRAMEWORK" \

@@ -351,7 +351,7 @@ discovery bootstrap policy: suites exist, `swift test` does not run them. The
 
 **Excluded from `swift test` does not mean unchecked.** A separate CI step,
 "iOS bridge typecheck (files excluded from the SwiftPM harness)", runs `swiftc
--typecheck` over the sources the package manifest leaves out, including
+-emit-sil` over the sources the package manifest leaves out, including
 `BleManager.swift`, the Wi-Fi Direct and Reticulum managers, and their `mesh/`
 and `ble/` collaborators. They are typechecked on every run, just not
 unit-tested.
