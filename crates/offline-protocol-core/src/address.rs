@@ -754,4 +754,36 @@ mod spec_vectors {
              checksum constant that this parser refuses"
         );
     }
+
+    /// The React Native binding mirrors the address shape by hand to warn an
+    /// integrator who passes a username or profile where a peer address goes
+    /// (`bindings/react-native/src/peerAddressHints.ts`). A length or prefix
+    /// change here that the binding missed would make it warn on every valid
+    /// address, or on none, and nothing else compares the two.
+    #[test]
+    fn the_react_native_address_hint_mirrors_the_core_constants() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/react-native/src/peerAddressHints.ts");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("bindings tree not present, skipping the address hint drift check");
+            return;
+        };
+
+        let length = format!(
+            "export const MESH_ADDRESS_ENCODED_LEN = {};",
+            Address::ENCODED_LEN
+        );
+        assert!(
+            text.contains(&length),
+            "peerAddressHints.ts must declare `{length}`"
+        );
+        let prefix = format!(
+            "export const MESH_ADDRESS_PREFIX = '{}1';",
+            Address::HRP_STR
+        );
+        assert!(
+            text.contains(&prefix),
+            "peerAddressHints.ts must declare `{prefix}`"
+        );
+    }
 }

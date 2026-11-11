@@ -138,8 +138,8 @@ await protocol.stop();
 await protocol.destroy();
 ```
 
-In development builds (`__DEV__`), the SDK warns once per call site if you pass
-a non-`off1…` peer id to `sendMessage` and related APIs. Toggle with
+In development builds (`__DEV__`), the SDK warns once per method and peer id if
+you pass a non-`off1…` peer id to `sendMessage` and related APIs. Toggle with
 `devPeerAddressWarnings` on `ProtocolConfig` (see
 [identity-for-integrators.md](../../docs/identity-for-integrators.md)).
 

@@ -170,9 +170,17 @@ const protocol = new OfflineProtocol({
 });
 ```
 
+Each method warns once per peer id. `DataStore` and `MeshServices` take no
+config of their own and follow the value given to the most recently
+constructed `OfflineProtocol`.
+
+The warning prints the id you passed. A misshapen id is often a username,
+phone number or email, so forcing warnings on in a release build writes that
+to the device log: use it while debugging, not in a shipped build.
+
 The check is shape-only (same idea as username-vs-address rejection in core),
-not a checksum parse. Export `looksLikeMeshAddress` if you want the same rule
-in your own UI before calling the SDK.
+not a checksum parse. The package exports `looksLikeMeshAddress` if you want
+the same rule in your own UI before calling the SDK.
 
 ---
 

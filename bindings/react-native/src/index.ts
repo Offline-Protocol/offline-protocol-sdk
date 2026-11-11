@@ -94,14 +94,11 @@ export {
   ANDROID_API_LOCAL_NETWORK,
 } from './meshPermissions';
 export {
-  devPeerAddressWarningsEnabled,
   looksLikeMeshAddress,
   MESH_ADDRESS_ENCODED_LEN,
   MESH_ADDRESS_PREFIX,
-  peerAddressMisshapeMessage,
-  warnPeerIdIfMisshapen,
 } from './peerAddressHints';
-import { warnPeerIdIfMisshapen as logMisshapenPeerId } from './peerAddressHints';
+import { setDevPeerAddressWarnings, warnPeerIdIfMisshapen } from './peerAddressHints';
 
 const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
   ? NativeModules.OfflineProtocolModule
@@ -598,12 +595,9 @@ export class OfflineProtocol {
    */
   constructor(config: ProtocolConfig) {
     this.config = config;
+    setDevPeerAddressWarnings(config.devPeerAddressWarnings);
     this.eventEmitter = new NativeEventEmitter(OfflineProtocolNativeModule);
     this.setupEventSubscription();
-  }
-
-  private warnPeerIdIfMisshapen(peerId: string, context: string): void {
-    logMisshapenPeerId(peerId, context, this.config.devPeerAddressWarnings);
   }
 
   /**
@@ -1755,7 +1749,7 @@ export class OfflineProtocol {
    * @throws Error if message fails to send
    */
   async sendMessage(params: SendMessageParams): Promise<string> {
-    this.warnPeerIdIfMisshapen(params.recipient, 'sendMessage');
+    warnPeerIdIfMisshapen(params.recipient, 'sendMessage');
     const priority = params.priority ?? MessagePriority.Medium;
 
     // Rich params route to the rich native method; the plain path is left
@@ -1843,7 +1837,7 @@ export class OfflineProtocol {
    * @throws Error if forwarding fails
    */
   async forwardMessage(params: ForwardMessageParams): Promise<string> {
-    this.warnPeerIdIfMisshapen(params.newRecipient, 'forwardMessage');
+    warnPeerIdIfMisshapen(params.newRecipient, 'forwardMessage');
     const priority = params.priority ?? MessagePriority.Medium;
     const messageId = await OfflineProtocolNativeModule.forwardMessage(
       params.originalMessageJson,
@@ -1873,7 +1867,7 @@ export class OfflineProtocol {
    * @throws Error if request fails to send
    */
   async sendConnectionRequest(params: SendConnectionRequestParams): Promise<string> {
-    this.warnPeerIdIfMisshapen(params.recipient, 'sendConnectionRequest');
+    warnPeerIdIfMisshapen(params.recipient, 'sendConnectionRequest');
     const messageId = await OfflineProtocolNativeModule.sendConnectionRequest(
       params.recipient,
       params.senderName,
@@ -1893,7 +1887,7 @@ export class OfflineProtocol {
   async acceptConnectionRequest(
     params: AcceptConnectionRequestParams
   ): Promise<string> {
-    this.warnPeerIdIfMisshapen(params.recipient, 'acceptConnectionRequest');
+    warnPeerIdIfMisshapen(params.recipient, 'acceptConnectionRequest');
     const messageId = await OfflineProtocolNativeModule.acceptConnectionRequest(
       params.recipient,
       params.accepterName,
@@ -1912,7 +1906,7 @@ export class OfflineProtocol {
   async rejectConnectionRequest(
     params: RejectConnectionRequestParams
   ): Promise<string> {
-    this.warnPeerIdIfMisshapen(params.recipient, 'rejectConnectionRequest');
+    warnPeerIdIfMisshapen(params.recipient, 'rejectConnectionRequest');
     const messageId = await OfflineProtocolNativeModule.rejectConnectionRequest(
       params.recipient
     );
@@ -1929,7 +1923,7 @@ export class OfflineProtocol {
   async cancelConnectionRequest(
     params: CancelConnectionRequestParams
   ): Promise<string> {
-    this.warnPeerIdIfMisshapen(params.recipient, 'cancelConnectionRequest');
+    warnPeerIdIfMisshapen(params.recipient, 'cancelConnectionRequest');
     const messageId = await OfflineProtocolNativeModule.cancelConnectionRequest(
       params.recipient
     );
@@ -2068,7 +2062,7 @@ export class OfflineProtocol {
    * @returns File ID for tracking progress
    */
   async sendMedia(params: SendMediaParams): Promise<string> {
-    this.warnPeerIdIfMisshapen(params.recipient, 'sendMedia');
+    warnPeerIdIfMisshapen(params.recipient, 'sendMedia');
     // Rich params — and any of the extended (cloud/sticker) metadata
     // fields, which the plain native method does not map — route to the
     // rich native method; the plain path is left untouched. Rich fields
@@ -2210,7 +2204,7 @@ export class OfflineProtocol {
    *         before a byte is read.
    */
   async sendFileFromPath(params: SendFileFromPathParams): Promise<string> {
-    this.warnPeerIdIfMisshapen(params.recipient, 'sendFileFromPath');
+    warnPeerIdIfMisshapen(params.recipient, 'sendFileFromPath');
     return await OfflineProtocolNativeModule.sendFileFromPath(
       params.recipient,
       params.filePath,
@@ -3502,7 +3496,7 @@ export class OfflineProtocol {
     userId: string,
     keyPackageData: number[]
   ): Promise<void> {
-    this.warnPeerIdIfMisshapen(userId, 'mlsImportKeyPackage');
+    warnPeerIdIfMisshapen(userId, 'mlsImportKeyPackage');
     return await OfflineProtocolNativeModule.mlsImportKeyPackage(
       userId,
       keyPackageData
@@ -3516,7 +3510,7 @@ export class OfflineProtocol {
    * @returns True if session exists
    */
   async mlsHasSession(otherUserId: string): Promise<boolean> {
-    this.warnPeerIdIfMisshapen(otherUserId, 'mlsHasSession');
+    warnPeerIdIfMisshapen(otherUserId, 'mlsHasSession');
     return await OfflineProtocolNativeModule.mlsHasSession(otherUserId);
   }
 
@@ -3531,7 +3525,7 @@ export class OfflineProtocol {
    * @returns True if key package is available
    */
   async hasPendingKeyPackage(peerId: string): Promise<boolean> {
-    this.warnPeerIdIfMisshapen(peerId, 'hasPendingKeyPackage');
+    warnPeerIdIfMisshapen(peerId, 'hasPendingKeyPackage');
     return await OfflineProtocolNativeModule.hasPendingKeyPackage(peerId);
   }
 
@@ -3543,7 +3537,7 @@ export class OfflineProtocol {
    * @param peerId - Peer's ID
    */
   async getEstablishmentState(peerId: string): Promise<EstablishmentState> {
-    this.warnPeerIdIfMisshapen(peerId, 'getEstablishmentState');
+    warnPeerIdIfMisshapen(peerId, 'getEstablishmentState');
     return await OfflineProtocolNativeModule.getEstablishmentState(peerId);
   }
 
@@ -3563,7 +3557,7 @@ export class OfflineProtocol {
    * @throws Error if no key package is available (peer hasn't completed key exchange)
    */
   async establishSecureSession(peerId: string): Promise<MlsWelcome | null> {
-    this.warnPeerIdIfMisshapen(peerId, 'establishSecureSession');
+    warnPeerIdIfMisshapen(peerId, 'establishSecureSession');
     const result = await OfflineProtocolNativeModule.establishSecureSession(
       peerId
     );
@@ -3609,7 +3603,7 @@ export class OfflineProtocol {
    *   the reset.
    */
   async rekeySession(peerId: string): Promise<boolean> {
-    this.warnPeerIdIfMisshapen(peerId, 'rekeySession');
+    warnPeerIdIfMisshapen(peerId, 'rekeySession');
     return await OfflineProtocolNativeModule.rekeySession(peerId);
   }
 
@@ -3655,7 +3649,7 @@ export class OfflineProtocol {
    * @throws Error if session creation fails
    */
   async mlsCreateSession(otherUserId: string): Promise<MlsWelcome> {
-    this.warnPeerIdIfMisshapen(otherUserId, 'mlsCreateSession');
+    warnPeerIdIfMisshapen(otherUserId, 'mlsCreateSession');
     const result = await OfflineProtocolNativeModule.mlsCreateSession(
       otherUserId
     );
@@ -3700,7 +3694,7 @@ export class OfflineProtocol {
     otherUserId: string,
     plaintext: number[]
   ): Promise<MlsEncryptedMessage> {
-    this.warnPeerIdIfMisshapen(otherUserId, 'mlsEncryptForUser');
+    warnPeerIdIfMisshapen(otherUserId, 'mlsEncryptForUser');
     const result = await OfflineProtocolNativeModule.mlsEncryptForUser(
       otherUserId,
       plaintext
@@ -3769,7 +3763,7 @@ export class OfflineProtocol {
    * @throws Error if deletion fails
    */
   async mlsDeleteSession(otherUserId: string): Promise<void> {
-    this.warnPeerIdIfMisshapen(otherUserId, 'mlsDeleteSession');
+    warnPeerIdIfMisshapen(otherUserId, 'mlsDeleteSession');
     return await OfflineProtocolNativeModule.mlsDeleteSession(otherUserId);
   }
 
@@ -3825,7 +3819,7 @@ export class OfflineProtocol {
    * @param inviteeUserId - User ID to invite
    */
   async meshInviteToGroup(groupId: string, inviteeUserId: string): Promise<void> {
-    this.warnPeerIdIfMisshapen(inviteeUserId, 'meshInviteToGroup');
+    warnPeerIdIfMisshapen(inviteeUserId, 'meshInviteToGroup');
     await OfflineProtocolNativeModule.meshInviteToGroup(groupId, inviteeUserId);
   }
 
@@ -3888,7 +3882,7 @@ export class OfflineProtocol {
    * @param memberId - Member to remove
    */
   async meshRemoveFromGroup(groupId: string, memberId: string): Promise<void> {
-    this.warnPeerIdIfMisshapen(memberId, 'meshRemoveFromGroup');
+    warnPeerIdIfMisshapen(memberId, 'meshRemoveFromGroup');
     await OfflineProtocolNativeModule.meshRemoveFromGroup(groupId, memberId);
   }
 
@@ -4085,7 +4079,7 @@ export class OfflineProtocol {
     userId: string,
     role: string
   ): Promise<void> {
-    this.warnPeerIdIfMisshapen(userId, 'meshSetMemberRole');
+    warnPeerIdIfMisshapen(userId, 'meshSetMemberRole');
     await OfflineProtocolNativeModule.meshSetMemberRole(groupId, userId, role);
   }
 
@@ -4100,7 +4094,7 @@ export class OfflineProtocol {
     groupId: string,
     userId: string
   ): Promise<string> {
-    this.warnPeerIdIfMisshapen(userId, 'meshGetMemberRole');
+    warnPeerIdIfMisshapen(userId, 'meshGetMemberRole');
     return await OfflineProtocolNativeModule.meshGetMemberRole(
       groupId,
       userId
@@ -4253,7 +4247,7 @@ export class OfflineProtocol {
     recipient: string,
     status: 'online' | 'away' | 'offline'
   ): Promise<string> {
-    this.warnPeerIdIfMisshapen(recipient, 'sendPresenceUpdate');
+    warnPeerIdIfMisshapen(recipient, 'sendPresenceUpdate');
     const statusCode = status === 'online' ? 0 : status === 'away' ? 1 : 2;
     return await OfflineProtocolNativeModule.sendPresenceUpdate(
       recipient,
@@ -4310,7 +4304,7 @@ export class OfflineProtocol {
     userId: string,
     options?: { force?: boolean }
   ): Promise<boolean> {
-    this.warnPeerIdIfMisshapen(userId, 'checkInternetPresence');
+    warnPeerIdIfMisshapen(userId, 'checkInternetPresence');
     return await OfflineProtocolNativeModule.checkInternetPresence(userId, {
       force: options?.force === true,
     });
@@ -4475,7 +4469,7 @@ export class OfflineProtocol {
     conversationId: string,
     isTyping: boolean
   ): Promise<string> {
-    this.warnPeerIdIfMisshapen(recipient, 'sendTypingIndicator');
+    warnPeerIdIfMisshapen(recipient, 'sendTypingIndicator');
     return await OfflineProtocolNativeModule.sendTypingIndicator(
       recipient,
       conversationId,
@@ -4494,7 +4488,7 @@ export class OfflineProtocol {
     recipient: string,
     messageIds: string[]
   ): Promise<string> {
-    this.warnPeerIdIfMisshapen(recipient, 'sendReadReceipt');
+    warnPeerIdIfMisshapen(recipient, 'sendReadReceipt');
     return await OfflineProtocolNativeModule.sendReadReceipt(
       recipient,
       messageIds
@@ -4509,7 +4503,7 @@ export class OfflineProtocol {
    * @param userId - User ID to block
    */
   async blockUser(userId: string): Promise<void> {
-    this.warnPeerIdIfMisshapen(userId, 'blockUser');
+    warnPeerIdIfMisshapen(userId, 'blockUser');
     await OfflineProtocolNativeModule.blockUser(userId);
   }
 
@@ -4519,7 +4513,7 @@ export class OfflineProtocol {
    * @param userId - User ID to unblock
    */
   async unblockUser(userId: string): Promise<void> {
-    this.warnPeerIdIfMisshapen(userId, 'unblockUser');
+    warnPeerIdIfMisshapen(userId, 'unblockUser');
     await OfflineProtocolNativeModule.unblockUser(userId);
   }
 
@@ -4539,6 +4533,7 @@ export class OfflineProtocol {
    * @returns true if the user is blocked
    */
   async isUserBlocked(userId: string): Promise<boolean> {
+    warnPeerIdIfMisshapen(userId, 'isUserBlocked');
     return await OfflineProtocolNativeModule.isUserBlocked(userId);
   }
 }
@@ -4672,6 +4667,7 @@ export class DataStore {
     peerId: string,
     hash: string
   ): Promise<void> {
+    warnPeerIdIfMisshapen(peerId, 'fetchAttachmentFrom');
     await OfflineProtocolNativeModule.dataFetchAttachmentFrom(
       spaceId,
       peerId,
@@ -5034,7 +5030,7 @@ export class DataStore {
     hash: string,
     bytesBase64: string
   ): Promise<void> {
-    logMisshapenPeerId(peerId, 'provideAttachment');
+    warnPeerIdIfMisshapen(peerId, 'provideAttachment');
     await OfflineProtocolNativeModule.dataProvideAttachment(spaceId, peerId, hash, bytesBase64);
   }
 
@@ -5047,7 +5043,7 @@ export class DataStore {
    * is merely slow, so it shows somebody a spinner that never resolves.
    */
   async declineAttachment(spaceId: string, peerId: string, hash: string): Promise<void> {
-    logMisshapenPeerId(peerId, 'declineAttachment');
+    warnPeerIdIfMisshapen(peerId, 'declineAttachment');
     await OfflineProtocolNativeModule.dataDeclineAttachment(spaceId, peerId, hash);
   }
 }
@@ -5124,7 +5120,7 @@ export class MeshServices {
     method: string,
     body: string
   ): Promise<string> {
-    logMisshapenPeerId(provider, 'sendServiceRequest');
+    warnPeerIdIfMisshapen(provider, 'sendServiceRequest');
     return await OfflineProtocolNativeModule.sendServiceRequest(
       provider,
       serviceId,
@@ -5151,7 +5147,7 @@ export class MeshServices {
     status: string,
     body: string
   ): Promise<string> {
-    logMisshapenPeerId(requester, 'respondToServiceRequest');
+    warnPeerIdIfMisshapen(requester, 'respondToServiceRequest');
     return await OfflineProtocolNativeModule.respondToServiceRequest(
       requestId,
       requester,
@@ -5189,6 +5185,7 @@ export class MeshServices {
     params: string = '',
     keys: string[] = []
   ): Promise<string> {
+    warnPeerIdIfMisshapen(provider, 'subscribeService');
     return await OfflineProtocolNativeModule.subscribeService(
       provider,
       serviceId,
