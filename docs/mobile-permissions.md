@@ -73,7 +73,10 @@ service and three permissions, so a Flutter app declares the rest itself. See
 - The **declaration** of `ACCESS_FINE_LOCATION`. The SDK does not declare it,
   but BLE scanning needs it on API 30 and lower, and Wi‑Fi Direct discovery
   needs it on API 32 and lower. Declare it with
-  `android:maxSdkVersion="32"` (see [Android Bluetooth](#android-bluetooth)).
+  `android:maxSdkVersion="32"` (see [Android Bluetooth](#android-bluetooth)),
+  unless your app uses location for its own features: then omit
+  `maxSdkVersion`, or the bound takes location away from those features on
+  Android 13 and later.
 - Any permission the SDK **deliberately does not** declare (`ACCESS_LOCAL_NETWORK`
   for API 37+ targets; see [Android 17](#android-17-api-37-local-network)).
 - Optional feature declarations (`uses-feature`) if you want Play filtering.
@@ -154,7 +157,8 @@ the one entry **every** app declares itself, because no SDK manifest does:
 <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
 
 <!-- Your app declares this: BLE scan on API 30 and lower, Wi-Fi Direct
-     discovery on API 32 and lower -->
+     discovery on API 32 and lower. Drop maxSdkVersion if your app uses
+     location for its own features. -->
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
     android:maxSdkVersion="32" />
 ```
@@ -280,7 +284,8 @@ Native library manifest, plus the location entry every app owns:
 <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-<!-- BLE scan on API 30 and lower, Wi-Fi Direct discovery on API 32 and lower -->
+<!-- BLE scan on API 30 and lower, Wi-Fi Direct discovery on API 32 and lower.
+     Drop maxSdkVersion if your app uses location for its own features. -->
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
     android:maxSdkVersion="32" />
 

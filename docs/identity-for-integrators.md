@@ -150,6 +150,14 @@ protocol.send_message(peer, "Hello!", Some(MessagePriority::High), None::<String
 - **Reinstall on Android:** uninstalling removes the app's storage, so the
   reinstalled app mints a new identity key → **new `off1…`**. Peers must learn
   the new address through discovery or your invite channel.
+- **Android Auto Backup:** the identity lives in `EncryptedSharedPreferences`,
+  whose key stays in the device's Keystore and is never backed up. The SDK
+  ships no backup rules, so with backup on (the Android default) a restore can
+  bring the preferences file back without the key that opens it, and the store
+  then fails to open instead of starting fresh. The protocol state is already
+  under `noBackupFilesDir`. Set `android:allowBackup="false"`, or exclude the
+  `sharedpref` domain in your backup rules, so a restored install starts with
+  a new identity as above.
 - **Reinstall on iOS:** the Keychain survives an uninstall, so a reinstall
   running the same `appId` + `profile` adopts the old identity again and keeps
   the old address. To start over, call `wipePersistedState(appId, profile)`

@@ -144,14 +144,16 @@ Add required permissions to `android/app/src/main/AndroidManifest.xml`:
     <uses-permission android:name="android.permission.INTERNET" />
     
     <!-- Bluetooth permissions -->
-    <uses-permission android:name="android.permission.BLUETOOTH" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     
     <!-- Location: BLE scanning on API 30 and lower, Wi-Fi Direct discovery
-         on API 32 and lower. The SDK does not declare it, so the app must. -->
+         on API 32 and lower. The SDK does not declare it, so the app must.
+         Drop maxSdkVersion if your app uses location for its own features. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="32" />
     
@@ -160,7 +162,8 @@ Add required permissions to `android/app/src/main/AndroidManifest.xml`:
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
     
     <!-- Features -->
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
@@ -426,34 +429,26 @@ const config: ProtocolConfig = {
 
 ### Runtime Permission Handling
 
+The SDK's helper requests exactly what the enabled transports check, by API
+level: the Bluetooth grants on 31+, `NEARBY_WIFI_DEVICES` on 33+ when Wi-Fi
+Direct is on, and `ACCESS_FINE_LOCATION` where BLE (30 and lower) or Wi-Fi
+Direct (32 and lower) still needs it. On iOS it returns at once; the system
+prompts when the transport starts.
+
 ```typescript
-import { PermissionsAndroid, Platform } from 'react-native';
+import { requestMeshPermissionsForConfig } from '@offline-protocol/mesh-sdk';
 
-async function requestPermissions() {
-  if (Platform.OS === 'android') {
-    const P = PermissionsAndroid.PERMISSIONS;
-    // Location is declared with maxSdkVersion 32, so it is only requested
-    // where BLE needs it (API 30 and lower); asking on newer versions is
-    // denied without a prompt.
-    const granted = await PermissionsAndroid.requestMultiple(
-      Number(Platform.Version) >= 31
-        ? [P.BLUETOOTH_CONNECT, P.BLUETOOTH_SCAN, P.BLUETOOTH_ADVERTISE]
-        : [P.ACCESS_FINE_LOCATION],
-    );
-
-    return Object.values(granted).every(
-      (status) => status === PermissionsAndroid.RESULTS.GRANTED
-    );
-  }
-  return true;
-}
-
-// Use before starting protocol
-const hasPermissions = await requestPermissions();
-if (hasPermissions) {
+// Use before starting protocol, with the same config you pass to it
+const { granted } = await requestMeshPermissionsForConfig(config);
+if (granted) {
   await protocol.start();
 }
 ```
+
+A hand-written list drifts from those checks. Requesting only the Bluetooth
+grants on 31+, for example, leaves Wi-Fi Direct without location on Android 12
+and 12L and without `NEARBY_WIFI_DEVICES` from 13, and the transport stays off.
+See [mobile-permissions.md](../../docs/mobile-permissions.md#before-you-call-start).
 
 ## Best Practices
 

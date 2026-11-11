@@ -23,7 +23,7 @@ introduction (v0.20.0, v0.21.0, …).
 |-------------|------|-----------------|-------------------|
 | **No SDK yet** | Integrate fresh | [integrator-map.md](integrator-map.md), platform guide in that map | This file |
 | **`v0.16.x` or earlier** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§1–§13](#1-initialize_mls-now-takes-two-storage-providers) (including §11.1–§11.3 and §12.1), then §14–§30 | Nothing |
-| **`v0.17.x`–`v0.19.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §1.10 and §1.11 (`v0.19.0`), §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §12.1 (`v0.20.0`, React Native iOS), §14–§30 | The rest of §1–§13 (the `v0.17.0` storage split) |
+| **`v0.17.x`–`v0.19.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: [Logging out and switching accounts](#logging-out-and-switching-accounts) in §10 (`v0.18.2`), §1.10 and §1.11 (`v0.19.0`), §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §12.1 (`v0.20.0`, React Native iOS), §14–§30 | The rest of §1–§13 (the `v0.17.0` storage split) |
 | **`v0.20.x`–`v0.22.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §14 (`v0.21.0`), §15–§30 | §1–§13 apart from those; §12.1 (`v0.20.0`) |
 | **`v0.23.x`–`v0.26.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §17 (`v0.24.0`), §18 (`v0.24.1`), §19 (`v0.25.0`), §20 and §21 (`v0.26.0`), §22–§30 | §1–§16 |
 | **`v0.27.x`–`v0.31.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §26 (`v0.28.0`), §27 (`v0.29.0`), §28 (`v0.30.0`), §29 (`v0.31.0`), [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) (`v0.32.0`) | §1–§25 |
@@ -34,6 +34,7 @@ on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
 
 | Version | Sections |
 |---------|----------|
+| `v0.18.2` | [§10, Logging out and switching accounts](#logging-out-and-switching-accounts) (`wipePersistedState`, labelled inline) |
 | `v0.19.0` | [§1.10](#110-the-inbound-plaintext-gate-no-longer-reads-session_states), [§1.11](#111-key-packages-are-checked-against-the-peers-identity) (tagged in the section's first line) |
 | `v0.20.0` | [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) |
 | `v0.20.1` | [§11.1](#111-messagedecryptionfailed-is-advisory-not-terminal-v0201) |
@@ -51,8 +52,9 @@ on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
 | `v0.31.0` | [§29](#29-behaviour-that-changes-without-a-compile-error-v0310) |
 | `v0.32.0` | [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) |
 
-Every other part of sections 1–13 covers the `v0.17.0` storage split, and §13
-is the test checklist.
+Every other part of sections 1–13 covers the `v0.17.0` storage split, apart
+from paragraphs labelled inline with a later release, and §13 is the test
+checklist.
 
 ### By platform (same target `v0.32.x`)
 
