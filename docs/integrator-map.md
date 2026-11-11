@@ -181,7 +181,7 @@ Checklist at end of upgrade guide:
 
 **Canonical guide:** [mobile-permissions.md](mobile-permissions.md) (manifest,
 Info.plist, runtime grant order, background modes, Android foreground service,
-API 37 `ACCESS_LOCAL_NETWORK`). From the next release, React Native apps may
+API 37 `ACCESS_LOCAL_NETWORK`). From 0.33.0, React Native apps may
 call `requestMeshPermissions()` before `start()` (see that guide).
 
 | Need | Where to read |

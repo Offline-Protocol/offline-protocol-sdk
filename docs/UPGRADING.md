@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.32.x` line.
+current `v0.33.x` line.
 
 > **New integrator?** You probably do not need this file yet. Use the
 > [integrator map](integrator-map.md) to pick a platform and a quick start.
@@ -15,19 +15,19 @@ Use this table to **limit** what you read. The sections below are complete;
 most upgrades only need a subset plus the version-tagged sections in the
 introduction (v0.20.0, v0.21.0, …).
 
-**Current SDK line documented here:** `v0.32.x` (see [CHANGELOG](../CHANGELOG.md)).
+**Current SDK line documented here:** `v0.33.x` (see [CHANGELOG](../CHANGELOG.md)).
 
 ### By where you are today
 
 | You are on… | Goal | Read (in order) | Skip unless noted |
 |-------------|------|-----------------|-------------------|
 | **No SDK yet** | Integrate fresh | [integrator-map.md](integrator-map.md), platform guide in that map | This file |
-| **`v0.16.x` or earlier** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§1–§13](#1-initialize_mls-now-takes-two-storage-providers) (including §11.1–§11.3 and §12.1), then §14–§30 | Nothing |
-| **`v0.17.x`–`v0.19.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: [Logging out and switching accounts](#logging-out-and-switching-accounts) in §10 (`v0.18.2`), §1.10 and §1.11 (`v0.19.0`), §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §12.1 (`v0.20.0`, React Native iOS), §14–§30 | The rest of §1–§13 (the `v0.17.0` storage split) |
-| **`v0.20.x`–`v0.22.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §14 (`v0.21.0`), §15–§30 | §1–§13 apart from those; §12.1 (`v0.20.0`) |
-| **`v0.23.x`–`v0.26.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §17 (`v0.24.0`), §18 (`v0.24.1`), §19 (`v0.25.0`), §20 and §21 (`v0.26.0`), §22–§30 | §1–§16 |
-| **`v0.27.x`–`v0.31.x`** | Reach `v0.32.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §26 (`v0.28.0`), §27 (`v0.29.0`), §28 (`v0.30.0`), §29 (`v0.31.0`), [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) (`v0.32.0`) | §1–§25 |
-| **`v0.32.x`** | Patch bump within series | [CHANGELOG](../CHANGELOG.md) `[Unreleased]` and the matching subsection in §30 only if the release note points here | Rest of this file |
+| **`v0.16.x` or earlier** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§1–§13](#1-initialize_mls-now-takes-two-storage-providers) (including §11.1–§11.3 and §12.1), then §14–§31 | Nothing |
+| **`v0.17.x`–`v0.19.x`** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: [Logging out and switching accounts](#logging-out-and-switching-accounts) in §10 (`v0.18.2`), §1.10 and §1.11 (`v0.19.0`), §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §12.1 (`v0.20.0`, React Native iOS), §14–§31 | The rest of §1–§13 (the `v0.17.0` storage split) |
+| **`v0.20.x`–`v0.22.x`** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §14 (`v0.21.0`), §15–§31 | §1–§13 apart from those; §12.1 (`v0.20.0`) |
+| **`v0.23.x`–`v0.26.x`** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §17 (`v0.24.0`), §18 (`v0.24.1`), §19 (`v0.25.0`), §20 and §21 (`v0.26.0`), §22–§31 | §1–§16 |
+| **`v0.27.x`–`v0.32.x`** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §26 (`v0.28.0`), §27 (`v0.29.0`), §28 (`v0.30.0`), §29 (`v0.31.0`), §30 (`v0.32.0`), [§31](#31-behaviour-that-changes-without-a-compile-error-v0330) (`v0.33.0`) | §1–§25 |
+| **`v0.33.x`** | Patch bump within series | [CHANGELOG](../CHANGELOG.md) `[Unreleased]` and the matching subsection in §31 only if the release note points here | Rest of this file |
 
 In a range row, skip any listed section tagged at or below your exact version:
 on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
@@ -51,21 +51,22 @@ on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
 | `v0.30.0` | [§28](#28-behaviour-that-changes-without-a-compile-error-v0300) |
 | `v0.31.0` | [§29](#29-behaviour-that-changes-without-a-compile-error-v0310) |
 | `v0.32.0` | [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) |
+| `v0.33.0` | [§31](#31-behaviour-that-changes-without-a-compile-error-v0330) |
 
 Every other part of sections 1–13 covers the `v0.17.0` storage split, apart
 from paragraphs labelled inline with a later release, and §13 is the test
 checklist.
 
-### By platform (same target `v0.32.x`)
+### By platform (same target `v0.33.x`)
 
 | Surface | Always check | Usually check on jump | Rare |
 |---------|--------------|----------------------|------|
 | **React Native** | [§8](#8-react-native-bridge-fallbacks-now-match-the-sdk-defaults), [§11](#11-events-you-must-now-handle), [§12](#12-build-and-packaging), [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) (iOS), [§13](#13-upgrade-test-checklist) | §14 identity, §16 data layer, §20 telemetry, §25–§30 behaviour | §1–§7 if never on pre-0.17 |
 | **Native Swift / Kotlin** | [§1](#1-initialize_mls-now-takes-two-storage-providers), [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence) (custom storage), [§14](#14-your-identity-is-derived-not-chosen-v0210), [§12](#12-build-and-packaging) (regenerate bindings) | §11 events, version-tagged iOS/Android behaviour in §18, §25–§30 | RN-only §8–§9 |
 | **Python** | [§1](#1-initialize_mls-now-takes-two-storage-providers) (`state_root`), [§14](#14-your-identity-is-derived-not-chosen-v0210) | §16 data, §25+ behaviour | RN §8–§9 |
-| **Rust app on crates** | [This release at a glance](#this-release-at-a-glance) Rust column, §15 API removals, §19 Reticulum crate | §25–§30 exhaustive `Event` / config field matches | Binding-only packaging |
+| **Rust app on crates** | [This release at a glance](#this-release-at-a-glance) Rust column, §15 API removals, §19 Reticulum crate | §25–§31 exhaustive `Event` / config field matches | Binding-only packaging |
 | **C / C# / Java** | [§12](#12-build-and-packaging), [§14](#14-your-identity-is-derived-not-chosen-v0210) | Same as native for storage if you implement providers | RN sections |
-| **Web** | [bridges/web.md](bridges/web.md), §25–§30 behaviour that touches workers/events | §14 identity model | Mobile-only §12.1 |
+| **Web** | [bridges/web.md](bridges/web.md), §25–§31 behaviour that touches workers/events | §14 identity model | Mobile-only §12.1 |
 
 ### One-page checklist after code changes
 
@@ -149,6 +150,10 @@ An exhaustive TypeScript `switch` over the event union needs the three
 twelve new subscription methods. A build that predates this release shows a
 `__MEMBER__` frame as a security warning or as text
 ([§30](#30-behaviour-that-changes-without-a-compile-error-v0320)).
+`v0.33.0` breaks no build. A resend crosses the mesh under a new generation, a
+neighbor's acknowledgements get a relay allowance of their own, and a React
+Native development build logs warnings for calls it used to pass silently
+([§31](#31-behaviour-that-changes-without-a-compile-error-v0330)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -2965,6 +2970,92 @@ session after `delete_session`. An event callback may call
 queue an event. On Android, the native module's `start()` rejects when no
 protocol has been created, instead of starting the mesh foreground service
 over no engine; the JavaScript wrapper never made that call.
+
+## 31. Behaviour that changes without a compile error *(v0.33.0)*
+
+Nothing is removed or changed in any binding, and nothing added breaks an
+exhaustive match or a full struct literal. Each paragraph says what to check.
+
+**A resend is carried again by devices that already carried the message.** A
+resend that reaches a neighbor a full acknowledgement timeout or more after
+the last generation did moves to the next generation, at most three, carried
+in a new reserved metadata key, `__resend`
+([wire format](spec/wire-format.md#reserved-metadata-keys)). A forwarder on
+this release suppresses each generation separately, so a message or a receipt
+lost past the first forwarder is recovered by retrying. A forwarder on an
+earlier release still treats every resend as a copy and drops it, and an
+earlier sender stamps nothing, so a chain recovers only as far as its
+upgraded devices reach. Upgrade the devices that relay, not only the ones
+that send.
+
+**A relay admits more frames from one neighbor than `peerBurst` says.** A
+link's acknowledgements, the frames carrying `ack_for`, have an allowance of
+their own, half of `peerBurst` and `peerRatePerSec`, and spend the ordinary
+one once theirs is gone. A neighbor can therefore be admitted at up to one
+and a half times the configured burst and rate. If you sized those two
+settings as a hard ceiling on what one neighbor may cost, lower them by a
+third. The device's forwarding budget is unchanged and still caps what goes
+on the air.
+
+**A delivery is answered fewer times, and later resends are slower.** A
+recipient no longer answers a copy a relay carried when it answered the same
+message, under the same resend generation, in the last five seconds. A copy
+from the sender itself, one over any other carrier, and a resend under a new
+generation are still answered. A receipt no longer re-sends every message
+still waiting for one: only a peer parked as unreachable is re-driven at
+once, and anyone else's waiting messages go one acknowledgement timeout
+later, spaced out. A resend whose earlier copy is still in a local carrier
+queue waits one more rung. Nothing in the API changes; a test that counts
+frames or asserts a resend within a fixed time of a receipt needs new
+numbers.
+
+**A device's own frame goes to one more neighbor than a forward.** A forward
+still fans out to three links. A frame the device itself sends now goes to
+four, which is every link a phone holds, and the fan-out gives the strongest
+link on each carrier a slot before any carrier gets a second.
+
+**A mesh-only device probes a silent peer less often.** A pending 1:1 session
+that only the mesh could carry was probed every five seconds forever. It now
+backs off from 15 seconds to 600, as a relay's unreachable verdict already
+made it do, and discovering the peer probes it again at once. A device with
+no relay configured that relied on the five-second probe to pick up a peer
+that never advertises will wait longer.
+
+**A Python service sees each phone on its Bluetooth peripheral once.** The
+peripheral announced each subscribed central under its Bluetooth id as well
+as under the address its hello proved. It now announces only the proven
+address, so `neighbor_discovered` and the peer list no longer carry the
+Bluetooth id for a central. Code that keyed on it keys on the address.
+
+**Browser: a Bluetooth write that never settles closes its link.** The worker
+now keeps at most four unwritten fragments per link with the page, and a
+Bluetooth sink's `write` may return a promise that settles when the write
+does. A sink that returns nothing behaves as before. A write still pending
+after ten seconds closes its link; a custom sink whose promise can take
+longer passes `writeTimeoutMs` to `BluetoothCarrier`
+([web bridge](bridges/web.md)).
+
+**React Native: a development build logs new console warnings.** With
+`__DEV__` set, the SDK warns once per method and id when a peer id is not a
+44-character `off1…` address, and once per mistake when calls come in the
+wrong order: a send or `enableTransport` before `await start()`, a
+`DataStore` call other than `setInterest` before the store opens, `start()`
+with no listener, a send with encryption on and MLS not initialized, and a
+`setInterest` after `start()` that narrows a space's interest. No call is
+blocked, and a release build logs nothing. A test suite that fails on
+`console.warn` sets `devPeerAddressWarnings: false` and
+`devLifecycleWarnings: false` on `ProtocolConfig`, or fixes what they name
+([identity for integrators](identity-for-integrators.md),
+[integrator map](integrator-map.md#react-native-lifecycle-ordering)).
+
+**Hosts built on `ProtocolEngineHost`: diagnostics gain warnings.** The
+Flutter plugin in a debuggable Android build, and any iOS host compiled with
+`DEBUG`, now receive the ordering hints through `onDiagnostic` at level
+`warning`. A host that treats every `warning` diagnostic as a fault should
+expect them. On Android the constructor gains `integratorLifecycleWarnings`,
+off by default, before `onDiagnostic`; a caller that passes `onDiagnostic`
+by position rather than as a trailing lambda or by name needs the new
+argument.
 
 ---
 
