@@ -60,6 +60,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   over 5 s fell from 68 of 200 to 15, each of the 15 a receipt the next hop
   refused under its rate limit.
 
+- **A neighbor's delivery receipts are no longer refused for its messages'
+  rate.** A relay admits a limited number of frames from each neighbor, and
+  receipts shared that allowance with data, so a sender's own messages and
+  resends could spend it and the next hop then refused the receipt frame
+  behind them. Every receipt it carried waited for the sender's retry: on a
+  phone chain, one refused receipt frame in each of three rounds out of ten
+  left five receipts 15 s late. A link's acknowledgements (frames carrying
+  `ack_for`) now have an allowance of their own, half of `peerBurst` and
+  `peerRatePerSec`, that its messages cannot spend, and spend the ordinary
+  one once theirs is gone, so none is refused that sharing one would have
+  admitted. Nothing authenticates the marker, so a neighbor that marks
+  frames gains half an allowance more admissions and no more; a marked
+  frame is consumed as an acknowledgement at its recipient, and the
+  device's forwarding budget still caps what goes on the air.
+
 - **A device hands its own frame to every neighbor a phone can hold.** A
   forward's fan-out of three covers every link of a four-link phone but the
   one the frame came from, and a device's own frame was given the same

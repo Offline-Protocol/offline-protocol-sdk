@@ -349,7 +349,9 @@ peer, hours after that peer sent anything. The held-frame intake:
 - MUST skip the suppression check and the hop accounting;
 - MUST take the queue capacity, the send budget (the forward budget, never the
   own-traffic reserve) and the per-neighbour rate toward the neighbour it
-  targets, and MUST obey `allow_relay` and the battery floors;
+  targets (for a held acknowledgement, that neighbour's receipts allowance
+  first and then its ordinary one, as for an acknowledgement arriving from
+  it), and MUST obey `allow_relay` and the battery floors;
 - MUST NOT target the depositor;
 - MUST mark the queued forward by its held identifier, so that when it reaches
   no link within the overdue window the drop point returns it to the store

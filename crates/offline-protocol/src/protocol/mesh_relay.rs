@@ -124,11 +124,17 @@ pub const RELAY_OWN_TRAFFIC_RESERVE: f32 = 5.0;
 ///
 /// Keeps a single noisy or hostile link from consuming the whole node's
 /// forwarding budget: its frames are refused at the door, leaving the budget
-/// for everyone else's traffic.
+/// for everyone else's traffic. A link's acknowledgements also have a
+/// separate allowance of half this, which its messages cannot spend.
 pub const DEFAULT_RELAY_PEER_RATE_PER_SEC: f32 = 5.0;
 
 /// Burst allowance for a single neighbor.
 pub const DEFAULT_RELAY_PEER_BURST: f32 = 15.0;
+
+/// The share of a neighbor's allowance its acknowledgements get again, of
+/// their own. The busiest second of the 2026-11-10 phone chain needed three
+/// receipt frames from one neighbor, against 7.5 at the defaults.
+const RECEIPT_ALLOWANCE_SHARE: f32 = 0.5;
 
 /// Maximum forwards waiting for their delay to elapse.
 pub const DEFAULT_RELAY_QUEUE_CAPACITY: usize = 256;
@@ -265,9 +271,11 @@ pub struct MeshRelayConfig {
     pub rate_per_sec: f32,
     /// Burst allowance above the sustained rate.
     pub burst: f32,
-    /// Sustained per-neighbor acceptance rate.
+    /// Sustained per-neighbor acceptance rate. A neighbor's delivery receipts
+    /// also have a separate allowance of half this.
     pub peer_rate_per_sec: f32,
-    /// Per-neighbor burst allowance.
+    /// Per-neighbor burst allowance. A neighbor's delivery receipts also have
+    /// a separate allowance of half this.
     pub peer_burst: f32,
     /// Maximum forwards awaiting transmission.
     pub queue_capacity: usize,
@@ -527,6 +535,25 @@ pub struct MeshRelayStats {
     pub dropped_for_capacity: u64,
 }
 
+/// What one neighbor may hand this device: its acknowledgements (frames
+/// carrying `ack_for`) have an allowance its messages cannot spend, and spend
+/// the messages' allowance once their own is gone, so an acknowledgement is
+/// never refused where it would have been admitted with the two sharing one.
+/// Sharing one, a sender's own messages and resends spent the link's share and
+/// the next hop refused the receipt frame behind them; each receipt it carried
+/// waited for the sender's retry (15 s on the 2026-11-10 phone chain).
+///
+/// The marker cannot be authenticated here, so a neighbor that marks frames
+/// gains [`RECEIPT_ALLOWANCE_SHARE`] of an allowance more admissions, and the
+/// share is kept below a whole one for that reason. That is all it gains: a
+/// marked frame is consumed as an acknowledgement at its recipient, and the
+/// device's forwarding budget still caps what goes on the air.
+#[derive(Debug, Clone)]
+struct PeerAllowance {
+    frames: TokenBucket,
+    receipts: TokenBucket,
+}
+
 /// A refilling allowance, in frames.
 #[derive(Debug, Clone)]
 struct TokenBucket {
@@ -630,7 +657,7 @@ pub struct MeshRelayGovernor {
     /// spend. Clamped to half the burst so a small configured burst cannot
     /// reserve the whole bucket and stop forwarding outright.
     own_reserve: f32,
-    peer_budgets: HashMap<String, TokenBucket>,
+    peer_budgets: HashMap<String, PeerAllowance>,
     counters: MeshRelayCounters,
     /// Seeds the per-frame delay so two nodes holding the same frame pick
     /// different delays.
@@ -930,7 +957,7 @@ impl MeshRelayGovernor {
         // per-neighbor limit shapes *fairness between links*, and a frame with
         // no known link has no share to exceed.
         if let Some(peer) = arrival_peer {
-            if !self.take_peer_token(peer, now) {
+            if !self.take_peer_token(peer, message, now) {
                 self.counters.peer_rate_limited = self.counters.peer_rate_limited.saturating_add(1);
                 return RelayAdmission::Rejected(RelayRejection::PeerRateLimited);
             }
@@ -993,7 +1020,9 @@ impl MeshRelayGovernor {
     /// peer sent anything. It still takes the queue capacity (evicting a
     /// lower-priority forward as `admit` would) and the per-neighbor rate
     /// toward the target, and the send budget is checked at release like
-    /// every other forward.
+    /// every other forward. A held acknowledgement spends the target's
+    /// receipts allowance first and then its ordinary one, as it would
+    /// arriving from that neighbor.
     ///
     /// Nothing is recorded in the suppression cache, so a refusal here and
     /// an abandonment later both leave the cache exactly as they found it.
@@ -1005,7 +1034,7 @@ impl MeshRelayGovernor {
         target: &str,
         now: Instant,
     ) -> Result<(), RelayRejection> {
-        if !self.take_peer_token(target, now) {
+        if !self.take_peer_token(target, &message, now) {
             return Err(RelayRejection::PeerRateLimited);
         }
         if self.pending.len() >= self.config.queue_capacity && !self.evict_for(&message, now) {
@@ -1559,7 +1588,7 @@ impl MeshRelayGovernor {
         }
     }
 
-    fn take_peer_token(&mut self, peer_id: &str, now: Instant) -> bool {
+    fn take_peer_token(&mut self, peer_id: &str, message: &Message, now: Instant) -> bool {
         if !self.peer_budgets.contains_key(peer_id) {
             // Bound the map: an attacker cannot grow it with invented peer ids
             // because entries are only created for peers we hold a link to,
@@ -1575,27 +1604,41 @@ impl MeshRelayGovernor {
                 //
                 // Costs a scan of the table, but only once the ceiling is
                 // reached and only when a genuinely new link appears.
-                for bucket in self.peer_budgets.values_mut() {
-                    bucket.refill(now);
+                for allowance in self.peer_budgets.values_mut() {
+                    allowance.frames.refill(now);
+                    allowance.receipts.refill(now);
                 }
+                let recovered = |a: &PeerAllowance| a.frames.tokens + a.receipts.tokens;
                 let most_recovered = self
                     .peer_budgets
                     .iter()
-                    .max_by(|(_, a), (_, b)| a.tokens.total_cmp(&b.tokens))
+                    .max_by(|(_, a), (_, b)| recovered(a).total_cmp(&recovered(b)))
                     .map(|(peer, _)| peer.clone());
                 if let Some(peer) = most_recovered {
                     self.peer_budgets.remove(&peer);
                 }
             }
+            let (burst, rate) = (self.config.peer_burst, self.config.peer_rate_per_sec);
             self.peer_budgets.insert(
                 peer_id.to_string(),
-                TokenBucket::new(self.config.peer_burst, self.config.peer_rate_per_sec, now),
+                PeerAllowance {
+                    frames: TokenBucket::new(burst, rate, now),
+                    receipts: TokenBucket::new(
+                        burst * RECEIPT_ALLOWANCE_SHARE,
+                        rate * RECEIPT_ALLOWANCE_SHARE,
+                        now,
+                    ),
+                },
             );
         }
 
+        let receipt = message.metadata.contains_key(crate::constants::ACK_FOR_KEY);
         self.peer_budgets
             .get_mut(peer_id)
-            .map(|bucket| bucket.try_take_above(0.0, now))
+            .map(|allowance| {
+                (receipt && allowance.receipts.try_take_above(0.0, now))
+                    || allowance.frames.try_take_above(0.0, now)
+            })
             .unwrap_or(true)
     }
 
@@ -1857,6 +1900,109 @@ mod tests {
         assert_eq!(
             gov.admit(&msg, Some("b"), 3),
             RelayAdmission::Rejected(RelayRejection::HopLimitReached)
+        );
+    }
+
+    fn receipt() -> Message {
+        Message::builder(
+            UserId::new("bob").unwrap(),
+            UserId::new("alice").unwrap(),
+            AppId::new("app").unwrap(),
+        )
+        .content("")
+        .metadata(crate::constants::ACK_FOR_KEY, "a-message-id")
+        .ttl(TTL::new(8).unwrap())
+        .build()
+    }
+
+    /// A neighbor's receipts are admitted after its messages have spent their
+    /// allowance, and are bounded by an allowance of their own. On the
+    /// 2026-11-10 phone chain the next hop refused one coalesced receipt frame
+    /// in three of ten rounds, after the sender's messages had spent the link's
+    /// allowance, and each of the five receipts it carried waited 15 s for the
+    /// sender's retry. Past both allowances, a receipt is refused.
+    #[test]
+    fn a_neighbors_receipts_have_an_allowance_its_messages_cannot_spend() {
+        let mut gov = governor();
+        while gov.admit(&frame(), Some("busy"), 3) == RelayAdmission::Queued {}
+
+        assert_eq!(
+            gov.admit(&receipt(), Some("busy"), 3),
+            RelayAdmission::Queued,
+            "the messages' spent allowance refused a receipt"
+        );
+
+        let mut receipts = 1;
+        for _ in 0..200 {
+            if gov.admit(&receipt(), Some("busy"), 3) == RelayAdmission::Queued {
+                receipts += 1;
+            }
+        }
+        assert!(
+            receipts <= (DEFAULT_RELAY_PEER_BURST * RECEIPT_ALLOWANCE_SHARE) as usize + 2,
+            "accepted {receipts} receipts from one neighbor"
+        );
+    }
+
+    /// Receipts spend their own allowance first and then the messages', so a
+    /// link carrying mostly receipts keeps all the capacity it had when the two
+    /// shared one. Receipts confined to their own half-size allowance halved
+    /// it for a return link or a relay downstream of a crowd, whose receipts
+    /// answer every recipient behind it and outnumber its messages, and under
+    /// a `peer_burst` below 2 that allowance never held a whole token and
+    /// refused every receipt.
+    #[test]
+    fn receipts_fall_back_to_the_messages_allowance() {
+        let mut gov = governor();
+        let mut receipts = 0;
+        for _ in 0..200 {
+            if gov.admit(&receipt(), Some("return"), 3) == RelayAdmission::Queued {
+                receipts += 1;
+            }
+        }
+        assert!(
+            receipts >= DEFAULT_RELAY_PEER_BURST as usize,
+            "a link carrying only receipts was admitted {receipts}"
+        );
+
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                peer_burst: 1.0,
+                peer_rate_per_sec: 0.5,
+                ..immediate_config()
+            },
+        );
+        assert_eq!(
+            gov.admit(&receipt(), Some("narrow"), 3),
+            RelayAdmission::Queued,
+            "the narrowest accepted allowance refused a receipt"
+        );
+    }
+
+    /// Marking frames as receipts buys a link at most the receipts' share of
+    /// an allowance more admissions. The marker cannot be authenticated, so
+    /// this is the whole of what lying about it gains at a relay.
+    ///
+    /// The bound is a whole second allowance, not the share plus one: the
+    /// governor reads the wall clock, both buckets refill at 7.5 frames a
+    /// second together, and a bound one frame above the 22 the share admits
+    /// failed on a runner that stalled for 200 ms. Twice the burst still fails
+    /// a receipts bucket the size of the messages' one, and allows a stall of
+    /// about a second.
+    #[test]
+    fn marking_frames_as_receipts_buys_a_link_half_an_allowance() {
+        let mut gov = governor();
+        let mut admitted = 0;
+        for n in 0..400 {
+            let frame = if n % 2 == 0 { frame() } else { receipt() };
+            if gov.admit(&frame, Some("marker"), 3) == RelayAdmission::Queued {
+                admitted += 1;
+            }
+        }
+        assert!(
+            (admitted as f32) < 2.0 * DEFAULT_RELAY_PEER_BURST,
+            "one link marking receipts was admitted {admitted} frames"
         );
     }
 
@@ -2454,7 +2600,7 @@ mod tests {
             .get("noisy")
             .expect("a link mid-spend must not be forgotten to make room for idle ones");
         assert!(
-            noisy.tokens < noisy.capacity,
+            noisy.frames.tokens < noisy.frames.capacity,
             "the noisy link kept its spent allowance rather than being handed a fresh burst"
         );
     }
@@ -2712,7 +2858,10 @@ mod tests {
         // copies were still circulating and be forwarded a second time — by
         // every node, which is how a flood becomes a storm.
         let gov = governor();
-        let max_admissions_per_sec = DEFAULT_RELAY_PEER_RATE_PER_SEC * MAX_RELAY_RATE_PEERS as f32;
+        // Two allowances per link: its frames, and a share again for receipts.
+        let max_admissions_per_sec = (1.0 + RECEIPT_ALLOWANCE_SHARE)
+            * DEFAULT_RELAY_PEER_RATE_PER_SEC
+            * MAX_RELAY_RATE_PEERS as f32;
         let sustained_ceiling = DEFAULT_RELAY_RATE_PER_SEC.min(max_admissions_per_sec);
         let ids_in_window = sustained_ceiling * gov.config().seen.retention.as_secs_f32();
 
