@@ -154,6 +154,36 @@ address.
 
 ---
 
+## React Native: development warnings
+
+`@offline-protocol/mesh-sdk` logs a **console warning** (never throws) when a
+peer id passed to send, invite, MLS, or service APIs does not **look like** a
+44-character `off1…` string. Warnings are **on by default in `__DEV__` builds**
+and **off in production** unless you opt in.
+
+```typescript
+const protocol = new OfflineProtocol({
+  appId: 'my-app',
+  profile: 'default',
+  devPeerAddressWarnings: true, // force on in release while debugging
+  // devPeerAddressWarnings: false, // silence in development
+});
+```
+
+Each method warns once per peer id. `DataStore` and `MeshServices` take no
+config of their own and follow the value given to the most recently
+constructed `OfflineProtocol`.
+
+The warning prints the id you passed. A misshapen id is often a username,
+phone number or email, so forcing warnings on in a release build writes that
+to the device log: use it while debugging, not in a shipped build.
+
+The check is shape-only (same idea as username-vs-address rejection in core),
+not a checksum parse. The package exports `looksLikeMeshAddress` if you want
+the same rule in your own UI before calling the SDK.
+
+---
+
 ## See also
 
 - [configuration.md](configuration.md) — `appId`, `profile`, and storage namespaces
