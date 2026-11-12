@@ -24347,6 +24347,44 @@ mod tests {
         }
     }
 
+    /// G7 PR1: reference storage kit is part of the native library and wired in
+    /// consumer-check sample code.
+    #[test]
+    fn g7_reference_storage_kit_is_shipped_and_wired_in_consumer_check() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = manifest.parent().unwrap().parent().unwrap();
+        let ios_kit = repo.join("bindings/react-native/ios/ReferenceStorage.swift");
+        let android_kit =
+            repo.join("bindings/react-native/android/src/main/java/com/offlineprotocol/ReferenceStorage.kt");
+        assert!(ios_kit.is_file(), "ReferenceStorage.swift must exist after G7 PR1");
+        assert!(android_kit.is_file(), "ReferenceStorage.kt must exist after G7 PR1");
+
+        let swift_use =
+            std::fs::read_to_string(repo.join("bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift"))
+                .expect("swift consumer-check Use.swift must exist");
+        let kotlin_use = std::fs::read_to_string(
+            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
+        )
+        .expect("kotlin consumer-check Use.kt must exist");
+
+        for path in [ios_kit, android_kit] {
+            let body = std::fs::read_to_string(&path).expect("reference storage kit must be readable");
+            assert!(
+                body.contains("OfflineProtocolReferenceStorage"),
+                "{} must declare OfflineProtocolReferenceStorage",
+                path.display()
+            );
+        }
+        assert!(
+            swift_use.contains("OfflineProtocolReferenceStorage"),
+            "swift consumer-check must wire OfflineProtocolReferenceStorage"
+        );
+        assert!(
+            kotlin_use.contains("OfflineProtocolReferenceStorage"),
+            "kotlin consumer-check must wire OfflineProtocolReferenceStorage"
+        );
+    }
+
     /// G6 PR2: RN `devTransportDiagnostics` matches native `diagnostic` messages by
     /// exact string. Every recognised wire form must stay pinned in the hints
     /// module and at each bridge emit site (C5), or hints rot silently.

@@ -104,9 +104,11 @@ class MainActivity : AppCompatActivity() {
         // default, so with MLS uninitialized every send fails with
         // EncryptFailed. Unlike React Native there is no auto-initialization on
         // the native path — you supply both providers yourself.
-        protocol.initializeMls(
-            secureStorage = KeystoreMlsStorage(this),        // credential-backed
-            protocolStateStorage = AppContainerStateStorage(this),  // in the app container
+        OfflineProtocolReferenceStorage.initializeMls(
+            protocol,
+            this,
+            config.appId,
+            config.profile,
         )
 
         protocol.start()
@@ -183,9 +185,10 @@ service, is what makes it safe.
 ### 5. Storage: Two Providers, Two Lifecycles
 
 `initializeMls` takes two providers because key material and restartable
-delivery state have different lifetimes. `KeystoreMlsStorage` and
-`AppContainerStateStorage` above are **your** classes — the SDK ships no default
-for the native path.
+delivery state have different lifetimes. The shipped
+**`OfflineProtocolReferenceStorage`** factory opens the same Keystore-backed MLS
+store and app-container state store the React Native module uses. You may
+substitute your own providers; they must meet the obligations below.
 
 | | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
 |---|---|---|

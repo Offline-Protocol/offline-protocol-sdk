@@ -111,9 +111,11 @@ React Native initializes MLS and storage inside `start()`. **Native** apps must:
 3. Call **`initializeMls`** with two providers (Keychain/Keystore + app container).
 4. Then **`start()`**.
 
-Reference storage implementations live in the React Native bridge sources
-(`ProtocolStateStorage` / MLS adapters). Native guides:
-[ios-integration.md](ios-integration.md),
+Native Swift and Android libraries ship **`OfflineProtocolReferenceStorage`**
+(Keychain / Keystore + app-container stores, same as React Native
+`initializeMlsWithSecureStorage`). Custom backends remain supported; see
+[C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified).
+Native guides: [ios-integration.md](ios-integration.md),
 [android-integration.md](android-integration.md).
 
 **Distribution shortcuts**

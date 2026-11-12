@@ -141,9 +141,10 @@ final class MeshController {
             // by default, so with MLS uninitialized every send fails with
             // encryptFailed. Unlike React Native there is no auto-initialization
             // on the native path — you supply both providers yourself.
-            try mesh.initializeMls(
-                secureStorage: KeychainMlsStorage(),              // credential-backed
-                protocolStateStorage: AppContainerStateStorage()  // in the app container
+            try OfflineProtocolReferenceStorage.initializeMls(
+                on: mesh,
+                appId: config.appId,
+                profile: config.profile
             )
 
             try mesh.start()
@@ -178,9 +179,10 @@ final class MeshController {
 ### 5. Storage: Two Providers, Two Lifecycles
 
 `initializeMls` takes two providers because key material and restartable delivery
-state have different lifetimes. `KeychainMlsStorage` and
-`AppContainerStateStorage` above are **your** classes — the SDK ships no default
-for the native path.
+state have different lifetimes. The shipped **`OfflineProtocolReferenceStorage`**
+factory opens the same Keychain-backed MLS store and app-container state store
+the React Native module uses. You may substitute your own providers; they must
+meet the obligations below.
 
 | | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
 |---|---|---|

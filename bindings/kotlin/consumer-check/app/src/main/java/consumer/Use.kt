@@ -4,7 +4,10 @@ import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import com.offlineprotocol.ConfigScenario
+import com.offlineprotocol.ConfigScenarios
 import com.offlineprotocol.InternetManager
+import com.offlineprotocol.OfflineProtocolReferenceStorage
 import com.offlineprotocol.TransportManager
 import uniffi.offline_protocol.EventCallback
 import uniffi.offline_protocol.OfflineProtocol
@@ -34,6 +37,18 @@ fun start(config: ProtocolConfig): OfflineProtocol {
     protocol.start()
     return protocol
 }
+
+/** Native path: event callback, reference storage, then `start()` (G7). */
+fun bootstrapWithReferenceStorage(context: Context, config: ProtocolConfig): OfflineProtocol {
+    val protocol = OfflineProtocol(config)
+    protocol.setEventCallback(Listener())
+    OfflineProtocolReferenceStorage.initializeMls(protocol, context, config.appId, config.profile)
+    protocol.start()
+    return protocol
+}
+
+fun referenceStorageSmokeConfig(): ProtocolConfig =
+    ConfigScenarios.forScenario(ConfigScenario.localBle, "consumer-check", "default")
 
 fun address(protocol: OfflineProtocol?, publicKey: List<UByte>): String? =
     try {
