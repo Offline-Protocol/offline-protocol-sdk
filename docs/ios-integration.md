@@ -219,6 +219,31 @@ initialization rather than coming up with every peer unblocked.
 See [MLS Integration](mls-integration.md#custom-storage-advanced) for the full
 provider interfaces.
 
+#### Verify a custom protocol-state backend (C11)
+
+Green on the conformance suite is the definition of **supported** storage. On the
+native Swift path, call `StorageConformance.run(on:)` with your
+`ProtocolStateStorageProvider` (no running engine required). Probe a **scratch**
+instance until `report.isGreen` is true:
+
+```swift
+let report = try StorageConformance.run(on: myBackend)
+precondition(report.isGreen, "\(report.failures)")
+```
+
+To sanity-check the shipped reference store:
+
+```swift
+let report = try StorageConformance.verifyReferenceProtocolStateStorage(
+    appId: config.appId,
+    profile: config.profile
+)
+```
+
+Details: [bridges/README §C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified).
+MLS secure storage has a separate Rust-only suite today; protocol-state is what
+the FFI exposes via `runStorageConformance`.
+
 ## Permissions
 
 Complete iOS rules (Bluetooth, local network, Bonjour, background modes):

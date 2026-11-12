@@ -113,7 +113,9 @@ React Native initializes MLS and storage inside `start()`. **Native** apps must:
 
 Native Swift and Android libraries ship **`OfflineProtocolReferenceStorage`**
 (Keychain / Keystore + app-container stores, same as React Native
-`initializeMlsWithSecureStorage`). Custom backends remain supported; see
+`initializeMlsWithSecureStorage`) and **`StorageConformance`** to run the
+protocol-state conformance suite (`runStorageConformance` with a typed report).
+Custom backends remain supported; see
 [C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified).
 Native guides: [ios-integration.md](ios-integration.md),
 [android-integration.md](android-integration.md).

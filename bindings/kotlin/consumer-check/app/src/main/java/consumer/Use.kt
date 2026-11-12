@@ -8,6 +8,7 @@ import com.offlineprotocol.ConfigScenario
 import com.offlineprotocol.ConfigScenarios
 import com.offlineprotocol.InternetManager
 import com.offlineprotocol.OfflineProtocolReferenceStorage
+import com.offlineprotocol.StorageConformance
 import com.offlineprotocol.TransportManager
 import uniffi.offline_protocol.EventCallback
 import uniffi.offline_protocol.OfflineProtocol
@@ -49,6 +50,14 @@ fun bootstrapWithReferenceStorage(context: Context, config: ProtocolConfig): Off
 
 fun referenceStorageSmokeConfig(): ProtocolConfig =
     ConfigScenarios.forScenario(ConfigScenario.localBle, "consumer-check", "default")
+
+/** Requires the loaded native library (device or emulator), not JVM unit tests alone. */
+fun referenceProtocolStateStorageConformanceIsGreen(context: Context): Boolean =
+    StorageConformance.verifyReferenceProtocolStateStorage(
+        context,
+        "consumer-check",
+        "default",
+    ).isGreen
 
 fun address(protocol: OfflineProtocol?, publicKey: List<UByte>): String? =
     try {

@@ -22,6 +22,14 @@ public func referenceStorageSmokeConfig() -> ProtocolConfig {
 }
 
 /// Native path: event callback, reference storage, then `start()` (G7).
+/// Returns whether the reference app-container store is green on the C11 suite.
+public func referenceProtocolStateStorageConformanceIsGreen() throws -> Bool {
+    try StorageConformance.verifyReferenceProtocolStateStorage(
+        appId: "consumer-check",
+        profile: "default"
+    ).isGreen
+}
+
 public func bootstrapWithReferenceStorage(config: ProtocolConfig) throws -> OfflineProtocol {
     let engine = try OfflineProtocol(config: config)
     engine.setEventCallback(callback: Listener())

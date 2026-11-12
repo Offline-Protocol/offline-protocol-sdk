@@ -24347,6 +24347,31 @@ mod tests {
         }
     }
 
+    /// G7 PR2: typed storage conformance helpers on native bridges + consumer-check.
+    #[test]
+    fn g7_storage_conformance_helpers_are_shipped_on_native_bridges() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = manifest.parent().unwrap().parent().unwrap();
+        let ios = std::fs::read_to_string(repo.join("bindings/react-native/ios/StorageConformance.swift"))
+            .expect("StorageConformance.swift must exist after G7 PR2");
+        let kotlin = std::fs::read_to_string(
+            repo.join("bindings/react-native/android/src/main/java/com/offlineprotocol/StorageConformance.kt"),
+        )
+        .expect("StorageConformance.kt must exist after G7 PR2");
+        let swift_use =
+            std::fs::read_to_string(repo.join("bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift"))
+                .expect("swift consumer-check Use.swift must exist");
+        let kotlin_use = std::fs::read_to_string(
+            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
+        )
+        .expect("kotlin consumer-check Use.kt must exist");
+        assert!(ios.contains("StorageConformance"));
+        assert!(kotlin.contains("object StorageConformance"));
+        assert!(kotlin.contains("runStorageConformance"));
+        assert!(swift_use.contains("StorageConformance"));
+        assert!(kotlin_use.contains("StorageConformance"));
+    }
+
     /// G7 PR1: reference storage kit is part of the native library and wired in
     /// consumer-check sample code.
     #[test]

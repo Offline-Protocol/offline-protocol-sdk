@@ -10,6 +10,10 @@ final class UseTests: XCTestCase {
         XCTAssertTrue(address.hasPrefix("off1"), "not an address: \(address)")
     }
 
+    func testReferenceStorageConformanceIsGreen() throws {
+        XCTAssertTrue(try referenceProtocolStateStorageConformanceIsGreen())
+    }
+
     func testReferenceStorageBootstrapDerivesAnAddress() throws {
         let config = referenceStorageSmokeConfig()
         let mesh = try bootstrapWithReferenceStorage(config: config)
