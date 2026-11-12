@@ -24347,28 +24347,60 @@ mod tests {
         }
     }
 
-    /// G6 PR2: the Wi‑Fi Direct formation progress diagnostic wire string must
-    /// match between the RN hints layer and the Android bridge.
+    /// G6 PR2: RN `devTransportDiagnostics` matches native `diagnostic` messages by
+    /// exact string. Every recognised wire form must stay pinned in the hints
+    /// module and at each bridge emit site (C5), or hints rot silently.
     #[test]
-    fn transport_formation_progress_diagnostic_is_pinned_in_rn_and_android() {
+    fn transport_expectation_diagnostics_are_pinned_for_rn_hints() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo = manifest.parent().unwrap().parent().unwrap();
-        const PROGRESS: &str = "transport_expectation_wifi_direct_formation_progress";
+
+        const WIFI_STARTED: &str = "Wi-Fi Direct group formation started";
+        const WIFI_RESUMED: &str = "Wi-Fi Direct group formation resumed";
+        const WIFI_PROGRESS: &str = "transport_expectation_wifi_direct_formation_progress";
+        const BLE_MULTI_APP: &str =
+            "BLE peer serves several service instances; choosing one";
+
         let ts = std::fs::read_to_string(
             repo.join("bindings/react-native/src/transportDiagnostics.ts"),
         )
         .expect("transportDiagnostics.ts must exist after G6 PR2");
-        let kotlin = std::fs::read_to_string(
-            repo.join("bindings/react-native/android/src/main/java/com/offlineprotocol/WifiDirectManager.kt"),
+        let wifi_direct = std::fs::read_to_string(
+            repo.join(
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+            ),
         )
         .expect("WifiDirectManager.kt must exist");
+        let ble_android = std::fs::read_to_string(
+            repo.join(
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+            ),
+        )
+        .expect("CentralGattClient.kt must exist");
+        let ble_ios = std::fs::read_to_string(repo.join("bindings/react-native/ios/BleManager.swift"))
+            .expect("BleManager.swift must exist");
+
+        for wire in [WIFI_STARTED, WIFI_RESUMED, WIFI_PROGRESS, BLE_MULTI_APP] {
+            assert!(
+                ts.contains(wire),
+                "transportDiagnostics.ts must recognise diagnostic message {wire:?}"
+            );
+        }
+
+        for wire in [WIFI_STARTED, WIFI_RESUMED, WIFI_PROGRESS] {
+            assert!(
+                wifi_direct.contains(wire),
+                "WifiDirectManager.kt must emit diagnostic message {wire:?}"
+            );
+        }
+
         assert!(
-            ts.contains(PROGRESS),
-            "transportDiagnostics.ts must name the formation progress diagnostic"
+            ble_android.contains(BLE_MULTI_APP),
+            "CentralGattClient.kt must emit the multi-app BLE diagnostic"
         );
         assert!(
-            kotlin.contains(PROGRESS),
-            "WifiDirectManager.kt must emit the formation progress diagnostic"
+            ble_ios.contains(BLE_MULTI_APP),
+            "BleManager.swift must emit the multi-app BLE diagnostic"
         );
     }
     /// The local API chapter, the interface definition and the reference
