@@ -110,6 +110,7 @@ export {
 } from './peerAddressHints';
 import { setDevPeerAddressWarnings, warnPeerIdIfMisshapen } from './peerAddressHints';
 import { internetAutoConnects, nostrAutoConnects } from './transportAutoStart';
+import { formatNativeLinkingError } from './hostCompatibility';
 import {
   bindDevLifecycleWarningsFromConfig,
   isModuleEngineStarted,
@@ -127,7 +128,7 @@ const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
       {},
       {
         get() {
-          throw new Error(LINKING_ERROR);
+          throw new Error(formatNativeLinkingError(LINKING_ERROR));
         },
       }
     )) as any; // Type assertion to allow all native module methods including group management
