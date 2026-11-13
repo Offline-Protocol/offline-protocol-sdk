@@ -98,13 +98,18 @@ export {
   forScenario,
   scenarioPreset,
 } from './configScenarios';
-export type { ConfigScenario, ForScenarioParams } from './configScenarios';
+export type {
+  ConfigScenario,
+  ForScenarioParams,
+  ScenarioOverrides,
+} from './configScenarios';
 export {
   looksLikeMeshAddress,
   MESH_ADDRESS_ENCODED_LEN,
   MESH_ADDRESS_PREFIX,
 } from './peerAddressHints';
 import { setDevPeerAddressWarnings, warnPeerIdIfMisshapen } from './peerAddressHints';
+import { internetAutoConnects, nostrAutoConnects } from './transportAutoStart';
 import { formatNativeLinkingError } from './hostCompatibility';
 import {
   bindDevLifecycleWarningsFromConfig,
@@ -1696,8 +1701,9 @@ export class OfflineProtocol {
     }
 
     // Auto-enable internet transport if configured with a server address
+    // The same predicate forScenario validates against (transportAutoStart.ts).
     const internetConfig = this.config.transports?.internet;
-    if (internetConfig?.enabled && internetConfig?.serverAddress) {
+    if (internetAutoConnects(internetConfig)) {
       try {
         const enableConfig: InternetTransportConfig = {
           enabled: true,
@@ -1720,7 +1726,7 @@ export class OfflineProtocol {
 
     // Auto-enable nostr transport if configured with relay URLs
     const nostrConfig = this.config.transports?.nostr;
-    if (nostrConfig?.enabled && nostrConfig?.relayUrls?.length) {
+    if (nostrAutoConnects(nostrConfig)) {
       try {
         await this.enableTransport("nostr", nostrConfig);
         console.log("[OfflineProtocol] Nostr transport auto-enabled");
