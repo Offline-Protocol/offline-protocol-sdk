@@ -13,12 +13,12 @@ Get started with the Offline Protocol SDK in 5 minutes.
 ### 1. Install
 
 > **Expo Go does not work** with this SDK (native module). Use a development
-> build (`expo-dev-client`) or bare React Native. See
-> [react-native-host-doctor.md](docs/react-native-host-doctor.md).
+> build (`expo-dev-client`), a native build (`npx expo run:ios`) or bare React
+> Native. See [react-native-host-doctor.md](docs/react-native-host-doctor.md).
 
 ```bash
 npm install @offline-protocol/mesh-sdk
-npx mesh-sdk-doctor   # catch Podfile / Expo mistakes early
+npx --no-install mesh-sdk-doctor   # catch Podfile / Expo mistakes early
 cd ios && pod install  # iOS only
 ```
 
