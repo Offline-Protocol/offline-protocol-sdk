@@ -34,6 +34,9 @@ const protocol = new OfflineProtocol({
 await protocol.start();
 ```
 
+For another transport mix (Wi-Fi Direct, an internet relay, Nostr), build the
+config with [`forScenario`](docs/react-native-config-presets.md).
+
 ### 3. Send Messages
 
 ```typescript
