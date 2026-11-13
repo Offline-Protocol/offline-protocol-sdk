@@ -114,12 +114,14 @@ class WifiDirectManager(
         // failure up to the ceiling, so a forged or stale record cannot keep
         // the radio busy. A record not heard again within the TTL is dropped.
         private const val FORMATION_TICK_MS = 10_000L
-        /** Integrator progress diagnostic (G6): emitted while group formation runs. */
-        private const val FORMATION_PROGRESS_INTERVAL_MS = 60_000L
-        const val DIAG_WIFI_DIRECT_FORMATION_PROGRESS =
-            "transport_expectation_wifi_direct_formation_progress"
         private const val FORMATION_RETRY_MS = 30_000L
         private const val FORMATION_MAX_BACKOFF_MS = 120_000L
+        // The progress diagnostic for a formation attempt
+        // ([WifiDirectFormationProgress]). The message is matched by exact
+        // string in the React Native hints (transportDiagnostics.ts) and pinned
+        // by transport_expectation_diagnostics_are_pinned_for_rn_hints.
+        const val DIAG_WIFI_DIRECT_FORMATION_PROGRESS =
+            "transport_expectation_wifi_direct_formation_progress"
         private const val ADVERT_TTL_MS = 180_000L
         // How often service discovery is asked again is
         // WifiDirectGroupFormation.discoveryPeriodMs: each call cancels and
@@ -247,8 +249,9 @@ class WifiDirectManager(
     // registered, so stop() clears exactly what start registered, whatever
     // [formGroups] says by then.
     private var formationRegistered = false
-    private var formationStartedAtMs = 0L
-    private var lastFormationProgressEmitMs = 0L
+    // The formation attempt the progress diagnostic reports on; see
+    // [WifiDirectFormationProgress] for what counts as one.
+    private var formationProgress = WifiDirectFormationProgress.IDLE
     // Discovery backoff: rounds in a row that heard no record, and whether a
     // record arrived since the last round was asked.
     private var quietDiscoveryRounds = 0
@@ -944,24 +947,35 @@ class WifiDirectManager(
     private val formationTick = object : Runnable {
         override fun run() {
             if (state != TransportState.RUNNING || !formGroups) return
-            maybeEmitFormationProgress()
+            reportFormationProgress()
             if (!isPaused) formationStep()
             transportHandler.postDelayed(this, FORMATION_TICK_MS)
         }
     }
 
-    private fun maybeEmitFormationProgress() {
-        if (!formGroups || !formationRegistered || inAppGroup) return
-        val now = SystemClock.elapsedRealtime()
-        val elapsed = now - formationStartedAtMs
-        if (elapsed < FORMATION_PROGRESS_INTERVAL_MS) return
-        if (now - lastFormationProgressEmitMs < FORMATION_PROGRESS_INTERVAL_MS) return
-        lastFormationProgressEmitMs = now
-        emitDiagnostic(
-            "info",
-            DIAG_WIFI_DIRECT_FORMATION_PROGRESS,
-            mapOf("elapsedMs" to elapsed),
+    /**
+     * Reports a formation attempt that is taking a while, a bounded number of
+     * times. Only an attempt that can actually end in a group counts: a lone
+     * device, P2P off, a paused transport, or a slot already carrying a peer
+     * (over a group or the LAN) is not one, and a report then would tell the
+     * developer formation is running when nothing is forming.
+     */
+    private fun reportFormationProgress() {
+        val address = localAddressOrNull()
+        val live = formationRegistered && p2pUp && !isPaused && !inAppGroup &&
+            sockets.isEmpty() &&
+            adverts.values.any { it.app == appTag && it.address != address }
+        val (next, report) = WifiDirectFormationProgress.step(
+            formationProgress, live, SystemClock.elapsedRealtime(),
         )
+        formationProgress = next
+        if (report != null) {
+            emitDiagnostic(
+                "info",
+                DIAG_WIFI_DIRECT_FORMATION_PROGRESS,
+                mapOf("elapsedMs" to report.elapsedMs, "report" to report.number),
+            )
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -997,8 +1011,7 @@ class WifiDirectManager(
             },
         )
         formationRegistered = true
-        formationStartedAtMs = SystemClock.elapsedRealtime()
-        lastFormationProgressEmitMs = 0L
+        formationProgress = WifiDirectFormationProgress.IDLE
         heardSinceLastDiscovery = true
         quietDiscoveryRounds = 0
         addServiceRequest()
@@ -1009,6 +1022,8 @@ class WifiDirectManager(
         nextPublishAtMs = SystemClock.elapsedRealtime() + FORMATION_RETRY_MS
         transportHandler.removeCallbacks(formationTick)
         transportHandler.post(formationTick)
+        // Matched by exact string in the React Native hints; see
+        // DIAG_WIFI_DIRECT_FORMATION_PROGRESS.
         emitDiagnostic("info", "Wi-Fi Direct group formation started")
     }
 
@@ -1039,6 +1054,8 @@ class WifiDirectManager(
         nextServiceDiscoveryAtMs = 0L
         quietDiscoveryRounds = 0
         heardSinceLastDiscovery = true
+        // Matched by exact string in the React Native hints; see
+        // DIAG_WIFI_DIRECT_FORMATION_PROGRESS.
         emitDiagnostic("info", "Wi-Fi Direct group formation resumed")
     }
 
@@ -1064,8 +1081,7 @@ class WifiDirectManager(
             if (createdNetwork != null) p2p.removeGroup(channel, quietListener("remove group"))
         }
         formationRegistered = false
-        formationStartedAtMs = 0L
-        lastFormationProgressEmitMs = 0L
+        formationProgress = WifiDirectFormationProgress.IDLE
         createdNetwork = null
         ownsFormationGroup = false
         inAppGroup = false
@@ -1833,5 +1849,36 @@ internal object GroupOwnerRedial {
         if (!running || isGroupOwner || owner == null || held) return null
         val delay = if (carried || owner != ended) initialDelayMs else currentDelayMs
         return Plan(owner, delay, minOf(delay * 2, maxDelayMs))
+    }
+}
+
+/**
+ * When the formation progress diagnostic is reported. Pure, so
+ * [WifiDirectFormationProgressTest] pins it without a device.
+ *
+ * An attempt starts on the first tick that is live (the manager decides what
+ * live means) and ends on the first that is not, so its elapsed time is never
+ * counted from a group that was up for an hour. It is reported at each of
+ * [REPORT_AT_MS] and then never again: measured formation took up to about
+ * four minutes, and past that a report saying "usually not a hang" would be
+ * noise on every diagnostic listener, production included.
+ */
+internal object WifiDirectFormationProgress {
+    data class State(val startedAtMs: Long?, val reported: Int)
+    /** [number] is how many of [REPORT_AT_MS] the attempt has passed, 1 to 3. */
+    data class Report(val elapsedMs: Long, val number: Int)
+
+    val IDLE = State(startedAtMs = null, reported = 0)
+    val REPORT_AT_MS = longArrayOf(60_000L, 120_000L, 240_000L)
+
+    fun step(state: State, live: Boolean, nowMs: Long): Pair<State, Report?> {
+        if (!live) return IDLE to null
+        val startedAt = state.startedAtMs ?: return State(nowMs, 0) to null
+        val elapsed = nowMs - startedAt
+        // The marks passed so far, so a late tick (a stalled handler) reports
+        // once however many marks it crossed, not once per mark in a burst.
+        val passed = REPORT_AT_MS.count { elapsed >= it }
+        if (passed <= state.reported) return state to null
+        return State(startedAt, passed) to Report(elapsed, passed)
     }
 }

@@ -4,8 +4,29 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 /**
+ * Static checks behind `mesh-sdk-doctor`. Every check reads files only; none
+ * runs CocoaPods, Gradle or the app.
+ *
+ * Severity is a promise to the reader: `error` means the app cannot work as
+ * written, and the CLI exits 1. Anything the doctor cannot prove from files
+ * (whether the app is launched in Expo Go, whether a linker flag is still
+ * needed) is a `warn`. A doctor that fails a working app teaches people to
+ * stop running it.
+ *
  * @typedef {{ severity: 'error' | 'warn', code: string, message: string, fix?: string }} Finding
  */
+
+const DOCS_URL =
+  'https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/react-native-host-doctor.md';
+const UPGRADING_URL =
+  'https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/UPGRADING.md#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200';
+
+/** Build settings the pre-0.20.0 integration told apps to set for MeshSdk. */
+const LEGACY_BUILD_SETTINGS =
+  /\b(OTHER_LDFLAGS|LIBRARY_SEARCH_PATHS|SWIFT_INCLUDE_PATHS|DEFINES_MODULE)\b/;
+const MESH_REFERENCE = /MeshSdk|offline_protocol/i;
+/** How many lines either side of a build setting may name MeshSdk. */
+const LINKER_HACK_WINDOW = 5;
 
 /**
  * @param {string} root App project root (contains package.json).
@@ -21,7 +42,7 @@ function runMeshDoctorChecks(root) {
       severity: 'error',
       code: 'no-package-json',
       message: `No package.json at ${root}`,
-      fix: 'Run this command from your React Native app root.',
+      fix: 'Run this command from your React Native app root, or pass --root <dir>.',
     });
     return findings;
   }
@@ -30,18 +51,21 @@ function runMeshDoctorChecks(root) {
   try {
     pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
   } catch {
+    pkg = undefined;
+  }
+  // `null`, an array or a bare value parses but is not a manifest.
+  if (pkg === null || typeof pkg !== 'object' || Array.isArray(pkg)) {
     findings.push({
       severity: 'error',
       code: 'package-json-invalid',
-      message: 'package.json is not valid JSON.',
+      message: `${pkgPath} is not a valid package manifest (expected a JSON object).`,
     });
     return findings;
   }
 
+  // Spreading a missing or non-object section adds nothing and never throws.
   const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-  const meshDep =
-    deps['@offline-protocol/mesh-sdk'] ?? deps['offline-protocol-mesh-sdk'];
-  if (!meshDep) {
+  if (!deps['@offline-protocol/mesh-sdk']) {
     findings.push({
       severity: 'warn',
       code: 'mesh-sdk-missing',
@@ -50,57 +74,64 @@ function runMeshDoctorChecks(root) {
     });
   }
 
-  checkExpoHost(root, pkg, deps, findings);
+  checkExpoHost(root, deps, findings);
   checkIosPodfile(root, findings);
-  checkAndroidGradle(root, findings);
+  checkAndroidJniLibs(root, findings);
 
   return findings;
 }
 
 /**
+ * Expo without `expo-dev-client` is not proof of Expo Go: an app built with
+ * `npx expo prebuild` / `npx expo run:ios`, or a bare app that uses Expo
+ * modules, loads native modules without it. So this is a warning, and its
+ * wording says which launch path fails.
+ *
  * @param {string} root
- * @param {Record<string, string>} pkg
  * @param {Record<string, string>} deps
  * @param {Finding[]} findings
  */
-function checkExpoHost(root, pkg, deps, findings) {
-  const hasExpo = Boolean(deps.expo);
-  const hasDevClient =
-    Boolean(deps['expo-dev-client']) ||
-    Boolean(pkg.dependencies?.['expo-dev-client']);
-
-  if (hasExpo && !hasDevClient) {
-    findings.push({
-      severity: 'error',
-      code: 'expo-go-unsupported',
-      message:
-        'Expo is present but expo-dev-client is not. Expo Go cannot load this SDK (native module).',
-      fix:
-        'Add a development build (expo-dev-client) and run a custom dev client, or use bare React Native. See docs/react-native-host-doctor.md.',
-    });
+function checkExpoHost(root, deps, findings) {
+  if (!deps.expo || deps['expo-dev-client']) {
+    return;
   }
+  const hasNativeProjects =
+    fs.existsSync(path.join(root, 'ios')) || fs.existsSync(path.join(root, 'android'));
+  findings.push({
+    severity: 'warn',
+    code: 'expo-without-dev-client',
+    message: hasNativeProjects
+      ? 'Expo is present without expo-dev-client. Native builds (npx expo run:ios / run:android) work; launching in Expo Go will not load this SDK.'
+      : 'Expo is present without expo-dev-client or native ios/ and android/ projects, so the app is probably launched in Expo Go, which cannot load this SDK.',
+    fix: `Use a development build (expo-dev-client) or npx expo run:ios / run:android. See ${DOCS_URL}`,
+  });
+}
 
-  for (const name of ['app.json', 'app.config.js', 'app.config.ts']) {
-    const p = path.join(root, name);
-    if (!fs.existsSync(p) || name !== 'app.json') {
+/**
+ * Drops whole-line Ruby comments, so a `# pod 'MeshSdk'` kept as a note after
+ * the upgrade is not reported as a live line. Trailing comments are left in
+ * place: cutting at `#` would also cut `#{...}` interpolation.
+ *
+ * @param {string} text
+ * @returns {string[]}
+ */
+function podfileCodeLines(text) {
+  const lines = [];
+  let inBlockComment = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^=begin\b/.test(line)) {
+      inBlockComment = true;
       continue;
     }
-    try {
-      const app = JSON.parse(fs.readFileSync(p, 'utf8'));
-      if (app.expo && !hasDevClient) {
-        findings.push({
-          severity: 'warn',
-          code: 'expo-config-without-dev-client',
-          message:
-            'app.json declares an Expo project without expo-dev-client in package.json.',
-          fix:
-            'Use EAS dev client or prebuild + native run; Expo Go will fail at runtime.',
-        });
+    if (inBlockComment) {
+      if (/^=end\b/.test(line)) {
+        inBlockComment = false;
       }
-    } catch {
-      /* ignore */
+      continue;
     }
+    lines.push(/^\s*#/.test(line) ? '' : line);
   }
+  return lines;
 }
 
 /**
@@ -112,61 +143,74 @@ function checkIosPodfile(root, findings) {
   if (!fs.existsSync(podfile)) {
     return;
   }
-  const text = fs.readFileSync(podfile, 'utf8');
+  const lines = podfileCodeLines(fs.readFileSync(podfile, 'utf8'));
+  const code = lines.join('\n');
 
-  if (/pod\s+['"]MeshSdk['"]/i.test(text)) {
+  if (/^\s*pod\s+['"]MeshSdk['"]/im.test(code)) {
     findings.push({
       severity: 'error',
       code: 'legacy-meshsdk-pod',
-      message: 'Podfile still contains a manual pod \'MeshSdk\' line.',
-      fix:
-        'Remove the manual pod line. Autolinking supplies MeshSdk since 0.20.0. See docs/UPGRADING.md §12.1.',
+      message: "Podfile still declares pod 'MeshSdk' by hand.",
+      fix: `Delete the line; autolinking supplies MeshSdk since 0.20.0. See ${UPGRADING_URL}`,
     });
   }
 
-  if (/offline_protocol_uniffi_(sim|device)/i.test(text)) {
+  if (/offline_protocol_uniffi_(sim|device)\b/i.test(code)) {
     findings.push({
       severity: 'error',
       code: 'legacy-uniffi-archives',
       message:
-        'Podfile references offline_protocol_uniffi_sim or offline_protocol_uniffi_device archives.',
-      fix:
-        'Remove manual linker flags; the XCFramework is selected by CocoaPods. See docs/UPGRADING.md §12.1.',
+        'Podfile names the offline_protocol_uniffi_sim or offline_protocol_uniffi_device archive, which no longer exist.',
+      fix: `Delete those flags; the podspec links the XCFramework. See ${UPGRADING_URL}`,
     });
   }
 
-  if (
-    /LIBRARY_SEARCH_PATHS|OTHER_LDFLAGS/i.test(text) &&
-    /MeshSdk|offline_protocol/i.test(text)
-  ) {
+  // A build setting alone is ordinary (`-ObjC`), and MeshSdk alone is ordinary
+  // (a comment). Only the two close together look like the old hook.
+  const linkerHack = lines.some((line, i) => {
+    if (!LEGACY_BUILD_SETTINGS.test(line)) {
+      return false;
+    }
+    const from = Math.max(0, i - LINKER_HACK_WINDOW);
+    return lines.slice(from, i + LINKER_HACK_WINDOW + 1).some((l) => MESH_REFERENCE.test(l));
+  });
+  if (linkerHack) {
     findings.push({
       severity: 'warn',
       code: 'legacy-linker-hacks',
       message:
-        'Podfile post_install may still manipulate linker settings for MeshSdk.',
-      fix:
-        'Delete post_install hooks that set OTHER_LDFLAGS or LIBRARY_SEARCH_PATHS for MeshSdk.',
+        'Podfile appears to set build settings (OTHER_LDFLAGS, LIBRARY_SEARCH_PATHS, SWIFT_INCLUDE_PATHS or DEFINES_MODULE) for MeshSdk.',
+      fix: `Delete post_install code that configures MeshSdk; the podspec sets what it needs. See ${UPGRADING_URL}`,
     });
   }
 }
 
 /**
+ * The package ships its own `libuniffi_offline_protocol.so` (the name the
+ * generated Kotlin loads). A `liboffline_protocol_uniffi.so` under the app's
+ * own jniLibs is a leftover from copying the cargo output by hand: never
+ * loaded, and shipped in the APK anyway.
+ *
  * @param {string} root
  * @param {Finding[]} findings
  */
-function checkAndroidGradle(root, findings) {
-  const appGradle = path.join(root, 'android', 'app', 'build.gradle');
-  if (!fs.existsSync(appGradle)) {
+function checkAndroidJniLibs(root, findings) {
+  const jniLibs = path.join(root, 'android', 'app', 'src', 'main', 'jniLibs');
+  let abis;
+  try {
+    abis = fs.readdirSync(jniLibs, { withFileTypes: true }).filter((d) => d.isDirectory());
+  } catch {
     return;
   }
-  const text = fs.readFileSync(appGradle, 'utf8');
-  if (/liboffline_protocol_uniffi\.so/i.test(text) && !/libuniffi_offline_protocol/i.test(text)) {
+  const stale = abis
+    .filter((d) => fs.existsSync(path.join(jniLibs, d.name, 'liboffline_protocol_uniffi.so')))
+    .map((d) => d.name);
+  if (stale.length > 0) {
     findings.push({
       severity: 'warn',
-      code: 'android-jni-name',
-      message:
-        'Gradle may copy liboffline_protocol_uniffi.so; the loader expects libuniffi_offline_protocol.so.',
-      fix: 'Rename jniLibs per bindings/react-native README Android section or use autolinking.',
+      code: 'android-stale-jnilib',
+      message: `android/app/src/main/jniLibs holds liboffline_protocol_uniffi.so (${stale.join(', ')}), which nothing loads.`,
+      fix: 'Delete it; @offline-protocol/mesh-sdk ships libuniffi_offline_protocol.so for every ABI.',
     });
   }
 }
@@ -180,6 +224,7 @@ function exitCodeFromFindings(findings) {
 }
 
 module.exports = {
+  DOCS_URL,
   runMeshDoctorChecks,
   exitCodeFromFindings,
 };
