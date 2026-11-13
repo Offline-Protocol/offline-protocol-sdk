@@ -2,12 +2,20 @@
 
 This guide shows how to integrate the Offline Protocol SDK into a native iOS app (Swift).
 
+**Native app integrators:** install the shipped **Swift package** first. See
+[ios-native-distribution.md](ios-native-distribution.md) for the blessed path
+(`OfflineProtocolSDK` from `offline-protocol-swift`). The sections below on
+building an XCFramework by hand are for SDK maintainers and advanced setups.
+
 ## Prerequisites
 
 - Xcode 15+
 - Rust toolchain with iOS targets
 
-## Setup
+## Advanced: build the bridge from source
+
+Only if you are developing the SDK or cannot use a release Swift package. App
+teams should start with [ios-native-distribution.md](ios-native-distribution.md).
 
 ### 1. Install Rust iOS Targets
 
@@ -286,24 +294,16 @@ Add to `Info.plist`:
 
 ## Distribution
 
-The SDK ships as an npm package for React Native apps:
+| Surface | Install |
+|---------|---------|
+| React Native | `npm install @offline-protocol/mesh-sdk` |
+| **Native iOS (blessed)** | Swift package `OfflineProtocolSDK` — [ios-native-distribution.md](ios-native-distribution.md) |
+| SDK maintainers | [bindings/swift/README.md](../bindings/swift/README.md), [ADR 0025](adr/0025-native-packages-are-assembled-in-place.md) |
 
-```bash
-npm install @offline-protocol/mesh-sdk
-```
-
-For a **native** iOS app (no React Native), integrate the Rust core directly via the
-manual XCFramework build in steps 1–4 above: build the `offline-protocol-uniffi` static
-libraries for the device and simulator targets, package them into an XCFramework, and add
-it to your Xcode project alongside the UniFFI-generated Swift bindings.
-
-From 0.28.0 a release also builds a Swift package, `OfflineProtocolSDK`, from the
-same bridge sources the React Native module compiles, and it is distributed through
-the `Offline-Protocol/offline-protocol-swift` repository; see
-[bindings/swift](../bindings/swift/README.md) and
-[ADR 0025](adr/0025-native-packages-are-assembled-in-place.md). What is public in it
-is what the React Native module needed public, which leaves out the storage
-providers. A standalone CocoaPods pod is not published.
+The package ships the XCFramework, generated UniFFI bindings, transports, and
+integrator helpers such as `OfflineProtocolReferenceStorage` and
+`StorageConformance`. A standalone CocoaPods pod for native apps is not
+published (React Native uses the in-repo `MeshSdk` pod).
 
 ## Architecture
 
