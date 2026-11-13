@@ -265,6 +265,8 @@ jobs:
 
             rn_typecheck:
               - 'bindings/react-native/**'
+              # config-scenarios.test.js typechecks the forScenario examples here.
+              - 'docs/react-native-config-presets.md'
               - 'scripts/check-binding-generators.sh'
               - 'tools/gen_protocol_engine_host_bridge.py'
               - 'tools/gen_rn_protocol_engine_bridge_react_native.py'

@@ -98,7 +98,11 @@ export {
   forScenario,
   scenarioPreset,
 } from './configScenarios';
-export type { ConfigScenario, ForScenarioParams } from './configScenarios';
+export type {
+  ConfigScenario,
+  ForScenarioParams,
+  ScenarioOverrides,
+} from './configScenarios';
 export {
   looksLikeMeshAddress,
   MESH_ADDRESS_ENCODED_LEN,

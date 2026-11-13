@@ -500,12 +500,18 @@ use [`forScenario`](../../docs/react-native-config-presets.md):
 import { OfflineProtocol, forScenario } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol(
-  forScenario('localBle', { appId: 'my-app', profile: 'default' })
+  forScenario('internetRelay', {
+    appId: 'my-app',
+    profile: 'default',
+    overrides: { transports: { internet: { serverAddress: 'wss://relay.example.com/ws' } } },
+  })
 );
 ```
 
 Scenarios: `localBle`, `proximityMesh`, `internetRelay`, `nostrMesh`,
-`developmentCleartext` (lab only). See the [preset tables](../../docs/react-native-config-presets.md#scenario-table).
+`developmentCleartext` (lab only). `forScenario` throws when the result would
+start without the transport it enables, such as `internetRelay` with no
+`serverAddress`. See the [preset tables](../../docs/react-native-config-presets.md#scenario-table).
 
 ### ProtocolConfig
 
