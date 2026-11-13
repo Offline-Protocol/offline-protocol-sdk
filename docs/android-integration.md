@@ -32,7 +32,10 @@ cargo build --profile mobile --target x86_64-linux-android
 ### 3. Copy Native Libraries
 
 Each build produces `liboffline_protocol_uniffi.so`. UniFFI's Kotlin loader looks for
-`libuniffi_offline_protocol.so`, so copy each ABI's output under **that** name:
+`libuniffi_offline_protocol.so`, so copy each ABI's output under **that** name.
+The shipped library exposes **`OfflineProtocolJniLibrary.LOADED_BASENAME`** and
+**`CARGO_OUTPUT_BASENAME`** so the two names stay obvious in the IDE. Full tables
+and import rules: [android-jni-and-imports.md](android-jni-and-imports.md).
 
 ```
 android/app/src/main/jniLibs/
@@ -52,7 +55,10 @@ bindings are rewritten too and all five must be committed together (see
 The generated Kotlin bindings live in the `uniffi.offline_protocol` package. The
 library's hand-written classes, such as `OfflineProtocolReferenceStorage` and the
 transport managers, live in `com.offlineprotocol`; import those by name, since
-the React Native module in that package is not part of the Android library.
+the React Native module in that package is not part of the Android library. Do
+not use `OfflineProtocolModule` on the native path (React Native only). See
+[android-jni-and-imports.md](android-jni-and-imports.md) for a package table and
+the canonical consumer-check imports.
 
 ```kotlin
 import android.util.Log
