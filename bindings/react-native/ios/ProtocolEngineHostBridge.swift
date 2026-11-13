@@ -375,21 +375,7 @@ enum ProtocolEngineHostBridge {
            StorageNamespace.account(appId: live.appId, profile: live.profile) == namespace {
             throw HostError.illegalState("Refusing to wipe storage for the running account; call destroy() first")
         }
-        // Secure storage first: it holds the key every sealed protocol-state
-        // record is written under, so an interrupted wipe leaves the remainder
-        // as ciphertext nobody can open rather than readable state.
-        var firstError: Error?
-        do {
-            try MlsSecureStorage.wipeAccount(accountNamespace: namespace)
-        } catch {
-            firstError = error
-        }
-        do {
-            try AppContainerProtocolStateStorage.wipeAccount(accountNamespace: namespace)
-        } catch {
-            firstError = firstError ?? error
-        }
-        if let firstError = firstError { throw firstError }
+        try OfflineProtocolReferenceStorage.wipe(appId: appId, profile: profile)
         return nil
     }
 

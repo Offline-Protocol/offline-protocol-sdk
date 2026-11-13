@@ -11,6 +11,20 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Added
+
+- **Native iOS and Android applications get the SDK's built-in storage.**
+  `OfflineProtocolReferenceStorage` opens the Keychain or Keystore MLS store and
+  the app-container protocol-state store for one `(appId, profile)` account,
+  hands both to `initializeMls`, and returns what happened to a store written
+  before storage was split per account: a `warning` when this account starts
+  from a fresh identity. `wipe` erases one account on sign-out. React Native
+  opens and wipes its storage through the same code, so the two cannot drift.
+  The iOS and Android integration guides use it in place of providers an
+  application had to write itself.
+
 ## [0.33.0] — 2026-11-11
 
 > **Messages and their receipts cross a mesh of phones.** A resend now

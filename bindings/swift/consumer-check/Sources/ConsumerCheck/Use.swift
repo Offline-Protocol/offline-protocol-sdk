@@ -1,8 +1,8 @@
 import OfflineProtocolSDK
 
 // What an application writes first: build the engine, listen to it, start it,
-// hand it to a transport. `start` and `relay` are never run. They have to
-// compile, from outside the module.
+// hand it to a transport. `start`, `startWithReferenceStorage`, `signOut` and
+// `relay` are never run. They have to compile, from outside the module.
 
 public final class Listener: EventCallback, @unchecked Sendable {
     public init() {}
@@ -17,21 +17,27 @@ public func start(config: ProtocolConfig) throws -> OfflineProtocol {
     return engine
 }
 
-public func referenceStorageSmokeConfig() -> ProtocolConfig {
-    ConfigScenarios.forScenario(.localBle, appId: "consumer-check", profile: "default")
-}
-
-/// Native path: event callback, reference storage, then `start()` (G7).
-public func bootstrapWithReferenceStorage(config: ProtocolConfig) throws -> OfflineProtocol {
+// A native application's start: listen, open the built-in stores, then start.
+// MLS must be initialized before `start()`, and the adoption warning is the
+// only signal that this account lost an earlier identity.
+public func startWithReferenceStorage(config: ProtocolConfig) throws -> OfflineProtocol {
     let engine = try OfflineProtocol(config: config)
     engine.setEventCallback(callback: Listener())
-    try OfflineProtocolReferenceStorage.initializeMls(
+    let adoption = try OfflineProtocolReferenceStorage.initializeMls(
         on: engine,
         appId: config.appId,
         profile: config.profile
     )
+    if let warning = adoption.warning {
+        print("ConsumerCheck: \(warning)")
+    }
     try engine.start()
     return engine
+}
+
+public func signOut(engine: OfflineProtocol, config: ProtocolConfig) throws {
+    try engine.stop()
+    try OfflineProtocolReferenceStorage.wipe(appId: config.appId, profile: config.profile)
 }
 
 public func relay(engine: OfflineProtocol) -> TransportManager {
