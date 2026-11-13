@@ -41,6 +41,27 @@ android {
     }
 }
 
+// Manual jniLibs copies must use libuniffi_offline_protocol.so, not the cargo
+// output name. See docs/android-jni-and-imports.md and OfflineProtocolJniLibrary.
+tasks.register("checkJniLibraryNames") {
+    val jniRoot = file("src/main/jniLibs")
+    doLast {
+        if (!jniRoot.isDirectory) {
+            return@doLast
+        }
+        jniRoot.walk().filter { it.isFile && it.extension == "so" }.forEach { so ->
+            when (so.name) {
+                "libuniffi_offline_protocol.so" -> Unit
+                "liboffline_protocol_uniffi.so" -> error(
+                    "${so}: rename to libuniffi_offline_protocol.so (see OfflineProtocolJniLibrary)"
+                )
+                else -> error("${so}: unexpected native library name for manual jniLibs")
+            }
+        }
+    }
+}
+tasks.named("preBuild") { dependsOn("checkJniLibraryNames") }
+
 dependencies {
     // The one line the README gives an application. Nothing else is declared
     // here, JNA included: if this stops compiling, the library's public API

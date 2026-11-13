@@ -128,7 +128,8 @@ React Native's `developmentCleartext` preset. The first production-path
 [native-development-cleartext.md](native-development-cleartext.md).
 
 Native guides: [ios-integration.md](ios-integration.md),
-[android-integration.md](android-integration.md).
+[android-integration.md](android-integration.md). Android manual path: JNI names
+and Kotlin imports in [android-jni-and-imports.md](android-jni-and-imports.md).
 
 **Distribution shortcuts**
 

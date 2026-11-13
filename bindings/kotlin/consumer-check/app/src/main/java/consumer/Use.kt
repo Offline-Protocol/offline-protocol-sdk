@@ -1,11 +1,16 @@
 package consumer
 
+// Canonical native Android imports (#16). Engine: uniffi.offline_protocol.* ;
+// bridge helpers: com.offlineprotocol.* (not OfflineProtocolModule — RN only).
+// See docs/android-jni-and-imports.md and this file in the repository.
+
 import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import com.offlineprotocol.InternetManager
 import com.offlineprotocol.OfflineProtocolDevelopmentCleartextConfig
+import com.offlineprotocol.OfflineProtocolJniLibrary
 import com.offlineprotocol.OfflineProtocolReferenceStorage
 import com.offlineprotocol.StorageConformance
 import com.offlineprotocol.TransportManager
@@ -88,3 +93,7 @@ fun relay(context: Context, protocol: OfflineProtocol): TransportManager =
 // extend JNA's, so this compiles only while the library's metadata hands JNA
 // to whoever compiles against it.
 fun reachesJna(): Long = RustBuffer.ByValue().len
+
+/** Compile-checked JNI names for manual integrators (Maven AAR users can ignore). */
+fun jniNamesForDocs(): Pair<String, String> =
+    OfflineProtocolJniLibrary.LOADED_BASENAME to OfflineProtocolJniLibrary.CARGO_OUTPUT_BASENAME
