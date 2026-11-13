@@ -24684,6 +24684,54 @@ mod tests {
         );
     }
 
+    /// The native `StorageConformance` helpers decode the suite's report by
+    /// key name. A key renamed in `ConformanceReport` compiles in every
+    /// language and turns each native verification into a decode error, so the
+    /// keys Rust writes are pinned at both decoders, and the shape is pinned
+    /// whole: a key added here is one neither decoder reads.
+    #[test]
+    fn native_storage_conformance_reports_read_the_keys_rust_writes() {
+        let mut report = offline_protocol::storage_conformance::ConformanceReport::new();
+        report.check("passing", Ok(()));
+        report.check("failing", Err("detail".to_string()));
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).expect("the report serialises"))
+                .expect("the report is JSON");
+        let keys = |value: &serde_json::Value| {
+            let mut keys: Vec<String> = value
+                .as_object()
+                .expect("a JSON object")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        };
+        let report_keys = keys(&json);
+        let failure_keys = keys(&json["failures"][0]);
+        assert_eq!(report_keys, ["failures", "passed"]);
+        assert_eq!(failure_keys, ["check", "detail"]);
+
+        let rn =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |path: &str| {
+            std::fs::read_to_string(rn.join(path))
+                .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+        };
+        let swift = read("ios/StorageConformance.swift");
+        let kotlin = read("android/src/main/java/com/offlineprotocol/StorageConformance.kt");
+        for key in report_keys.iter().chain(&failure_keys) {
+            assert!(
+                swift.contains(&format!("public let {key}:")),
+                "StorageConformance.swift does not decode the `{key}` key the report writes"
+            );
+            assert!(
+                kotlin.contains(&format!("\"{key}\"")),
+                "StorageConformance.kt does not read the `{key}` key the report writes"
+            );
+        }
+    }
+
     /// `OfflineProtocolReferenceStorage` is the one place the built-in MLS and
     /// protocol-state stores are opened and wiped, on each platform. The React
     /// Native module and the engine host call it, so a native application that

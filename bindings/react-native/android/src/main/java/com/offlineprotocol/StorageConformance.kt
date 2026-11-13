@@ -1,64 +1,71 @@
 package com.offlineprotocol
 
-import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.offline_protocol.ProtocolStateStorageProvider
 import uniffi.offline_protocol.runStorageConformance
 
-/**
- * G7 PR2: typed access to [runStorageConformance] for native Android integrators (C11).
- */
+/** One check the backend failed, with enough detail to fix the adapter. */
 data class StorageConformanceFailure(
     val check: String,
     val detail: String,
 )
 
+/**
+ * What the conformance suite found for one backend.
+ *
+ * The keys [StorageConformance] reads are the ones the Rust `ConformanceReport`
+ * serialises; a guard in the FFI crate pins them, because a renamed key throws
+ * here rather than failing any build.
+ */
 data class StorageConformanceReport(
+    /** The checks that passed, in run order. */
     val passed: List<String>,
+    /** The checks that failed. */
     val failures: List<StorageConformanceFailure>,
 ) {
-    /** Green is the definition of a supported protocol-state backend. */
+    /**
+     * Whether the backend is supported: nothing failed and the suite ran. An
+     * empty report is not green, since it proves nothing was checked.
+     */
     val isGreen: Boolean
         get() = failures.isEmpty() && passed.isNotEmpty()
 }
 
+/**
+ * Runs the conformance suite (C11) against a protocol-state backend.
+ *
+ * Green is the definition of a supported backend, but it is not a persistence
+ * test: every check runs against one open instance. A persistent backend proves
+ * reopen with a test of its own.
+ */
 object StorageConformance {
-    /** Runs the engine suite against [provider] and decodes the JSON report. */
-    fun run(provider: ProtocolStateStorageProvider): StorageConformanceReport {
-        val root = JSONObject(runStorageConformance(provider))
-        val passed = root.getJSONArray("passed").toStringList()
-        val failures = root.getJSONArray("failures").toFailureList()
-        return StorageConformanceReport(passed, failures)
-    }
-
     /**
-     * Convenience: verify the shipped reference app-container store for one account.
+     * Runs the suite against [provider] and decodes its report.
      *
-     * Requires the Rust library to be loaded (device, emulator, or a host test that
-     * loads [uniffi.offline_protocol].
+     * No engine is needed, but the Rust library must be loaded. The suite
+     * writes only under its own probe key types and deletes what it wrote, but
+     * it writes records of several megabytes and blocks until it ends: run it
+     * off the main thread, and on a scratch instance of a new backend until it
+     * is green.
      */
-    fun verifyReferenceProtocolStateStorage(
-        context: Context,
-        appId: String,
-        profile: String,
-    ): StorageConformanceReport {
-        val storage = OfflineProtocolReferenceStorage.makeProtocolStateStorage(context, appId, profile)
-        return run(storage)
+    @JvmStatic
+    fun run(provider: ProtocolStateStorageProvider): StorageConformanceReport =
+        decode(runStorageConformance(provider))
+
+    /** Decodes the JSON report the suite renders. */
+    internal fun decode(json: String): StorageConformanceReport {
+        val root = JSONObject(json)
+        return StorageConformanceReport(
+            passed = root.getJSONArray("passed").strings(),
+            failures = root.getJSONArray("failures").failures(),
+        )
     }
 
-    private fun JSONArray.toStringList(): List<String> = buildList(length()) { i ->
-        add(getString(i))
-    }
+    private fun JSONArray.strings(): List<String> = List(length()) { getString(it) }
 
-    private fun JSONArray.toFailureList(): List<StorageConformanceFailure> =
-        buildList(length()) { i ->
-            val item = getJSONObject(i)
-            add(
-                StorageConformanceFailure(
-                    check = item.getString("check"),
-                    detail = item.getString("detail"),
-                ),
-            )
-        }
+    private fun JSONArray.failures(): List<StorageConformanceFailure> = List(length()) {
+        val item = getJSONObject(it)
+        StorageConformanceFailure(check = item.getString("check"), detail = item.getString("detail"))
+    }
 }

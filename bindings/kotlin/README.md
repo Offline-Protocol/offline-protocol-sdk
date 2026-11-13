@@ -16,7 +16,7 @@ Coordinates: `com.offlineprotocol:offline-protocol-sdk`.
 
 Verify a custom `ProtocolStateStorageProvider` with `StorageConformance.run(provider)`
 and check `report.isGreen` (see [C11](../../docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
-The call needs the Rust `.so` loaded.
+The call needs the Rust library loaded and blocks: run it off the main thread.
 
 ## What the library reads, and what it writes again
 

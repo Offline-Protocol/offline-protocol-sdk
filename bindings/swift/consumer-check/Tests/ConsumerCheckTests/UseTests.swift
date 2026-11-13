@@ -9,4 +9,14 @@ final class UseTests: XCTestCase {
 
         XCTAssertTrue(address.hasPrefix("off1"), "not an address: \(address)")
     }
+
+    /// The typed conformance report is public, and the suite runs from an
+    /// application's module over the store an application opens. The Keychain
+    /// half of the wipe fails without a host application; the state store is
+    /// still wiped.
+    func testTheReferenceStateStoreIsSupported() throws {
+        XCTAssertTrue(
+            try referenceStateStoreIsSupported(
+                appId: "consumer-check", scratchProfile: UUID().uuidString))
+    }
 }

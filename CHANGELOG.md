@@ -24,6 +24,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   opens and wipes its storage through the same code, so the two cannot drift.
   The iOS and Android integration guides use it in place of providers an
   application had to write itself.
+- **Native iOS and Android applications can verify a storage backend.**
+  `StorageConformance.run` runs the protocol-state conformance suite against a
+  `ProtocolStateStorageProvider` and returns a typed report (`passed`,
+  `failures` with each check and its detail, `isGreen`) instead of the JSON
+  string `runStorageConformance` returns. Green is the definition of a
+  supported backend.
 
 ### Fixed
 

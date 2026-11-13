@@ -549,7 +549,9 @@ Applications must not put secrets in a document name.
 
 **Green on the conformance suite is the definition of supported.** Run
 `runStorageConformance(provider)` (namespace-level, no protocol instance
-needed) and check that `failures` is empty. It covers the round trip,
+needed) and check that `failures` is empty. The Swift package and the
+Android library wrap it as `StorageConformance.run`, which decodes the report
+and whose `isGreen` also refuses a report that ran no checks. It covers the round trip,
 binary and empty values, overwrite semantics, delete idempotence, key-type
 isolation, listing accuracy, composed and long key ids, large records, and
 delete completeness. Each check exists because that defect is invisible

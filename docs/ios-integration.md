@@ -233,28 +233,22 @@ provider interfaces.
 
 #### Verify a custom protocol-state backend (C11)
 
-Green on the conformance suite is the definition of **supported** storage. On the
-native Swift path, call `StorageConformance.run(on:)` with your
-`ProtocolStateStorageProvider` (no running engine required). Probe a **scratch**
-instance until `report.isGreen` is true:
+Green on the conformance suite is the definition of a **supported** backend.
+`StorageConformance.run(on:)` runs it against your `ProtocolStateStorageProvider`
+and decodes the report; no engine is needed. The suite blocks on writes of
+several megabytes, so call it off the main thread, and on a scratch instance of
+a new backend until it is green:
 
 ```swift
-let report = try StorageConformance.run(on: myBackend)
+let report = try StorageConformance.run(on: myScratchBackend)
 precondition(report.isGreen, "\(report.failures)")
 ```
 
-To sanity-check the shipped reference store:
-
-```swift
-let report = try StorageConformance.verifyReferenceProtocolStateStorage(
-    appId: config.appId,
-    profile: config.profile
-)
-```
-
-Details: [bridges/README §C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified).
-MLS secure storage has a separate Rust-only suite today; protocol-state is what
-the FFI exposes via `runStorageConformance`.
+Every check runs against one open instance, so green is not a persistence test:
+a backend that forgets everything on reopen can pass, and proves reopen with a
+test of its own. Only the protocol-state suite crosses the FFI; the MLS storage
+suite runs in Rust only. Details:
+[C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified).
 
 ## Permissions
 
