@@ -53,6 +53,7 @@ let package = Package(
                 "ProtocolErrorBridge.swift",
                 "ReferenceStorage.swift",
                 "ReticulumManager.swift",
+                "StorageConformance.swift",
                 "TransportBridge.swift",
                 "TransportManager.swift",
                 "WifiDirectManager.swift",

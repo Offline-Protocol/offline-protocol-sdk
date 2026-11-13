@@ -6,11 +6,13 @@ import android.os.Bundle
 import android.util.Log
 import com.offlineprotocol.InternetManager
 import com.offlineprotocol.OfflineProtocolReferenceStorage
+import com.offlineprotocol.StorageConformance
 import com.offlineprotocol.TransportManager
 import uniffi.offline_protocol.EventCallback
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.ProtocolConfig
 import uniffi.offline_protocol.ProtocolException
+import uniffi.offline_protocol.ProtocolStateStorageProvider
 import uniffi.offline_protocol.RustBuffer
 import uniffi.offline_protocol.deriveAddress
 
@@ -56,6 +58,15 @@ fun signOut(context: Context, protocol: OfflineProtocol, config: ProtocolConfig)
     protocol.stop()
     protocol.close()
     OfflineProtocolReferenceStorage.wipe(context, config.appId, config.profile)
+}
+
+// Verify a protocol-state backend before wiring it in (C11): green means
+// supported. Run it off the main thread, and on a scratch instance: the suite
+// blocks on writes of several megabytes.
+fun isSupported(backend: ProtocolStateStorageProvider): Boolean {
+    val report = StorageConformance.run(backend)
+    report.failures.forEach { Log.e("ConsumerCheck", "${it.check}: ${it.detail}") }
+    return report.isGreen
 }
 
 fun address(protocol: OfflineProtocol?, publicKey: List<UByte>): String? =

@@ -46,6 +46,23 @@ public func signOut(engine: inout OfflineProtocol?, config: ProtocolConfig) thro
     try OfflineProtocolReferenceStorage.wipe(appId: config.appId, profile: config.profile)
 }
 
+// Verify a protocol-state backend before wiring it in (C11): green means
+// supported. Here it is the built-in store, opened for a scratch account and
+// wiped after. Run it off the main thread: the suite blocks on writes of
+// several megabytes.
+public func referenceStateStoreIsSupported(appId: String, scratchProfile: String) throws -> Bool {
+    defer { try? OfflineProtocolReferenceStorage.wipe(appId: appId, profile: scratchProfile) }
+    let store = try OfflineProtocolReferenceStorage.makeProtocolStateStorage(
+        appId: appId,
+        profile: scratchProfile
+    )
+    let report = try StorageConformance.run(on: store)
+    for failure in report.failures {
+        print("ConsumerCheck: \(failure.check): \(failure.detail)")
+    }
+    return report.isGreen
+}
+
 public func relay(engine: OfflineProtocol) -> TransportManager {
     InternetManager(protocol: engine, deviceId: "device", appId: "app")
 }

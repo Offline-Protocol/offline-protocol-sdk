@@ -234,6 +234,26 @@ initialization rather than coming up with every peer unblocked.
 See [MLS Integration](mls-integration.md#custom-storage-advanced) for the full
 provider interfaces.
 
+#### Verify a custom protocol-state backend (C11)
+
+Green on the conformance suite is the definition of a **supported** backend.
+`StorageConformance.run` runs it against your `ProtocolStateStorageProvider`
+and decodes the report; no engine is needed, but the Rust library must be
+loaded, so it runs on a device or emulator rather than in a JVM unit test. The
+suite blocks on writes of several megabytes, so call it off the main thread,
+and on a scratch instance of a new backend until it is green:
+
+```kotlin
+val report = StorageConformance.run(myScratchBackend)
+check(report.isGreen) { report.failures }
+```
+
+Every check runs against one open instance, so green is not a persistence test:
+a backend that forgets everything on reopen can pass, and proves reopen with a
+test of its own. Only the protocol-state suite crosses the FFI; the MLS storage
+suite runs in Rust only. Details:
+[C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified).
+
 ## Permissions
 
 Complete Android rules (SDK merge vs app manifest, runtime order, Wi‑Fi Direct,
