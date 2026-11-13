@@ -17,7 +17,8 @@ see [mobile-permissions.md](mobile-permissions.md).
 |--------------|--------------|------|
 | Wi‑Fi Direct enabled, no link for 1–2 minutes | Normal group formation budget | [Wi‑Fi Direct is slow, not stuck](#wifi-direct-is-slow-not-stuck) |
 | BLE works; Wi‑Fi Direct "never connects" in 30s | Timeout too short for QA | Same section |
-| Wi‑Fi Direct link is up but no `transport_switched` | DORS still prefers BLE | Same section |
+| `WiFiDirect` link in seconds, on phones that share a Wi‑Fi network | The LAN, not a group: the slot carries both | Same section |
+| First `neighbor_discovered` on `WiFiDirect` but no `transport_switched` to it | Not expected; capture logs and report it | Same section |
 | Two SDK apps on one phone; wrong neighbor | Shared BT service; `appId` filter | [Several SDK apps on one phone](#several-sdk-apps-on-one-phone) |
 | Extra neighbors while dogfooding another team's app | Relay + shared discovery | Same section |
 | Wi‑Fi Direct group never forms between two phones that each run several SDK apps | Neither app holds port 8988, so neither creates a group | [LAN / peer-stream port](#lan--peer-stream-port-android) |
@@ -42,17 +43,26 @@ Traffic and discovery can continue on Bluetooth.
 1. Enable both BLE and Wi‑Fi Direct for proximity tests, or wait the full time
    budget before failing the case.
 2. Watch events instead of staring at a spinner:
-   - `neighbor_discovered` whose `transport` names the Wi‑Fi Direct slot: the
-     link is up. This is the signal to wait for.
-   - `transport_switched` fires only if DORS then prefers the new link. A
-     switch needs a clear score improvement and respects a cooldown (see
-     [dors-configuration.md](dors-configuration.md)), so it may never fire
-     while BLE is healthy. Its absence is not a failure.
-3. Grant **NEARBY_WIFI_DEVICES** (Android 13+) or **ACCESS_FINE_LOCATION**
+   - `neighbor_discovered` with `transport: "WiFiDirect"`: the slot has a
+     link to that peer. This is the signal to wait for.
+   - `transport_switched` with `from: null` and `to: "WiFiDirect"` fires
+     alongside it when the slot gains its first link, and `from:
+     "WiFiDirect"` when it loses its last. The slot's own layer emits these
+     whatever DORS prefers. Only the first link switches: a second peer on a
+     slot that already has one raises `neighbor_discovered` alone. A first
+     `WiFiDirect` neighbor with no switch is a bug worth reporting. DORS decisions arrive separately as
+     `dors_transport_switched` (see
+     [dors-configuration.md](dors-configuration.md)).
+3. Take both phones off any shared Wi‑Fi network when you time group
+   formation. On Android the `wifiDirect` slot also carries peer streams on
+   the Wi‑Fi network the phone is on, so two phones on one network link over
+   the LAN within seconds and raise the same `WiFiDirect` events without any
+   group. That run says nothing about the group's time budget.
+4. Grant **NEARBY_WIFI_DEVICES** (Android 13+) or **ACCESS_FINE_LOCATION**
    (Android 12 and lower) **before** `start()` when Wi‑Fi Direct is on. Missing
    grants disable Wi‑Fi Direct for the whole session until you call
    `enableTransport('wifiDirect')` after the grant.
-4. Without `autoAccept`, pair once in the system Wi‑Fi Direct settings, then
+5. Without `autoAccept`, pair once in the system Wi‑Fi Direct settings, then
    retry.
 
 ### Configuration reference
@@ -100,7 +110,7 @@ The stack disambiguates using a short tag derived from each app's **`appId`**
 |----------|-----|
 | Use a **stable `appId` per product** across debug, staging, and release builds of **that** app | Otherwise two builds of "the same" app ignore each other |
 | Use **distinct `appId`s** for distinct products on the same phone | Avoid assuming every neighbor is your app |
-| **Upgrade all SDK apps** on shared test phones to the **same SDK generation** | Older builds could not disambiguate multi-app phones correctly (see [UPGRADING](UPGRADING.md)) |
+| **Upgrade all SDK apps** on shared test phones to **0.27.0 or later** | An app built on an earlier SDK serves no `appId` tag and cannot find its own counterpart on a phone running several SDK apps (see [changelog 0.27](changelog/0.27.md)) |
 | Identify **your** counterpart by **known `off1…` address** or invite, not by discovery alone | Other SDK apps may show up as neighbors |
 | After installing or removing an SDK app, **toggle Bluetooth** on the *other* phone if pairing stalls | iOS may cache stale GATT service lists |
 
@@ -132,8 +142,13 @@ Details: [changelog 0.32](changelog/0.32.md),
    on React Native (see [integrator map](integrator-map.md#react-native-lifecycle-ordering)).
 2. **Physical devices** in range, Bluetooth on, permissions granted per
    [mobile-permissions.md](mobile-permissions.md).
-3. Simulators are **not** sufficient for BLE or Wi‑Fi Direct mesh QA.
-4. Run `npx mesh-sdk-doctor` for linking and Expo issues.
+3. For peers on the same Wi‑Fi network: an Android app that targets API 37
+   (Android 17) must declare `ACCESS_LOCAL_NETWORK` and request it before
+   `start()`, or the LAN carrier stays off with only a warning `diagnostic`
+   event. The SDK does not declare it for you (see
+   [mobile-permissions.md](mobile-permissions.md#android-17-api-37-local-network)).
+4. Simulators are **not** sufficient for BLE or Wi‑Fi Direct mesh QA.
+5. Run `npx mesh-sdk-doctor` for linking and Expo issues.
 
 ---
 
@@ -142,6 +157,6 @@ Details: [changelog 0.32](changelog/0.32.md),
 | Document | Role |
 |----------|------|
 | [react-native-integration §4](react-native-integration.md#4-enabling-transports) | Transport behaviour after permissions |
-| [dors-configuration.md](dors-configuration.md) | When switches happen after links exist |
+| [dors-configuration.md](dors-configuration.md) | DORS decisions (`dors_transport_switched`) once links exist |
 | [transport-architecture.md](transport-architecture.md) | How carriers fit together |
 | [bindings/react-native/README §Troubleshooting](../bindings/react-native/README.md#troubleshooting) | Delivery, battery, linking |
