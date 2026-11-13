@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.offline_protocol.ProtocolException
 
 /**
  * The hints mirror `lifecycleHints.ts`: each fires only on a real ordering
@@ -20,9 +21,21 @@ class IntegratorLifecycleHintsTest {
         h.callBeforeEngineStart("sendMessage", engineRunning = false)
         h.startWithoutMls(encryptionEnabled = true, mlsReady = false)
         h.sendWithoutMls("sendMessage", encryptionEnabled = true, mlsReady = false, engineRunning = true)
+        h.encryptFailedRemedy("sendMessage", ProtocolException.EncryptFailed("boom"))
         h.dataStorageUnavailable("dataCreateDoc")
         h.interestApplied("notes", listOf("a"), engineRunning = true)
         assertEquals(emptyList<String>(), messages)
+    }
+
+    @Test
+    fun encryptFailedRemedyFiresOnce() {
+        val h = hints()
+        val error = ProtocolException.EncryptFailed("boom")
+        h.encryptFailedRemedy("sendMessage", error)
+        h.encryptFailedRemedy("sendMessageRich", error)
+        assertEquals(1, messages.size)
+        assertTrue(messages[0].contains("send failed with EncryptFailed"))
+        assertTrue(messages[0].contains("native-development-cleartext"))
     }
 
     @Test

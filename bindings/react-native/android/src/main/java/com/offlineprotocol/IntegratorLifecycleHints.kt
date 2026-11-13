@@ -77,6 +77,15 @@ class IntegratorLifecycleHints(
         )
     }
 
+    /** After a fail-closed send returns [ProtocolException.EncryptFailed]. */
+    fun encryptFailedRemedy(context: String, error: Throwable) {
+        if (!OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(error)) return
+        warnOnce(
+            "encrypt:failed",
+            IntegratorEncryptionRemedy.message(context),
+        )
+    }
+
     /** The engine refused [context] with `DataStorageUnavailable`. */
     fun dataStorageUnavailable(context: String) {
         warnOnce(

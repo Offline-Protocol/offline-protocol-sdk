@@ -139,10 +139,15 @@ final class MeshController {
 
             // REQUIRED before you can send anything. Encryption is fail-closed
             // by default, so with MLS uninitialized every send fails with
-            // encryptFailed. Unlike React Native nothing opens storage for you
-            // on the native path: this opens the SDK's built-in stores for the
-            // account. A warning means this account started from a fresh MLS
-            // identity although an earlier one was on the device; report it.
+            // encryptFailed. Catch that once with
+            // OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded,
+            // or use OfflineProtocolDevelopmentCleartextConfig for lab-only
+            // cleartext (never ship to users). See
+            // docs/native-development-cleartext.md. Unlike React Native nothing
+            // opens storage for you on the native path: this opens the SDK's
+            // built-in stores for the account. A warning means this account
+            // started from a fresh MLS identity although an earlier one was on
+            // the device; report it.
             let adoption = try OfflineProtocolReferenceStorage.initializeMls(
                 on: mesh,
                 appId: config.appId,

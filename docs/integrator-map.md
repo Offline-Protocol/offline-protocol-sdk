@@ -119,6 +119,14 @@ reports a lost earlier identity, and wipes an account on sign-out. React Native'
 verify one with **`StorageConformance.run`**, which runs the protocol-state
 conformance suite and returns a typed report. See
 [C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified).
+
+For **lab-only** cleartext smoke tests (never production), use
+**`OfflineProtocolDevelopmentCleartextConfig.make`**, the native counterpart of
+React Native's `developmentCleartext` preset. The first production-path
+`EncryptFailed` on a send can be diagnosed with
+**`OfflineProtocolEncryptFailedDiagnostics`**. See
+[native-development-cleartext.md](native-development-cleartext.md).
+
 Native guides: [ios-integration.md](ios-integration.md),
 [android-integration.md](android-integration.md).
 

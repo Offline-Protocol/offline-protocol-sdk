@@ -79,6 +79,14 @@ class ProtocolEngineHost(
         )
     }
 
+    private fun <T> withEncryptFailedHint(context: String, body: () -> T): T =
+        try {
+            body()
+        } catch (error: Throwable) {
+            lifecycleHints.encryptFailedRemedy(context, error)
+            throw error
+        }
+
     data class InternetTransportEventHandlers(
         val serverMessageEmitter: (String) -> Unit,
         val connectionStatusEmitter: (Boolean, Boolean) -> Unit,
@@ -525,13 +533,17 @@ class ProtocolEngineHost(
         warnLifecycleNeedsEngine("sendMessage")
         warnLifecycleSendMls("sendMessage")
         val msgPriority = messagePriorityFromInt(priority)
-        return requireProtocol().sendMessage(recipient, content, msgPriority, replyToMsg)
+        return withEncryptFailedHint("sendMessage") {
+            requireProtocol().sendMessage(recipient, content, msgPriority, replyToMsg)
+        }
     }
 
     fun sendMessageRich(recipient: String, content: String, options: SendMessageOptions): String {
         warnLifecycleNeedsEngine("sendMessageRich")
         warnLifecycleSendMls("sendMessageRich")
-        return requireProtocol().sendMessageRich(recipient, content, options)
+        return withEncryptFailedHint("sendMessageRich") {
+            requireProtocol().sendMessageRich(recipient, content, options)
+        }
     }
 
     fun receiveMessage(): String? = protocol?.receiveMessage()

@@ -63,7 +63,7 @@ const config = forScenario('nostrMesh', {
 | `proximityMesh` | BLE + Wi-Fi Direct on; internet, Nostr, Reticulum off | (core defaults) | Grants before `start()` on Android (see [mobile-permissions.md](mobile-permissions.md)) | Higher throughput when peers are nearby on LAN/Wi-Fi Direct |
 | `internetRelay` | BLE + internet on | `dors.preferOnline: true` | `transports.internet.serverAddress` (and `authToken` if required), or `connectInternetLater: true` | Apps with a relay/WebSocket back end |
 | `nostrMesh` | BLE + Nostr on | (core defaults) | `transports.nostr.relayUrls` | Nostr bootstrap path; needs MLS identity (`encryption` default on) |
-| `developmentCleartext` | BLE on | `encryption.enabled: false` | Nothing beyond ids | **Dev / lab only.** Production must use default fail-closed encryption |
+| `developmentCleartext` | BLE on | `encryption.enabled: false` | Nothing beyond ids | **Dev / lab only.** Production must use default fail-closed encryption. Native parity: [native-development-cleartext.md](native-development-cleartext.md) |
 
 ## What `forScenario` refuses
 

@@ -24848,4 +24848,72 @@ mod tests {
             }
         }
     }
+
+    /// Native lab cleartext must match React Native's `developmentCleartext`
+    /// preset (`encryptionEnabled` and `requireEncryption` false, BLE on). The
+    /// remedial `EncryptFailed` copy is one string in each platform's
+    /// `IntegratorEncryptionRemedy`, pinned so integrator hints cannot drift.
+    #[test]
+    fn development_cleartext_helpers_are_shipped_on_native_bridges() {
+        let rn =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |path: &str| {
+            std::fs::read_to_string(rn.join(path))
+                .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+        };
+        let swift_config = read("ios/DevelopmentCleartextConfig.swift");
+        let kotlin_config = read("android/src/main/java/com/offlineprotocol/DevelopmentCleartextConfig.kt");
+        for (path, body) in [
+            ("DevelopmentCleartextConfig.swift", swift_config.as_str()),
+            (
+                "DevelopmentCleartextConfig.kt",
+                kotlin_config.as_str(),
+            ),
+        ] {
+            assert!(
+                body.contains("bleEnabled: true") || body.contains("bleEnabled = true"),
+                "{path} must enable BLE for developmentCleartext parity"
+            );
+            assert!(
+                body.contains("encryptionEnabled: false") || body.contains("encryptionEnabled = false"),
+                "{path} must disable encryption for lab cleartext"
+            );
+            assert!(
+                body.contains("requireEncryption: false")
+                    || body.contains("requireEncryption = false"),
+                "{path} must set requireEncryption false (core rejects enabled-false alone)"
+            );
+            assert!(
+                body.contains("OfflineProtocolDevelopmentCleartextConfig"),
+                "{path} must export the native helper type"
+            );
+        }
+        let swift_remedy = read("ios/IntegratorEncryptionRemedy.swift");
+        let kotlin_remedy =
+            read("android/src/main/java/com/offlineprotocol/IntegratorEncryptionRemedy.kt");
+        const NEEDLE_A: &str = "send failed with EncryptFailed because";
+        const NEEDLE_B: &str = "encryption is fail-closed by default";
+        for (name, body) in [
+            ("IntegratorEncryptionRemedy.swift", swift_remedy.as_str()),
+            ("IntegratorEncryptionRemedy.kt", kotlin_remedy.as_str()),
+        ] {
+            assert!(
+                body.contains(NEEDLE_A) && body.contains(NEEDLE_B),
+                "{name} missing pinned remedial copy"
+            );
+        }
+        for path in [
+            "bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift",
+            "bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt",
+        ] {
+            let body = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path),
+            )
+            .expect("read consumer-check");
+            assert!(
+                body.contains("OfflineProtocolDevelopmentCleartextConfig"),
+                "{path} must compile the lab config helper"
+            );
+        }
+    }
 }

@@ -81,6 +81,23 @@ final class IntegratorLifecycleHints {
         )
     }
 
+    /// After a fail-closed send returns `EncryptFailed` (production default).
+    func encryptFailedRemedy(context: String, error: Error) {
+        guard Self.errorIsEncryptFailed(error) else { return }
+        warnOnce(
+            key: "encrypt:failed",
+            message: IntegratorEncryptionRemedy.message(context: context)
+        )
+    }
+
+    private static func errorIsEncryptFailed(_ error: Error) -> Bool {
+        #if OFFLINE_PROTOCOL_HARNESS_SHIMS
+        return String(reflecting: error).contains("EncryptFailed")
+        #else
+        return OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(error)
+        #endif
+    }
+
     /// The engine refused `context` with `DataStorageUnavailable`.
     func dataStorageUnavailable(context: String) {
         warnOnce(

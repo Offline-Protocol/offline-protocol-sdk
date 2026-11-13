@@ -106,7 +106,10 @@ class MainActivity : AppCompatActivity() {
 
         // REQUIRED before you can send anything. Encryption is fail-closed by
         // default, so with MLS uninitialized every send fails with
-        // EncryptFailed. Unlike React Native nothing opens storage for you on
+        // EncryptFailed. Use OfflineProtocolEncryptFailedDiagnostics for a
+        // one-shot remediation log, or OfflineProtocolDevelopmentCleartextConfig
+        // for lab-only cleartext (docs/native-development-cleartext.md).
+        // Unlike React Native nothing opens storage for you on
         // the native path: this opens the SDK's built-in stores for the account.
         // A warning means this account started from a fresh MLS identity
         // although an earlier one was on the device; report it.
