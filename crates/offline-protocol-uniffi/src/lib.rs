@@ -24347,62 +24347,102 @@ mod tests {
         }
     }
 
-    /// G6 PR2: RN `devTransportDiagnostics` matches native `diagnostic` messages by
-    /// exact string. Every recognised wire form must stay pinned in the hints
-    /// module and at each bridge emit site (C5), or hints rot silently.
+    /// The React Native development hints (`devTransportDiagnostics`) match
+    /// native `diagnostic` events by exact message and read named context
+    /// keys. A native wording change or a renamed key compiles and tests green
+    /// everywhere else and the hint silently never fires (C5), so every message
+    /// the hints recognise, and every context key they read, is pinned here at
+    /// the hints module and at each bridge emit site.
     #[test]
     fn transport_expectation_diagnostics_are_pinned_for_rn_hints() {
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo = manifest.parent().unwrap().parent().unwrap();
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the crate sits two levels below the repository root");
+        let read = |relative: &str| {
+            std::fs::read_to_string(repo.join(relative))
+                .unwrap_or_else(|e| panic!("{relative} must exist: {e}"))
+        };
+        // The line holding `needle` and the four after it, where an emit
+        // call's context map is written. Line-based, so it never slices
+        // inside a multi-byte character. Panics when `needle` is absent.
+        fn site<'a>(source: &'a str, needle: &str, file: &str) -> &'a str {
+            let at = source
+                .find(needle)
+                .unwrap_or_else(|| panic!("{file} must contain {needle:?}"));
+            let tail = &source[at..];
+            let end = tail
+                .match_indices('\n')
+                .nth(4)
+                .map_or(tail.len(), |(i, _)| i);
+            &tail[..end]
+        }
+        fn emit_site<'a>(source: &'a str, message: &str, file: &str) -> &'a str {
+            site(source, &format!("\"{message}\""), file)
+        }
 
         const WIFI_STARTED: &str = "Wi-Fi Direct group formation started";
         const WIFI_RESUMED: &str = "Wi-Fi Direct group formation resumed";
         const WIFI_PROGRESS: &str = "transport_expectation_wifi_direct_formation_progress";
-        const BLE_MULTI_APP: &str =
-            "BLE peer serves several service instances; choosing one";
+        const BLE_MULTI_APP: &str = "BLE peer serves several service instances; choosing one";
 
-        let ts = std::fs::read_to_string(
-            repo.join("bindings/react-native/src/transportDiagnostics.ts"),
-        )
-        .expect("transportDiagnostics.ts must exist after G6 PR2");
-        let wifi_direct = std::fs::read_to_string(
-            repo.join(
-                "bindings/react-native/android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
-            ),
-        )
-        .expect("WifiDirectManager.kt must exist");
-        let ble_android = std::fs::read_to_string(
-            repo.join(
-                "bindings/react-native/android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
-            ),
-        )
-        .expect("CentralGattClient.kt must exist");
-        let ble_ios = std::fs::read_to_string(repo.join("bindings/react-native/ios/BleManager.swift"))
-            .expect("BleManager.swift must exist");
+        let ts = read("bindings/react-native/src/transportDiagnostics.ts");
+        let wifi_direct = read(
+            "bindings/react-native/android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+        );
+        let ble_android = read(
+            "bindings/react-native/android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        );
+        let ble_ios = read("bindings/react-native/ios/BleManager.swift");
 
         for wire in [WIFI_STARTED, WIFI_RESUMED, WIFI_PROGRESS, BLE_MULTI_APP] {
             assert!(
-                ts.contains(wire),
+                ts.contains(&format!("'{wire}'")),
                 "transportDiagnostics.ts must recognise diagnostic message {wire:?}"
             );
         }
-
         for wire in [WIFI_STARTED, WIFI_RESUMED, WIFI_PROGRESS] {
+            emit_site(&wifi_direct, wire, "WifiDirectManager.kt");
+        }
+
+        // The progress report's context: the constant is the emit site's
+        // message, and the map beside it carries the two keys the hint reads.
+        let progress_emit = site(
+            &wifi_direct,
+            "DIAG_WIFI_DIRECT_FORMATION_PROGRESS,",
+            "WifiDirectManager.kt",
+        );
+        for key in ["elapsedMs", "report"] {
             assert!(
-                wifi_direct.contains(wire),
-                "WifiDirectManager.kt must emit diagnostic message {wire:?}"
+                progress_emit.contains(&format!("\"{key}\" to")),
+                "the formation progress diagnostic must carry context key {key:?}"
+            );
+            assert!(
+                ts.contains(&format!("context?.{key}")),
+                "transportDiagnostics.ts must read progress context key {key:?}"
             );
         }
 
+        // Several SDK apps on one phone: Android names the peer `address`,
+        // iOS `peripheral`, and the hint reads both.
+        let android_site = emit_site(&ble_android, BLE_MULTI_APP, "CentralGattClient.kt");
         assert!(
-            ble_android.contains(BLE_MULTI_APP),
-            "CentralGattClient.kt must emit the multi-app BLE diagnostic"
+            android_site.contains("\"address\" to"),
+            "CentralGattClient.kt's multi-app diagnostic must carry context key \"address\""
         );
+        let ios_site = emit_site(&ble_ios, BLE_MULTI_APP, "BleManager.swift");
         assert!(
-            ble_ios.contains(BLE_MULTI_APP),
-            "BleManager.swift must emit the multi-app BLE diagnostic"
+            ios_site.contains("\"peripheral\":"),
+            "BleManager.swift's multi-app diagnostic must carry context key \"peripheral\""
         );
+        for key in ["address", "peripheral"] {
+            assert!(
+                ts.contains(&format!("context?.{key}")),
+                "transportDiagnostics.ts must read multi-app context key {key:?}"
+            );
+        }
     }
+
     /// The local API chapter, the interface definition and the reference
     /// server's dispatch table name every declaration exactly once, and the
     /// chapter's catalogue names every event tag the engine can emit

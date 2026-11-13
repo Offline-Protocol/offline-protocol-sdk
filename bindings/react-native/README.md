@@ -166,10 +166,12 @@ a `setInterest` after `start()` that narrows a space's interest (a widening is
 fine). Toggle with `devLifecycleWarnings` on `ProtocolConfig` (default:
 `__DEV__` only). Warnings never block calls.
 
-Development builds can also map transport expectation diagnostics to one-time
-console hints (Wi‑Fi Direct formation timing, multi-app BLE on one phone) with
-`devTransportDiagnostics` (default: `__DEV__` only). See
-[docs/troubleshooting.md](../../docs/troubleshooting.md).
+Development builds also turn a few native `diagnostic` events into one-time
+console hints: Wi‑Fi Direct group formation that is slow but not stuck, and a
+peer phone running several SDK apps. Toggle with `devTransportDiagnostics` on
+`ProtocolConfig` (default: `__DEV__` only). The diagnostics themselves reach
+your `diagnostic` listeners in every build. See
+[docs/troubleshooting.md](../../docs/troubleshooting.md#react-native-development-console-hints).
 
 Built-in secure and restartable-state stores are isolated by both `appId` and
 `profile`. Changing either value selects a fresh storage namespace.
