@@ -24985,4 +24985,43 @@ mod tests {
             "consumer Use.kt must not import OfflineProtocolModule"
         );
     }
+
+    /// The README rendered into every release Swift package must match the
+    /// integrator surface we ship (reference storage, not stale "private storage"
+    /// copy) and point at the distribution guide on the main repository.
+    #[test]
+    fn swift_package_distribution_readme_matches_shipped_integrator_kit() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let readme =
+            std::fs::read_to_string(repo.join("bindings/swift/PACKAGE_README.md.template"))
+                .expect("PACKAGE_README.md.template");
+        const STALE: &str = "storage providers are not yet public";
+        assert!(
+            !readme.contains(STALE),
+            "distribution README still claims storage is private"
+        );
+        for needle in [
+            "OfflineProtocolReferenceStorage",
+            "StorageConformance",
+            "docs/ios-native-distribution.md",
+            "offline-protocol-swift.git",
+        ] {
+            assert!(
+                readme.contains(needle),
+                "PACKAGE_README.md.template missing `{needle}`"
+            );
+        }
+        let upgrading = std::fs::read_to_string(repo.join("docs/UPGRADING.md")).expect("UPGRADING");
+        assert!(
+            upgrading.contains("12.3 Native iOS: bump the Swift package"),
+            "UPGRADING must document Swift package version bumps"
+        );
+        assert!(
+            upgrading.contains("ios-native-distribution.md"),
+            "UPGRADING §12.3 must link ios-native-distribution.md"
+        );
+    }
 }

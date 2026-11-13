@@ -62,7 +62,7 @@ checklist.
 | Surface | Always check | Usually check on jump | Rare |
 |---------|--------------|----------------------|------|
 | **React Native** | [§8](#8-react-native-bridge-fallbacks-now-match-the-sdk-defaults), [§11](#11-events-you-must-now-handle), [§12](#12-build-and-packaging), [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) (iOS), [§13](#13-upgrade-test-checklist) | §14 identity, §16 data layer, §20 telemetry, §25–§30 behaviour | §1–§7 if never on pre-0.17 |
-| **Native Swift / Kotlin** | [§1](#1-initialize_mls-now-takes-two-storage-providers), [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence) (custom storage), [§14](#14-your-identity-is-derived-not-chosen-v0210), [§12](#12-build-and-packaging) (regenerate bindings) | §11 events, version-tagged iOS/Android behaviour in §18, §25–§30 | RN-only §8–§9 |
+| **Native Swift / Kotlin** | [§1](#1-initialize_mls-now-takes-two-storage-providers), [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence) (custom storage), [§14](#14-your-identity-is-derived-not-chosen-v0210), [§12](#12-build-and-packaging) ([§12.3](#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework) for Swift package apps) | §11 events, version-tagged iOS/Android behaviour in §18, §25–§30 | RN-only §8–§9; hand-built XCFramework §12.2 |
 | **Python** | [§1](#1-initialize_mls-now-takes-two-storage-providers) (`state_root`), [§14](#14-your-identity-is-derived-not-chosen-v0210) | §16 data, §25+ behaviour | RN §8–§9 |
 | **Rust app on crates** | [This release at a glance](#this-release-at-a-glance) Rust column, §15 API removals, §19 Reticulum crate | §25–§31 exhaustive `Event` / config field matches | Binding-only packaging |
 | **C / C# / Java** | [§12](#12-build-and-packaging), [§14](#14-your-identity-is-derived-not-chosen-v0210) | Same as native for storage if you implement providers | RN sections |
@@ -1392,6 +1392,38 @@ for the current pin).
 | Android | `ProtocolStateStorage.kt`, `StorageNamespace.kt`, `LegacyStoreAdoption.kt` |
 
 Run `pod install` for iOS. A JS-only update will not pick these up.
+
+### 12.3 Native iOS: bump the Swift package, not a hand-built XCFramework
+
+**Applies to native Swift apps** that depend on `OfflineProtocolSDK` from
+[`offline-protocol-swift`](https://github.com/Offline-Protocol/offline-protocol-swift)
+(see [ios-native-distribution.md](ios-native-distribution.md)).
+
+**What to do on an SDK upgrade**
+
+1. Bump the package version in Xcode (**File → Packages → Update to Latest Package
+   Versions**) or raise the `from:` / exact version in `Package.swift` to match the
+   SDK release you are adopting (`X.Y.Z` aligns with the main repository tag).
+2. Clean-build the app. You do **not** need to rebuild `liboffline_protocol_uniffi.a`
+   or stitch an XCFramework unless you maintain a fork built from source
+   ([ios-integration.md](ios-integration.md#advanced-build-the-bridge-from-source)).
+3. Re-read [CHANGELOG](../CHANGELOG.md) and the version-tagged sections in this
+   file for API and behaviour changes. Regenerate bindings (§12.2) applies only
+   when you compile the bridge yourself, not when you consume a release package.
+
+**What the release train publishes**
+
+Each `vX.Y.Z` GitHub release attaches the SwiftPM XCFramework archive and the
+assembled package tree (`offline-protocol-X.Y.Z-swift-package.tar.gz`). The
+distribution repository pulls those assets and tags `X.Y.Z`; SPM resolves that
+tag to a fixed revision, so integrators upgrade by version, not by copying
+Rust build artifacts.
+
+**If you vendor a tarball instead of the distribution repo**
+
+Verify the tarball's `Package.swift` checksum matches the XCFramework zip from
+the same release, then replace your vendored tree. Do not edit generated sources
+by hand.
 
 **Android test dependency:** `org.robolectric:robolectric:4.16` was added to
 `testImplementation`. The `build.gradle` react-native detection also now checks

@@ -109,6 +109,12 @@ SDK maintainers and contributors still use the scripts in
 [ios-integration.md#advanced-build-the-bridge-from-source](ios-integration.md#advanced-build-the-bridge-from-source)
 and [bindings/swift/README.md](../bindings/swift/README.md) to validate changes.
 
+## Upgrading
+
+On a new SDK version, bump the Swift package dependency to the same `X.Y.Z`
+(release train). You do not rebuild Rust locally unless you fork from source.
+Details: [UPGRADING.md §12.3](UPGRADING.md#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework).
+
 ## See also
 
 - [ios-integration.md](ios-integration.md) — app patterns, plist, transports, groups

@@ -141,35 +141,30 @@ val messageId = protocol.sendMessage(
 
 ---
 
-## For iOS Developers
+## For iOS Developers (native Swift)
 
-> Native (no React Native) integration needs the full `ProtocolConfig`, permission
-> setup, and a call to `initializeMls(secureStorage:protocolStateStorage:)` with two
-> storage providers you supply — there is no auto-initialization on the native path,
-> and encryption is fail-closed, so sends fail until MLS is initialized. See the
-> [iOS Integration Guide](docs/ios-integration.md) for the complete
-> walkthrough — the snippet below is just the shape.
+Native apps should install the **release Swift package** `OfflineProtocolSDK`, not
+build Rust by hand. Start with
+[ios-native-distribution.md](docs/ios-native-distribution.md), then
+[ios-integration.md](docs/ios-integration.md) for transports and plist setup.
 
-### 1. Build Rust Library
+### 1. Add the package
 
-```bash
-cargo build --profile mobile --target aarch64-apple-ios
-```
+In Xcode: **File → Add Package Dependencies…** →
+`https://github.com/Offline-Protocol/offline-protocol-swift.git`
 
-This produces `liboffline_protocol_uniffi.a`.
-
-### 2. Add to Xcode
-
-Add `liboffline_protocol_uniffi.a` (or the device and simulator XCFramework that
-`bindings/react-native/scripts/build-uniffi-ios.sh` builds) and the generated `offline_protocol.swift` to your project.
-
-### 3. Use in Swift
+### 2. Initialize MLS (built-in stores)
 
 ```swift
-// Build `config` with the full ProtocolConfig(...) — see the iOS integration guide.
-let mesh = try OfflineProtocol(config: config)
-try mesh.start()
+import OfflineProtocolSDK
 
+try OfflineProtocolReferenceStorage.initializeMls(on: mesh, appId: "my-app", profile: "default")
+try mesh.start()
+```
+
+### 3. Send a message
+
+```swift
 let messageId = try mesh.sendMessage(
     recipient: peerAddress, // the peer's off1… address
     content: "Hello!",
@@ -177,6 +172,9 @@ let messageId = try mesh.sendMessage(
     replyToMsg: nil
 )
 ```
+
+Custom storage or an XCFramework built from source: see the integration and
+distribution guides above; that path is for maintainers, not the default app flow.
 
 ---
 
