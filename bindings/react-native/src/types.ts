@@ -1012,6 +1012,15 @@ export interface ProtocolConfig {
    * (`__DEV__`); off in production unless set to `true` explicitly.
    */
   devLifecycleWarnings?: boolean;
+
+  /**
+   * When enabled, maps selected native `diagnostic` events to one-time console
+   * hints about Wi‑Fi Direct formation timing and a peer phone running several
+   * SDK apps. Defaults to on in development builds (`__DEV__`); off in
+   * production unless set to `true` explicitly. Only the console hints are
+   * gated: the `diagnostic` events reach listeners either way.
+   */
+  devTransportDiagnostics?: boolean;
 }
 
 /**

@@ -160,6 +160,31 @@ Details: [changelog 0.32](changelog/0.32.md),
 
 ---
 
+## React Native: development console hints
+
+`devTransportDiagnostics` on `ProtocolConfig` turns a few native `diagnostic`
+events into one-time `console.warn` messages that link back to this page. It is
+**on** in development builds (`__DEV__`) and **off** in production unless set
+to `true`. The hints never block calls. Each is shown at most once per
+process, the progress hint once for each report number.
+
+| Native `diagnostic` message | Platform | Hint |
+|-----------------------------|----------|------|
+| `Wi-Fi Direct group formation started` or `... resumed` | Android | Formation is in progress; once a peer is nearby a group often takes one to two minutes |
+| `transport_expectation_wifi_direct_formation_progress` | Android | Formation with a nearby peer is still running, with the elapsed time |
+| `BLE peer serves several service instances; choosing one` | Android, iOS | The peer phone runs several SDK apps and the stack is picking yours by `appId` |
+
+The progress diagnostic is reported only while an attempt can end in a group:
+a peer of the same `appId` has been heard over Wi‑Fi Direct, Wi‑Fi P2P is on,
+the transport is not paused, the device is not yet in this app's group, and no
+stream links a peer yet (a `WiFiDirect` link over the LAN counts as one). It is
+sent at one, two and four minutes into an attempt, never more, with `elapsedMs`
+and `report` (1 to 3) in its context. A lone phone never sends it. Unlike the
+console hints, the diagnostic reaches your `diagnostic` listeners in every
+build.
+
+---
+
 ## Related
 
 | Document | Role |

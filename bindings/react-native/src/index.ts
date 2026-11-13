@@ -112,6 +112,10 @@ import { setDevPeerAddressWarnings, warnPeerIdIfMisshapen } from './peerAddressH
 import { internetAutoConnects, nostrAutoConnects } from './transportAutoStart';
 import { formatNativeLinkingError } from './hostCompatibility';
 import {
+  bindDevTransportDiagnosticsFromConfig,
+  maybeExplainTransportDiagnostic,
+} from './transportDiagnostics';
+import {
   bindDevLifecycleWarningsFromConfig,
   isModuleEngineStarted,
   setModuleEngineStartedForHints,
@@ -641,6 +645,7 @@ export class OfflineProtocol {
     this.config = config;
     setDevPeerAddressWarnings(config.devPeerAddressWarnings);
     bindDevLifecycleWarningsFromConfig(config.devLifecycleWarnings);
+    bindDevTransportDiagnosticsFromConfig(config.devTransportDiagnostics);
     this.eventEmitter = new NativeEventEmitter(OfflineProtocolNativeModule);
     this.setupEventSubscription();
   }
@@ -1290,6 +1295,9 @@ export class OfflineProtocol {
   private emitEvent(event: ProtocolEvent): void {
     if (event.type === 'identity_ready') {
       this.cachedLocalAddress = event.address;
+    }
+    if (event.type === 'diagnostic') {
+      maybeExplainTransportDiagnostic(event);
     }
 
     let delivered = false;
