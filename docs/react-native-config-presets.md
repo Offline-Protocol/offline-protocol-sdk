@@ -61,7 +61,7 @@ const config = forScenario('nostrMesh', {
 |----------|------------|--------------|--------------------|-------------|
 | `localBle` | BLE on; Wi-Fi Direct, internet, Nostr, Reticulum off | (core defaults) | `appId`, `profile` | First on-device mesh. The same transports as a config that names none, spelled out |
 | `proximityMesh` | BLE + Wi-Fi Direct on; internet, Nostr, Reticulum off | (core defaults) | Grants before `start()` on Android (see [mobile-permissions.md](mobile-permissions.md)) | Higher throughput when peers are nearby on LAN/Wi-Fi Direct |
-| `internetRelay` | BLE + internet on | `dors.preferOnline: true` | `transports.internet.serverAddress` (and `authToken` if required) | Apps with a relay/WebSocket back end |
+| `internetRelay` | BLE + internet on | `dors.preferOnline: true` | `transports.internet.serverAddress` (and `authToken` if required), or `connectInternetLater: true` | Apps with a relay/WebSocket back end |
 | `nostrMesh` | BLE + Nostr on | (core defaults) | `transports.nostr.relayUrls` | Nostr bootstrap path; needs MLS identity (`encryption` default on) |
 | `developmentCleartext` | BLE on | `encryption.enabled: false` | Nothing beyond ids | **Dev / lab only.** Production must use default fail-closed encryption |
 
@@ -69,10 +69,14 @@ const config = forScenario('nostrMesh', {
 
 `start()` connects the internet transport only when it has a `serverAddress`,
 and Nostr only when it has at least one relay URL. Without them the engine
-starts, the transport stays down, and nothing reports it. `forScenario`
-therefore throws instead of returning such a config:
+starts and `start()` leaves the transport down without an error. `forScenario`
+therefore throws instead of returning such a config, unless you say the app
+connects the relay itself (next section):
 
-- the internet transport enabled without `serverAddress`;
+- the internet transport enabled without `serverAddress`, and without
+  `connectInternetLater`;
+- `connectInternetLater` with the internet transport off, or together with a
+  `serverAddress` (which `start()` would connect at once);
 - Nostr enabled without `relayUrls`, or with `encryption.enabled: false`
   (Nostr needs the identity that MLS initialization creates, and disabling
   encryption skips that initialization);
@@ -82,6 +86,39 @@ therefore throws instead of returning such a config:
 
 A config with encryption off, from `developmentCleartext` or from an
 override, logs a warning each time `forScenario` builds it.
+
+## A relay whose server or token arrives after login
+
+An app that learns its relay address or token only once the user has logged
+in keeps the internet transport on at construction (that is what registers
+it) and connects it after `start()` with `enableTransport`. Pass
+`connectInternetLater: true` so `forScenario` accepts the missing server:
+
+```typescript
+import { OfflineProtocol, forScenario } from '@offline-protocol/mesh-sdk';
+
+// From your own login flow, after start().
+declare function loggedInRelay(): Promise<{ serverAddress: string; authToken: string }>;
+
+async function startMesh(): Promise<OfflineProtocol> {
+  const protocol = new OfflineProtocol(
+    forScenario('internetRelay', {
+      appId: 'my-chat',
+      profile: 'default',
+      connectInternetLater: true,
+    })
+  );
+  await protocol.start();
+
+  const { serverAddress, authToken } = await loggedInRelay();
+  await protocol.enableTransport('internet', { enabled: true, serverAddress, authToken });
+  return protocol;
+}
+```
+
+`start()` does not restore a relay connected this way: after a restart, call
+`enableTransport('internet', ...)` again (see
+[react-native-integration.md](react-native-integration.md)).
 
 ## Defaults philosophy
 

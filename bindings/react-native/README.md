@@ -511,7 +511,10 @@ const protocol = new OfflineProtocol(
 Scenarios: `localBle`, `proximityMesh`, `internetRelay`, `nostrMesh`,
 `developmentCleartext` (lab only). `forScenario` throws when the result would
 start without the transport it enables, such as `internetRelay` with no
-`serverAddress`. See the [preset tables](../../docs/react-native-config-presets.md#scenario-table).
+`serverAddress`. An app whose relay server or token arrives after login passes
+`connectInternetLater: true` and calls `enableTransport('internet', ...)` after
+`start()` ([example](../../docs/react-native-config-presets.md#a-relay-whose-server-or-token-arrives-after-login)).
+See the [preset tables](../../docs/react-native-config-presets.md#scenario-table).
 
 ### ProtocolConfig
 

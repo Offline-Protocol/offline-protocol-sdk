@@ -7,11 +7,14 @@
  *
  * `forScenario` refuses a config that would start without the transport it
  * names. `start()` brings internet up only with a `serverAddress` and Nostr
- * only with a relay URL, and says nothing when either is missing, so a preset
- * that returned such a config would build an app that is silently offline on
- * the one transport it was chosen for.
+ * only with a relay URL (the predicates in `transportAutoStart.ts`, which
+ * `start()` reads too), so a preset that returned such a config would build
+ * an app that is silently offline on the one transport it was chosen for.
+ * The one exception is explicit: `connectInternetLater` for an app that
+ * enables the relay itself after login.
  */
 
+import { internetAutoConnects, nostrAutoConnects } from './transportAutoStart';
 import type { ProtocolConfig, TransportsConfig } from './types';
 
 /**
@@ -55,6 +58,15 @@ export interface ForScenarioParams {
   profile: string;
   /** Merged over the preset last; use for relay URLs, the internet server and app tuning. */
   overrides?: ScenarioOverrides;
+  /**
+   * The internet transport is on, and its server and token arrive after
+   * `start()` through `enableTransport('internet', { serverAddress, authToken })`,
+   * typically once the user has logged in. Without this flag an enabled
+   * internet transport with no `serverAddress` throws, because `start()`
+   * alone would never connect it. Refused with internet off, and with a
+   * `serverAddress` in overrides (which `start()` would connect at once).
+   */
+  connectInternetLater?: boolean;
 }
 
 type PlainRecord = Record<string, unknown>;
@@ -171,14 +183,19 @@ const TRANSPORT_KEYS: readonly (keyof TransportsConfig)[] = [
  * of these is otherwise silent: the engine starts and the transport, or the
  * whole config, is not what the app chose.
  */
-function assertStartable(scenario: ConfigScenario, config: ProtocolConfig): void {
+function assertStartable(
+  scenario: ConfigScenario,
+  config: ProtocolConfig,
+  connectInternetLater: boolean
+): void {
   const fail = (detail: string): never => {
     throw new Error(`[OfflineProtocol] forScenario('${scenario}'): ${detail}`);
   };
   const transports = config.transports ?? {};
   for (const key of TRANSPORT_KEYS) {
-    const entry = transports[key];
-    if (entry !== undefined && typeof entry.enabled !== 'boolean') {
+    // A parsed override can carry `null` where the types allow only an object.
+    const entry = transports[key] as { enabled?: unknown } | null | undefined;
+    if (entry === null || (entry !== undefined && typeof entry.enabled !== 'boolean')) {
       fail(
         `transports.${key} has no 'enabled' and no preset supplies one. ` +
           `Set transports.${key}.enabled in overrides.`
@@ -186,15 +203,34 @@ function assertStartable(scenario: ConfigScenario, config: ProtocolConfig): void
     }
   }
   const internet = transports.internet;
-  if (internet?.enabled && !internet.serverAddress) {
+  if (connectInternetLater) {
+    // Enabling internet at construction is what registers the transport, so
+    // a later enableTransport('internet', ...) needs it on; and a server here
+    // would make start() connect at once, before the credentials the flag
+    // waits for.
+    if (!internet?.enabled) {
+      fail(
+        'connectInternetLater needs the internet transport enabled. Use ' +
+          "'internetRelay', or set overrides.transports.internet.enabled."
+      );
+    }
+    if (internetAutoConnects(internet)) {
+      fail(
+        'connectInternetLater and transports.internet.serverAddress contradict ' +
+          'each other: with a server, start() connects at once. Drop one.'
+      );
+    }
+  } else if (internet?.enabled && !internetAutoConnects(internet)) {
     fail(
-      'the internet transport is enabled without a server, so start() would ' +
-        'never connect it. Set overrides.transports.internet.serverAddress.'
+      'the internet transport is enabled without a server, so start() will not ' +
+        'connect it. Set overrides.transports.internet.serverAddress, or pass ' +
+        "connectInternetLater: true and call enableTransport('internet', ...) " +
+        'after start() once the server and token are known.'
     );
   }
   const nostr = transports.nostr;
   if (nostr?.enabled) {
-    if (!nostr.relayUrls?.length) {
+    if (!nostrAutoConnects(nostr)) {
       fail(
         'the Nostr transport is enabled without relays, so start() would never ' +
           'connect it. Set overrides.transports.nostr.relayUrls; the SDK names none.'
@@ -214,8 +250,10 @@ function assertStartable(scenario: ConfigScenario, config: ProtocolConfig): void
  * preset, and optional `overrides` (deep-merged last).
  *
  * @throws Error when the result would start without the transport it enables
- *   (internet without `serverAddress`, Nostr without `relayUrls` or with
- *   encryption off), when a transport entry has no `enabled`, or when
+ *   (internet without `serverAddress` and without `connectInternetLater`,
+ *   Nostr without `relayUrls` or with encryption off), when
+ *   `connectInternetLater` is set with internet off or with a
+ *   `serverAddress`, when a transport entry has no `enabled`, or when
  *   `overrides` names `appId` or `profile`.
  */
 export function forScenario(
@@ -237,7 +275,7 @@ export function forScenario(
     appId: params.appId,
     profile: params.profile,
   } as ProtocolConfig;
-  assertStartable(scenario, config);
+  assertStartable(scenario, config, params.connectInternetLater === true);
   if (config.encryption?.enabled === false) {
     console.warn(
       `[OfflineProtocol] forScenario('${scenario}') builds a config with end-to-end ` +

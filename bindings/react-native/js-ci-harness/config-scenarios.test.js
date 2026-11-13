@@ -16,9 +16,11 @@
  *      `undefined` keeps the preset, a parsed `__proto__` is never copied,
  *      and presets are fresh objects.
  *   3. `forScenario` throws on a config that would start without the
- *      transport it enables, a failure `start()` reports nowhere.
+ *      transport it enables, a failure `start()` reports nowhere, unless
+ *      `connectInternetLater` says the app enables the relay itself.
  *   4. A preset drives the real `OfflineProtocol` to the native payloads the
- *      scenario promises.
+ *      scenario promises, and `start()` connects exactly what the shared
+ *      predicates in `transportAutoStart.ts` accept.
  *
  * See one-shot-hold.test.js for the stubbed-native-module harness pattern.
  */
@@ -57,11 +59,11 @@ function compileSdk() {
   return outDir;
 }
 
-/** Every ```typescript fence in `file` that calls `forScenario`. */
+/** Every ```typescript or ```ts fence in `file` that calls `forScenario`. */
 function forScenarioExamples(file) {
   const text = fs.readFileSync(file, 'utf8');
   const blocks = [];
-  const fence = /```typescript\n([\s\S]*?)```/g;
+  const fence = /```(?:typescript|ts)\n([\s\S]*?)```/g;
   let match;
   while ((match = fence.exec(text)) !== null) {
     if (match[1].includes('forScenario(')) {
@@ -361,6 +363,42 @@ test('a transport entry with no enabled throws', () => {
   );
 });
 
+test('a null transport entry throws the named error, not a TypeError', () => {
+  const overrides = JSON.parse('{"transports":{"internet":null}}');
+  assert.throws(
+    () => sdk.forScenario('localBle', { ...ids, overrides }),
+    /transports\.internet has no 'enabled'/
+  );
+});
+
+test('internetRelay without a server is accepted with connectInternetLater', () => {
+  const config = sdk.forScenario('internetRelay', { ...ids, connectInternetLater: true });
+  assert.deepEqual(config.transports.internet, { enabled: true });
+  assert.equal('connectInternetLater' in config, false, 'the flag is a parameter, not config');
+});
+
+test('the missing-server error names both ways out', () => {
+  assert.throws(() => sdk.forScenario('internetRelay', ids), /connectInternetLater/);
+});
+
+test('connectInternetLater with a server throws', () => {
+  assert.throws(
+    () => sdk.forScenario('internetRelay', { ...ids, overrides: RELAY, connectInternetLater: true }),
+    /contradict/
+  );
+});
+
+test('connectInternetLater with internet off throws', () => {
+  assert.throws(
+    () => sdk.forScenario('localBle', { ...ids, connectInternetLater: true }),
+    /needs the internet transport enabled/
+  );
+  assert.throws(
+    () => sdk.forScenario('nostrMesh', { ...ids, overrides: NOSTR, connectInternetLater: true }),
+    /needs the internet transport enabled/
+  );
+});
+
 test('appId or profile inside overrides throws instead of being dropped', () => {
   assert.throws(
     () => sdk.forScenario('localBle', { ...ids, overrides: { appId: 'other' } }),
@@ -429,11 +467,56 @@ test('developmentCleartext reaches native as the fully disabled posture', async 
   );
 });
 
+test('connectInternetLater registers internet at create and leaves the connect to the app', async () => {
+  const protocol = new sdk.OfflineProtocol(
+    sdk.forScenario('internetRelay', { ...ids, connectInternetLater: true })
+  );
+  await protocol.start();
+
+  assert.equal(payloadOf('create').internetEnabled, true);
+  assert.equal(
+    nativeCalls.some((c) => c.method === 'enableTransport' && c.args[0] === 'internet'),
+    false,
+    'start() must not connect a relay it has no server for'
+  );
+});
+
+test('start() connects exactly the transports the shared predicates accept', async () => {
+  // forScenario validates against these predicates; this pins start() to them,
+  // so the two cannot drift apart.
+  const cases = [
+    { internet: { enabled: true, serverAddress: 'wss://r/ws' } },
+    { internet: { enabled: true } },
+    { internet: { enabled: true, serverAddress: '' } },
+    { internet: { enabled: false, serverAddress: 'wss://r/ws' } },
+    { nostr: { enabled: true, relayUrls: ['wss://n'] } },
+    { nostr: { enabled: true, relayUrls: [] } },
+    { nostr: { enabled: true } },
+    { nostr: { enabled: false, relayUrls: ['wss://n'] } },
+  ];
+  for (const transports of cases) {
+    nativeCalls = [];
+    const protocol = new sdk.OfflineProtocol({ ...ids, transports: { ble: { enabled: true }, ...transports } });
+    await protocol.start();
+    const enabled = new Set(
+      nativeCalls.filter((c) => c.method === 'enableTransport').map((c) => c.args[0])
+    );
+    const label = JSON.stringify(transports);
+    assert.equal(
+      enabled.has('internet'),
+      sdk.internetAutoConnects(transports.internet),
+      `internet: ${label}`
+    );
+    assert.equal(enabled.has('nostr'), sdk.nostrAutoConnects(transports.nostr), `nostr: ${label}`);
+  }
+});
+
 (async () => {
   const outDir = compileSdk();
   try {
     sdk = {
       ...require(path.join(outDir, 'configScenarios.js')),
+      ...require(path.join(outDir, 'transportAutoStart.js')),
       OfflineProtocol: require(path.join(outDir, 'index.js')).OfflineProtocol,
     };
 
