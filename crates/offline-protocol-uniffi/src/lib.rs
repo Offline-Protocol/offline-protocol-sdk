@@ -24862,20 +24862,19 @@ mod tests {
                 .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
         };
         let swift_config = read("ios/DevelopmentCleartextConfig.swift");
-        let kotlin_config = read("android/src/main/java/com/offlineprotocol/DevelopmentCleartextConfig.kt");
+        let kotlin_config =
+            read("android/src/main/java/com/offlineprotocol/DevelopmentCleartextConfig.kt");
         for (path, body) in [
             ("DevelopmentCleartextConfig.swift", swift_config.as_str()),
-            (
-                "DevelopmentCleartextConfig.kt",
-                kotlin_config.as_str(),
-            ),
+            ("DevelopmentCleartextConfig.kt", kotlin_config.as_str()),
         ] {
             assert!(
                 body.contains("bleEnabled: true") || body.contains("bleEnabled = true"),
                 "{path} must enable BLE for developmentCleartext parity"
             );
             assert!(
-                body.contains("encryptionEnabled: false") || body.contains("encryptionEnabled = false"),
+                body.contains("encryptionEnabled: false")
+                    || body.contains("encryptionEnabled = false"),
                 "{path} must disable encryption for lab cleartext"
             );
             assert!(
@@ -24907,7 +24906,9 @@ mod tests {
             "bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt",
         ] {
             let body = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path),
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(path),
             )
             .expect("read consumer-check");
             assert!(

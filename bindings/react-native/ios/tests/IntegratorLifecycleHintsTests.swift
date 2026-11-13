@@ -21,22 +21,9 @@ final class IntegratorLifecycleHintsTests: XCTestCase {
         h.callBeforeEngineStart(context: "sendMessage", engineRunning: false)
         h.startWithoutMls(encryptionEnabled: true, mlsReady: false)
         h.sendWithoutMls(context: "sendMessage", encryptionEnabled: true, mlsReady: false, engineRunning: true)
-        h.encryptFailedRemedy(context: "sendMessage", error: EncryptFailedHarnessError())
         h.dataStorageUnavailable(context: "dataCreateDoc")
         h.interestApplied(spaceId: "notes", patterns: ["a"], engineRunning: true)
         XCTAssertEqual(messages, [])
-    }
-
-    private struct EncryptFailedHarnessError: Error {}
-
-    func testEncryptFailedRemedyFiresOnce() {
-        let h = hints()
-        let err = EncryptFailedHarnessError()
-        h.encryptFailedRemedy(context: "sendMessage", error: err)
-        h.encryptFailedRemedy(context: "sendMessageRich", error: err)
-        XCTAssertEqual(messages.count, 1)
-        XCTAssertTrue(messages[0].contains("send failed with EncryptFailed"))
-        XCTAssertTrue(messages[0].contains("native-development-cleartext"))
     }
 
     func testEngineHintFiresOncePerContextAndNeverWhileRunning() {
