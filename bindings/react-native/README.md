@@ -1513,7 +1513,7 @@ await protocol.cancelFileTransfer(fileId);
 ## Troubleshooting
 
 **Transport timing and several apps on one phone:** see
-[docs/troubleshooting.md](../../docs/troubleshooting.md) (G6). Wi‑Fi Direct
+[docs/troubleshooting.md](../../docs/troubleshooting.md). Wi‑Fi Direct
 `autoAccept` often needs **1–2 minutes** before switching; that is not a hang.
 
 ### Messages Not Delivering
