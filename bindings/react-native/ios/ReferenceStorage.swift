@@ -77,6 +77,10 @@ public enum OfflineProtocolReferenceStorage {
     }
 
     /// The Keychain-backed MLS store for one account.
+    ///
+    /// This does not report what happened to an earlier store on the device,
+    /// so a lost identity passes silently. Use `initializeMls(on:appId:profile:)`
+    /// unless you need the store on its own.
     public static func makeSecureStorage(appId: String, profile: String) throws -> MlsStorageProvider {
         try MlsSecureStorage(accountNamespace: StorageNamespace.account(appId: appId, profile: profile))
     }
@@ -113,7 +117,8 @@ public enum OfflineProtocolReferenceStorage {
     /// identity, sessions and pins, its outbox and its protocol state.
     ///
     /// Stop the engine for this account and release it first. A running engine
-    /// keeps writing, and would write into the stores this just emptied.
+    /// keeps writing, and releasing an engine flushes its state, so an engine
+    /// released after this call writes into the stores it just emptied.
     ///
     /// The secure store goes first: it holds the key every sealed
     /// protocol-state record is written under, so an interrupted wipe leaves

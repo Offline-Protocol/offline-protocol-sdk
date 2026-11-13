@@ -25,6 +25,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   The iOS and Android integration guides use it in place of providers an
   application had to write itself.
 
+### Fixed
+
+- **Flutter on Android now reports a lost MLS identity.** Its engine host
+  opened the same stores as React Native but never read the legacy-adoption
+  outcome, so an account that started from a fresh identity (the earlier store
+  belonged to another account, or this account's claim on it could not be
+  recorded) did so with nothing logged. It now logs the same error to logcat
+  that Flutter on iOS already logs to the unified log.
+
 ## [0.33.0] — 2026-11-11
 
 > **Messages and their receipts cross a mesh of phones.** A resend now

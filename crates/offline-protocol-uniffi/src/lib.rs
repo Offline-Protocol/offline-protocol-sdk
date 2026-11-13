@@ -24691,6 +24691,11 @@ mod tests {
     /// that constructs a store or wipes an account itself is a second copy of
     /// the wiring, and a copy that derives the account namespace differently
     /// opens an empty store: a fresh identity, with no error.
+    ///
+    /// The scan covers the generator templates under `tools/` and the Flutter
+    /// plugin too. `ProtocolEngineHostBridge.kt` is generated, so a template
+    /// that still wires the stores puts the copy back on the next
+    /// regeneration, which is how one survived the first version of the kit.
     #[test]
     fn built_in_stores_are_opened_and_wiped_only_by_the_reference_kit() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -24732,6 +24737,12 @@ mod tests {
         for (root, ext) in [
             ("bindings/react-native/ios", ".swift"),
             ("bindings/react-native/android/src/main/java", ".kt"),
+            ("bindings/flutter/offline_protocol/ios/Classes", ".swift"),
+            (
+                "bindings/flutter/offline_protocol/android/src/main/kotlin",
+                ".kt",
+            ),
+            ("tools", ".py"),
         ] {
             let mut files = Vec::new();
             walk(&repo.join(root), ext, &mut files);
@@ -24754,7 +24765,7 @@ mod tests {
                 }
                 for (number, line) in body.lines().enumerate() {
                     let code = line.trim_start();
-                    if code.starts_with("//") || code.starts_with('*') {
+                    if code.starts_with("//") || code.starts_with('*') || code.starts_with('#') {
                         continue;
                     }
                     if WIRING.iter().any(|call| code.contains(call)) {

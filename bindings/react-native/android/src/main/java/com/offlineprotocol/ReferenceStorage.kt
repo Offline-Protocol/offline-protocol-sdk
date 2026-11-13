@@ -82,7 +82,13 @@ object OfflineProtocolReferenceStorage {
         }
     }
 
-    /** The `EncryptedSharedPreferences` MLS store for one account. */
+    /**
+     * The `EncryptedSharedPreferences` MLS store for one account.
+     *
+     * This does not report what happened to an earlier store on the device, so
+     * a lost identity passes silently. Use [initializeMls] unless you need the
+     * store on its own.
+     */
     @JvmStatic
     fun makeSecureStorage(context: Context, appId: String, profile: String): MlsStorageProvider =
         MlsSecureStorage(context, StorageNamespace.account(appId, profile))
@@ -124,7 +130,8 @@ object OfflineProtocolReferenceStorage {
      * identity, sessions and pins, its outbox and its protocol state.
      *
      * Stop the engine for this account and release it first. A running engine
-     * keeps writing, and would write into the stores this just emptied.
+     * keeps writing, and releasing an engine flushes its state, so an engine
+     * released after this call writes into the stores it just emptied.
      *
      * The secure store goes first: it holds the key every sealed protocol-state
      * record is written under, so an interrupted wipe leaves the rest as

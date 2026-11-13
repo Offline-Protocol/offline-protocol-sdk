@@ -48,8 +48,13 @@ fun startWithReferenceStorage(context: Context, config: ProtocolConfig): Offline
     return protocol
 }
 
+// Sign out for good: stop the engine, release it, then wipe. Releasing the
+// engine flushes its state to storage, so an engine released after the wipe
+// writes that state back into the account the wipe just emptied. Every other
+// holder (a transport manager, a service) must have let go first.
 fun signOut(context: Context, protocol: OfflineProtocol, config: ProtocolConfig) {
     protocol.stop()
+    protocol.close()
     OfflineProtocolReferenceStorage.wipe(context, config.appId, config.profile)
 }
 

@@ -35,8 +35,14 @@ public func startWithReferenceStorage(config: ProtocolConfig) throws -> OfflineP
     return engine
 }
 
-public func signOut(engine: OfflineProtocol, config: ProtocolConfig) throws {
-    try engine.stop()
+// Sign out for good: stop the engine, release it, then wipe. Releasing the
+// engine flushes its state to storage, so an engine released after the wipe
+// writes that state back into the account the wipe just emptied. This must be
+// the last reference: every other holder (a transport manager, a service)
+// must have let go first.
+public func signOut(engine: inout OfflineProtocol?, config: ProtocolConfig) throws {
+    try engine?.stop()
+    engine = nil
     try OfflineProtocolReferenceStorage.wipe(appId: config.appId, profile: config.profile)
 }
 
