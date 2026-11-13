@@ -139,12 +139,18 @@ final class MeshController {
 
             // REQUIRED before you can send anything. Encryption is fail-closed
             // by default, so with MLS uninitialized every send fails with
-            // encryptFailed. Unlike React Native there is no auto-initialization
-            // on the native path — you supply both providers yourself.
-            try mesh.initializeMls(
-                secureStorage: KeychainMlsStorage(),              // credential-backed
-                protocolStateStorage: AppContainerStateStorage()  // in the app container
+            // encryptFailed. Unlike React Native nothing opens storage for you
+            // on the native path: this opens the SDK's built-in stores for the
+            // account. A warning means this account started from a fresh MLS
+            // identity although an earlier one was on the device; report it.
+            let adoption = try OfflineProtocolReferenceStorage.initializeMls(
+                on: mesh,
+                appId: config.appId,
+                profile: config.profile
             )
+            if let warning = adoption.warning {
+                print("Mesh: \(warning)")
+            }
 
             try mesh.start()
 
@@ -178,9 +184,17 @@ final class MeshController {
 ### 5. Storage: Two Providers, Two Lifecycles
 
 `initializeMls` takes two providers because key material and restartable delivery
-state have different lifetimes. `KeychainMlsStorage` and
-`AppContainerStateStorage` above are **your** classes — the SDK ships no default
-for the native path.
+state have different lifetimes. The shipped **`OfflineProtocolReferenceStorage`**
+factory opens the same Keychain-backed MLS store and app-container state store
+the React Native module uses, for the account `(appId, profile)` names. You may
+substitute your own providers; they must meet the obligations below.
+
+To sign a user out for good, stop the engine, release it, then call
+`OfflineProtocolReferenceStorage.wipe(appId:profile:)`. It erases that account's
+identity, sessions, outbox and protocol state, and nothing of any other account.
+A running engine keeps writing, and releasing an engine flushes its state, so
+an engine released after the wipe writes that state back. Release every
+reference to it first.
 
 | | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
 |---|---|---|

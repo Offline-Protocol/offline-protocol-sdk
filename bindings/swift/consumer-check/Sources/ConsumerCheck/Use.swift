@@ -1,8 +1,8 @@
 import OfflineProtocolSDK
 
 // What an application writes first: build the engine, listen to it, start it,
-// hand it to a transport. `start` and `relay` are never run. They have to
-// compile, from outside the module.
+// hand it to a transport. `start`, `startWithReferenceStorage`, `signOut` and
+// `relay` are never run. They have to compile, from outside the module.
 
 public final class Listener: EventCallback, @unchecked Sendable {
     public init() {}
@@ -15,6 +15,35 @@ public func start(config: ProtocolConfig) throws -> OfflineProtocol {
     engine.setEventCallback(callback: Listener())
     try engine.start()
     return engine
+}
+
+// A native application's start: listen, open the built-in stores, then start.
+// MLS must be initialized before `start()`, and the adoption warning is the
+// only signal that this account lost an earlier identity.
+public func startWithReferenceStorage(config: ProtocolConfig) throws -> OfflineProtocol {
+    let engine = try OfflineProtocol(config: config)
+    engine.setEventCallback(callback: Listener())
+    let adoption = try OfflineProtocolReferenceStorage.initializeMls(
+        on: engine,
+        appId: config.appId,
+        profile: config.profile
+    )
+    if let warning = adoption.warning {
+        print("ConsumerCheck: \(warning)")
+    }
+    try engine.start()
+    return engine
+}
+
+// Sign out for good: stop the engine, release it, then wipe. Releasing the
+// engine flushes its state to storage, so an engine released after the wipe
+// writes that state back into the account the wipe just emptied. This must be
+// the last reference: every other holder (a transport manager, a service)
+// must have let go first.
+public func signOut(engine: inout OfflineProtocol?, config: ProtocolConfig) throws {
+    try engine?.stop()
+    engine = nil
+    try OfflineProtocolReferenceStorage.wipe(appId: config.appId, profile: config.profile)
 }
 
 public func relay(engine: OfflineProtocol) -> TransportManager {

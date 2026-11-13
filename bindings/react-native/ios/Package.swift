@@ -51,6 +51,7 @@ let package = Package(
                 "ProtocolBackgroundProcessor.swift",
                 "ProtocolEngineHost.swift",
                 "ProtocolErrorBridge.swift",
+                "ReferenceStorage.swift",
                 "ReticulumManager.swift",
                 "TransportBridge.swift",
                 "TransportManager.swift",

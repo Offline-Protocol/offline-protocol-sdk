@@ -665,13 +665,18 @@ class ProtocolEngineHost(
 
     fun meshRenameGroup(groupId: String, newName: String) = requireProtocol().renameGroup(groupId, newName)
 
+    /**
+     * Opens the secure MLS store and the app-container protocol-state store for
+     * this account and hands both to the core, through
+     * [OfflineProtocolReferenceStorage] so native applications get the same
+     * wiring.
+     */
     fun initializeMlsWithSecureStorage(context: Context) {
         val proto = requireProtocol()
         val config = currentConfig ?: throw IllegalStateException("Protocol config not initialized")
-        val accountNamespace = StorageNamespace.account(config.appId, config.profile)
-        val secureStorage = MlsSecureStorage(context, accountNamespace)
-        val protocolStateStorage = AppContainerProtocolStateStorage(context, accountNamespace)
-        proto.initializeMls(secureStorage, protocolStateStorage)
+        val adoption = OfflineProtocolReferenceStorage.initializeMls(proto, context, config.appId, config.profile)
+        adoption.warning?.let { onDiagnostic("error", it, emptyMap()) }
+        onDiagnostic("info", "MLS initialized with split secure and app-container storage", emptyMap())
     }
 
     fun requireProtocolBridge(): OfflineProtocol = requireProtocol()

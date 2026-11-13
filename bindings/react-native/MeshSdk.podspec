@@ -82,6 +82,7 @@ Pod::Spec.new do |s|
     "ios/MlsSecureStorage.swift",
     "ios/ProtocolStateStorage.swift",
     "ios/StorageNamespace.swift",
+    "ios/ReferenceStorage.swift",
     "ios/ble/**/*.swift",
     "ios/mesh/**/*.swift",
     "ios/Generated/offline_protocol.swift",  # UniFFI generated Swift file

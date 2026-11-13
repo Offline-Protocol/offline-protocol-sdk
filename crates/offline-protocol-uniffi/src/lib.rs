@@ -24683,4 +24683,121 @@ mod tests {
             "catalogue rows that are not Event variants: {extra:?}"
         );
     }
+
+    /// `OfflineProtocolReferenceStorage` is the one place the built-in MLS and
+    /// protocol-state stores are opened and wiped, on each platform. The React
+    /// Native module and the engine host call it, so a native application that
+    /// calls it gets the stores a React Native application gets. A bridge file
+    /// that constructs a store or wipes an account itself is a second copy of
+    /// the wiring, and a copy that derives the account namespace differently
+    /// opens an empty store: a fresh identity, with no error.
+    ///
+    /// The scan covers the generator templates under `tools/` and the Flutter
+    /// plugin too. `ProtocolEngineHostBridge.kt` is generated, so a template
+    /// that still wires the stores puts the copy back on the next
+    /// regeneration, which is how one survived the first version of the kit.
+    #[test]
+    fn built_in_stores_are_opened_and_wiped_only_by_the_reference_kit() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = manifest
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+
+        fn walk(dir: &std::path::Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_dir() {
+                    if ![".build", "tests", "Generated"].contains(&name) {
+                        walk(&path, ext, out);
+                    }
+                } else if name.ends_with(ext) {
+                    out.push(path);
+                }
+            }
+        }
+
+        // The kit, and the files that define the stores and their wipes.
+        const OWNERS: [&str; 3] = [
+            "ReferenceStorage",
+            "MlsSecureStorage",
+            "ProtocolStateStorage",
+        ];
+        const WIRING: [&str; 3] = [
+            "MlsSecureStorage(",
+            "AppContainerProtocolStateStorage(",
+            ".wipeAccount(",
+        ];
+
+        let mut kits = 0usize;
+        let mut offenders = Vec::new();
+        for (root, ext) in [
+            ("bindings/react-native/ios", ".swift"),
+            ("bindings/react-native/android/src/main/java", ".kt"),
+            ("bindings/flutter/offline_protocol/ios/Classes", ".swift"),
+            (
+                "bindings/flutter/offline_protocol/android/src/main/kotlin",
+                ".kt",
+            ),
+            ("tools", ".py"),
+        ] {
+            let mut files = Vec::new();
+            walk(&repo.join(root), ext, &mut files);
+            assert!(!files.is_empty(), "no {ext} sources under {root}");
+            for file in files {
+                let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let body = std::fs::read_to_string(&file).expect("read bridge source");
+                if stem == "ReferenceStorage" {
+                    kits += 1;
+                    for call in ["initializeMls(", "wipe("] {
+                        assert!(
+                            body.contains(call),
+                            "{} no longer has {call}",
+                            file.display()
+                        );
+                    }
+                }
+                if OWNERS.contains(&stem) {
+                    continue;
+                }
+                for (number, line) in body.lines().enumerate() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") || code.starts_with('*') || code.starts_with('#') {
+                        continue;
+                    }
+                    if WIRING.iter().any(|call| code.contains(call)) {
+                        offenders.push(format!("{}:{}: {code}", file.display(), number + 1));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            kits, 2,
+            "expected ReferenceStorage.swift and ReferenceStorage.kt"
+        );
+        assert!(
+            offenders.is_empty(),
+            "open or wipe the built-in stores through OfflineProtocolReferenceStorage:\n{}",
+            offenders.join("\n")
+        );
+
+        // Each consumer-check compiles the native start and sign-out against
+        // the kit, from outside the module.
+        for path in [
+            "bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift",
+            "bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt",
+        ] {
+            let body = std::fs::read_to_string(repo.join(path)).expect("read consumer-check");
+            for call in [
+                "OfflineProtocolReferenceStorage.initializeMls(",
+                "OfflineProtocolReferenceStorage.wipe(",
+                ".warning",
+            ] {
+                assert!(body.contains(call), "{path} does not call {call}");
+            }
+        }
+    }
 }
