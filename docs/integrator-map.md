@@ -17,7 +17,7 @@ before reading all of [UPGRADING.md](UPGRADING.md).
 |----------------|------------|----------------------------|-------|
 | React Native / Expo (dev client) | [QUICKSTART](../QUICKSTART.md) → [RN package README](../bindings/react-native/README.md) → [config presets](react-native-config-presets.md) | ~15–30 min to first `start()` | Expo Go is not supported (native module). |
 | React Native (deep dive) | [react-native-integration.md](react-native-integration.md) | 1–2 h for transports + events | Package README is the API reference. |
-| Native iOS (Swift) | [ios-integration.md](ios-integration.md) | 2 h–2 days | RN path is much faster; native needs storage providers + XCFramework or SwiftPM release. |
+| Native iOS (Swift) | [ios-native-distribution.md](ios-native-distribution.md) → [ios-integration.md](ios-integration.md) | ~2 h with release package (longer if building from source) | RN path is much faster; native adds storage + transport wiring via `OfflineProtocolSDK`. |
 | Native Android (Kotlin) | [android-integration.md](android-integration.md) | 2 h–2 days | Same parity gap as iOS for MLS storage. |
 | Flutter | [bindings/flutter/README.md](../bindings/flutter/README.md) | 1–4 h | Path dependency today; build UniFFI natives like React Native. |
 | Python (desktop / gateway) | [bindings/python/README.md](../bindings/python/README.md) | ~30 min with wheels | `pip install offline-protocol-sdk`; set `state_root` explicitly. |
@@ -127,7 +127,8 @@ React Native's `developmentCleartext` preset. The first production-path
 **`OfflineProtocolEncryptFailedDiagnostics`**. See
 [native-development-cleartext.md](native-development-cleartext.md).
 
-Native guides: [ios-integration.md](ios-integration.md),
+Native guides: [ios-native-distribution.md](ios-native-distribution.md),
+[ios-integration.md](ios-integration.md),
 [android-integration.md](android-integration.md). Android manual path: JNI names
 and Kotlin imports in [android-jni-and-imports.md](android-jni-and-imports.md).
 
@@ -136,7 +137,7 @@ and Kotlin imports in [android-jni-and-imports.md](android-jni-and-imports.md).
 | Surface | Preferred install |
 |---------|---------------------|
 | React Native | npm `@offline-protocol/mesh-sdk` |
-| Native iOS | Swift package from release assets (see iOS integration guide) or XCFramework build |
+| Native iOS | [ios-native-distribution.md](ios-native-distribution.md) — Swift package `OfflineProtocolSDK` (not hand-built XCFramework) |
 | Native Android | Maven coordinates `com.offlineprotocol:offline-protocol-sdk` or jniLibs from RN build scripts |
 
 ---
