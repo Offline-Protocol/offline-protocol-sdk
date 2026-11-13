@@ -18,11 +18,12 @@ see [mobile-permissions.md](mobile-permissions.md).
 | Wi‑Fi Direct enabled, no link for 1–2 minutes | Normal group formation budget | [Wi‑Fi Direct is slow, not stuck](#wifi-direct-is-slow-not-stuck) |
 | BLE works; Wi‑Fi Direct "never connects" in 30s | Timeout too short for QA | Same section |
 | `WiFiDirect` link in seconds, on phones that share a Wi‑Fi network | The LAN, not a group: the slot carries both | Same section |
-| First `neighbor_discovered` on `WiFiDirect` but no `transport_switched` to it | Not expected; capture logs and report it | Same section |
+| First `neighbor_discovered` on `WiFiDirect` and no `transport_switched` to it follows | Not expected; capture logs and report it | Same section |
+| `transport_switched` to `wifiDirect` (lower case) with no `WiFiDirect` neighbor | A DORS send decision, not a link | Same section |
 | Two SDK apps on one phone; wrong neighbor | Shared BT service; `appId` filter | [Several SDK apps on one phone](#several-sdk-apps-on-one-phone) |
 | Extra neighbors while dogfooding another team's app | Relay + shared discovery | Same section |
-| Wi‑Fi Direct group never forms between two phones that each run several SDK apps | Neither app holds port 8988, so neither creates a group | [LAN / peer-stream port](#lan--peer-stream-port-android) |
-| `neighbor_discovered` empty | Permissions, range, or not started | [No peers](#no-peers-discovered) |
+| Wi‑Fi Direct group never forms between two phones that each run several SDK apps | Your app holds port 8988 on neither phone, so neither creates a group | [LAN / peer-stream port](#lan--peer-stream-port-android) |
+| No `neighbor_discovered` events | Permissions, range, or not started | [No peers](#no-peers-discovered) |
 
 ---
 
@@ -46,13 +47,20 @@ Traffic and discovery can continue on Bluetooth.
    - `neighbor_discovered` with `transport: "WiFiDirect"`: the slot has a
      link to that peer. This is the signal to wait for.
    - `transport_switched` with `from: null` and `to: "WiFiDirect"` fires
-     alongside it when the slot gains its first link, and `from:
-     "WiFiDirect"` when it loses its last. The slot's own layer emits these
+     when the slot gains its first link, and `from: "WiFiDirect"` with
+     `to: "None"` when it loses its last. The slot's own layer emits these
      whatever DORS prefers. Only the first link switches: a second peer on a
-     slot that already has one raises `neighbor_discovered` alone. A first
-     `WiFiDirect` neighbor with no switch is a bug worth reporting. DORS decisions arrive separately as
-     `dors_transport_switched` (see
-     [dors-configuration.md](dors-configuration.md)).
+     slot that already has one raises `neighbor_discovered` alone. The switch
+     can trail the first `neighbor_discovered`: a stream that connects before
+     the platform reports the layer up switches once the layer is up. A first
+     `WiFiDirect` neighbor with no switch to follow is a bug worth reporting.
+   - DORS decisions raise their own events: `dors_transport_switched` with a
+     machine-readable `reason_code`, and a `transport_switched` whose `from`
+     and `to` use the configuration spelling (`"ble"`, `"wifiDirect"`) and
+     whose `reason` is "DORS selected better transport", when it picks a
+     different transport to send on (see
+     [dors-configuration.md](dors-configuration.md)). Match the slot's events
+     on the exact `"WiFiDirect"` spelling, or a DORS switch reads as a link.
 3. Take both phones off any shared Wi‑Fi network when you time group
    formation. On Android the `wifiDirect` slot also carries peer streams on
    the Wi‑Fi network the phone is on, so two phones on one network link over
@@ -157,6 +165,6 @@ Details: [changelog 0.32](changelog/0.32.md),
 | Document | Role |
 |----------|------|
 | [react-native-integration §4](react-native-integration.md#4-enabling-transports) | Transport behaviour after permissions |
-| [dors-configuration.md](dors-configuration.md) | DORS decisions (`dors_transport_switched`) once links exist |
+| [dors-configuration.md](dors-configuration.md) | DORS decisions (`dors_transport_switched`, and `transport_switched` spelled `"ble"`, `"wifiDirect"`) once links exist |
 | [transport-architecture.md](transport-architecture.md) | How carriers fit together |
 | [bindings/react-native/README §Troubleshooting](../bindings/react-native/README.md#troubleshooting) | Delivery, battery, linking |
