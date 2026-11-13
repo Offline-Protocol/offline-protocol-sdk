@@ -24917,4 +24917,72 @@ mod tests {
             );
         }
     }
+
+    /// Manual Android integrators confuse the cargo `.so` name with the name
+    /// UniFFI loads, and mix `com.offlineprotocol` bridge types with the
+    /// `uniffi.offline_protocol` engine. The constants, doc, checker script,
+    /// and consumer-check imports are pinned together.
+    #[test]
+    fn android_jni_naming_and_imports_are_pinned_for_native_integrators() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let jni = std::fs::read_to_string(
+            repo.join(
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/OfflineProtocolJniLibrary.kt",
+            ),
+        )
+        .expect("OfflineProtocolJniLibrary.kt");
+        const LOADED: &str = "libuniffi_offline_protocol.so";
+        const CARGO: &str = "liboffline_protocol_uniffi.so";
+        assert!(
+            jni.contains(LOADED),
+            "OfflineProtocolJniLibrary must name the loaded .so"
+        );
+        assert!(
+            jni.contains(CARGO),
+            "OfflineProtocolJniLibrary must name the cargo output"
+        );
+        let aar_check = std::fs::read_to_string(repo.join("scripts/check_android_aar.py"))
+            .expect("check_android_aar.py");
+        assert!(
+            aar_check.contains(&format!("NATIVE_LIBRARY = \"{LOADED}\"")),
+            "check_android_aar.py must agree on the loaded JNI name"
+        );
+        let doc = std::fs::read_to_string(repo.join("docs/android-jni-and-imports.md"))
+            .expect("android-jni-and-imports.md");
+        for needle in [
+            LOADED,
+            CARGO,
+            "uniffi.offline_protocol",
+            "OfflineProtocolModule",
+        ] {
+            assert!(
+                doc.contains(needle),
+                "android-jni-and-imports.md missing `{needle}`"
+            );
+        }
+        let script = std::fs::read_to_string(repo.join("scripts/check_manual_android_jni_libs.py"))
+            .expect("check_manual_android_jni_libs.py");
+        assert!(script.contains(LOADED) && script.contains(CARGO));
+        let consumer_use = std::fs::read_to_string(
+            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
+        )
+        .expect("consumer Use.kt");
+        for needle in [
+            "import uniffi.offline_protocol.OfflineProtocol",
+            "import com.offlineprotocol.OfflineProtocolReferenceStorage",
+            "OfflineProtocolJniLibrary",
+        ] {
+            assert!(
+                consumer_use.contains(needle),
+                "consumer Use.kt missing canonical import `{needle}`"
+            );
+        }
+        assert!(
+            !consumer_use.contains("import com.offlineprotocol.OfflineProtocolModule"),
+            "consumer Use.kt must not import OfflineProtocolModule"
+        );
+    }
 }
