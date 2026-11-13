@@ -2636,40 +2636,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             val config = currentConfig
                 ?: throw IllegalStateException("Protocol config not initialized")
-            val accountNamespace = StorageNamespace.account(config.appId, config.profile)
-            val secureStorage =
-                MlsSecureStorage(reactApplicationContext, accountNamespace)
-            val protocolStateStorage =
-                AppContainerProtocolStateStorage(
-                    reactApplicationContext,
-                    accountNamespace
-                )
-            proto.initializeMls(secureStorage, protocolStateStorage)
-            // Either of these means this account is starting from a fresh MLS
-            // identity — never let that pass silently.
-            when (secureStorage.legacyAdoption) {
-                is LegacyStoreAdoption.Decision.Conflict -> emitDiagnostic(
-                    "error",
-                    "Legacy secure store belongs to another account; this " +
-                        "account starts from a fresh MLS identity and cannot " +
-                        "decrypt its previous sessions. Its pre-split delivery " +
-                        "state is unreachable too, so it also comes up with an " +
-                        "empty outbox and an empty block list — every " +
-                        "previously blocked peer is unblocked"
-                )
-                is LegacyStoreAdoption.Decision.ClaimUnverified -> emitDiagnostic(
-                    "error",
-                    "Could not record this account's claim on the legacy secure " +
-                        "store, so it was not adopted: another account could " +
-                        "otherwise inherit the same MLS identity. This account " +
-                        "starts from a fresh identity and comes up with an empty " +
-                        "outbox and an empty block list — every previously " +
-                        "blocked peer is unblocked. The credential store is " +
-                        "failing writes; retrying on a healthy store adopts " +
-                        "normally"
-                )
-                else -> Unit
-            }
+            val adoption = OfflineProtocolReferenceStorage.initializeMls(
+                proto,
+                reactApplicationContext,
+                config.appId,
+                config.profile
+            )
+            // A warning means this account is starting from a fresh MLS
+            // identity: never let that pass silently.
+            adoption.warning?.let { emitDiagnostic("error", it) }
             emitDiagnostic(
                 "info",
                 "MLS initialized with split secure and app-container storage"

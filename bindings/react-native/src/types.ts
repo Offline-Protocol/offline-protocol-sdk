@@ -1015,9 +1015,10 @@ export interface ProtocolConfig {
 
   /**
    * When enabled, maps selected native `diagnostic` events to one-time console
-   * hints about Wi‑Fi Direct timing and multi-app BLE (G6). Defaults to on in
-   * development builds (`__DEV__`); off in production unless set to `true`
-   * explicitly.
+   * hints about Wi‑Fi Direct formation timing and a peer phone running several
+   * SDK apps. Defaults to on in development builds (`__DEV__`); off in
+   * production unless set to `true` explicitly. Only the console hints are
+   * gated: the `diagnostic` events reach listeners either way.
    */
   devTransportDiagnostics?: boolean;
 }

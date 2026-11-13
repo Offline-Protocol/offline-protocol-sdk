@@ -13,12 +13,12 @@ Get started with the Offline Protocol SDK in 5 minutes.
 ### 1. Install
 
 > **Expo Go does not work** with this SDK (native module). Use a development
-> build (`expo-dev-client`) or bare React Native. See
-> [react-native-host-doctor.md](docs/react-native-host-doctor.md).
+> build (`expo-dev-client`), a native build (`npx expo run:ios`) or bare React
+> Native. See [react-native-host-doctor.md](docs/react-native-host-doctor.md).
 
 ```bash
 npm install @offline-protocol/mesh-sdk
-npx mesh-sdk-doctor   # catch Podfile / Expo mistakes early
+npx --no-install mesh-sdk-doctor   # catch Podfile / Expo mistakes early
 cd ios && pod install  # iOS only
 ```
 
@@ -29,14 +29,18 @@ ids, use `off1…` addresses, not `profile`: [identity-for-integrators.md](docs/
 ### 2. Initialize
 
 ```typescript
-import { OfflineProtocol, MessagePriority, forScenario } from '@offline-protocol/mesh-sdk';
+import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
-const protocol = new OfflineProtocol(
-  forScenario('localBle', { appId: 'my-app', profile: 'default' })
-);
+const protocol = new OfflineProtocol({
+  appId: 'my-app',
+  profile: 'default',
+});
 
 await protocol.start();
 ```
+
+For another transport mix (Wi-Fi Direct, an internet relay, Nostr), build the
+config with [`forScenario`](docs/react-native-config-presets.md).
 
 ### 3. Send Messages
 

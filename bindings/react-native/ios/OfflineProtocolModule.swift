@@ -3038,47 +3038,15 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let accountNamespace = StorageNamespace.account(
+            let adoption = try OfflineProtocolReferenceStorage.initializeMls(
+                on: proto,
                 appId: config.appId,
                 profile: config.profile
             )
-            let secureStorage = try MlsSecureStorage(
-                accountNamespace: accountNamespace
-            )
-            let protocolStateStorage = try AppContainerProtocolStateStorage(
-                accountNamespace: accountNamespace
-            )
-            try proto.initializeMls(
-                secureStorage: secureStorage,
-                protocolStateStorage: protocolStateStorage
-            )
-            // Either of these means this account is starting from a fresh MLS
-            // identity — never let that pass silently.
-            switch secureStorage.legacyAdoption {
-            case .conflict?:
-                emitDiagnostic(
-                    level: "error",
-                    message: "Legacy secure store belongs to another account; "
-                        + "this account starts from a fresh MLS identity and "
-                        + "cannot decrypt its previous sessions. Its pre-split "
-                        + "delivery state is unreachable too, so it also comes "
-                        + "up with an empty outbox and an empty block list — "
-                        + "every previously blocked peer is unblocked"
-                )
-            case .claimUnverified?:
-                emitDiagnostic(
-                    level: "error",
-                    message: "Could not record this account's claim on the "
-                        + "legacy secure store, so it was not adopted: another "
-                        + "account could otherwise inherit the same MLS "
-                        + "identity. This account starts from a fresh identity "
-                        + "and comes up with an empty outbox and an empty block "
-                        + "list — every previously blocked peer is unblocked. "
-                        + "The credential store is failing writes; retrying on "
-                        + "a healthy store adopts normally"
-                )
-            case .adopt?, .resume?, .none:
-                break
+            // A warning means this account is starting from a fresh MLS
+            // identity: never let that pass silently.
+            if let warning = adoption.warning {
+                emitDiagnostic(level: "error", message: warning)
             }
             emitDiagnostic(
                 level: "info",

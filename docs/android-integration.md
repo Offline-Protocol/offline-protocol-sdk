@@ -49,10 +49,14 @@ bindings are rewritten too and all five must be committed together (see
 
 ### 4. Use in Kotlin
 
-The generated Kotlin bindings live in the `uniffi.offline_protocol` package, so import
-that (not `com.offlineprotocol.*`, which is the React Native wrapper).
+The generated Kotlin bindings live in the `uniffi.offline_protocol` package. The
+library's hand-written classes, such as `OfflineProtocolReferenceStorage` and the
+transport managers, live in `com.offlineprotocol`; import those by name, since
+the React Native module in that package is not part of the Android library.
 
 ```kotlin
+import android.util.Log
+import com.offlineprotocol.OfflineProtocolReferenceStorage
 import uniffi.offline_protocol.*
 import org.json.JSONObject
 
@@ -102,14 +106,17 @@ class MainActivity : AppCompatActivity() {
 
         // REQUIRED before you can send anything. Encryption is fail-closed by
         // default, so with MLS uninitialized every send fails with
-        // EncryptFailed. Unlike React Native there is no auto-initialization on
-        // the native path — you supply both providers yourself.
-        OfflineProtocolReferenceStorage.initializeMls(
+        // EncryptFailed. Unlike React Native nothing opens storage for you on
+        // the native path: this opens the SDK's built-in stores for the account.
+        // A warning means this account started from a fresh MLS identity
+        // although an earlier one was on the device; report it.
+        val adoption = OfflineProtocolReferenceStorage.initializeMls(
             protocol,
             this,
             config.appId,
             config.profile,
         )
+        adoption.warning?.let { Log.e("Mesh", it) }
 
         protocol.start()
 
@@ -187,8 +194,16 @@ service, is what makes it safe.
 `initializeMls` takes two providers because key material and restartable
 delivery state have different lifetimes. The shipped
 **`OfflineProtocolReferenceStorage`** factory opens the same Keystore-backed MLS
-store and app-container state store the React Native module uses. You may
-substitute your own providers; they must meet the obligations below.
+store and app-container state store the React Native module uses, for the
+account `(appId, profile)` names. You may substitute your own providers; they
+must meet the obligations below.
+
+To sign a user out for good, stop the engine, release it, then call
+`OfflineProtocolReferenceStorage.wipe(context, appId, profile)`. It erases that
+account's identity, sessions, outbox and protocol state, and nothing of any other
+account. A running engine keeps writing, and releasing an engine flushes its
+state, so an engine released after the wipe writes that state back. Call
+`protocol.close()` first.
 
 | | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
 |---|---|---|

@@ -661,17 +661,6 @@ _m("wipePersistedState", """
         if (live != null && StorageNamespace.account(live.appId, live.profile) == namespace) {
             throw IllegalStateException("Refusing to wipe storage for the running account; call destroy() first")
         }
-        var firstError: Exception? = null
-        try {
-            MlsSecureStorage.wipeAccount(context, namespace)
-        } catch (e: Exception) {
-            firstError = e
-        }
-        try {
-            AppContainerProtocolStateStorage.wipeAccount(context, namespace)
-        } catch (e: Exception) {
-            if (firstError == null) firstError = e
-        }
-        firstError?.let { throw it }
+        OfflineProtocolReferenceStorage.wipe(context, appId, profile)
         return null
 """)

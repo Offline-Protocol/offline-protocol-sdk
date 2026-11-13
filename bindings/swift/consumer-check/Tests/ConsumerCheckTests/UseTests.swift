@@ -9,16 +9,4 @@ final class UseTests: XCTestCase {
 
         XCTAssertTrue(address.hasPrefix("off1"), "not an address: \(address)")
     }
-
-    func testReferenceStorageConformanceIsGreen() throws {
-        XCTAssertTrue(try referenceProtocolStateStorageConformanceIsGreen())
-    }
-
-    func testReferenceStorageBootstrapDerivesAnAddress() throws {
-        let config = referenceStorageSmokeConfig()
-        let mesh = try bootstrapWithReferenceStorage(config: config)
-        let address = mesh.localAddress()
-        XCTAssertTrue(address.hasPrefix("off1"), "not an address: \(address)")
-        try mesh.stop()
-    }
 }

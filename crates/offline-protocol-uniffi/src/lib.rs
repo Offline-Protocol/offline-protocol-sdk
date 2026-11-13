@@ -24347,125 +24347,102 @@ mod tests {
         }
     }
 
-    /// G7 PR2: typed storage conformance helpers on native bridges + consumer-check.
-    #[test]
-    fn g7_storage_conformance_helpers_are_shipped_on_native_bridges() {
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo = manifest.parent().unwrap().parent().unwrap();
-        let ios = std::fs::read_to_string(repo.join("bindings/react-native/ios/StorageConformance.swift"))
-            .expect("StorageConformance.swift must exist after G7 PR2");
-        let kotlin = std::fs::read_to_string(
-            repo.join("bindings/react-native/android/src/main/java/com/offlineprotocol/StorageConformance.kt"),
-        )
-        .expect("StorageConformance.kt must exist after G7 PR2");
-        let swift_use =
-            std::fs::read_to_string(repo.join("bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift"))
-                .expect("swift consumer-check Use.swift must exist");
-        let kotlin_use = std::fs::read_to_string(
-            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
-        )
-        .expect("kotlin consumer-check Use.kt must exist");
-        assert!(ios.contains("StorageConformance"));
-        assert!(kotlin.contains("object StorageConformance"));
-        assert!(kotlin.contains("runStorageConformance"));
-        assert!(swift_use.contains("StorageConformance"));
-        assert!(kotlin_use.contains("StorageConformance"));
-    }
-
-    /// G7 PR1: reference storage kit is part of the native library and wired in
-    /// consumer-check sample code.
-    #[test]
-    fn g7_reference_storage_kit_is_shipped_and_wired_in_consumer_check() {
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo = manifest.parent().unwrap().parent().unwrap();
-        let ios_kit = repo.join("bindings/react-native/ios/ReferenceStorage.swift");
-        let android_kit =
-            repo.join("bindings/react-native/android/src/main/java/com/offlineprotocol/ReferenceStorage.kt");
-        assert!(ios_kit.is_file(), "ReferenceStorage.swift must exist after G7 PR1");
-        assert!(android_kit.is_file(), "ReferenceStorage.kt must exist after G7 PR1");
-
-        let swift_use =
-            std::fs::read_to_string(repo.join("bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift"))
-                .expect("swift consumer-check Use.swift must exist");
-        let kotlin_use = std::fs::read_to_string(
-            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
-        )
-        .expect("kotlin consumer-check Use.kt must exist");
-
-        for path in [ios_kit, android_kit] {
-            let body = std::fs::read_to_string(&path).expect("reference storage kit must be readable");
-            assert!(
-                body.contains("OfflineProtocolReferenceStorage"),
-                "{} must declare OfflineProtocolReferenceStorage",
-                path.display()
-            );
-        }
-        assert!(
-            swift_use.contains("OfflineProtocolReferenceStorage"),
-            "swift consumer-check must wire OfflineProtocolReferenceStorage"
-        );
-        assert!(
-            kotlin_use.contains("OfflineProtocolReferenceStorage"),
-            "kotlin consumer-check must wire OfflineProtocolReferenceStorage"
-        );
-    }
-
-    /// G6 PR2: RN `devTransportDiagnostics` matches native `diagnostic` messages by
-    /// exact string. Every recognised wire form must stay pinned in the hints
-    /// module and at each bridge emit site (C5), or hints rot silently.
+    /// The React Native development hints (`devTransportDiagnostics`) match
+    /// native `diagnostic` events by exact message and read named context
+    /// keys. A native wording change or a renamed key compiles and tests green
+    /// everywhere else and the hint silently never fires (C5), so every message
+    /// the hints recognise, and every context key they read, is pinned here at
+    /// the hints module and at each bridge emit site.
     #[test]
     fn transport_expectation_diagnostics_are_pinned_for_rn_hints() {
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo = manifest.parent().unwrap().parent().unwrap();
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the crate sits two levels below the repository root");
+        let read = |relative: &str| {
+            std::fs::read_to_string(repo.join(relative))
+                .unwrap_or_else(|e| panic!("{relative} must exist: {e}"))
+        };
+        // The line holding `needle` and the four after it, where an emit
+        // call's context map is written. Line-based, so it never slices
+        // inside a multi-byte character. Panics when `needle` is absent.
+        fn site<'a>(source: &'a str, needle: &str, file: &str) -> &'a str {
+            let at = source
+                .find(needle)
+                .unwrap_or_else(|| panic!("{file} must contain {needle:?}"));
+            let tail = &source[at..];
+            let end = tail
+                .match_indices('\n')
+                .nth(4)
+                .map_or(tail.len(), |(i, _)| i);
+            &tail[..end]
+        }
+        fn emit_site<'a>(source: &'a str, message: &str, file: &str) -> &'a str {
+            site(source, &format!("\"{message}\""), file)
+        }
 
         const WIFI_STARTED: &str = "Wi-Fi Direct group formation started";
         const WIFI_RESUMED: &str = "Wi-Fi Direct group formation resumed";
         const WIFI_PROGRESS: &str = "transport_expectation_wifi_direct_formation_progress";
-        const BLE_MULTI_APP: &str =
-            "BLE peer serves several service instances; choosing one";
+        const BLE_MULTI_APP: &str = "BLE peer serves several service instances; choosing one";
 
-        let ts = std::fs::read_to_string(
-            repo.join("bindings/react-native/src/transportDiagnostics.ts"),
-        )
-        .expect("transportDiagnostics.ts must exist after G6 PR2");
-        let wifi_direct = std::fs::read_to_string(
-            repo.join(
-                "bindings/react-native/android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
-            ),
-        )
-        .expect("WifiDirectManager.kt must exist");
-        let ble_android = std::fs::read_to_string(
-            repo.join(
-                "bindings/react-native/android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
-            ),
-        )
-        .expect("CentralGattClient.kt must exist");
-        let ble_ios = std::fs::read_to_string(repo.join("bindings/react-native/ios/BleManager.swift"))
-            .expect("BleManager.swift must exist");
+        let ts = read("bindings/react-native/src/transportDiagnostics.ts");
+        let wifi_direct = read(
+            "bindings/react-native/android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
+        );
+        let ble_android = read(
+            "bindings/react-native/android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        );
+        let ble_ios = read("bindings/react-native/ios/BleManager.swift");
 
         for wire in [WIFI_STARTED, WIFI_RESUMED, WIFI_PROGRESS, BLE_MULTI_APP] {
             assert!(
-                ts.contains(wire),
+                ts.contains(&format!("'{wire}'")),
                 "transportDiagnostics.ts must recognise diagnostic message {wire:?}"
             );
         }
-
         for wire in [WIFI_STARTED, WIFI_RESUMED, WIFI_PROGRESS] {
+            emit_site(&wifi_direct, wire, "WifiDirectManager.kt");
+        }
+
+        // The progress report's context: the constant is the emit site's
+        // message, and the map beside it carries the two keys the hint reads.
+        let progress_emit = site(
+            &wifi_direct,
+            "DIAG_WIFI_DIRECT_FORMATION_PROGRESS,",
+            "WifiDirectManager.kt",
+        );
+        for key in ["elapsedMs", "report"] {
             assert!(
-                wifi_direct.contains(wire),
-                "WifiDirectManager.kt must emit diagnostic message {wire:?}"
+                progress_emit.contains(&format!("\"{key}\" to")),
+                "the formation progress diagnostic must carry context key {key:?}"
+            );
+            assert!(
+                ts.contains(&format!("context?.{key}")),
+                "transportDiagnostics.ts must read progress context key {key:?}"
             );
         }
 
+        // Several SDK apps on one phone: Android names the peer `address`,
+        // iOS `peripheral`, and the hint reads both.
+        let android_site = emit_site(&ble_android, BLE_MULTI_APP, "CentralGattClient.kt");
         assert!(
-            ble_android.contains(BLE_MULTI_APP),
-            "CentralGattClient.kt must emit the multi-app BLE diagnostic"
+            android_site.contains("\"address\" to"),
+            "CentralGattClient.kt's multi-app diagnostic must carry context key \"address\""
         );
+        let ios_site = emit_site(&ble_ios, BLE_MULTI_APP, "BleManager.swift");
         assert!(
-            ble_ios.contains(BLE_MULTI_APP),
-            "BleManager.swift must emit the multi-app BLE diagnostic"
+            ios_site.contains("\"peripheral\":"),
+            "BleManager.swift's multi-app diagnostic must carry context key \"peripheral\""
         );
+        for key in ["address", "peripheral"] {
+            assert!(
+                ts.contains(&format!("context?.{key}")),
+                "transportDiagnostics.ts must read multi-app context key {key:?}"
+            );
+        }
     }
+
     /// The local API chapter, the interface definition and the reference
     /// server's dispatch table name every declaration exactly once, and the
     /// chapter's catalogue names every event tag the engine can emit
@@ -24705,5 +24682,122 @@ mod tests {
             extra.is_empty(),
             "catalogue rows that are not Event variants: {extra:?}"
         );
+    }
+
+    /// `OfflineProtocolReferenceStorage` is the one place the built-in MLS and
+    /// protocol-state stores are opened and wiped, on each platform. The React
+    /// Native module and the engine host call it, so a native application that
+    /// calls it gets the stores a React Native application gets. A bridge file
+    /// that constructs a store or wipes an account itself is a second copy of
+    /// the wiring, and a copy that derives the account namespace differently
+    /// opens an empty store: a fresh identity, with no error.
+    ///
+    /// The scan covers the generator templates under `tools/` and the Flutter
+    /// plugin too. `ProtocolEngineHostBridge.kt` is generated, so a template
+    /// that still wires the stores puts the copy back on the next
+    /// regeneration, which is how one survived the first version of the kit.
+    #[test]
+    fn built_in_stores_are_opened_and_wiped_only_by_the_reference_kit() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = manifest
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+
+        fn walk(dir: &std::path::Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_dir() {
+                    if ![".build", "tests", "Generated"].contains(&name) {
+                        walk(&path, ext, out);
+                    }
+                } else if name.ends_with(ext) {
+                    out.push(path);
+                }
+            }
+        }
+
+        // The kit, and the files that define the stores and their wipes.
+        const OWNERS: [&str; 3] = [
+            "ReferenceStorage",
+            "MlsSecureStorage",
+            "ProtocolStateStorage",
+        ];
+        const WIRING: [&str; 3] = [
+            "MlsSecureStorage(",
+            "AppContainerProtocolStateStorage(",
+            ".wipeAccount(",
+        ];
+
+        let mut kits = 0usize;
+        let mut offenders = Vec::new();
+        for (root, ext) in [
+            ("bindings/react-native/ios", ".swift"),
+            ("bindings/react-native/android/src/main/java", ".kt"),
+            ("bindings/flutter/offline_protocol/ios/Classes", ".swift"),
+            (
+                "bindings/flutter/offline_protocol/android/src/main/kotlin",
+                ".kt",
+            ),
+            ("tools", ".py"),
+        ] {
+            let mut files = Vec::new();
+            walk(&repo.join(root), ext, &mut files);
+            assert!(!files.is_empty(), "no {ext} sources under {root}");
+            for file in files {
+                let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let body = std::fs::read_to_string(&file).expect("read bridge source");
+                if stem == "ReferenceStorage" {
+                    kits += 1;
+                    for call in ["initializeMls(", "wipe("] {
+                        assert!(
+                            body.contains(call),
+                            "{} no longer has {call}",
+                            file.display()
+                        );
+                    }
+                }
+                if OWNERS.contains(&stem) {
+                    continue;
+                }
+                for (number, line) in body.lines().enumerate() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") || code.starts_with('*') || code.starts_with('#') {
+                        continue;
+                    }
+                    if WIRING.iter().any(|call| code.contains(call)) {
+                        offenders.push(format!("{}:{}: {code}", file.display(), number + 1));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            kits, 2,
+            "expected ReferenceStorage.swift and ReferenceStorage.kt"
+        );
+        assert!(
+            offenders.is_empty(),
+            "open or wipe the built-in stores through OfflineProtocolReferenceStorage:\n{}",
+            offenders.join("\n")
+        );
+
+        // Each consumer-check compiles the native start and sign-out against
+        // the kit, from outside the module.
+        for path in [
+            "bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift",
+            "bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt",
+        ] {
+            let body = std::fs::read_to_string(repo.join(path)).expect("read consumer-check");
+            for call in [
+                "OfflineProtocolReferenceStorage.initializeMls(",
+                "OfflineProtocolReferenceStorage.wipe(",
+                ".warning",
+            ] {
+                assert!(body.contains(call), "{path} does not call {call}");
+            }
+        }
     }
 }

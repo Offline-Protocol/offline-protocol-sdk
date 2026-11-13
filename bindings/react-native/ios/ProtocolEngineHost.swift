@@ -984,38 +984,21 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     // MARK: - MLS storage
 
     /// Opens the Keychain-backed MLS store and the app-container protocol
-    /// state store for this account and hands both to the core.
+    /// state store for this account and hands both to the core, through
+    /// `OfflineProtocolReferenceStorage` so native applications get the same
+    /// wiring.
     func initializeMlsWithSecureStorage() throws {
         let proto = try requireProtocol()
         guard let config = currentConfig else {
             throw HostError.illegalState("Protocol config not initialized")
         }
-        let accountNamespace = StorageNamespace.account(appId: config.appId, profile: config.profile)
-        let secureStorage = try MlsSecureStorage(accountNamespace: accountNamespace)
-        let protocolStateStorage = try AppContainerProtocolStateStorage(accountNamespace: accountNamespace)
-        try proto.initializeMls(secureStorage: secureStorage, protocolStateStorage: protocolStateStorage)
-        switch secureStorage.legacyAdoption {
-        case .conflict?:
-            onDiagnostic(
-                "error",
-                "Legacy secure store belongs to another account; this account starts from a fresh MLS "
-                    + "identity and cannot decrypt its previous sessions. Its pre-split delivery state is "
-                    + "unreachable too, so it also comes up with an empty outbox and an empty block list: "
-                    + "every previously blocked peer is unblocked",
-                [:]
-            )
-        case .claimUnverified?:
-            onDiagnostic(
-                "error",
-                "Could not record this account's claim on the legacy secure store, so it was not adopted: "
-                    + "another account could otherwise inherit the same MLS identity. This account starts "
-                    + "from a fresh identity and comes up with an empty outbox and an empty block list: "
-                    + "every previously blocked peer is unblocked. The credential store is failing writes; "
-                    + "retrying on a healthy store adopts normally",
-                [:]
-            )
-        case .adopt?, .resume?, .none:
-            break
+        let adoption = try OfflineProtocolReferenceStorage.initializeMls(
+            on: proto,
+            appId: config.appId,
+            profile: config.profile
+        )
+        if let warning = adoption.warning {
+            onDiagnostic("error", warning, [:])
         }
         onDiagnostic("info", "MLS initialized with split Keychain and app-container storage", [:])
     }
