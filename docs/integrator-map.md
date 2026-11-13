@@ -193,6 +193,10 @@ call `requestMeshPermissions()` before `start()` (see that guide).
 **Testing:** BLE and Wi‑Fi Direct need **physical devices**; simulators are not
 enough for mesh QA.
 
+**QA thinks the SDK is hung or pairing is wrong?** See
+[troubleshooting.md](troubleshooting.md) (Wi‑Fi Direct often needs **1–2
+minutes**; multiple SDK apps on one phone need distinct `appId`s).
+
 ---
 
 ## Configuration and tuning
