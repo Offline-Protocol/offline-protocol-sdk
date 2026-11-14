@@ -19,6 +19,7 @@ before changing behaviour, not before using the SDK.
 | [Quick Start](../QUICKSTART.md) | Get started in 5 minutes (React Native, iOS, Android) |
 | [Upgrading](UPGRADING.md) | **Breaking changes and required app-side work** (use the [version index](UPGRADING.md#start-here-version-and-surface-index) first) |
 | [React Native Integration](react-native-integration.md) | Full SDK integration guide with complete API reference |
+| [Flutter distribution](flutter-distribution.md) | **pub.dev** install path for the Flutter plugin |
 | [Native iOS distribution](ios-native-distribution.md) | **Blessed Swift package path** for native apps (`OfflineProtocolSDK`) |
 | [iOS Integration](ios-integration.md) | Native iOS (Swift) app patterns, plist, transports |
 | [Android Integration](android-integration.md) | Native Android (Kotlin) setup and usage |

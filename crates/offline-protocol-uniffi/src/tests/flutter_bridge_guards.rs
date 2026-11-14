@@ -615,4 +615,38 @@ fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory()
         ignore.lines().any(|l| l.trim() == "Frameworks/"),
         "ios/.gitignore must keep the staged XCFramework out of the repository"
     );
+    assert!(
+        podspec.contains("BridgeRN/Generated/offline_protocol.swift")
+            && podspec.contains("unless File.file?(bridge_generated)"),
+        "offline_protocol.podspec must skip prepare_command when BridgeRN is shipped"
+    );
+}
+
+/// Friction #19: pub.dev packaging is scripted and documented; no ad-hoc copies.
+#[test]
+fn flutter_pub_distribution_path_is_documented_and_pinned() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("repository root");
+    let assemble = read_text(&repo.join("scripts/assemble-flutter-pub-package.sh"));
+    assert!(
+        assemble.contains("pub.dev"),
+        "assemble-flutter-pub-package.sh must describe the pub.dev tree"
+    );
+    assert!(
+        assemble.contains("bridge-rn"),
+        "assemble script must vendor the Android bridge for pub consumers"
+    );
+    let doc = std::fs::read_to_string(repo.join("docs/flutter-distribution.md"))
+        .unwrap_or_else(|e| panic!("docs/flutter-distribution.md: {e}"));
+    assert!(
+        doc.contains("flutter pub add offline_protocol"),
+        "flutter-distribution.md must name the pub.dev install command"
+    );
+    let gradle = read_text(&flutter_plugin_dir().join("android/build.gradle"));
+    assert!(
+        gradle.contains("file('bridge-rn')"),
+        "Flutter android/build.gradle must support the pub assemble layout"
+    );
 }

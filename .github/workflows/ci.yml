@@ -1855,6 +1855,8 @@ jobs:
             scripts/publish-swift-package.sh \
             scripts/swiftpm-archive-url.sh \
             scripts/tests/test-publish-swift-package.sh \
+            scripts/assemble-flutter-pub-package.sh \
+            scripts/tests/test-assemble-flutter-pub-package.sh \
             scripts/maven-central-bundle.sh \
             scripts/maven-central-upload.sh \
             scripts/tests/test-maven-central.sh
@@ -1875,6 +1877,9 @@ jobs:
       # release.
       - name: Publish the Swift package to a local repository
         run: bash scripts/tests/test-publish-swift-package.sh
+
+      - name: Assemble the Flutter pub package against a fixture tree
+        run: bash scripts/tests/test-assemble-flutter-pub-package.sh
 
       - name: Sign, bundle and upload the Android library to a stand-in Portal
         run: bash scripts/tests/test-maven-central.sh
