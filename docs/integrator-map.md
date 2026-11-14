@@ -26,7 +26,7 @@ before reading all of [UPGRADING.md](UPGRADING.md).
 | C# / .NET 8 | [desktop-java-csharp-distribution.md](desktop-java-csharp-distribution.md) → [bindings/csharp/README.md](../bindings/csharp/README.md) | ~1 h with release natives | Release desktop archive + `OFFLINE_PROTOCOL_LIBRARY_DIR` (no NuGet yet). |
 | Java (JVM 22+) | [desktop-java-csharp-distribution.md](desktop-java-csharp-distribution.md) → [bindings/java/README.md](../bindings/java/README.md) | ~1 h with Maven + release natives | `com.offlineprotocol:offline-protocol-java` + `--enable-native-access`. |
 | Ruby | [bindings/ruby/README.md](../bindings/ruby/README.md) | ~1 h | Keep engine alive while callbacks exist. |
-| Web (browser) | [bridges/web.md](bridges/web.md) | days (experimental) | Worker + OPFS; not a drop-in npm widget. |
+| Web (browser) | [Web Vite starter](../bindings/web/starter/README.md) → [bridges/web.md](bridges/web.md) | ~1–2 h tab mesh (experimental) | Dedicated worker + WASM build; **not** an npm drop-in. See starter [go/no-go](../bindings/web/starter/README.md#go--no-go-pick-another-platform-when). |
 
 ---
 
@@ -261,7 +261,8 @@ version for the index).
 | [Demo app](../examples/demo-app/README.md) | Discovery, chat, groups, services in one RN app |
 | [Storage adapters](../examples/storage-adapters/README.md) | Custom protocol-state storage (Swift/Kotlin/Python) |
 | `offline-protocol-verify` (Python) | Smoke test pairing/delivery against a running service |
-| [Mesh between tabs](../examples/web-two-tabs/README.md) | Browser worker mesh |
+| [Web Vite starter](../bindings/web/starter/README.md) | Cloneable dev template (tab mesh, `npm run dev`) |
+| [Mesh between tabs](../examples/web-two-tabs/README.md) | Same tab mesh without Vite (static `http.server`) |
 
 ---
 
