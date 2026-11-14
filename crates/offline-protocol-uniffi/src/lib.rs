@@ -25024,4 +25024,50 @@ mod tests {
             "UPGRADING §12.3 must link ios-native-distribution.md"
         );
     }
+
+    /// Friction #21: Python integrators get an honest wheel matrix and Docker
+    /// fallback, pinned to the four platforms build-wheel.sh ships.
+    #[test]
+    fn python_wheel_distribution_path_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let doc = std::fs::read_to_string(repo.join("docs/python-distribution.md"))
+            .expect("python-distribution.md");
+        for needle in [
+            "pip install offline-protocol-sdk",
+            "ghcr.io/offline-protocol/offline-protocol-service",
+            "musl",
+            "Intel",
+            "no sdist",
+            "macos-arm64",
+            "linux-x86_64",
+        ] {
+            assert!(
+                doc.contains(needle),
+                "python-distribution.md must mention `{needle}`"
+            );
+        }
+        let wheel_script =
+            std::fs::read_to_string(repo.join("bindings/python/scripts/build-wheel.sh"))
+                .expect("build-wheel.sh");
+        for platform in [
+            "macos-arm64",
+            "linux-x86_64",
+            "linux-aarch64",
+            "windows-x86_64",
+        ] {
+            assert!(
+                wheel_script.contains(platform),
+                "build-wheel.sh must still name {platform}"
+            );
+        }
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        assert!(
+            map.contains("python-distribution.md"),
+            "integrator-map must link python-distribution.md"
+        );
+    }
 }
