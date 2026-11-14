@@ -25025,7 +25025,7 @@ mod tests {
         );
     }
 
-    /// Friction #21: Python integrators get an honest wheel matrix and Docker
+    /// Python integrators get an honest wheel matrix and Docker
     /// fallback, pinned to the four platforms build-wheel.sh ships.
     #[test]
     fn python_wheel_distribution_path_is_documented() {
@@ -25071,7 +25071,7 @@ mod tests {
         );
     }
 
-    /// Friction #23: Java Maven + release natives and C# library dir are one doc.
+    /// Java Maven + release natives and C# library dir are documented together.
     #[test]
     fn desktop_java_csharp_distribution_path_is_documented() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -25100,7 +25100,7 @@ mod tests {
         );
     }
 
-    /// Friction #5: the TypeScript catalog of event tags must stay aligned with
+    /// The TypeScript catalog of event tags must stay aligned with
     /// `types.ts`, and integrators must have a documented parse entry point.
     #[test]
     fn react_native_protocol_event_parse_helpers_are_documented() {
@@ -25184,7 +25184,7 @@ mod tests {
         );
     }
 
-    /// Friction #25: browser integrators get a Vite starter and integrator-map
+    /// Browser integrators get a Vite starter and integrator-map
     /// pointers with explicit experimental boundaries.
     #[test]
     fn web_vite_quickstart_is_documented() {
@@ -25229,7 +25229,7 @@ mod tests {
         );
     }
 
-    /// Friction #28: integrators get a testing matrix with golden paths and
+    /// Integrators get a testing matrix with golden paths and
     /// explicit simulator vs hardware boundaries.
     #[test]
     fn integration_testing_matrix_is_documented() {
@@ -25270,7 +25270,7 @@ mod tests {
         );
     }
 
-    /// Friction #30 (C12): native consumer-check apps document telemetry config
+    /// Native consumer-check apps document telemetry config (C12) and
     /// fill + lifecycle forwarding for hosts that are not React Native.
     #[test]
     fn consumer_check_telemetry_lifecycle_is_documented() {
@@ -25333,6 +25333,52 @@ mod tests {
             assert!(
                 telemetry.contains(needle),
                 "telemetry.md must link native consumer-check stubs (`{needle}`)"
+            );
+        }
+    }
+
+    /// Integrators get a license decision tree linked from package
+    /// READMEs and the integrator map.
+    #[test]
+    fn licensing_decision_tree_is_linked_from_package_readmes() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let tree = std::fs::read_to_string(repo.join("docs/licensing-decision-tree.md"))
+            .expect("licensing-decision-tree.md");
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        for needle in [
+            "not legal advice",
+            "Commercial license",
+            "AGPL-3.0-only",
+            "legal@offlineprotocol.com",
+            "licensing-faq.md",
+        ] {
+            assert!(
+                tree.contains(needle),
+                "licensing-decision-tree.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            map.contains("licensing-decision-tree.md"),
+            "integrator-map must link licensing-decision-tree.md"
+        );
+        for (path, label) in [
+            ("README.md", "repository README"),
+            (
+                "bindings/react-native/README.md",
+                "React Native package README",
+            ),
+            ("bindings/python/README.md", "Python package README"),
+            ("bindings/flutter/README.md", "Flutter README"),
+        ] {
+            let readme = std::fs::read_to_string(repo.join(path))
+                .unwrap_or_else(|e| panic!("read {label}: {e}"));
+            assert!(
+                readme.contains("licensing-decision-tree.md"),
+                "{label} must link licensing-decision-tree.md"
             );
         }
     }

@@ -622,7 +622,7 @@ fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory()
     );
 }
 
-/// Friction #19: pub.dev packaging is scripted and documented; no ad-hoc copies.
+/// pub.dev packaging is scripted and documented; no ad-hoc copies.
 #[test]
 fn flutter_pub_distribution_path_is_documented_and_pinned() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

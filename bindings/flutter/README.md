@@ -2,6 +2,8 @@
 
 Flutter plugin for the [Offline Protocol SDK](https://github.com/Offline-Protocol/offline-protocol-sdk): offline-first mesh messaging with MLS encryption.
 
+**Dual-licensed:** [AGPL-3.0-only](../../LICENSE) or [commercial license](../../LICENSE-COMMERCIAL.md). Package manifests list AGPL SPDX only — see [license decision tree](../../docs/licensing-decision-tree.md) before legal review.
+
 Hand-written native bridge code is shared with the React Native module under
 `bindings/react-native/{ios,android}`
 ([ADR 0025](../../docs/adr/0025-native-packages-are-assembled-in-place.md)).

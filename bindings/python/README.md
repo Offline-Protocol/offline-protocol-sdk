@@ -6,7 +6,7 @@ Python bindings for the Offline Protocol SDK: offline-first mesh networking with
 [docs/python-distribution.md](../../docs/python-distribution.md) (wheel matrix
 and Alpine / Intel Mac fallbacks).
 
-**Dual-licensed:** use it under [AGPL-3.0-only](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE), or buy a [commercial license](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE-COMMERCIAL.md), your call. The package metadata can only name `AGPL-3.0-only` because SPDX has no identifier for the commercial offer — see [License](#license) for the full breakdown.
+**Dual-licensed:** use it under [AGPL-3.0-only](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE), or buy a [commercial license](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE-COMMERCIAL.md), your call. The package metadata can only name `AGPL-3.0-only` because SPDX has no identifier for the commercial offer — see [License](#license) for the full breakdown. **Choosing?** [License decision tree](../../docs/licensing-decision-tree.md) → [Licensing FAQ](../../docs/licensing-faq.md).
 
 > **Upgrading an existing install?** Read [docs/UPGRADING.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/UPGRADING.md)
 > first — `ProtocolManager` now requires an explicit `state_root`, and this

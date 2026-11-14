@@ -17,6 +17,7 @@ before changing behaviour, not before using the SDK.
 | [Mobile permissions](mobile-permissions.md) | **iOS and Android:** Info.plist, manifest, runtime grants, background mesh |
 | [Transport troubleshooting](troubleshooting.md) | **QA:** Wi‑Fi Direct timing, several SDK apps on one phone, false "broken SDK" |
 | [Integration testing matrix](integration-testing-matrix.md) | **QA:** simulator vs hardware, golden smoke paths, release milestones |
+| [License decision tree](licensing-decision-tree.md) | **Legal triage:** AGPL vs commercial before first import |
 | [Quick Start](../QUICKSTART.md) | Get started in 5 minutes (React Native, iOS, Android) |
 | [Upgrading](UPGRADING.md) | **Breaking changes and required app-side work** (use the [version index](UPGRADING.md#start-here-version-and-surface-index) first) |
 | [React Native Integration](react-native-integration.md) | Full SDK integration guide with complete API reference |
@@ -167,5 +168,6 @@ in here fails **silently** when violated.
 
 | Resource | Description |
 |----------|-------------|
-| [Licensing FAQ](licensing-faq.md) | The dual license in practice: app stores, the AGPL's reach, commercial licensing |
+| [License decision tree](licensing-decision-tree.md) | AGPL vs commercial — start here before legal review |
+| [Licensing FAQ](licensing-faq.md) | App stores, §13, telemetry (after the tree) |
 | [Export Control Notice](../EXPORT.md) | Encryption export status of the SDK and what app teams must handle themselves |

@@ -275,4 +275,5 @@ version for the index).
 | [Documentation index](README.md) | Full list of guides and spec |
 | [Bridge contracts](bridges/README.md) | Boundary rules (silent failures if violated) |
 | [Architecture](architecture.md) | Crate layout and design |
-| [Licensing FAQ](licensing-faq.md) | AGPL vs commercial |
+| [License decision tree](licensing-decision-tree.md) | AGPL vs commercial — start here for legal triage |
+| [Licensing FAQ](licensing-faq.md) | App Store, §13, telemetry (after the tree) |
