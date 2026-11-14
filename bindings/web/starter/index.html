@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Offline Protocol — Web Vite starter</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>Web Vite starter</h1>
+        <p class="lede">
+          Open this dev server in <strong>two tabs</strong>. Each tab runs a full
+          node in a dedicated worker; tabs mesh over <code>BroadcastChannel</code>
+          with MLS encryption. This path uses in-memory storage so every tab is its
+          own device.
+        </p>
+      </header>
+      <section>
+        <div class="label">This tab</div>
+        <code id="me">starting…</code>
+      </section>
+      <section>
+        <div class="label">Neighbours</div>
+        <ul id="neighbours"><li class="muted">none yet</li></ul>
+      </section>
+      <section>
+        <form id="send">
+          <select id="to" aria-label="Recipient"></select>
+          <input id="text" placeholder="Message" autocomplete="off" required />
+          <button type="submit">Send</button>
+        </form>
+      </section>
+      <section>
+        <div class="label">Messages</div>
+        <ul id="messages"></ul>
+      </section>
+      <footer class="muted">
+        Experimental binding — read
+        <a href="https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/bridges/web.md">docs/bridges/web.md</a>
+        before shipping. Not a drop-in npm widget.
+      </footer>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
