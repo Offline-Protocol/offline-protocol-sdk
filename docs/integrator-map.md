@@ -23,8 +23,8 @@ before reading all of [UPGRADING.md](UPGRADING.md).
 | Python (desktop / gateway) | [python-distribution.md](python-distribution.md) → [bindings/python/README.md](../bindings/python/README.md) | ~30 min with wheels | `pip install`; Docker image when no wheel matches (Alpine, Intel Mac, old glibc). |
 | Local API (multi-app on one host) | [local-api.md](local-api.md) | ~1 h | Service + policy file; clients over socket. |
 | C / C++ / Go (via C) | [bindings/c/README.md](../bindings/c/README.md) | 1–2 h | Build or ship `liboffline_protocol_uniffi`; JSON config + callbacks. |
-| C# / .NET 8 | [bindings/csharp/README.md](../bindings/csharp/README.md) | 1–2 h | `OFFLINE_PROTOCOL_LIBRARY_DIR` + engine thread rules. |
-| Java (JVM 22+) | [bindings/java/README.md](../bindings/java/README.md) | 1–2 h | `--enable-native-access`; positional `ProtocolConfig`. |
+| C# / .NET 8 | [desktop-java-csharp-distribution.md](desktop-java-csharp-distribution.md) → [bindings/csharp/README.md](../bindings/csharp/README.md) | ~1 h with release natives | Release desktop archive + `OFFLINE_PROTOCOL_LIBRARY_DIR` (no NuGet yet). |
+| Java (JVM 22+) | [desktop-java-csharp-distribution.md](desktop-java-csharp-distribution.md) → [bindings/java/README.md](../bindings/java/README.md) | ~1 h with Maven + release natives | `com.offlineprotocol:offline-protocol-java` + `--enable-native-access`. |
 | Ruby | [bindings/ruby/README.md](../bindings/ruby/README.md) | ~1 h | Keep engine alive while callbacks exist. |
 | Web (browser) | [bridges/web.md](bridges/web.md) | days (experimental) | Worker + OPFS; not a drop-in npm widget. |
 
