@@ -25228,4 +25228,45 @@ mod tests {
             "integrator-map Web row must mention the starter go/no-go section"
         );
     }
+
+    /// Friction #28: integrators get a testing matrix with golden paths and
+    /// explicit simulator vs hardware boundaries.
+    #[test]
+    fn integration_testing_matrix_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let doc =
+            std::fs::read_to_string(repo.join("docs/integration-testing-matrix.md"))
+                .expect("integration-testing-matrix.md");
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        let docs_readme = std::fs::read_to_string(repo.join("docs/README.md")).expect("docs README");
+        for needle in [
+            "Golden paths",
+            "physical devices",
+            "offline-protocol-verify",
+            "examples/react-native-app",
+            "web-devices",
+            "Milestone B",
+        ] {
+            assert!(
+                doc.contains(needle),
+                "integration-testing-matrix.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            map.contains("integration-testing-matrix.md"),
+            "integrator-map must link integration-testing-matrix.md"
+        );
+        assert!(
+            map.contains("Integration testing matrix"),
+            "integrator-map examples table must name the testing matrix"
+        );
+        assert!(
+            docs_readme.contains("integration-testing-matrix.md"),
+            "docs/README.md must list integration-testing-matrix.md"
+        );
+    }
 }
