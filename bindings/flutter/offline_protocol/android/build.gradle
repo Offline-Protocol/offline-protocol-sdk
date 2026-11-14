@@ -26,7 +26,7 @@ apply plugin: 'kotlin-android'
 // shared bridge source except the ones the KotlinCompile excludes below name:
 // a list of what to leave out, never a list of what to take, so a new shared
 // source reaches this plugin without being registered (decision 3).
-def bridgeDir = file('../../../react-native/android')
+def bridgeDir = file('bridge-rn').isDirectory() ? file('bridge-rn') : file('../../../react-native/android')
 def bridgeJava = bridgeDir.path + '/src/main/java'
 
 // Values the React Native module declares are read from the line that declares
@@ -48,7 +48,10 @@ def moduleDependency = { String module ->
     def quoted = java.util.regex.Pattern.quote(module)
     exactlyOne(module, /(?m)^[ \t]*implementation[ \t(]+['"]${quoted}:([^'"@]+)(?:@aar)?['"]/)
 }
-def rnPackage = new groovy.json.JsonSlurper().parse(file('../../../react-native/package.json'))
+def versionJson = file('pub_bridge_version.json')
+def rnPackage = versionJson.exists()
+    ? new groovy.json.JsonSlurper().parse(versionJson)
+    : new groovy.json.JsonSlurper().parse(file('../../../react-native/package.json'))
 version rnPackage.version
 
 android {

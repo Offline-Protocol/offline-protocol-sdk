@@ -44,8 +44,11 @@ Pod::Spec.new do |s|
   s.platform         = :ios, ios_deployment_target
   s.swift_version    = '5.5'
 
-  sync_script = File.join(plugin_ios, 'sync_bridge_rn.sh')
-  s.prepare_command = "bash #{sync_script.shellescape}"
+  bridge_generated = File.join(plugin_ios, 'BridgeRN/Generated/offline_protocol.swift')
+  unless File.file?(bridge_generated)
+    sync_script = File.join(plugin_ios, 'sync_bridge_rn.sh')
+    s.prepare_command = "bash #{sync_script.shellescape}"
+  end
 
   s.source_files = [
     'Classes/**/*.swift',
