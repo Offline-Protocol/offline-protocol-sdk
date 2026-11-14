@@ -25269,4 +25269,71 @@ mod tests {
             "docs/README.md must list integration-testing-matrix.md"
         );
     }
+
+    /// Friction #30 (C12): native consumer-check apps document telemetry config
+    /// fill + lifecycle forwarding for hosts that are not React Native.
+    #[test]
+    fn consumer_check_telemetry_lifecycle_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let swift = std::fs::read_to_string(
+            repo.join("bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift"),
+        )
+        .expect("swift consumer-check");
+        let kotlin = std::fs::read_to_string(
+            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
+        )
+        .expect("kotlin consumer-check");
+        let csharp = std::fs::read_to_string(repo.join("bindings/csharp/consumer-check/Program.cs"))
+            .expect("csharp consumer-check");
+        let telemetry =
+            std::fs::read_to_string(repo.join("docs/telemetry.md")).expect("telemetry.md");
+        for (path, body, needles) in [
+            (
+                "Use.swift",
+                swift.as_str(),
+                &[
+                    "telemetryConfigFilledByBinding",
+                    "forwardTelemetryLifecycleEdges",
+                    "notifyAppState",
+                    "os: .ios",
+                ][..],
+            ),
+            (
+                "Use.kt",
+                kotlin.as_str(),
+                &[
+                    "telemetryConfigFilledByBinding",
+                    "forwardTelemetryLifecycleEdges",
+                    "notifyAppState",
+                    "TelemetryOs.ANDROID",
+                ][..],
+            ),
+        ] {
+            for needle in needles {
+                assert!(
+                    body.contains(needle),
+                    "bindings/.../consumer-check {path} must mention `{needle}`"
+                );
+            }
+        }
+        assert!(
+            csharp.contains("NotifyAppStateAsync(AppState.Background)")
+                && csharp.contains("NotifyAppStateAsync(AppState.Active)"),
+            "csharp consumer-check must forward telemetry lifecycle"
+        );
+        for needle in [
+            "bindings/swift/consumer-check",
+            "bindings/kotlin/consumer-check",
+            "bindings/csharp/consumer-check/Program.cs",
+            "forwardTelemetryLifecycleEdges",
+        ] {
+            assert!(
+                telemetry.contains(needle),
+                "telemetry.md must link native consumer-check stubs (`{needle}`)"
+            );
+        }
+    }
 }

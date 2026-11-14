@@ -6,7 +6,7 @@ R8, no extra libraries.
 
 | Path | Role |
 |------|------|
-| `app/src/main/java/consumer/Use.kt` | Canonical engine vs bridge imports and API touch points |
+| `app/src/main/java/consumer/Use.kt` | Canonical engine vs bridge imports, storage, and C12 telemetry lifecycle stubs |
 | `app/build.gradle.kts` | `checkJniLibraryNames` if you add manual `jniLibs/` (see below) |
 
 JNI naming for hand-copied `.so` files:

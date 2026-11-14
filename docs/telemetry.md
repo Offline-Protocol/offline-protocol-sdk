@@ -47,6 +47,22 @@ await pm.start()
 pm.enable_telemetry("mp_…", "app_…", app_version="1.4.2")
 ```
 
+Python hosts that see foreground/background must call `notify_app_state` the
+same way desktop bindings do (see below).
+
+**Native Swift, Kotlin, and C#** (not React Native or Flutter): you fill
+`TelemetryConfig` with the binding's platform values and forward lifecycle
+edges yourself. Copy the compile-checked stubs in the consumer-check apps:
+
+| Binding | File |
+|---------|------|
+| Swift | [bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift](../bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift) (`telemetryConfigFilledByBinding`, `forwardTelemetryLifecycleEdges`) |
+| Kotlin | [bindings/kotlin/consumer-check/.../Use.kt](../bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt) |
+| C# | [bindings/csharp/consumer-check/Program.cs](../bindings/csharp/consumer-check/Program.cs) (`NotifyAppStateAsync`) |
+
+On Android, watch **process** foreground/background (`Application`
+`ActivityLifecycleCallbacks`), not `Activity.onPause` ([C12](bridges/README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform)).
+
 Rust:
 
 ```rust
