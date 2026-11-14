@@ -17,7 +17,7 @@
 [![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20Android%20%7C%20macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#building-the-sdk)
 [![Discord](https://img.shields.io/badge/chat-Discord-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/9TQGrxaPJk)
 
-**Dual-licensed:** use it under [AGPL-3.0-only](LICENSE), or buy a [commercial license](LICENSE-COMMERCIAL.md), your call — see the [License](#license) section for the full breakdown.
+**Dual-licensed:** use it under [AGPL-3.0-only](LICENSE), or buy a [commercial license](LICENSE-COMMERCIAL.md), your call — see the [License](#license) section for the full breakdown. **Choosing?** Start with the [license decision tree](docs/licensing-decision-tree.md) (then [Licensing FAQ](docs/licensing-faq.md)).
 
 ## Features
 
