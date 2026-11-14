@@ -1,7 +1,7 @@
 # Web Vite quickstart
 
-Opinionated dev template for the **experimental** browser binding (friction
-#25). Cloneable tab-to-tab mesh with Vite — not a published npm package.
+Opinionated dev template for the **experimental** browser binding. Cloneable
+tab-to-tab mesh with Vite — not a published npm package.
 
 ## Prerequisites
 

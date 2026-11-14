@@ -1,7 +1,7 @@
 # Flutter: pub.dev install path
 
-Friction **#19**: integrators should not need the Rust toolchain or
-`generate-bindings.sh` to try the Flutter plugin.
+Use this path when you want the Flutter plugin from pub.dev without building
+the Rust bridge from a full SDK checkout.
 
 React Native teams should use `@offline-protocol/mesh-sdk` instead ([QUICKSTART.md](../QUICKSTART.md)).
 

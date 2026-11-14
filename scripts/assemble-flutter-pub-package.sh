@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Assemble a self-contained Flutter plugin tree for pub.dev (G10 / friction #19).
+# Assemble a self-contained Flutter plugin tree for pub.dev.
 # The in-repository plugin reaches shared bridge sources under
 # bindings/react-native; a pub consumer has no such tree. This script copies
 # the bridge, stages prebuilt UniFFI libraries, and writes the version pin the

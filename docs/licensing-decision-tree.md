@@ -1,8 +1,8 @@
 # License decision tree
 
-**Purpose:** Fast legal/product triage before you import the SDK (friction
-**#31**). This is **not legal advice**; it routes you to the authoritative
-text. Nothing here changes either license.
+**Purpose:** Fast legal/product triage before you import the SDK. This is
+**not legal advice**; it routes you to the authoritative text. Nothing here
+changes either license.
 
 | Document | Role |
 |----------|------|

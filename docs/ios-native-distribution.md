@@ -1,8 +1,7 @@
 # Native iOS: blessed distribution path
 
-This page is for a **native Swift app** (no React Native). It answers #12 in the
-integrator friction plan: one obvious install path instead of a multi-day
-hand-built XCFramework workflow.
+This page is for a **native Swift app** (no React Native). It is the supported
+install path instead of a multi-day hand-built XCFramework workflow.
 
 React Native integrators should use [QUICKSTART.md](../QUICKSTART.md) and
 `@offline-protocol/mesh-sdk` instead.

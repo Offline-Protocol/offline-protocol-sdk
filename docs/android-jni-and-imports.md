@@ -4,7 +4,7 @@ Two footguns on the **manual** Android path (Maven coordinates or hand-copied
 `jniLibs`): wrong `.so` names and mixing React Native bridge types with the
 engine API.
 
-## JNI library names (#15)
+## JNI library names
 
 | Stage | File name |
 |-------|-----------|
@@ -30,7 +30,7 @@ python3 scripts/check_manual_android_jni_libs.py path/to/jniLibs
 `mesh-sdk-doctor` flags the stale cargo name under an RN app's
 `android/app/src/main/jniLibs` (see [react-native-host-doctor.md](react-native-host-doctor.md)).
 
-## Kotlin imports (#16)
+## Kotlin imports
 
 | You need | Package | Examples |
 |----------|---------|----------|

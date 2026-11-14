@@ -1,7 +1,7 @@
 # Python: wheels, PyPI, and fallbacks
 
-Friction **#21**: integrators need a clear answer for `pip install` on common
-hosts, and an honest path when no wheel matches.
+This guide answers `pip install` on common hosts and what to do when no wheel
+matches your platform.
 
 Libraries and gateways: start here. Container deploys: [Docker service](#docker-one-liner)
 below. API details: [bindings/python/README.md](../bindings/python/README.md).

@@ -1,7 +1,7 @@
 # Integration testing matrix
 
-**Purpose:** Standard QA for integrators and release owners (friction **#28**).
-Simulators and emulators are fine for **app and SDK wiring**; they do **not**
+**Purpose:** Standard QA for integrators and release owners before you trust mesh
+on real hardware. Simulators and emulators are fine for **app and SDK wiring**; they do **not**
 faithfully reproduce BLE, Wi‑Fi Direct, or browser mesh on real networks. This
 page says what to run where, and which repo paths are the **golden**
 smoke tests.

@@ -1001,7 +1001,7 @@ jobs:
 
   # The Flutter plugin pub.dev carries: shared bridge sources vendored into the
   # package, plus the same staged jniLibs and XCFramework the in-repo plugin
-  # links (friction #19). Assembled and dry-run published before the GitHub
+  # links. Assembled and dry-run published before the GitHub
   # release job; pub.dev publish runs after release when FLUTTER_PUBLISH is on.
   flutter-pub-package:
     name: Assemble Flutter pub package

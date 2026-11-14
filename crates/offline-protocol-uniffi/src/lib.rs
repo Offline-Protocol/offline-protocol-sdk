@@ -25025,7 +25025,7 @@ mod tests {
         );
     }
 
-    /// Friction #21: Python integrators get an honest wheel matrix and Docker
+    /// Python integrators get an honest wheel matrix and Docker
     /// fallback, pinned to the four platforms build-wheel.sh ships.
     #[test]
     fn python_wheel_distribution_path_is_documented() {
@@ -25071,7 +25071,7 @@ mod tests {
         );
     }
 
-    /// Friction #23: Java Maven + release natives and C# library dir are one doc.
+    /// Java Maven + release natives and C# library dir are documented together.
     #[test]
     fn desktop_java_csharp_distribution_path_is_documented() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -25100,7 +25100,7 @@ mod tests {
         );
     }
 
-    /// Friction #5: the TypeScript catalog of event tags must stay aligned with
+    /// The TypeScript catalog of event tags must stay aligned with
     /// `types.ts`, and integrators must have a documented parse entry point.
     #[test]
     fn react_native_protocol_event_parse_helpers_are_documented() {
@@ -25184,7 +25184,7 @@ mod tests {
         );
     }
 
-    /// Friction #25: browser integrators get a Vite starter and integrator-map
+    /// Browser integrators get a Vite starter and integrator-map
     /// pointers with explicit experimental boundaries.
     #[test]
     fn web_vite_quickstart_is_documented() {
@@ -25229,7 +25229,7 @@ mod tests {
         );
     }
 
-    /// Friction #28: integrators get a testing matrix with golden paths and
+    /// Integrators get a testing matrix with golden paths and
     /// explicit simulator vs hardware boundaries.
     #[test]
     fn integration_testing_matrix_is_documented() {
@@ -25270,7 +25270,7 @@ mod tests {
         );
     }
 
-    /// Friction #30 (C12): native consumer-check apps document telemetry config
+    /// Native consumer-check apps document telemetry config (C12) and
     /// fill + lifecycle forwarding for hosts that are not React Native.
     #[test]
     fn consumer_check_telemetry_lifecycle_is_documented() {
@@ -25337,7 +25337,7 @@ mod tests {
         }
     }
 
-    /// Friction #31: integrators get a license decision tree linked from package
+    /// Integrators get a license decision tree linked from package
     /// READMEs and the integrator map.
     #[test]
     fn licensing_decision_tree_is_linked_from_package_readmes() {
