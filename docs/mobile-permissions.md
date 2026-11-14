@@ -350,6 +350,7 @@ Simulators do not validate BLE or Wi‑Fi Direct behaviour. Use hardware for mes
 | Document | Role |
 |----------|------|
 | [Integrator map](integrator-map.md) | Platform entry and lifecycle |
+| [Integration testing matrix](integration-testing-matrix.md) | Full QA matrix and golden paths |
 | [Transport troubleshooting](troubleshooting.md) | Wi‑Fi Direct time budget, multi-app QA |
 | [react-native-integration §4](react-native-integration.md#4-enabling-transports) | Transport configuration |
 | [configuration.md](configuration.md) | Which transports to enable |
