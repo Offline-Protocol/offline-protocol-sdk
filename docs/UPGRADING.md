@@ -66,7 +66,7 @@ checklist.
 | **Python** | [§1](#1-initialize_mls-now-takes-two-storage-providers) (`state_root`), [§14](#14-your-identity-is-derived-not-chosen-v0210) | §16 data, §25+ behaviour | RN §8–§9 |
 | **Rust app on crates** | [This release at a glance](#this-release-at-a-glance) Rust column, §15 API removals, §19 Reticulum crate | §25–§31 exhaustive `Event` / config field matches | Binding-only packaging |
 | **Python** | [python-distribution.md](python-distribution.md) (wheel tag vs glibc), [§1](#1-initialize_mls-now-takes-two-storage-providers) (`state_root`) | §14 identity, §25–§30 behaviour | Mobile-only §12.1 |
-| **C / C# / Java** | [§12](#12-build-and-packaging), [§14](#14-your-identity-is-derived-not-chosen-v0210) | Same as native for storage if you implement providers | RN sections |
+| **C / C# / Java** | [desktop-java-csharp-distribution.md](desktop-java-csharp-distribution.md) (release natives), [§12](#12-build-and-packaging), [§14](#14-your-identity-is-derived-not-chosen-v0210) | Same as native for storage if you implement providers | RN sections |
 | **Web** | [bridges/web.md](bridges/web.md), §25–§31 behaviour that touches workers/events | §14 identity model | Mobile-only §12.1 |
 
 ### One-page checklist after code changes
