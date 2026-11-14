@@ -81,6 +81,7 @@ import {
   NATIVE_EVENT_REPLAY_TIMEOUT_MS,
   MAX_DEFERRED_NATIVE_EVENTS,
 } from './constants';
+import { parseProtocolEvent } from './parseProtocolEvent';
 
 export * from './types';
 export * from './constants';
@@ -103,6 +104,21 @@ export type {
   ForScenarioParams,
   ScenarioOverrides,
 } from './configScenarios';
+export {
+  PROTOCOL_EVENT_TYPES,
+  PROTOCOL_EVENT_TYPE_SET,
+  parseProtocolEvent,
+  tryParseProtocolEvent,
+  protocolEventTypeOf,
+  isProtocolEventType,
+  narrowProtocolEvent,
+} from './parseProtocolEvent';
+export type {
+  ParseProtocolEventError,
+  ParseProtocolEventErrorCode,
+  ParseProtocolEventOptions,
+  ParseProtocolEventResult,
+} from './parseProtocolEvent';
 export {
   looksLikeMeshAddress,
   MESH_ADDRESS_ENCODED_LEN,
@@ -1074,12 +1090,12 @@ export class OfflineProtocol {
 
   /** Parses one event the native module handed over and dispatches it. */
   private dispatchEventJson(eventJson: string): void {
-    try {
-      const event = JSON.parse(eventJson) as ProtocolEvent;
-      this.emitEvent(event);
-    } catch (error) {
-      console.error("Failed to parse event JSON:", error);
+    const parsed = parseProtocolEvent(eventJson, { requireKnownType: false });
+    if (!parsed.ok) {
+      console.error("Failed to parse event JSON:", parsed.error.message);
+      return;
     }
+    this.emitEvent(parsed.event);
   }
 
   /**

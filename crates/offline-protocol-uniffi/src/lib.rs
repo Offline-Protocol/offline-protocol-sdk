@@ -25099,4 +25099,88 @@ mod tests {
             "integrator-map must link desktop-java-csharp-distribution.md"
         );
     }
+
+    /// Friction #5: the TypeScript catalog of event tags must stay aligned with
+    /// `types.ts`, and integrators must have a documented parse entry point.
+    #[test]
+    fn react_native_protocol_event_parse_helpers_are_documented() {
+        use std::collections::BTreeSet;
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let rn = repo.join("bindings/react-native");
+        let types_ts = std::fs::read_to_string(rn.join("src/types.ts")).expect("types.ts");
+        let parser = std::fs::read_to_string(rn.join("src/parseProtocolEvent.ts"))
+            .expect("parseProtocolEvent.ts");
+        let index = std::fs::read_to_string(rn.join("src/index.ts")).expect("index.ts");
+        let ts_doc = std::fs::read_to_string(repo.join("docs/bridges/typescript.md"))
+            .expect("typescript.md");
+        let integration =
+            std::fs::read_to_string(repo.join("docs/react-native-integration.md"))
+                .expect("react-native-integration.md");
+
+        let ts_tags: BTreeSet<String> = types_ts
+            .lines()
+            .filter_map(|l| l.strip_prefix("  type: '"))
+            .filter_map(|rest| rest.strip_suffix("';"))
+            .map(str::to_string)
+            .collect();
+
+        let mut in_array = false;
+        let mut catalog = BTreeSet::new();
+        for line in parser.lines() {
+            if line.contains("export const PROTOCOL_EVENT_TYPES = [") {
+                in_array = true;
+                continue;
+            }
+            if in_array {
+                if line.contains("] as const") {
+                    break;
+                }
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix('\'') {
+                    if let Some(tag) = rest.strip_suffix("',") {
+                        catalog.insert(tag.to_string());
+                    }
+                }
+            }
+        }
+
+        assert!(
+            catalog.len() >= 60,
+            "PROTOCOL_EVENT_TYPES catalog looks truncated ({})",
+            catalog.len()
+        );
+        let missing: Vec<_> = ts_tags.difference(&catalog).collect();
+        assert!(
+            missing.is_empty(),
+            "types.ts event tags missing from PROTOCOL_EVENT_TYPES: {missing:?}"
+        );
+        let stale: Vec<_> = catalog.difference(&ts_tags).collect();
+        assert!(
+            stale.is_empty(),
+            "PROTOCOL_EVENT_TYPES has tags not declared in types.ts: {stale:?}"
+        );
+
+        for needle in [
+            "parseProtocolEvent",
+            "tryParseProtocolEvent",
+            "PROTOCOL_EVENT_TYPES",
+        ] {
+            assert!(
+                index.contains(needle),
+                "bindings/react-native/src/index.ts must re-export `{needle}`"
+            );
+        }
+        assert!(
+            ts_doc.contains("## T10. Parsing opaque event JSON"),
+            "docs/bridges/typescript.md must document parseProtocolEvent (T10)"
+        );
+        assert!(
+            integration.contains("parseProtocolEvent"),
+            "react-native-integration.md must mention parseProtocolEvent"
+        );
+    }
 }
