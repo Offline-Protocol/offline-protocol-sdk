@@ -999,6 +999,49 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+  # The Flutter plugin pub.dev carries: shared bridge sources vendored into the
+  # package, plus the same staged jniLibs and XCFramework the in-repo plugin
+  # links (friction #19). Assembled and dry-run published before the GitHub
+  # release job; pub.dev publish runs after release when FLUTTER_PUBLISH is on.
+  flutter-pub-package:
+    name: Assemble Flutter pub package
+    needs: [version-gate, build-ios, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download iOS Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-libs
+          path: bindings/react-native/ios
+
+      - name: Download Android Libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: android-jniLibs-*
+          path: bindings/react-native/android/src/main/jniLibs
+          merge-multiple: true
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: "3.27.4"
+
+      - name: Assemble the pub.dev tree
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: |
+          bash scripts/assemble-flutter-pub-package.sh \
+            --output build/flutter-pub-package --version "$VERSION"
+          (cd build/flutter-pub-package && dart pub publish --dry-run)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flutter-pub-package
+          path: build/flutter-pub-package
+          retention-days: 5
+
   # ---------------------------------------------------------------------------
   # Release gate
   # ---------------------------------------------------------------------------
@@ -2113,6 +2156,44 @@ jobs:
             exit 0
           fi
           gem push "$GEM"
+
+  # offline_protocol on pub.dev, from the tree flutter-pub-package assembled and
+  # dry-run published on the release's own mobile artifacts.
+  publish-flutter-pub:
+    name: Publish to pub.dev
+    needs: [version-gate, flutter-pub-package, release]
+    runs-on: ubuntu-latest
+    environment: pub-dev
+    permissions:
+      contents: read
+    env:
+      REAL_RELEASE: ${{ needs.version-gate.outputs.REAL_RELEASE }}
+    steps:
+      - name: Download the pub package
+        uses: actions/download-artifact@v8
+        with:
+          name: flutter-pub-package
+          path: build/flutter-pub-package
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: "3.27.4"
+
+      - name: Channel off
+        if: vars.FLUTTER_PUBLISH != 'true' || env.REAL_RELEASE != 'true'
+        run: echo "::notice title=Flutter plugin not published::Published only from a release tag with FLUTTER_PUBLISH set to 'true'. The flutter-pub-package job dry-runs pub publish on every release."
+
+      - name: Publish to pub.dev
+        if: vars.FLUTTER_PUBLISH == 'true' && env.REAL_RELEASE == 'true'
+        env:
+          PUB_TOKEN: ${{ secrets.PUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$PUB_TOKEN" ] || { echo "::error title=Missing PUB_TOKEN::Add a pub.dev uploader token to the pub-dev environment."; exit 1; }
+          dart pub token add https://pub.dev -v "$PUB_TOKEN"
+          cd build/flutter-pub-package
+          dart pub publish --force
 
   # ghcr.io/offline-protocol/offline-protocol-service, built from
   # bindings/python/docker. The image installs the wheels `publish-pypi` just

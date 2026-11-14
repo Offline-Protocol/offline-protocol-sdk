@@ -40,7 +40,14 @@ This produces:
 
 ## Add the plugin
 
-Until the plugin is published to pub.dev, depend on the path in this repository:
+**App integrators:** use the release on pub.dev when available. See
+[docs/flutter-distribution.md](../../docs/flutter-distribution.md).
+
+```bash
+flutter pub add offline_protocol
+```
+
+**SDK contributors** use a path dependency and must build UniFFI natives first:
 
 ```yaml
 dependencies:

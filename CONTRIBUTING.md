@@ -378,6 +378,7 @@ release.
 | Maven Central | `MAVEN_CENTRAL_PUBLISH` | `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token), `MAVEN_SIGNING_KEY` (armored private key) and `MAVEN_SIGNING_KEY_PASSWORD` | uploads a deployment Central validates, then drops it |
 | PyPI | `PYPI_PUBLISH` | none: trusted publishing from `release.yml` in the `pypi` environment | checks the wheels' metadata only: PyPI has no rehearsal |
 | RubyGems | `RUBYGEMS_PUBLISH` | none: trusted publishing from `release.yml` in the `rubygems` environment | builds and tests the gem only: RubyGems has no rehearsal |
+| pub.dev (`offline_protocol`) | `FLUTTER_PUBLISH` | `PUB_TOKEN` (pub.dev uploader token) in the `pub-dev` environment | `dart pub publish --dry-run` on the assembled tree in the `flutter-pub-package` job |
 | Service image (ghcr.io) | `PYPI_PUBLISH`, since it installs what PyPI published | none: the workflow's own `GITHUB_TOKEN` with `packages: write` | not built: it needs the release on PyPI |
 
 **RubyGems needs its trusted publisher before the first release.** The gem

@@ -19,7 +19,7 @@ before reading all of [UPGRADING.md](UPGRADING.md).
 | React Native (deep dive) | [react-native-integration.md](react-native-integration.md) | 1–2 h for transports + events | Package README is the API reference. |
 | Native iOS (Swift) | [ios-native-distribution.md](ios-native-distribution.md) → [ios-integration.md](ios-integration.md) | ~2 h with release package (longer if building from source) | RN path is much faster; native adds storage + transport wiring via `OfflineProtocolSDK`. |
 | Native Android (Kotlin) | [android-integration.md](android-integration.md) | 2 h–2 days | Same parity gap as iOS for MLS storage. |
-| Flutter | [bindings/flutter/README.md](../bindings/flutter/README.md) | 1–4 h | Path dependency today; build UniFFI natives like React Native. |
+| Flutter | [flutter-distribution.md](flutter-distribution.md) → [bindings/flutter/README.md](../bindings/flutter/README.md) | ~1 h with pub.dev release | Path dependency + Rust build only for SDK contributors. |
 | Python (desktop / gateway) | [bindings/python/README.md](../bindings/python/README.md) | ~30 min with wheels | `pip install offline-protocol-sdk`; set `state_root` explicitly. |
 | Local API (multi-app on one host) | [local-api.md](local-api.md) | ~1 h | Service + policy file; clients over socket. |
 | C / C++ / Go (via C) | [bindings/c/README.md](../bindings/c/README.md) | 1–2 h | Build or ship `liboffline_protocol_uniffi`; JSON config + callbacks. |

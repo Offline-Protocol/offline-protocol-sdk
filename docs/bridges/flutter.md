@@ -227,6 +227,11 @@ because an empty staged directory would otherwise win and link nothing. Neither
 is committed. `bindings/flutter/scripts/stage-plugin-native-artifacts.sh` copies
 the React Native package's libraries into both (`--check` verifies them).
 
+For **pub.dev**, `scripts/assemble-flutter-pub-package.sh` stages those libraries
+into a self-contained publish tree (vendored `android/bridge-rn` and
+`ios/BridgeRN`) so consumers never need the monorepo layout. Integrators:
+[flutter-distribution.md](../flutter-distribution.md).
+
 ## F9. Binary footprint
 
 The plugin links BLE and mesh bridge sources into the AAR and CocoaPod. CI runs
