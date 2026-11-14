@@ -25336,4 +25336,50 @@ mod tests {
             );
         }
     }
+
+    /// Friction #31: integrators get a license decision tree linked from package
+    /// READMEs and the integrator map.
+    #[test]
+    fn licensing_decision_tree_is_linked_from_package_readmes() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let tree = std::fs::read_to_string(repo.join("docs/licensing-decision-tree.md"))
+            .expect("licensing-decision-tree.md");
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        for needle in [
+            "not legal advice",
+            "Commercial license",
+            "AGPL-3.0-only",
+            "legal@offlineprotocol.com",
+            "licensing-faq.md",
+        ] {
+            assert!(
+                tree.contains(needle),
+                "licensing-decision-tree.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            map.contains("licensing-decision-tree.md"),
+            "integrator-map must link licensing-decision-tree.md"
+        );
+        for (path, label) in [
+            ("README.md", "repository README"),
+            (
+                "bindings/react-native/README.md",
+                "React Native package README",
+            ),
+            ("bindings/python/README.md", "Python package README"),
+            ("bindings/flutter/README.md", "Flutter README"),
+        ] {
+            let readme = std::fs::read_to_string(repo.join(path))
+                .unwrap_or_else(|e| panic!("read {label}: {e}"));
+            assert!(
+                readme.contains("licensing-decision-tree.md"),
+                "{label} must link licensing-decision-tree.md"
+            );
+        }
+    }
 }

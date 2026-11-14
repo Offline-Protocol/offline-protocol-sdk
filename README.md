@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only%20or%20Commercial-blue.svg)](#license)
 [![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20Android%20%7C%20macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#building-the-sdk)
 
-**Dual-licensed:** use it under [AGPL-3.0-only](LICENSE), or buy a [commercial license](LICENSE-COMMERCIAL.md), your call — see the [License](#license) section for the full breakdown.
+**Dual-licensed:** use it under [AGPL-3.0-only](LICENSE), or buy a [commercial license](LICENSE-COMMERCIAL.md), your call — see the [License](#license) section for the full breakdown. **Choosing?** Start with the [license decision tree](docs/licensing-decision-tree.md) (then [Licensing FAQ](docs/licensing-faq.md)).
 
 ## Features
 
