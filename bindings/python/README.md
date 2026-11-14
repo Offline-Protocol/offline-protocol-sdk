@@ -2,6 +2,10 @@
 
 Python bindings for the Offline Protocol SDK: offline-first mesh networking with MLS end-to-end encryption. Supports macOS, Linux, and Windows.
 
+**Choosing install vs Docker vs source?** See
+[docs/python-distribution.md](../../docs/python-distribution.md) (wheel matrix
+and Alpine / Intel Mac fallbacks).
+
 **Dual-licensed:** use it under [AGPL-3.0-only](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE), or buy a [commercial license](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE-COMMERCIAL.md), your call. The package metadata can only name `AGPL-3.0-only` because SPDX has no identifier for the commercial offer — see [License](#license) for the full breakdown.
 
 > **Upgrading an existing install?** Read [docs/UPGRADING.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/UPGRADING.md)

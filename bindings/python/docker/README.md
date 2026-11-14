@@ -1,5 +1,8 @@
 # The service as a container
 
+No matching PyPI wheel (Alpine, Intel macOS, older glibc)? Start with
+[docs/python-distribution.md](../../../docs/python-distribution.md#docker-one-liner).
+
 One container per host runs one engine: the identity, the queued messages,
 the transports the configuration enables, the [local API](../../../docs/local-api.md)
 for applications that use the SDK, and the
