@@ -25183,4 +25183,49 @@ mod tests {
             "react-native-integration.md must mention parseProtocolEvent"
         );
     }
+
+    /// Friction #25: browser integrators get a Vite starter and integrator-map
+    /// pointers with explicit experimental boundaries.
+    #[test]
+    fn web_vite_quickstart_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let starter = repo.join("bindings/web/starter");
+        let readme = std::fs::read_to_string(starter.join("README.md")).expect("starter README");
+        let pkg = std::fs::read_to_string(starter.join("package.json")).expect("starter package.json");
+        let vite_cfg =
+            std::fs::read_to_string(starter.join("vite.config.js")).expect("starter vite.config.js");
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        for needle in [
+            "bash bindings/web/scripts/build.sh",
+            "wasm-bindgen-cli",
+            "npm run dev",
+            "Go / no-go",
+            "not a published npm package",
+        ] {
+            assert!(
+                readme.contains(needle),
+                "bindings/web/starter/README.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            pkg.contains("\"vite\"") && pkg.contains("\"dev\": \"vite\""),
+            "starter package.json must define a Vite dev script"
+        );
+        assert!(
+            vite_cfg.contains("@offline-protocol/web"),
+            "starter vite.config.js must alias the browser binding"
+        );
+        assert!(
+            map.contains("bindings/web/starter/README.md"),
+            "integrator-map must link bindings/web/starter/README.md"
+        );
+        assert!(
+            map.contains("go/no-go"),
+            "integrator-map Web row must mention the starter go/no-go section"
+        );
+    }
 }

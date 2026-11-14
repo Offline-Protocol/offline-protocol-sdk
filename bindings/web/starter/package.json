@@ -1,0 +1,14 @@
+{
+  "name": "@offline-protocol/web-starter",
+  "private": true,
+  "description": "Opinionated Vite quickstart for the experimental browser binding",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "6.4.1"
+  }
+}
