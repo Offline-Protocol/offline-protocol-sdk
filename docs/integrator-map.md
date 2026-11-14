@@ -207,7 +207,8 @@ call `requestMeshPermissions()` before `start()` (see that guide).
 | Example app copy-paste blocks | [example app integration guide](../examples/react-native-app/INTEGRATION_GUIDE.md) (should match the canonical guide) |
 
 **Testing:** BLE and Wi‑Fi Direct need **physical devices**; simulators are not
-enough for mesh QA.
+enough for mesh QA. Use the [integration testing matrix](integration-testing-matrix.md)
+(golden paths: example app, `offline-protocol-verify`, web-devices).
 
 **QA thinks the SDK is hung or pairing is wrong?** See
 [troubleshooting.md](troubleshooting.md) (Wi‑Fi Direct often needs **1–2
@@ -257,10 +258,11 @@ version for the index).
 
 | Resource | Use when |
 |----------|----------|
-| [React Native example app](../examples/react-native-app/README.md) | You want a full app to copy patterns from |
+| [Integration testing matrix](integration-testing-matrix.md) | QA: simulator vs hardware, release milestones |
+| [React Native example app](../examples/react-native-app/README.md) | **Golden path:** two-device RN mesh smoke |
 | [Demo app](../examples/demo-app/README.md) | Discovery, chat, groups, services in one RN app |
 | [Storage adapters](../examples/storage-adapters/README.md) | Custom protocol-state storage (Swift/Kotlin/Python) |
-| `offline-protocol-verify` (Python) | Smoke test pairing/delivery against a running service |
+| [`offline-protocol-verify`](local-api.md#checking-what-the-network-did-offline-protocol-verify) (Python) | **Golden path:** event-backed delivery proof on a service |
 | [Web Vite starter](../bindings/web/starter/README.md) | Cloneable dev template (tab mesh, `npm run dev`) |
 | [Mesh between tabs](../examples/web-two-tabs/README.md) | Same tab mesh without Vite (static `http.server`) |
 
