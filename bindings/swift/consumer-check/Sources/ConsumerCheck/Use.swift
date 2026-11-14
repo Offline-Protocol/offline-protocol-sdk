@@ -1,4 +1,5 @@
 import OfflineProtocolSDK
+import UIKit
 
 // What an application writes first: build the engine, listen to it, start it,
 // hand it to a transport. `start`, `startWithReferenceStorage`, `signOut` and
@@ -74,4 +75,38 @@ public func relay(engine: OfflineProtocol) -> TransportManager {
 
 public func address(of publicKey: [UInt8]) throws -> String {
     try deriveAddress(publicKey: publicKey)
+}
+
+// MARK: - Telemetry (C12)
+
+/// Binding fills `os` and `osMajor`; the app supplies key, app id, and version.
+/// See `telemetryConfigFilledByBinding` in the Kotlin consumer-check for parity.
+public func telemetryConfigFilledByBinding(appId: String) -> TelemetryConfig {
+    let osMajor = UInt16(
+        clamping: Int(UIDevice.current.systemVersion.split(separator: ".").first ?? "0") ?? 0
+    )
+    return TelemetryConfig(
+        apiKey: "",
+        appId: appId,
+        os: .ios,
+        osMajor: osMajor,
+        appVersion: nil,
+        debug: nil,
+        flushIntervalMs: nil,
+        maxBatchBytes: nil,
+        maxBufferedRecords: nil,
+        includeDeviceId: nil,
+        scrubIds: nil,
+        mlsVerbosity: nil,
+        metricsCadenceMs: nil,
+        routingDiagnostic: nil,
+        mlsSamplingBypass: nil
+    )
+}
+
+/// Native hosts must forward foreground/background edges (Swift:
+/// `UIApplication` notifications; never rely on RN to do this). Never run.
+public func forwardTelemetryLifecycleEdges(on engine: OfflineProtocol) {
+    engine.notifyAppState(state: .background)
+    engine.notifyAppState(state: .active)
 }

@@ -6,6 +6,7 @@ package consumer
 
 import android.app.Activity
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import com.offlineprotocol.InternetManager
@@ -14,7 +15,10 @@ import com.offlineprotocol.OfflineProtocolJniLibrary
 import com.offlineprotocol.OfflineProtocolReferenceStorage
 import com.offlineprotocol.StorageConformance
 import com.offlineprotocol.TransportManager
+import uniffi.offline_protocol.AppState
 import uniffi.offline_protocol.EventCallback
+import uniffi.offline_protocol.TelemetryConfig
+import uniffi.offline_protocol.TelemetryOs
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.ProtocolConfig
 import uniffi.offline_protocol.ProtocolException
@@ -97,3 +101,30 @@ fun reachesJna(): Long = RustBuffer.ByValue().len
 /** Compile-checked JNI names for manual integrators (Maven AAR users can ignore). */
 fun jniNamesForDocs(): Pair<String, String> =
     OfflineProtocolJniLibrary.LOADED_BASENAME to OfflineProtocolJniLibrary.CARGO_OUTPUT_BASENAME
+
+// Telemetry (C12): binding fills platform fields; Application-level lifecycle
+// (not Activity.onPause) forwards background/foreground. See RN
+// OfflineProtocolModule activity watcher for the reference wiring. Never run.
+fun telemetryConfigFilledByBinding(appId: String): TelemetryConfig =
+    TelemetryConfig(
+        apiKey = "",
+        appId = appId,
+        os = TelemetryOs.ANDROID,
+        osMajor = Build.VERSION.SDK_INT.toUShort(),
+        appVersion = null,
+        debug = null,
+        flushIntervalMs = null,
+        maxBatchBytes = null,
+        maxBufferedRecords = null,
+        includeDeviceId = null,
+        scrubIds = null,
+        mlsVerbosity = null,
+        metricsCadenceMs = null,
+        routingDiagnostic = null,
+        mlsSamplingBypass = null,
+    )
+
+fun forwardTelemetryLifecycleEdges(protocol: OfflineProtocol) {
+    protocol.notifyAppState(AppState.BACKGROUND)
+    protocol.notifyAppState(AppState.ACTIVE)
+}
