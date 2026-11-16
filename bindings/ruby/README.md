@@ -128,3 +128,8 @@ bindings, which are one artifact set:
 The Ruby generator is part of `uniffi-bindgen`, so there is nothing more to
 install than the other bindings need. [`uniffi.toml`](uniffi.toml) names the
 library; see R1 in the contract.
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

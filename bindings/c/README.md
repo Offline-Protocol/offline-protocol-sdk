@@ -184,3 +184,8 @@ it binds UniFFI's own ABI rather than this one.
 Dual-licensed: [AGPL-3.0-only](../../LICENSE) for open-source use, or a
 [commercial license](../../LICENSE-COMMERCIAL.md) for proprietary use. The
 library contains cryptography; see [EXPORT.md](../../EXPORT.md).
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

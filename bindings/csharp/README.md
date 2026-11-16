@@ -61,3 +61,8 @@ Regenerate after a UDL change:
 ```bash
 python3 tools/gen_csharp_local_api.py
 ```
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

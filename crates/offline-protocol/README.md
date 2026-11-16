@@ -34,3 +34,8 @@ Ready-made bridges ship with the higher-level bindings instead:
 Copyright © 2025-2026 Offline Protocol, Inc.
 
 Dual-licensed: [AGPL-3.0-only](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE) for open-source use, or a [commercial license](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE-COMMERCIAL.md) for proprietary use. You may use the SDK under either license; you do not need both.
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).
