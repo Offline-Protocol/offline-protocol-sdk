@@ -13,6 +13,10 @@ What lives here is what exists only for the package.
 | `Tests/` | Suites that need the linked library, which the test harness in `bindings/react-native/ios` cannot supply |
 | `consumer-check/` | A separate package that depends on the assembled one as an application would, with a plain import |
 
+**App integrators** install the release package via
+[docs/ios-native-distribution.md](../../docs/ios-native-distribution.md). The
+steps below are for SDK maintainers assembling or testing this tree.
+
 ## Build and test it
 
 On a Mac with Xcode and the Rust iOS targets. On an Intel Mac the simulator

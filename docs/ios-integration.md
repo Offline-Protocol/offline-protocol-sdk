@@ -2,12 +2,35 @@
 
 This guide shows how to integrate the Offline Protocol SDK into a native iOS app (Swift).
 
+**Native app integrators:** install the shipped **Swift package** first. See
+[ios-native-distribution.md](ios-native-distribution.md) for the recommended path
+(`OfflineProtocolSDK` from `offline-protocol-swift`). The sections below on
+building an XCFramework by hand are for SDK maintainers and advanced setups.
+
 ## Prerequisites
 
-- Xcode 15+
-- Rust toolchain with iOS targets
+What you need depends on how you install the SDK.
 
-## Setup
+### Using the release Swift package
+
+If you followed [ios-native-distribution.md](ios-native-distribution.md), you
+only need:
+
+- Xcode 15+
+
+The package ships the XCFramework and UniFFI bindings. You do **not** need Rust
+on the app team machine.
+
+### Building the bridge from source (maintainers)
+
+The [advanced section](#advanced-build-the-bridge-from-source) below is for SDK
+development or when you cannot use a release package. It additionally requires a
+Rust toolchain and the iOS targets installed in its first step.
+
+## Advanced: build the bridge from source
+
+Only if you are developing the SDK or cannot use a release Swift package. App
+teams should start with [ios-native-distribution.md](ios-native-distribution.md).
 
 ### 1. Install Rust iOS Targets
 
@@ -65,15 +88,23 @@ Swift, Kotlin, Python, Ruby and Java together because they are one artifact set 
 UDL, and a subset leaves the rest describing a different ABI, which fails at
 the app's first FFI call rather than at build time.
 
-### 4. Use in Swift
+## Use the SDK
 
-The generated `offline_protocol.swift` declares the public types (`OfflineProtocol`,
-`ProtocolConfig`, `EventCallback`, `MessagePriority`, …). When it compiles into your app
-target no extra `import` is needed — the low-level FFI is exposed to it as the
-`offline_protocolFFI` clang module referenced from the generated file.
+Everything from here on applies however you installed the SDK.
+
+### Use in Swift
+
+The generated UniFFI layer declares the public types (`OfflineProtocol`,
+`ProtocolConfig`, `EventCallback`, `MessagePriority`, …). With the Swift
+package, `import OfflineProtocolSDK` brings them in along with the integrator
+helpers below. Built from source, the generated `offline_protocol.swift`
+compiles into your app target and no extra `import` is needed: the low-level
+FFI is exposed to it as the `offline_protocolFFI` clang module referenced from
+the generated file.
 
 ```swift
 import Foundation
+import OfflineProtocolSDK  // Swift package only; omit when built from source
 
 // Events are delivered as JSON strings — implement `EventCallback` to receive them.
 final class MeshEventHandler: EventCallback {
@@ -186,7 +217,7 @@ final class MeshController {
 }
 ```
 
-### 5. Storage: Two Providers, Two Lifecycles
+### Storage: Two Providers, Two Lifecycles
 
 `initializeMls` takes two providers because key material and restartable delivery
 state have different lifetimes. The shipped **`OfflineProtocolReferenceStorage`**
@@ -286,24 +317,16 @@ Add to `Info.plist`:
 
 ## Distribution
 
-The SDK ships as an npm package for React Native apps:
+| Surface | Install |
+|---------|---------|
+| React Native | `npm install @offline-protocol/mesh-sdk` |
+| **Native iOS (recommended)** | Swift package `OfflineProtocolSDK` ([ios-native-distribution.md](ios-native-distribution.md)) |
+| SDK maintainers | [bindings/swift/README.md](../bindings/swift/README.md), [ADR 0025](adr/0025-native-packages-are-assembled-in-place.md) |
 
-```bash
-npm install @offline-protocol/mesh-sdk
-```
-
-For a **native** iOS app (no React Native), integrate the Rust core directly via the
-manual XCFramework build in steps 1–4 above: build the `offline-protocol-uniffi` static
-libraries for the device and simulator targets, package them into an XCFramework, and add
-it to your Xcode project alongside the UniFFI-generated Swift bindings.
-
-From 0.28.0 a release also builds a Swift package, `OfflineProtocolSDK`, from the
-same bridge sources the React Native module compiles, and it is distributed through
-the `Offline-Protocol/offline-protocol-swift` repository; see
-[bindings/swift](../bindings/swift/README.md) and
-[ADR 0025](adr/0025-native-packages-are-assembled-in-place.md). What is public in it
-is what the React Native module needed public, which leaves out the storage
-providers. A standalone CocoaPods pod is not published.
+The package ships the XCFramework, generated UniFFI bindings, transports, and
+integrator helpers such as `OfflineProtocolReferenceStorage` and
+`StorageConformance`. A standalone CocoaPods pod for native apps is not
+published (React Native uses the in-repo `MeshSdk` pod).
 
 ## Architecture
 

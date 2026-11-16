@@ -50,6 +50,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   names and which package to import the engine and the bridge types from.
   Applications on the Maven library are unaffected: the AAR already carries the
   loaded name.
+- **Native iOS applications have one install path.**
+  [docs/ios-native-distribution.md](docs/ios-native-distribution.md) installs
+  `OfflineProtocolSDK` from `offline-protocol-swift` (or the release's
+  `swift-package` tarball) and gives the call order that starts an engine on
+  it. The iOS integration guide no longer lists Rust as a prerequisite for an
+  application and moves the hand-built XCFramework under a section for
+  building the bridge from source.
 
 ### Fixed
 
