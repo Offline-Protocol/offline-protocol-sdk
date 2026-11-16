@@ -52,14 +52,32 @@ intentional: the tagged wheel must match the bundled `.so` / `.dylib` / `.dll`.
 
 When `pip` has no matching wheel, run the **published service image** (glibc
 Linux, amd64 and arm64). It installs `offline-protocol-sdk[lan,http]` from PyPI
-at the image tag:
+at the image tag.
+
+**Once per host** (generate a store key, save it outside the data volume, and
+reuse it on every start that mounts the same volume). A new random key with an
+existing `offline-protocol-data` volume fails with `InvalidConfiguration`
+because the volume is sealed under the old key:
 
 ```bash
-export OFFLINE_PROTOCOL_STORE_KEY="$(openssl rand -hex 32)"
+mkdir -p ~/.offline-protocol
+openssl rand -hex 32 | tee ~/.offline-protocol/store-key
+chmod 600 ~/.offline-protocol/store-key
+```
+
+**Each run** (load the saved key; set `OP_LISTEN` to your host's **reserved LAN
+address**, not `0.0.0.0`. On Docker with host networking, leaving the default
+advertises `docker0` and breaks LAN peering. See
+[bindings/python/docker/README.md](../bindings/python/docker/README.md)):
+
+```bash
+export OFFLINE_PROTOCOL_STORE_KEY="$(cat ~/.offline-protocol/store-key)"
+export OP_LISTEN="192.168.1.10:7878"   # substitute your host's LAN address
 docker pull ghcr.io/offline-protocol/offline-protocol-service:0.33.0
 docker run --rm -it \
   --network host \
   -e OFFLINE_PROTOCOL_STORE_KEY \
+  -e OP_LISTEN \
   -v offline-protocol-data:/var/lib/offline-protocol \
   ghcr.io/offline-protocol/offline-protocol-service:0.33.0
 ```
