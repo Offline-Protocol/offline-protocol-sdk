@@ -60,6 +60,15 @@ test('parse known message_received', () => {
   assert.equal(result.event.type, 'message_received');
 });
 
+test('known type does not validate payload fields', () => {
+  const result = parseProtocolEvent(JSON.stringify({ type: 'message_received' }));
+  assert.equal(result.ok, true);
+  assert.equal(result.event.content, undefined);
+  const narrowed = narrowProtocolEvent(result.event, 'message_received');
+  assert.ok(narrowed);
+  assert.equal(narrowed.content, undefined);
+});
+
 test('reject invalid json', () => {
   const result = parseProtocolEvent('{not json');
   assert.equal(result.ok, false);
@@ -83,6 +92,8 @@ test('accept unknown type when requireKnownType is false', () => {
   const result = parseProtocolEvent(JSON.stringify(payload), { requireKnownType: false });
   assert.equal(result.ok, true);
   assert.deepEqual(result.event, payload);
+  assert.equal(typeof result.event.type, 'string');
+  assert.equal(result.event.type, 'future_event_tag');
 });
 
 test('tryParseProtocolEvent returns null on failure', () => {
@@ -102,6 +113,7 @@ test('narrowProtocolEvent', () => {
   assert.equal(parsed.ok, true);
   const narrowed = narrowProtocolEvent(parsed.event, 'message_sent');
   assert.ok(narrowed);
+  assert.equal(narrowed.message_id, 'x');
   assert.equal(narrowProtocolEvent(parsed.event, 'message_received'), null);
 });
 

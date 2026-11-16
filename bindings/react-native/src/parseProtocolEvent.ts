@@ -2,12 +2,14 @@
  * Runtime helpers for opaque engine events (bridge contract C3).
  *
  * Events still cross the native boundary as JSON strings; these functions parse
- * and validate the `type` discriminant against the catalog in `types.ts`. They
- * do not replace `OfflineProtocol.on(...)` — use them when you handle raw
+ * JSON, require a plain object, and validate the `type` string (and optionally
+ * that it is catalogued in `types.ts`). **Payload fields are not validated.**
+ * For a fully typed {@link ProtocolEvent}, use `OfflineProtocol.on(...)` or
+ * check each field yourself after parse. Use these when you handle raw
  * `eventJson` (custom transports, logging, tests).
  */
 
-import type { EventType, ProtocolEvent } from './types';
+import type { EventType } from './types';
 
 /**
  * Every `ProtocolEvent` discriminant declared in `types.ts`.
@@ -118,8 +120,16 @@ export interface ParseProtocolEventError {
   message: string;
 }
 
+/**
+ * Parsed event JSON: `type` is validated; every other field is whatever the
+ * payload carried (may be missing or the wrong shape).
+ */
+export type ProtocolEventEnvelope = {
+  type: string;
+} & Record<string, unknown>;
+
 export type ParseProtocolEventResult =
-  | { ok: true; event: ProtocolEvent }
+  | { ok: true; event: ProtocolEventEnvelope }
   | { ok: false; error: ParseProtocolEventError };
 
 export interface ParseProtocolEventOptions {
@@ -185,7 +195,8 @@ export function parseProtocolEvent(
     return fail('unknown_type', `Unknown protocol event type: ${type}`);
   }
 
-  return { ok: true, event: value as ProtocolEvent };
+  const envelope = value as ProtocolEventEnvelope;
+  return { ok: true, event: envelope };
 }
 
 /**
@@ -194,17 +205,18 @@ export function parseProtocolEvent(
 export function tryParseProtocolEvent(
   input: string | unknown,
   options?: ParseProtocolEventOptions
-): ProtocolEvent | null {
+): ProtocolEventEnvelope | null {
   const result = parseProtocolEvent(input, options);
   return result.ok ? result.event : null;
 }
 
 /**
- * Narrows a {@link ProtocolEvent} by its `type` discriminant.
+ * Narrows a {@link ProtocolEventEnvelope} by its `type` string. Does not assert
+ * that payload fields match the corresponding interface in `types.ts`.
  */
-export function narrowProtocolEvent<T extends ProtocolEvent['type']>(
-  event: ProtocolEvent,
+export function narrowProtocolEvent<T extends EventType>(
+  event: ProtocolEventEnvelope,
   type: T
-): Extract<ProtocolEvent, { type: T }> | null {
-  return event.type === type ? (event as Extract<ProtocolEvent, { type: T }>) : null;
+): (ProtocolEventEnvelope & { type: T }) | null {
+  return event.type === type ? (event as ProtocolEventEnvelope & { type: T }) : null;
 }

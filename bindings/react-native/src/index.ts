@@ -118,6 +118,7 @@ export type {
   ParseProtocolEventErrorCode,
   ParseProtocolEventOptions,
   ParseProtocolEventResult,
+  ProtocolEventEnvelope,
 } from './parseProtocolEvent';
 export {
   looksLikeMeshAddress,
@@ -1095,7 +1096,8 @@ export class OfflineProtocol {
       console.error("Failed to parse event JSON:", parsed.error.message);
       return;
     }
-    this.emitEvent(parsed.event);
+    // Native module produced this JSON; treat as ProtocolEvent for dispatch.
+    this.emitEvent(parsed.event as ProtocolEvent);
   }
 
   /**
