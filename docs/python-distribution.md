@@ -60,9 +60,11 @@ existing `offline-protocol-data` volume fails with `InvalidConfiguration`
 because the volume is sealed under the old key:
 
 ```bash
-mkdir -p ~/.offline-protocol
-openssl rand -hex 32 | tee ~/.offline-protocol/store-key
-chmod 600 ~/.offline-protocol/store-key
+(
+  umask 077
+  mkdir -p ~/.offline-protocol
+  openssl rand -hex 32 > ~/.offline-protocol/store-key
+)
 ```
 
 **Each run** (load the saved key; set `OP_LISTEN` to your host's **reserved LAN
