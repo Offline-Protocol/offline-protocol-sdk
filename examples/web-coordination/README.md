@@ -20,3 +20,8 @@ What each tab does:
 - **Resync** asks a device for its whole state again.
 
 Every subscription frame is sealed in the 1:1 session between the two tabs; there is no plaintext form. Close a tab and its subscriptions on the others pause, then end after ten minutes without an answer.
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

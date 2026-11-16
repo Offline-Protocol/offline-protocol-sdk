@@ -49,3 +49,8 @@ npx react-native run-ios
 The example ships with no relays, and neither does the SDK. List the ones you
 choose in `RELAYS` in `src/constants.ts` (`wss://` URLs) before running; with
 an empty list the Nostr transport stays down.
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

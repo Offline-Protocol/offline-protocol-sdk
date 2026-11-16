@@ -82,3 +82,8 @@ library's path in `-Duniffi.component.offline_protocol.libraryOverride=<file>`
   [J4](../../docs/bridges/java.md#j4-callbacks-run-on-the-engines-thread-and-must-not-call-back-in).
 - The host fills the telemetry platform:
   [J3](../../docs/bridges/java.md#j3-the-host-fills-the-telemetry-platform).
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).
