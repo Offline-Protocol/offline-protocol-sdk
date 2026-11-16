@@ -14,6 +14,11 @@ What lives here is the build, and what exists only for the library.
 
 Coordinates: `com.offlineprotocol:offline-protocol-sdk`.
 
+The AAR carries the native library under the name the generated Kotlin loads,
+`libuniffi_offline_protocol.so`. An application that copies the `.so` files
+itself must rename cargo's output to it; see
+[android-jni-and-imports.md](../../docs/android-jni-and-imports.md).
+
 Verify a custom `ProtocolStateStorageProvider` with `StorageConformance.run(provider)`
 and check `report.isGreen` (see [C11](../../docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
 The call needs the Rust library loaded and blocks: run it off the main thread.

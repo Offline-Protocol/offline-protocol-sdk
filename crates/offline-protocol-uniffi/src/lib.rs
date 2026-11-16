@@ -24987,4 +24987,127 @@ mod tests {
             );
         }
     }
+
+    /// The generated Kotlin loads `lib<findLibraryName>.so`, and cargo writes
+    /// `lib<[lib] name>.so`. An application that copies cargo's output into
+    /// its own `jniLibs` without renaming builds, installs, and fails at the
+    /// first engine call with `UnsatisfiedLinkError`. Both names are derived
+    /// here from those two sources, never written down, so a renamed crate or
+    /// UniFFI namespace fails this test instead of leaving the constant, the
+    /// checkers, the build script and the doc agreeing with each other and
+    /// wrong. The consumer check is the canonical import sample, and a
+    /// wildcard import of `com.offlineprotocol` is the trap the doc warns of.
+    #[test]
+    fn android_jni_naming_and_imports_are_pinned_for_native_integrators() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let read = |rel: &str| {
+            std::fs::read_to_string(repo.join(rel))
+                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+        };
+
+        // What the generated Kotlin opens: the one string `findLibraryName`
+        // returns when no override is set.
+        let generated =
+            read("bindings/react-native/android/src/main/java/uniffi/offline_protocol/offline_protocol.kt");
+        let body_start = generated
+            .find("private fun findLibraryName(")
+            .expect("generated Kotlin declares findLibraryName");
+        let body = &generated[body_start..];
+        let body = &body[..body.find("\n}").expect("findLibraryName closes")];
+        let returned: Vec<&str> = body
+            .match_indices("return \"")
+            .map(|(at, prefix)| {
+                let rest = &body[at + prefix.len()..];
+                &rest[..rest.find('"').expect("closing quote")]
+            })
+            .collect();
+        assert_eq!(
+            returned.len(),
+            1,
+            "findLibraryName must return exactly one literal name: {returned:?}"
+        );
+        let loaded = format!("lib{}.so", returned[0]);
+
+        // What cargo writes: the `[lib]` name of this crate.
+        let manifest = read("crates/offline-protocol-uniffi/Cargo.toml");
+        let lib_section = &manifest[manifest.find("\n[lib]").expect("[lib] section")..];
+        let lib_section = match lib_section[1..].find("\n[") {
+            Some(end) => &lib_section[..end + 1],
+            None => lib_section,
+        };
+        let lib_name = lib_section
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("name = \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("[lib] name");
+        let cargo = format!("lib{lib_name}.so");
+        assert_ne!(
+            loaded, cargo,
+            "the two names differ, which is the whole trap"
+        );
+
+        for (rel, needles) in [
+            (
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/OfflineProtocolJniLibrary.kt",
+                vec![
+                    format!("const val LOADED_BASENAME: String = \"{loaded}\""),
+                    format!("const val CARGO_OUTPUT_BASENAME: String = \"{cargo}\""),
+                ],
+            ),
+            (
+                "scripts/check_android_aar.py",
+                vec![format!("NATIVE_LIBRARY = \"{loaded}\"")],
+            ),
+            (
+                "scripts/check_manual_android_jni_libs.py",
+                vec![format!("LOADED = \"{loaded}\""), format!("STALE = \"{cargo}\"")],
+            ),
+            (
+                "bindings/react-native/scripts/build-uniffi-android.sh",
+                vec![
+                    format!("so_path=\"$so_root/{cargo}\""),
+                    format!("cp \"$so_path\" \"$OUTPUT_DIR/$abi/{loaded}\""),
+                ],
+            ),
+            (
+                "bindings/react-native/scripts/mesh-doctor-checks.js",
+                vec![format!("'{cargo}'")],
+            ),
+            (
+                "docs/android-jni-and-imports.md",
+                vec![
+                    loaded.clone(),
+                    cargo.clone(),
+                    "uniffi.offline_protocol".to_owned(),
+                    "OfflineProtocolModule".to_owned(),
+                    "scripts/check_manual_android_jni_libs.py".to_owned(),
+                ],
+            ),
+        ] {
+            let code = read(rel);
+            for needle in needles {
+                assert!(code.contains(&needle), "{rel} must contain `{needle}`");
+            }
+        }
+
+        let consumer = read("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt");
+        for needle in [
+            "\nimport uniffi.offline_protocol.OfflineProtocol\n",
+            "\nimport com.offlineprotocol.OfflineProtocolReferenceStorage\n",
+            "OfflineProtocolJniLibrary.LOADED_BASENAME",
+        ] {
+            assert!(
+                consumer.contains(needle),
+                "consumer-check Use.kt must contain `{}`",
+                needle.trim()
+            );
+        }
+        assert!(
+            !consumer.contains("import com.offlineprotocol.*"),
+            "consumer-check Use.kt is the canonical sample: import com.offlineprotocol types by name"
+        );
+    }
 }

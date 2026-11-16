@@ -1868,6 +1868,9 @@ jobs:
       - name: Test the AAR check
         run: python3 -B -m unittest scripts/tests/test_check_android_aar.py
 
+      - name: Test the manual jniLibs naming check
+        run: python3 -B -m unittest scripts/tests/test_check_manual_android_jni_libs.py
+
       # What the release does with the package and the library once they are
       # built, against a local bare repository and a stand-in Portal. Both
       # channels are permanent: a moved tag or a version on Maven Central

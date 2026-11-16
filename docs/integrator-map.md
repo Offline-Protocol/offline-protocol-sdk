@@ -128,7 +128,8 @@ MLS not initialized can be diagnosed with
 [native-development-cleartext.md](native-development-cleartext.md).
 
 Native guides: [ios-integration.md](ios-integration.md),
-[android-integration.md](android-integration.md).
+[android-integration.md](android-integration.md), and for Android the native
+library names and Kotlin imports in [android-jni-and-imports.md](android-jni-and-imports.md).
 
 **Distribution shortcuts**
 
