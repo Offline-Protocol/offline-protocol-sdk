@@ -154,6 +154,12 @@ in here fails **silently** when violated.
 | `cargo run -p offline-protocol --example replicated_notes` | Replicated documents: open a store, edit, persist, reopen |
 | `cargo run -p offline-protocol-data --example offline_merge` | What two people editing the same document offline actually get back |
 
+## Community
+
+| Resource | Description |
+|----------|-------------|
+| [Developer Discord](https://discord.gg/9TQGrxaPJk) | Questions, debugging help, release announcements and what other developers are building |
+
 ## Contributing
 
 | Resource | Description |

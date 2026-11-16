@@ -4,6 +4,8 @@ One place to choose a platform, estimate setup time, and land on the right
 guide. You do not need this file if you already know whether you are
 integrating React Native, native mobile, desktop, or the browser.
 
+> **Stuck?** Ask in the [developer Discord](https://discord.gg/9TQGrxaPJk), where the team and other integrators answer questions.
+
 **Changing behaviour in the SDK or a binding?** Read [bridge contracts](bridges/README.md)
 and the relevant ADR, not this page. **Bumping the SDK version?** Use the
 [Upgrading guide version index](UPGRADING.md#start-here-version-and-surface-index)

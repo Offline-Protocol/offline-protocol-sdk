@@ -2,6 +2,8 @@
 
 This guide shows how to integrate the Offline Protocol SDK into a native Android app (Kotlin/Java).
 
+> **Stuck?** Ask in the [developer Discord](https://discord.gg/9TQGrxaPJk), where the team and other integrators answer questions.
+
 ## Prerequisites
 
 - Android Studio

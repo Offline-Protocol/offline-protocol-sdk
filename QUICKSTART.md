@@ -8,6 +8,8 @@ Get started with the Offline Protocol SDK in 5 minutes.
 
 > **Want to see a complete working example?** Check out the [React Native Example App](examples/react-native-app/README.md) that demonstrates all SDK features.
 
+> **Stuck?** Ask in the [developer Discord](https://discord.gg/9TQGrxaPJk), where the team and other integrators answer questions.
+
 ## For React Native Developers
 
 ### 1. Install
