@@ -37,6 +37,7 @@ before wiring transports and permissions.
 | `offline_protocolFFI` | The Rust library, as an XCFramework for device and simulator |
 | Generated bindings | `OfflineProtocol`, `ProtocolConfig`, `MeshServices`, `DataStore` and the rest of the API, generated from the Rust interface |
 | Transports | The BLE, internet relay, Wi-Fi Direct, Nostr and Reticulum managers, the same sources the React Native module compiles |
+| Storage | The Keychain store for MLS material and the file store for protocol state, opened per account by `OfflineProtocolReferenceStorage` |
 | Integrator helpers | `OfflineProtocolReferenceStorage`, `StorageConformance`, lifecycle and lab-cleartext helpers |
 
 The Rust core is an I/O-free engine. It queues, routes and encrypts, and never
@@ -50,11 +51,16 @@ hands inbound bytes back.
 2. Build `ProtocolConfig` (see [configuration](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/configuration.md) on the main repo)
 3. `let engine = try OfflineProtocol(config: config)`
 4. `engine.setEventCallback(callback: …)` **before** `start()`
-5. `try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)` (built-in stores)
-6. `try engine.start()` — then wire transports (see the integration guide on the main repo)
+5. `let adoption = try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)`
+   opens the built-in stores. Report `adoption.warning` when it is set: it is
+   the only signal that this account started from a fresh MLS identity, with
+   an empty outbox and an empty block list.
+6. `try engine.start()`, then wire transports (see the integration guide on the main repo)
 
-Custom protocol-state storage must pass `StorageConformance.run(on:)` before
-you call `initializeMls` (see the
+A custom protocol-state backend is verified once, before you wire it in: run
+`StorageConformance.run(on:)` against a scratch instance, off the main thread
+(the suite blocks on writes of several megabytes). Green is what makes a
+backend supported (see the
 [distribution guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/ios-native-distribution.md)).
 Lab-only cleartext and `OfflineProtocolDevelopmentCleartextConfig` are in
 [native development cleartext](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/native-development-cleartext.md).

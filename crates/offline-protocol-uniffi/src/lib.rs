@@ -25133,9 +25133,25 @@ mod tests {
             !readme.contains(SHORTHAND_INIT),
             "distribution README uses invalid initializeMls(on:appId:…) shorthand"
         );
+        // The adoption result is the only signal that an account started from
+        // a fresh MLS identity. A snippet that discards it compiles with a
+        // warning and hides the loss, so both copy-paste sources must bind it
+        // and report its warning.
+        const BOUND_INIT: &str =
+            "let adoption = try OfflineProtocolReferenceStorage.initializeMls(";
         assert!(
-            readme.contains("initializeMls(on: engine,"),
-            "distribution README must show initializeMls(on: engine, appId: profile:)"
+            readme.contains(&format!("{BOUND_INIT}on: engine,")),
+            "distribution README must bind the result of initializeMls(on: engine, appId:, profile:)"
+        );
+        assert!(
+            readme.contains("adoption.warning"),
+            "distribution README must tell integrators to report adoption.warning"
+        );
+        let quickstart =
+            std::fs::read_to_string(repo.join("QUICKSTART.md")).expect("QUICKSTART.md");
+        assert!(
+            quickstart.contains(BOUND_INIT) && quickstart.contains("adoption.warning"),
+            "QUICKSTART's native Swift snippet must bind initializeMls and report adoption.warning"
         );
         for needle in [
             "OfflineProtocolReferenceStorage",
@@ -25156,6 +25172,19 @@ mod tests {
         assert!(
             upgrading.contains("ios-native-distribution.md"),
             "UPGRADING §12.3 must link ios-native-distribution.md"
+        );
+        // §12.3 closes section 12: inserted earlier, it takes §12.2's trailing
+        // paragraphs under a native-iOS heading.
+        let section_12_3 = upgrading
+            .find("### 12.3 Native iOS")
+            .expect("UPGRADING §12.3 heading");
+        let section_13 = upgrading
+            .find("## 13. Upgrade test checklist")
+            .expect("UPGRADING §13 heading");
+        assert!(
+            section_12_3 < section_13
+                && !upgrading[section_12_3..section_13].contains("Events cross the FFI"),
+            "UPGRADING §12.3 must follow all of §12.2 and end section 12"
         );
     }
 }

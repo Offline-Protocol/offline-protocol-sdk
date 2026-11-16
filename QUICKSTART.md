@@ -158,16 +158,22 @@ In Xcode: **File → Add Package Dependencies…** →
 ```swift
 import OfflineProtocolSDK
 
-// Build `config` with the full `ProtocolConfig(...)` — see
+// Build `config` with the full `ProtocolConfig(...)`: see
 // docs/configuration.md and docs/ios-native-distribution.md.
 let mesh = try OfflineProtocol(config: config)
-mesh.setEventCallback(callback: yourHandler) // before start()
+// `yourHandler` is your `EventCallback`. Register it before start(), or
+// events emitted during startup are lost.
+mesh.setEventCallback(callback: yourHandler)
 
-try OfflineProtocolReferenceStorage.initializeMls(
+let adoption = try OfflineProtocolReferenceStorage.initializeMls(
     on: mesh,
     appId: config.appId,
     profile: config.profile
 )
+if let warning = adoption.warning {
+    // The only signal that this account started from a fresh MLS identity.
+    print(warning)
+}
 try mesh.start()
 
 let messageId = try mesh.sendMessage(

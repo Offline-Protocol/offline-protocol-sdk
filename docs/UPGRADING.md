@@ -1393,6 +1393,14 @@ for the current pin).
 
 Run `pod install` for iOS. A JS-only update will not pick these up.
 
+**Android test dependency:** `org.robolectric:robolectric:4.16` was added to
+`testImplementation`. The `build.gradle` react-native detection also now checks
+for `react-native/android/` rather than just the package directory, so newer RN
+packages no longer resolve to an unversioned `react-android` dependency.
+
+Events cross the FFI as JSON strings, so **event field changes need no bindings
+regeneration** — only `bindings/react-native/src/types.ts`, which can drift.
+
 ### 12.3 Native iOS: bump the Swift package, not a hand-built XCFramework
 
 **Applies to native Swift apps** that depend on `OfflineProtocolSDK` from
@@ -1421,17 +1429,10 @@ Rust build artifacts.
 
 **If you vendor a tarball instead of the distribution repo**
 
-Verify the tarball's `Package.swift` checksum matches the XCFramework zip from
-the same release, then replace your vendored tree. Do not edit generated sources
+Verify both assets with `gh attestation verify <asset> --repo Offline-Protocol/offline-protocol-sdk`
+and check that the tarball's `Package.swift` checksum matches the XCFramework zip
+from the same release, then replace your vendored tree. Do not edit generated sources
 by hand.
-
-**Android test dependency:** `org.robolectric:robolectric:4.16` was added to
-`testImplementation`. The `build.gradle` react-native detection also now checks
-for `react-native/android/` rather than just the package directory, so newer RN
-packages no longer resolve to an unversioned `react-android` dependency.
-
-Events cross the FFI as JSON strings, so **event field changes need no bindings
-regeneration** — only `bindings/react-native/src/types.ts`, which can drift.
 
 ---
 

@@ -19,7 +19,7 @@ ASSEMBLE="$REPO_ROOT/scripts/assemble-swift-package.sh"
 FAILURES=0
 ASSERTIONS=0
 # A test that stops asserting passes. Raise this with every check added.
-EXPECTED_ASSERTIONS=124
+EXPECTED_ASSERTIONS=125
 
 URL="https://example.com/releases/offline-protocol-1.2.3-swiftpm-xcframework.zip"
 CHECKSUM="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -191,7 +191,8 @@ check "the README takes the pod's deployment target" holds "$OUT/README.md" "iOS
 check "the README holds no placeholder" lacks "$OUT/README.md" "@@"
 check "the README names reference storage" holds "$OUT/README.md" "OfflineProtocolReferenceStorage"
 check "the README does not claim storage is private" lacks "$OUT/README.md" "not yet public"
-check "the README shows initializeMls on engine" holds "$OUT/README.md" "initializeMls(on: engine,"
+check "the README binds the initializeMls result" holds "$OUT/README.md" "let adoption = try OfflineProtocolReferenceStorage.initializeMls(on: engine,"
+check "the README reports the adoption warning" holds "$OUT/README.md" "adoption.warning"
 check "the README avoids invalid initializeMls shorthand" lacks "$OUT/README.md" "initializeMls(on:appId"
 check "the version file names the package" holds_line "$OUT/VERSION" "name=offline-protocol-swift"
 check "the version file names the version" holds_line "$OUT/VERSION" "version=1.2.3"
