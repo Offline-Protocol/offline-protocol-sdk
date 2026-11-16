@@ -1,8 +1,7 @@
 # Native iOS: blessed distribution path
 
-This page is for a **native Swift app** (no React Native). It answers #12 in the
-integrator friction plan: one obvious install path instead of a multi-day
-hand-built XCFramework workflow.
+This page is for a **native Swift app** (no React Native). It is the single
+recommended install path instead of a multi-day hand-built XCFramework workflow.
 
 React Native integrators should use [QUICKSTART.md](../QUICKSTART.md) and
 `@offline-protocol/mesh-sdk` instead.
@@ -18,7 +17,9 @@ React Native integrators should use [QUICKSTART.md](../QUICKSTART.md) and
 **Do not** treat `swift build` or `swift test` under
 `bindings/react-native/ios` as how end-user apps integrate. That directory is a
 **CI harness** for policy tests, not the shipping Swift package
-([bridges/swift.md](bridges/swift.md#s7-the-swiftpm-harness-under-bindingsreact-nativeios-is-not-the-sdk)).
+([bridges/swift.md](bridges/swift.md#the-swift-package) and
+[S2](bridges/swift.md#s2-five-registration-points-per-new-swift-file) in the Swift
+bridge contract).
 
 ## Recommended: Swift package (`OfflineProtocolSDK`)
 
