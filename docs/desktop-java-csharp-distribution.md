@@ -1,9 +1,9 @@
 # Java and C# on desktop: packages and native libraries
 
-Friction **#23**: desktop hosts should not need a Rust toolchain for the
-**blessed integrator path**. The Java jar and the C# binding ship **without**
-embedding the native library; pair them with **release desktop archives** (same
-binaries as Python wheels).
+Desktop hosts should not need a Rust toolchain on the **recommended integrator
+path**. The Java jar and the C# binding ship **without** embedding the native
+library; pair them with **release desktop archives** (same binaries as Python
+wheels).
 
 For the shared C ABI and JSON calling style, see [bindings/c/README.md](../bindings/c/README.md).
 
@@ -68,8 +68,9 @@ java --enable-native-access=ALL-UNNAMED \
 JDK **22+** is required (`java.lang.foreign`). Full quick start:
 [bindings/java/README.md](../bindings/java/README.md).
 
-`ProtocolConfig` is a long positional record (generated): spell every field or
-wrap construction in your own builder (#24 is a separate ergonomics effort).
+`ProtocolConfig` is a long positional record (generated): spell every field (see
+[configuration.md](configuration.md)) or wrap construction in your own builder in
+application code.
 
 ## C# — .NET + `OFFLINE_PROTOCOL_LIBRARY_DIR`
 
