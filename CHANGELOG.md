@@ -64,6 +64,17 @@ Questions about a release, or about upgrading to one? Ask in the
   building Rust, and [UPGRADING §12.3](docs/UPGRADING.md#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework)
   covers bumping it, including why an app that already has accounts keeps its
   own storage providers.
+- **The Flutter plugin can ship on pub.dev with prebuilt native libraries.**
+  `scripts/assemble-flutter-pub-package.sh` builds a self-contained package:
+  the plugin's tracked files, the shared Android and iOS bridge sources
+  vendored beside it, the staged `jniLibs` and XCFramework, and the version and
+  deployment target the Gradle build and the podspec would otherwise read from
+  the React Native package. An application adds it with
+  `flutter pub add offline_protocol` and needs no Rust toolchain. Each release
+  assembles it, evaluates its podspec and dry-runs `dart pub publish`; with
+  `FLUTTER_PUBLISH` on, a pushed release tag publishes it through pub.dev
+  automated publishing. The first version is uploaded by hand
+  ([docs/flutter-distribution.md](docs/flutter-distribution.md)).
 
 ### Fixed
 

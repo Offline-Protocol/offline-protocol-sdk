@@ -227,6 +227,43 @@ because an empty staged directory would otherwise win and link nothing. Neither
 is committed. `bindings/flutter/scripts/stage-plugin-native-artifacts.sh` copies
 the React Native package's libraries into both (`--check` verifies them).
 
+For **pub.dev**, `scripts/assemble-flutter-pub-package.sh` stages those libraries
+into a self-contained publish tree (vendored `android/bridge-rn` and
+`ios/BridgeRN`) so consumers never need the monorepo layout. Integrators:
+[flutter-distribution.md](../flutter-distribution.md).
+
+The publish tree carries each native library exactly once, in the staged
+locations. The vendored bridge leaves out the React Native package's own
+`src/main/jniLibs` and `libs/`: the staged copies always win there, so the
+vendored ones would never be read and would double the archive. The layout
+check refuses a tree that carries them. It also refuses any native file but the
+four `libuniffi_offline_protocol.so` and the two XCFramework slices, and the
+script copies each Android library by name rather than the directory: a
+maintainer's `jniLibs` can still hold a library from an older build under
+another name, and both slices are required because a device-only framework
+fails every simulator build.
+
+Pub decides what the archive holds from ignore files, and both traps drop
+files with no error: inside a git work tree it applies the repository's
+`.gitignore` (`build/`, `*.so`, `*.a`), and it honours a `.gitignore` inside the
+package even outside git, where the plugin's `ios/.gitignore` hides `BridgeRN`
+and `Frameworks`. So the script refuses an output inside a work tree, deletes
+every `.gitignore` it copied, and the fixture test ends in
+`flutter pub publish --dry-run` with the archive listing checked.
+
+Deleting those `.gitignore` files would also publish whatever a build or an
+IDE left in the working tree (`local.properties`, `.idea/`, `.cxx/`,
+`.build/`), so the script never copies a directory: it takes the files git
+tracks in the plugin and the React Native bridge, and adds the staged native
+libraries. The fixture test leaves such files in its source tree and checks
+none reach the package.
+
+In the monorepo the podspec's `prepare_command` copies the shared bridge into
+`BridgeRN` on every `pod install`; only the pub tree, marked by
+`ios/pub_bridge_version.json`, skips it. Keyed on `BridgeRN` existing, the
+first copy in a checkout would be the last, and an edited shared source would
+never reach the pod.
+
 ## F9. Binary footprint
 
 The plugin links BLE and mesh bridge sources into the AAR and CocoaPod. CI runs

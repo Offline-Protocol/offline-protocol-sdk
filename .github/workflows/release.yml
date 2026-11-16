@@ -999,6 +999,80 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+  # The Flutter plugin pub.dev carries: shared bridge sources vendored into the
+  # package, plus the same staged jniLibs and XCFramework the in-repo plugin
+  # links. Assembled, podspec-verified, and dry-run published before the GitHub
+  # release job, which needs it: a tree that fails here stops npm and crates.io
+  # too, rather than shipping a version pub.dev can never carry. pub.dev
+  # publish runs after release when FLUTTER_PUBLISH is on.
+  # The Kotlin bindings come from android-bindings, as for the Android library
+  # and npm, so both platforms ship bindings generated with this release's
+  # libraries rather than whatever was last committed.
+  # The tree is assembled under the runner's temporary directory, never inside
+  # the checkout: there pub lists files through git and the repository's
+  # .gitignore (build/, *.so, *.a) hides the pubspec and every native library.
+  flutter-pub-package:
+    name: Assemble Flutter pub package
+    needs: [version-gate, build-ios, build-android, android-bindings]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download iOS Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-libs
+          path: bindings/react-native/ios
+
+      - name: Download Android Libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: android-jniLibs-*
+          path: bindings/react-native/android/src/main/jniLibs
+          merge-multiple: true
+
+      - name: Download Android Bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: android-uniffi-bindings
+          path: bindings/react-native/android/src/main/java
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: "3.27.4"
+
+      # A gem installed into the runner's system Ruby lands in a user directory
+      # that is not on PATH, so `pod` would be installed and never found.
+      # setup-ruby puts its own gem bin directory on PATH.
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "3.3"
+
+      - name: Install CocoaPods for Flutter podspec verification
+        run: |
+          gem install cocoapods -v 1.16.2 --no-document
+          pod --version
+
+      - name: Assemble the pub.dev tree
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: |
+          PACKAGE="$RUNNER_TEMP/flutter-pub-package"
+          bash scripts/assemble-flutter-pub-package.sh \
+            --output "$PACKAGE" --version "$VERSION"
+          bash scripts/verify-flutter-pub-podspec.sh "$PACKAGE"
+          (cd "$PACKAGE" && dart pub publish --dry-run)
+
+      # include-hidden-files keeps .pubignore, so the publish job archives the
+      # same files this job dry-ran.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flutter-pub-package
+          path: ${{ runner.temp }}/flutter-pub-package
+          include-hidden-files: true
+          retention-days: 5
+
   # ---------------------------------------------------------------------------
   # Release gate
   # ---------------------------------------------------------------------------
@@ -1187,11 +1261,11 @@ jobs:
     # job alone, it splits the release across registries with no way back — see
     # the long note on that job.
     #
-    # The Swift package, the Android and Java libraries and the wheels are in it too, and
-    # their tests: the GitHub release carries the wheels, the Swift package and
+    # The Swift package, the Android, Java and Flutter packages and the wheels are in it
+    # too, and their tests: the GitHub release carries the wheels, the Swift package and
     # the archive it names, and Maven Central and PyPI publish only after this
     # job, so one that fails its tests stops everything before npm.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, java-library, ruby-library, swift-package, test-c-library]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, java-library, ruby-library, swift-package, test-c-library, flutter-pub-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1682,7 +1756,7 @@ jobs:
     # artifacts; the shared `needs` list exists purely for that all-or-nothing
     # property, and sharing it with `release` is what keeps a version mismatch
     # from failing one registry while the other publishes regardless.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package, test-c-library]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package, test-c-library, flutter-pub-package]
     runs-on: ubuntu-latest
     env:
       # The single gate on every step that uploads. Four conditions, each
@@ -2113,6 +2187,79 @@ jobs:
             exit 0
           fi
           gem push "$GEM"
+
+  # offline_protocol on pub.dev, from the tree flutter-pub-package assembled and
+  # dry-run published on the release's own mobile artifacts.
+  #
+  # Automated publishing (OIDC), so there is no token to store or leak. pub.dev
+  # sets three conditions this job cannot meet on its own:
+  #   - Only an existing package can be published this way: the first version
+  #     is uploaded by hand with `dart pub publish` from an assembled tree.
+  #   - The package's Admin page enables publishing from GitHub Actions for
+  #     this repository with the tag pattern `v{{version}}`, and should require
+  #     the `pub-dev` environment.
+  #   - Only a workflow started by pushing the tag may publish, so a
+  #     workflow_dispatch run (even on a tag ref) stays on the dry run.
+  publish-flutter-pub:
+    name: Publish to pub.dev
+    needs: [version-gate, flutter-pub-package, release]
+    runs-on: ubuntu-latest
+    environment: pub-dev
+    permissions:
+      contents: read
+      # The automated-publishing credential, as for npm.
+      id-token: write
+    env:
+      REAL_RELEASE: ${{ needs.version-gate.outputs.REAL_RELEASE }}
+      TAG_PUSH: ${{ github.event_name == 'push' }}
+    steps:
+      - name: Download the pub package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: flutter-pub-package
+          path: ${{ runner.temp }}/flutter-pub-package
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: "3.27.4"
+
+      # The same validation flutter-pub-package ran, on the files this job
+      # will upload: an artifact that lost a file fails here, not on pub.dev.
+      - name: Dry-run the downloaded package
+        run: cd "$RUNNER_TEMP/flutter-pub-package" && dart pub publish --dry-run
+
+      - name: Channel off
+        if: vars.FLUTTER_PUBLISH != 'true' || env.REAL_RELEASE != 'true' || env.TAG_PUSH != 'true'
+        run: echo "::notice title=Flutter plugin not published::Published only from a pushed release tag with FLUTTER_PUBLISH set to 'true'. The flutter-pub-package job dry-runs pub publish on every release."
+
+      # The exchange dart-lang/setup-dart makes (createPubOIDCToken): an ID
+      # token for the audience https://pub.dev, handed to pub through
+      # PUB_TOKEN. Done here because pub must run from the Flutter SDK, which
+      # a Flutter plugin needs to resolve.
+      - name: Publish to pub.dev
+        if: vars.FLUTTER_PUBLISH == 'true' && env.REAL_RELEASE == 'true' && env.TAG_PUSH == 'true'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/flutter-pub-package"
+          # A re-run of a release whose version is already on pub.dev succeeds
+          # instead of failing on the duplicate, as skip-existing does for PyPI.
+          PUB_VERSION="$(grep -m1 '^version: ' pubspec.yaml | sed 's/^version: //')"
+          if curl -fs -o /dev/null "https://pub.dev/api/packages/offline_protocol/versions/$PUB_VERSION"; then
+            echo "::warning title=pub.dev publish is a no-op::offline_protocol $PUB_VERSION is already on pub.dev. Expected when re-running a release that already reached it."
+            exit 0
+          fi
+          PUB_TOKEN="$(curl -sSf \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https%3A%2F%2Fpub.dev" | jq -r '.value')"
+          if [ -z "$PUB_TOKEN" ] || [ "$PUB_TOKEN" = null ]; then
+            echo "::error title=No OIDC token::The job could not mint an ID token for pub.dev; it needs id-token: write."
+            exit 1
+          fi
+          echo "::add-mask::$PUB_TOKEN"
+          export PUB_TOKEN
+          dart pub token add https://pub.dev --env-var PUB_TOKEN
+          dart pub publish --force
 
   # ghcr.io/offline-protocol/offline-protocol-service, built from
   # bindings/python/docker. The image installs the wheels `publish-pypi` just

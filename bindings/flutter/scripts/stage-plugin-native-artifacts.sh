@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+REPO_ROOT="${PACKAGE_SOURCE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 PLUGIN="$REPO_ROOT/bindings/flutter/offline_protocol"
 RN_ANDROID="$REPO_ROOT/bindings/react-native/android/src/main/jniLibs"
 RN_IOS="$REPO_ROOT/bindings/react-native/ios/libs/offline_protocol_uniffi.xcframework"

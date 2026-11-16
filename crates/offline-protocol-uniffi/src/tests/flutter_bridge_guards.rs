@@ -232,20 +232,23 @@ fn flutter_ios_exclude_lists_agree_and_name_real_files() {
 
 // A version, an SDK level or a deployment target written down in the plugin is
 // right on the day it is made and drifts with nothing failing (ADR 0025
-// decision 5). The podspec and the Gradle build read them from the React
-// Native package; the pubspec cannot, so the release gate checks it.
+// decision 5). The podspec and Gradle read them from the React Native package
+// in the monorepo, or from pub_bridge_version.json when the pub assemble ships
+// a vendored bridge; release gates the pubspec version.
 #[test]
 fn flutter_native_builds_read_what_the_react_native_package_declares() {
     let plugin = flutter_plugin_dir();
     let podspec = read_text(&plugin.join("ios/offline_protocol.podspec"));
     let gradle = read_text(&plugin.join("android/build.gradle"));
     for needle in [
-        "s.version          = rn_package['version']",
+        "s.version          = package_version",
         "s.platform         = :ios, ios_deployment_target",
+        "pub_bridge_version.json",
+        "MeshSdk.podspec",
     ] {
         assert!(
             podspec.contains(needle),
-            "offline_protocol.podspec must read `{needle}` from the React Native package"
+            "offline_protocol.podspec must pin `{needle}` from RN or pub metadata"
         );
     }
     for needle in [
@@ -614,5 +617,198 @@ fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory()
     assert!(
         ignore.lines().any(|l| l.trim() == "Frameworks/"),
         "ios/.gitignore must keep the staged XCFramework out of the repository"
+    );
+    // In the monorepo every `pod install` copies the shared bridge again, so an
+    // edit to a shared source reaches the pod. Only the pub tree, which ships
+    // BridgeRN and has no React Native package to copy from, skips the copy.
+    // Keyed on BridgeRN existing instead, the first sync would be the last.
+    assert!(
+        podspec.contains("unless File.file?(pub_meta_path)\n    sync_script"),
+        "offline_protocol.podspec must skip prepare_command only in the pub layout"
+    );
+    assert!(
+        !podspec.contains("bridge_generated"),
+        "offline_protocol.podspec must not skip prepare_command because BridgeRN exists"
+    );
+}
+
+/// The body of one job in a workflow file: from its key to the next line at
+/// job indentation (two spaces), which is the next job's key or the comment
+/// above it. A comment inside a job is indented further and stays in.
+fn workflow_job<'a>(workflow: &'a str, file: &str, name: &str) -> &'a str {
+    let header = format!("\n  {name}:\n");
+    let start = workflow
+        .find(&header)
+        .unwrap_or_else(|| panic!("{file} has no `{name}` job"))
+        + 1;
+    let body = start + header.len() - 1;
+    let end = workflow[body..]
+        .match_indices('\n')
+        .map(|(i, _)| body + i + 1)
+        .find(|&line| {
+            let rest = &workflow[line..];
+            rest.starts_with("  ") && !rest[2..].starts_with([' ', '\n'])
+        })
+        .unwrap_or(workflow.len());
+    &workflow[start..end]
+}
+
+/// pub.dev packaging is scripted and documented; no ad-hoc copies.
+#[test]
+fn flutter_pub_distribution_path_is_documented_and_pinned() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("repository root");
+    let assemble = read_text(&repo.join("scripts/assemble-flutter-pub-package.sh"));
+    assert!(
+        assemble.contains("pub.dev"),
+        "assemble-flutter-pub-package.sh must describe the pub.dev tree"
+    );
+    assert!(
+        assemble.contains("bridge-rn"),
+        "assemble script must vendor the Android bridge for pub consumers"
+    );
+    assert!(
+        assemble.contains("ios/pub_bridge_version.json"),
+        "assemble script must write iOS pub_bridge_version.json for pub consumers"
+    );
+    assert!(
+        assemble.contains("ios_deployment_target"),
+        "assemble script must pin ios_deployment_target from MeshSdk.podspec"
+    );
+    // Pub hides files through ignore rules no layout check sees: the
+    // repository's .gitignore when the tree sits inside a git work tree, and
+    // any .gitignore shipped in the tree (the plugin's own ios/.gitignore hides
+    // BridgeRN and Frameworks). The script refuses the first and deletes the
+    // second; the fixture test's dry-run proves the archive.
+    assert!(
+        assemble.contains("inside a git work tree")
+            && assemble.contains("-name .gitignore -type f -delete"),
+        "assemble-flutter-pub-package.sh must refuse a git work tree and ship no .gitignore"
+    );
+    assert!(
+        assemble.contains("sync_bridge_rn.sh") && assemble.contains("ios-deployment-target.sh"),
+        "assemble-flutter-pub-package.sh must reuse sync_bridge_rn.sh and the one \
+         deployment-target parser rather than a copy of either"
+    );
+    // A working tree holds what builds and IDEs leave in it, hidden only by
+    // the .gitignore files the package cannot ship. A pub.dev version is
+    // permanent, so the package is the tracked files plus the staged natives.
+    assert!(
+        assemble.contains("ls-files -z --cached")
+            && !assemble.contains("\"$PLUGIN/\" \"$OUTPUT/\""),
+        "assemble-flutter-pub-package.sh must copy tracked files, never the plugin directory"
+    );
+    // A maintainer's jniLibs can hold a library from an older build under
+    // another name. The package takes each library by name and refuses any
+    // native file it does not expect, so nothing stale reaches a permanent
+    // pub.dev version, and both XCFramework slices must be there.
+    assert!(
+        assemble.contains("unexpected native file")
+            && assemble.contains("ios-arm64_x86_64-simulator"),
+        "assemble-flutter-pub-package.sh must refuse unexpected native files and require \
+         the simulator slice"
+    );
+    let fixture = read_text(&repo.join("scripts/tests/test-assemble-flutter-pub-package.sh"));
+    assert!(
+        fixture.contains("a stale library beside the real one stays out of the package")
+            && fixture.contains("stray native file refused")
+            && fixture.contains("missing simulator slice refused"),
+        "the fixture test must prove stale and stray native files stay out of the package"
+    );
+    assert!(
+        fixture.contains("flutter pub publish --dry-run"),
+        "the fixture test must dry-run publish the assembled tree"
+    );
+    assert!(
+        fixture.contains("untracked files in the source tree stay out of the package"),
+        "the fixture test must prove untracked files stay out of the package"
+    );
+    let verify = read_text(&repo.join("scripts/verify-flutter-pub-podspec.sh"));
+    assert!(
+        verify.contains("pod ipc spec"),
+        "verify-flutter-pub-podspec.sh must evaluate the podspec via pod ipc spec"
+    );
+    let release = read_text(&repo.join(".github/workflows/release.yml"));
+    assert!(
+        release.contains("verify-flutter-pub-podspec.sh"),
+        "release.yml must verify the Flutter pub podspec after assemble"
+    );
+    let job = |name: &str| workflow_job(&release, "release.yml", name);
+    // `gem install` into the runner's system Ruby puts `pod` in a user
+    // directory that is not on PATH; setup-ruby puts its gem bin on PATH.
+    let ci = read_text(&repo.join(".github/workflows/ci.yml"));
+    for (file, body) in [
+        (
+            "ci.yml native-package-scripts",
+            workflow_job(&ci, "ci.yml", "native-package-scripts"),
+        ),
+        (
+            "release.yml flutter-pub-package",
+            job("flutter-pub-package"),
+        ),
+    ] {
+        let ruby = body.find("ruby/setup-ruby@");
+        let pods = body.find("gem install cocoapods");
+        assert!(
+            matches!((ruby, pods), (Some(r), Some(p)) if r < p),
+            "{file} must set up Ruby before installing CocoaPods, or `pod` is not on PATH"
+        );
+    }
+    let assemble_job = job("flutter-pub-package");
+    assert!(
+        assemble_job.contains("$RUNNER_TEMP/flutter-pub-package")
+            && assemble_job.contains("include-hidden-files: true"),
+        "flutter-pub-package must assemble outside the checkout and upload the tree with \
+         its .pubignore"
+    );
+    // The package is a release artifact like the Swift package and the
+    // Android library: a tree that fails to assemble must stop npm and
+    // crates.io, or a version ships that pub.dev can never carry.
+    for gate in ["release", "publish-crates"] {
+        let needs = job(gate)
+            .lines()
+            .find(|l| l.trim_start().starts_with("needs: ["))
+            .unwrap_or_else(|| panic!("release.yml `{gate}` has no one-line needs list"));
+        assert!(
+            needs.contains(" flutter-pub-package,") || needs.contains(" flutter-pub-package]"),
+            "release.yml `{gate}` must need flutter-pub-package"
+        );
+    }
+    // Both platforms ship bindings generated with this release's libraries:
+    // the iOS ones arrive with ios-libs, the Kotlin ones from android-bindings.
+    assert!(
+        assemble_job.contains("android-bindings]")
+            && assemble_job.contains("name: android-uniffi-bindings"),
+        "flutter-pub-package must ship the Kotlin bindings android-bindings generated"
+    );
+    let publish_job = job("publish-flutter-pub");
+    assert!(
+        publish_job.contains("id-token: write")
+            && publish_job.contains("audience=https%3A%2F%2Fpub.dev")
+            && !publish_job.contains("secrets."),
+        "publish-flutter-pub must publish through pub.dev automated publishing (OIDC), \
+         with no stored token"
+    );
+    let doc = std::fs::read_to_string(repo.join("docs/flutter-distribution.md"))
+        .unwrap_or_else(|e| panic!("docs/flutter-distribution.md: {e}"));
+    assert!(
+        doc.contains("flutter pub add offline_protocol"),
+        "flutter-distribution.md must name the pub.dev install command"
+    );
+    let gradle = read_text(&flutter_plugin_dir().join("android/build.gradle"));
+    assert!(
+        gradle.contains("file('bridge-rn')"),
+        "Flutter android/build.gradle must support the pub assemble layout"
+    );
+    let podspec = read_text(&flutter_plugin_dir().join("ios/offline_protocol.podspec"));
+    assert!(
+        podspec.contains("pub_bridge_version.json"),
+        "offline_protocol.podspec must read pub_bridge_version.json in the pub layout"
+    );
+    assert!(
+        podspec.contains("ios_deployment_target"),
+        "offline_protocol.podspec must read ios_deployment_target from pub_bridge_version.json"
     );
 }

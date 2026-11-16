@@ -364,7 +364,7 @@ all four ABIs and a minified application, and each wheel installed by pip and
 run through the whole suite on the system it is tagged for. All of that runs on
 every release and every dry run, and a failure stops npm and crates.io too.
 
-Maven Central, PyPI and RubyGems then publish after the `release` job, only from a
+Maven Central, PyPI, RubyGems and pub.dev then publish after the `release` job, only from a
 `v*` tag that is not a dry run, and only when the channel's repository
 variable is `true`. A channel switched on with its secret missing fails the
 run rather than skipping, because a skipped channel is a release that looks
@@ -381,6 +381,7 @@ release.
 | Maven Central | `MAVEN_CENTRAL_PUBLISH` | `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token), `MAVEN_SIGNING_KEY` (armored private key) and `MAVEN_SIGNING_KEY_PASSWORD` | uploads a deployment Central validates, then drops it |
 | PyPI | `PYPI_PUBLISH` | none: trusted publishing from `release.yml` in the `pypi` environment | checks the wheels' metadata only: PyPI has no rehearsal |
 | RubyGems | `RUBYGEMS_PUBLISH` | none: trusted publishing from `release.yml` in the `rubygems` environment | builds and tests the gem only: RubyGems has no rehearsal |
+| pub.dev (`offline_protocol`) | `FLUTTER_PUBLISH` | none: automated publishing (OIDC) from `release.yml` in the `pub-dev` environment, only from a pushed tag | `dart pub publish --dry-run` on the assembled tree, in `flutter-pub-package` and again in `publish-flutter-pub` |
 | Service image (ghcr.io) | `PYPI_PUBLISH`, since it installs what PyPI published | none: the workflow's own `GITHUB_TOKEN` with `packages: write` | not built: it needs the release on PyPI |
 
 **RubyGems needs its trusted publisher before the first release.** The gem
@@ -398,6 +399,39 @@ gh variable set RUBYGEMS_PUBLISH --body true -R Offline-Protocol/offline-protoco
 The first push turns the pending publisher into the gem's own. A release
 candidate is the safe first exercise: it publishes a prerelease
 (`0.31.0.pre.rc.1`), which `gem install` skips unless asked with `--pre`.
+
+**pub.dev needs its first version uploaded by hand.** pub.dev automates
+publishing only for a package that already exists, so the first
+`offline_protocol` is published by the pub.dev account that will own it. Upload
+the tree a release run assembled and dry-ran (the `flutter-pub-package`
+artifact, kept five days), never one assembled on a workstation: a pub.dev
+version is permanent, and a local tree carries that machine's native libraries
+and any uncommitted edit to a tracked file. Download it outside any git
+checkout: inside one, pub applies the repository's `.gitignore` and drops the
+natives.
+
+```bash
+VERSION=X.Y.Z   # the release whose run assembled the package
+RUN="$(gh run list -R Offline-Protocol/offline-protocol-sdk --workflow release.yml \
+  --branch "v$VERSION" --limit 1 --json databaseId --jq '.[0].databaseId')"
+DEST="$(mktemp -d)/flutter-pub"
+gh run download "$RUN" -R Offline-Protocol/offline-protocol-sdk \
+  -n flutter-pub-package -D "$DEST"
+(cd "$DEST" && dart pub publish)
+```
+
+Then, on the package's Admin page on pub.dev, enable automated publishing
+from GitHub Actions for `Offline-Protocol/offline-protocol-sdk` with the tag
+pattern `v{{version}}` and require the `pub-dev` environment. Create that
+environment on this repository and set the switch:
+
+```bash
+gh variable set FLUTTER_PUBLISH --body true -R Offline-Protocol/offline-protocol-sdk
+```
+
+pub.dev accepts only a run started by pushing the tag, so a release run
+dispatched by hand stays on the dry run. A pub.dev version is permanent: it
+can be retracted for a week, never deleted.
 
 **The Swift package is pulled, not pushed.** Nothing in this repository can
 write to `Offline-Protocol/offline-protocol-swift`, and no credential for it
