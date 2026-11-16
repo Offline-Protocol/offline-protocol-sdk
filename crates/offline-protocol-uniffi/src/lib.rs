@@ -25621,8 +25621,9 @@ mod tests {
             repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
         )
         .expect("kotlin consumer-check");
-        let csharp = std::fs::read_to_string(repo.join("bindings/csharp/consumer-check/Program.cs"))
-            .expect("csharp consumer-check");
+        let csharp =
+            std::fs::read_to_string(repo.join("bindings/csharp/consumer-check/Program.cs"))
+                .expect("csharp consumer-check");
         let telemetry =
             std::fs::read_to_string(repo.join("docs/telemetry.md")).expect("telemetry.md");
         for (path, body, needles) in [
