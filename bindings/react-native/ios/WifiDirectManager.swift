@@ -10,6 +10,11 @@
 
 import Foundation
 import Network
+import os.log
+// SPIKE(fast-link): scoped, because the module also exports a legacy NWEndpoint.
+import class NetworkExtension.NEHotspotConfiguration
+import class NetworkExtension.NEHotspotConfigurationManager
+import class NetworkExtension.NEHotspotNetwork
 
 /// The engine's peer-stream slot on iOS, over `NWListener`, `NWBrowser` and
 /// `NWConnection`.
@@ -285,6 +290,7 @@ public class WifiDirectManager: NSObject, TransportManager {
         updateState(.running)
         try? protocolInstance.wifiDirectStatusChanged(isConnected: true)
         emitDiagnostic("info", "Peer-stream transport started")
+        spikeJoinIfConfigured()
     }
 
     public func stop() {
@@ -793,6 +799,7 @@ extension WifiDirectManager: PeerStreamHost {
                 "error": error.localizedDescription
             ])
         }
+        spikeLog("peer stream proved \(address)")
     }
 
     func peerStreamReceived(_ address: String, _ body: Data) {
@@ -825,3 +832,113 @@ extension WifiDirectManager: PeerStreamHost {
 }
 
 extension WifiDirectManager: @unchecked Sendable {}
+
+// MARK: - SPIKE (BLE-to-Wi-Fi fast link, phase 1). Throwaway: not a design.
+//
+// Driven from the Mac, so the spike needs no UDL or JS surface. Copy a JSON
+// file into the app's container:
+//
+//     {"ssid":"DIRECT-sp-...","pass":"<hex>","host":"192.168.49.1"}
+//     xcrun devicectl device copy to --device <udid> \
+//         --domain-type appDataContainer --domain-identifier <bundle> \
+//         --source opspike.json --destination Documents/opspike.json
+//
+// Optional keys: port (default 8988), joinOnce (default true), addr (the
+// address the preamble must prove). Launch arguments (-opSpikeSSID and so on)
+// work too, but iOS relaunches the app for Bluetooth restoration without them.
+// The join runs when this transport starts. Logs go to os_log as "OPSPIKE".
+extension WifiDirectManager {
+    private static var spikeT0: TimeInterval = 0
+    private static let spikeOSLog = OSLog(subsystem: "com.offlineprotocol.spike", category: "OPSPIKE")
+
+    func spikeLog(_ message: String) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let since = Self.spikeT0 == 0 ? 0 : Int((now - Self.spikeT0) * 1000)
+        let line = "OPSPIKE wall=\(Int64(Date().timeIntervalSince1970 * 1000)) +\(since)ms \(message)"
+        os_log("%{public}@", log: Self.spikeOSLog, type: .default, line)
+    }
+
+    fileprivate func spikeJoinIfConfigured() {
+        // Documents/opspike.json, copied in with `devicectl device copy to`,
+        // wins over launch arguments: iOS relaunches the app for Bluetooth
+        // restoration, and a relaunch carries no arguments.
+        var config: [String: Any] = [:]
+        if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+           let data = try? Data(contentsOf: dir.appendingPathComponent("opspike.json")),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            config = object
+        } else {
+            let defaults = UserDefaults.standard
+            for key in ["ssid": "opSpikeSSID", "pass": "opSpikePass", "host": "opSpikeHost", "addr": "opSpikeAddr"] {
+                if let value = defaults.string(forKey: key.value) { config[key.key] = value }
+            }
+            if defaults.integer(forKey: "opSpikePort") != 0 { config["port"] = defaults.integer(forKey: "opSpikePort") }
+            if defaults.object(forKey: "opSpikeJoinOnce") != nil { config["joinOnce"] = defaults.bool(forKey: "opSpikeJoinOnce") }
+        }
+        spikeLog("transport started; spike config ssid=\(config["ssid"] as? String ?? "nil")")
+        guard let ssid = config["ssid"] as? String,
+              let pass = config["pass"] as? String,
+              let host = config["host"] as? String else { return }
+        let port = config["port"] as? Int ?? 0
+        let joinOnce = config["joinOnce"] as? Bool ?? true
+        let expected = config["addr"] as? String
+        Self.spikeT0 = ProcessInfo.processInfo.systemUptime
+        spikeLog("apply ssid=\(ssid) joinOnce=\(joinOnce) host=\(host):\(port == 0 ? 8988 : port)")
+        let configuration = NEHotspotConfiguration(ssid: ssid, passphrase: pass, isWEP: false)
+        configuration.joinOnce = joinOnce
+        NEHotspotConfigurationManager.shared.apply(configuration) { [weak self] error in
+            guard let self = self else { return }
+            if let error = error as NSError? {
+                self.spikeLog("apply finished error domain=\(error.domain) code=\(error.code) \(error.localizedDescription)")
+                // alreadyAssociated (13) is a join that already holds.
+                if error.code != 13 { return }
+            } else {
+                self.spikeLog("apply finished ok")
+            }
+            NEHotspotNetwork.fetchCurrent { network in
+                self.spikeLog("current network ssid=\(network?.ssid ?? "nil") bssid=\(network?.bssid ?? "nil")")
+            }
+            self.spikeDial(host: host, port: port == 0 ? 8988 : port, expected: expected, attempt: 1)
+        }
+    }
+
+    /// Dials the host's listener directly: there is no DNS-SD on the group.
+    /// Retried each second until a stream proves its peer, for 30 attempts.
+    private func spikeDial(host: String, port: Int, expected: String?, attempt: Int) {
+        linkQueue.async { [weak self] in
+            guard let self = self, self.state == .running else { return }
+            if !self.peers.isEmpty, let expected = expected, self.peers.handle(for: expected) != nil {
+                self.spikeLog("already proved \(expected); not dialing")
+                return
+            }
+            self.spikeLog("dial attempt \(attempt) to \(host):\(port)")
+            let endpoint = NWEndpoint.hostPort(
+                host: NWEndpoint.Host(host), port: NWEndpoint.Port(integerLiteral: UInt16(port)))
+            let parameters = Self.makeParameters()
+            parameters.requiredInterfaceType = .wifi
+            let stream = Stream(
+                connection: NWConnection(to: endpoint, using: parameters),
+                outbound: true,
+                dialed: nil
+            )
+            self.peers.claim(expected, for: stream)
+            self.open(stream)
+            // Wrapped after open(): both run on linkQueue, so no state change
+            // is delivered in between.
+            let handler = stream.connection.stateUpdateHandler
+            stream.connection.stateUpdateHandler = { [weak self, weak stream] state in
+                let local = stream?.connection.currentPath?.localEndpoint
+                self?.spikeLog("dial \(attempt) state \(state) local=\(String(describing: local))")
+                handler?(state)
+            }
+            self.linkQueue.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self = self else { return }
+                if self.peers.provedAddress(of: stream) != nil { return }
+                if attempt >= 30 { self.spikeLog("giving up"); return }
+                if case .ready = stream.connection.state { return }
+                stream.connection.cancel()
+                self.spikeDial(host: host, port: port, expected: expected, attempt: attempt + 1)
+            }
+        }
+    }
+}

@@ -187,6 +187,8 @@ class WifiDirectManager(
     // Whether the listener holds the port a group's clients dial. Written at
     // start, read by formation on the transport thread.
     private var ownsGroupPort = false
+    // SPIKE(fast-link)
+    private var spike: FastLinkSpike? = null
     
     // Every socket from its first byte to its end: the preamble, the framing,
     // one announced stream per address, the writers. This manager owns the
@@ -513,6 +515,16 @@ class WifiDirectManager(
         // Start server socket on the port bound above.
         startServerSocket(listener)
 
+        // SPIKE(fast-link): adb-driven group and hotspot hosting.
+        spike = FastLinkSpike(context) {
+            transportHandler.post {
+                lan?.stop()
+                lan = null
+                sockets.closeCarrier(PeerStreamSockets.Carrier.LAN)
+                Log.i(FastLinkSpike.TAG, "LAN carrier stopped")
+            }
+        }.also { it.register() }
+
         updateState(TransportState.RUNNING)
 
         // Notify protocol. Wi-Fi P2P off at start arrives next as the
@@ -594,6 +606,9 @@ class WifiDirectManager(
 
         // Stop server socket
         stopServerSocket()
+
+        spike?.unregister()
+        spike = null
 
         lan?.stop()
         lan = null
