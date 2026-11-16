@@ -1,6 +1,6 @@
 package consumer
 
-// Canonical native Android imports (#16). Engine: uniffi.offline_protocol.* ;
+// Canonical native Android imports. Engine: uniffi.offline_protocol.* ;
 // bridge helpers: com.offlineprotocol.* (not OfflineProtocolModule — RN only).
 // See docs/android-jni-and-imports.md and this file in the repository.
 
