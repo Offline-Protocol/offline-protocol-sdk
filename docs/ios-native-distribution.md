@@ -37,7 +37,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.33.0"),
+    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.34.0"),
 ],
 targets: [
     .target(
@@ -58,7 +58,9 @@ Import **`OfflineProtocolSDK`** only. You do not add
 `bindings/react-native/ios/Generated/offline_protocol.swift` by hand; the
 package links the Rust library and generated bindings together.
 
-Minimal sequence (details and transports in [ios-integration.md](ios-integration.md)):
+Minimal sequence (details and transports in [ios-integration.md](ios-integration.md)).
+It needs 0.34.0 or later: `OfflineProtocolReferenceStorage` and
+`StorageConformance` are not in 0.33.0 and earlier.
 
 1. `import OfflineProtocolSDK`
 2. Build `ProtocolConfig` (see [configuration.md](configuration.md))

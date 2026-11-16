@@ -25186,5 +25186,42 @@ mod tests {
                 && !upgrading[section_12_3..section_13].contains("Events cross the FFI"),
             "UPGRADING §12.3 must follow all of §12.2 and end section 12"
         );
+        // Every app on 0.33.0 and earlier brought its own storage. Moving one
+        // of its accounts to the reference storage starts a fresh identity
+        // that `adoption.warning` never reports, so both places an upgrader
+        // reads must tell them to keep their providers.
+        assert!(
+            upgrading[section_12_3..section_13].contains("initializeMlsWithFileStores"),
+            "UPGRADING §12.3 must tell apps with existing accounts to keep their own storage"
+        );
+        assert!(
+            readme.contains("initializeMlsWithFileStores"),
+            "distribution README must tell apps with existing accounts to keep their own storage"
+        );
+        // The snippet does not compile against a package without the
+        // reference storage, so the reader must see the floor.
+        assert!(
+            quickstart.contains("0.34.0 or later"),
+            "QUICKSTART's native Swift section must name the first package with reference storage"
+        );
+        // A README is frozen into every release tag it ships in, so a link it
+        // carries cannot be corrected afterwards. Each path it names on the
+        // main repository must exist at the commit that renders it.
+        const VERSIONED: &str = "blob/v@@VERSION@@/";
+        let mut linked = 0;
+        for (at, _) in readme.match_indices(VERSIONED) {
+            let rest = &readme[at + VERSIONED.len()..];
+            let end = rest.find([')', '#', ' ', '\n']).unwrap_or(rest.len());
+            let path = &rest[..end];
+            assert!(
+                repo.join(path).is_file(),
+                "PACKAGE_README.md.template links `{path}`, which does not exist"
+            );
+            linked += 1;
+        }
+        assert!(
+            linked >= 4,
+            "PACKAGE_README.md.template carries {linked} versioned links; the check above saw none of them"
+        );
     }
 }

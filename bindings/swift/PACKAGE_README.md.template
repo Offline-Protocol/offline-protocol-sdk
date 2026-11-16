@@ -38,7 +38,7 @@ before wiring transports and permissions.
 | Generated bindings | `OfflineProtocol`, `ProtocolConfig`, `MeshServices`, `DataStore` and the rest of the API, generated from the Rust interface |
 | Transports | The BLE, internet relay, Wi-Fi Direct, Nostr and Reticulum managers, the same sources the React Native module compiles |
 | Storage | The Keychain store for MLS material and the file store for protocol state, opened per account by `OfflineProtocolReferenceStorage` |
-| Integrator helpers | `OfflineProtocolReferenceStorage`, `StorageConformance`, lifecycle and lab-cleartext helpers |
+| Integrator helpers | `OfflineProtocolReferenceStorage`, `StorageConformance`, `OfflineProtocolDevelopmentCleartextConfig`, `OfflineProtocolEncryptFailedDiagnostics` |
 
 The Rust core is an I/O-free engine. It queues, routes and encrypts, and never
 opens a socket or touches a radio for the protocol. A transport manager does
@@ -56,6 +56,12 @@ hands inbound bytes back.
    the only signal that this account started from a fresh MLS identity, with
    an empty outbox and an empty block list.
 6. `try engine.start()`, then wire transports (see the integration guide on the main repo)
+
+Upgrading an app that already initializes MLS with its own storage providers
+or `initializeMlsWithFileStores` (every app on 0.33.0 and earlier)? Keep them.
+The reference storage holds nothing for those accounts, so switching starts a
+fresh identity, and `adoption.warning` does not report it (see
+[UPGRADING §12.3](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/UPGRADING.md#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework)).
 
 A custom protocol-state backend is verified once, before you wire it in: run
 `StorageConformance.run(on:)` against a scratch instance, off the main thread

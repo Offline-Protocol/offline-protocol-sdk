@@ -1409,15 +1409,31 @@ regeneration** — only `bindings/react-native/src/types.ts`, which can drift.
 
 **What to do on an SDK upgrade**
 
-1. Bump the package version in Xcode (**File → Packages → Update to Latest Package
+1. Read [CHANGELOG](../CHANGELOG.md) and the version-tagged sections in this
+   file for every release between yours and the target, before you bump. The
+   package is 0.x, so a minor release can break the API, and `from:` accepts
+   any later 0.x. Regenerating bindings (§12.2) applies only when you compile
+   the bridge yourself, not when you consume a release package.
+2. Bump the package version in Xcode (**File → Packages → Update to Latest Package
    Versions**) or raise the `from:` / exact version in `Package.swift` to match the
    SDK release you are adopting (`X.Y.Z` aligns with the main repository tag).
-2. Clean-build the app. You do **not** need to rebuild `liboffline_protocol_uniffi.a`
+3. Clean-build the app. You do **not** need to rebuild `liboffline_protocol_uniffi.a`
    or stitch an XCFramework unless you maintain a fork built from source
    ([ios-integration.md](ios-integration.md#advanced-build-the-bridge-from-source)).
-3. Re-read [CHANGELOG](../CHANGELOG.md) and the version-tagged sections in this
-   file for API and behaviour changes. Regenerate bindings (§12.2) applies only
-   when you compile the bridge yourself, not when you consume a release package.
+
+**If your app already has accounts, keep its storage**
+
+Before 0.34.0 the package's Keychain store was internal, so an app on 0.28.0 to
+0.33.0 initializes MLS with its own `MlsStorageProvider` and
+`ProtocolStateStorageProvider`, or with `initializeMlsWithFileStores`. Keep
+doing so after the upgrade. `OfflineProtocolReferenceStorage` opens stores
+under the SDK's own per-account namespace, which hold nothing for an account
+your app created: switching an existing account to it starts a fresh MLS
+identity, with an empty outbox and an empty block list, and every session and
+group from the old identity stops decrypting. `adoption.warning` does not
+report this. It covers only the store the SDK itself wrote before storage was
+split per account, and it is nil here. Use the reference storage for new
+installs, or move existing accounts only with a migration you write and test.
 
 **What the release train publishes**
 
@@ -1429,10 +1445,11 @@ Rust build artifacts.
 
 **If you vendor a tarball instead of the distribution repo**
 
-Verify both assets with `gh attestation verify <asset> --repo Offline-Protocol/offline-protocol-sdk`
-and check that the tarball's `Package.swift` checksum matches the XCFramework zip
-from the same release, then replace your vendored tree. Do not edit generated sources
-by hand.
+Verify both assets with `gh attestation verify <asset> --repo Offline-Protocol/offline-protocol-sdk`,
+then check that the `checksum:` in the tarball's `Package.swift` equals
+`swift package compute-checksum offline-protocol-X.Y.Z-swiftpm-xcframework.zip`
+for the zip from the same release, and replace your vendored tree. Do not edit
+generated sources by hand.
 
 ---
 

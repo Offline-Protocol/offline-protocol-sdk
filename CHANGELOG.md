@@ -56,7 +56,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `swift-package` tarball) and gives the call order that starts an engine on
   it. The iOS integration guide no longer lists Rust as a prerequisite for an
   application and moves the hand-built XCFramework under a section for
-  building the bridge from source.
+  building the bridge from source. The README shipped in the Swift package
+  now gives the same call order, QUICKSTART installs the package instead of
+  building Rust, and [UPGRADING §12.3](docs/UPGRADING.md#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework)
+  covers bumping it, including why an app that already has accounts keeps its
+  own storage providers.
 
 ### Fixed
 

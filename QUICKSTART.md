@@ -148,10 +148,14 @@ build Rust by hand. Start with
 [ios-native-distribution.md](docs/ios-native-distribution.md), then
 [ios-integration.md](docs/ios-integration.md) for transports and plist setup.
 
+The snippet below needs `OfflineProtocolSDK` 0.34.0 or later:
+`OfflineProtocolReferenceStorage` is not in 0.33.0 and earlier, where the
+application supplies its own storage providers.
+
 ### 1. Add the package
 
 In Xcode: **File → Add Package Dependencies…** →
-`https://github.com/Offline-Protocol/offline-protocol-swift.git`
+`https://github.com/Offline-Protocol/offline-protocol-swift.git`, version 0.34.0 or later
 
 ### 2. Start the engine and send
 
