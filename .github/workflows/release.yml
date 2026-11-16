@@ -1002,13 +1002,18 @@ jobs:
   # The Flutter plugin pub.dev carries: shared bridge sources vendored into the
   # package, plus the same staged jniLibs and XCFramework the in-repo plugin
   # links. Assembled, podspec-verified, and dry-run published before the GitHub
-  # release job; pub.dev publish runs after release when FLUTTER_PUBLISH is on.
+  # release job, which needs it: a tree that fails here stops npm and crates.io
+  # too, rather than shipping a version pub.dev can never carry. pub.dev
+  # publish runs after release when FLUTTER_PUBLISH is on.
+  # The Kotlin bindings come from android-bindings, as for the Android library
+  # and npm, so both platforms ship bindings generated with this release's
+  # libraries rather than whatever was last committed.
   # The tree is assembled under the runner's temporary directory, never inside
   # the checkout: there pub lists files through git and the repository's
   # .gitignore (build/, *.so, *.a) hides the pubspec and every native library.
   flutter-pub-package:
     name: Assemble Flutter pub package
-    needs: [version-gate, build-ios, build-android]
+    needs: [version-gate, build-ios, build-android, android-bindings]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -1025,6 +1030,12 @@ jobs:
           pattern: android-jniLibs-*
           path: bindings/react-native/android/src/main/jniLibs
           merge-multiple: true
+
+      - name: Download Android Bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: android-uniffi-bindings
+          path: bindings/react-native/android/src/main/java
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -1250,11 +1261,11 @@ jobs:
     # job alone, it splits the release across registries with no way back — see
     # the long note on that job.
     #
-    # The Swift package, the Android and Java libraries and the wheels are in it too, and
-    # their tests: the GitHub release carries the wheels, the Swift package and
+    # The Swift package, the Android, Java and Flutter packages and the wheels are in it
+    # too, and their tests: the GitHub release carries the wheels, the Swift package and
     # the archive it names, and Maven Central and PyPI publish only after this
     # job, so one that fails its tests stops everything before npm.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, java-library, ruby-library, swift-package, test-c-library]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, java-library, ruby-library, swift-package, test-c-library, flutter-pub-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1745,7 +1756,7 @@ jobs:
     # artifacts; the shared `needs` list exists purely for that all-or-nothing
     # property, and sharing it with `release` is what keeps a version mismatch
     # from failing one registry while the other publishes regardless.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package, test-c-library]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package, test-c-library, flutter-pub-package]
     runs-on: ubuntu-latest
     env:
       # The single gate on every step that uploads. Four conditions, each

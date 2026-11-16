@@ -700,7 +700,23 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
             && !assemble.contains("\"$PLUGIN/\" \"$OUTPUT/\""),
         "assemble-flutter-pub-package.sh must copy tracked files, never the plugin directory"
     );
+    // A maintainer's jniLibs can hold a library from an older build under
+    // another name. The package takes each library by name and refuses any
+    // native file it does not expect, so nothing stale reaches a permanent
+    // pub.dev version, and both XCFramework slices must be there.
+    assert!(
+        assemble.contains("unexpected native file")
+            && assemble.contains("ios-arm64_x86_64-simulator"),
+        "assemble-flutter-pub-package.sh must refuse unexpected native files and require \
+         the simulator slice"
+    );
     let fixture = read_text(&repo.join("scripts/tests/test-assemble-flutter-pub-package.sh"));
+    assert!(
+        fixture.contains("a stale library beside the real one stays out of the package")
+            && fixture.contains("stray native file refused")
+            && fixture.contains("missing simulator slice refused"),
+        "the fixture test must prove stale and stray native files stay out of the package"
+    );
     assert!(
         fixture.contains("flutter pub publish --dry-run"),
         "the fixture test must dry-run publish the assembled tree"
@@ -746,6 +762,26 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
             && assemble_job.contains("include-hidden-files: true"),
         "flutter-pub-package must assemble outside the checkout and upload the tree with \
          its .pubignore"
+    );
+    // The package is a release artifact like the Swift package and the
+    // Android library: a tree that fails to assemble must stop npm and
+    // crates.io, or a version ships that pub.dev can never carry.
+    for gate in ["release", "publish-crates"] {
+        let needs = job(gate)
+            .lines()
+            .find(|l| l.trim_start().starts_with("needs: ["))
+            .unwrap_or_else(|| panic!("release.yml `{gate}` has no one-line needs list"));
+        assert!(
+            needs.contains(" flutter-pub-package,") || needs.contains(" flutter-pub-package]"),
+            "release.yml `{gate}` must need flutter-pub-package"
+        );
+    }
+    // Both platforms ship bindings generated with this release's libraries:
+    // the iOS ones arrive with ios-libs, the Kotlin ones from android-bindings.
+    assert!(
+        assemble_job.contains("android-bindings]")
+            && assemble_job.contains("name: android-uniffi-bindings"),
+        "flutter-pub-package must ship the Kotlin bindings android-bindings generated"
     );
     let publish_job = job("publish-flutter-pub");
     assert!(

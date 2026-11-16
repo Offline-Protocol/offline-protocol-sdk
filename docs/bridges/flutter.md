@@ -236,7 +236,12 @@ The publish tree carries each native library exactly once, in the staged
 locations. The vendored bridge leaves out the React Native package's own
 `src/main/jniLibs` and `libs/`: the staged copies always win there, so the
 vendored ones would never be read and would double the archive. The layout
-check refuses a tree that carries them.
+check refuses a tree that carries them. It also refuses any native file but the
+four `libuniffi_offline_protocol.so` and the two XCFramework slices, and the
+script copies each Android library by name rather than the directory: a
+maintainer's `jniLibs` can still hold a library from an older build under
+another name, and both slices are required because a device-only framework
+fails every simulator build.
 
 Pub decides what the archive holds from ignore files, and both traps drop
 files with no error: inside a git work tree it applies the repository's

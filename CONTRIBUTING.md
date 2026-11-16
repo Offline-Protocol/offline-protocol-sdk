@@ -399,14 +399,22 @@ candidate is the safe first exercise: it publishes a prerelease
 
 **pub.dev needs its first version uploaded by hand.** pub.dev automates
 publishing only for a package that already exists, so the first
-`offline_protocol` is published from an assembled tree by the pub.dev account
-that will own it. Assemble outside any git checkout: inside one, pub applies the
-repository's `.gitignore` and the archive loses the natives.
+`offline_protocol` is published by the pub.dev account that will own it. Upload
+the tree a release run assembled and dry-ran (the `flutter-pub-package`
+artifact, kept five days), never one assembled on a workstation: a pub.dev
+version is permanent, and a local tree carries that machine's native libraries
+and any uncommitted edit to a tracked file. Download it outside any git
+checkout: inside one, pub applies the repository's `.gitignore` and drops the
+natives.
 
 ```bash
-cd bindings/react-native && npm run build:uniffi:all && cd ../..
-bash scripts/assemble-flutter-pub-package.sh --output /tmp/flutter-pub --version 0.34.0
-(cd /tmp/flutter-pub && dart pub publish)
+VERSION=X.Y.Z   # the release whose run assembled the package
+RUN="$(gh run list -R Offline-Protocol/offline-protocol-sdk --workflow release.yml \
+  --branch "v$VERSION" --limit 1 --json databaseId --jq '.[0].databaseId')"
+DEST="$(mktemp -d)/flutter-pub"
+gh run download "$RUN" -R Offline-Protocol/offline-protocol-sdk \
+  -n flutter-pub-package -D "$DEST"
+(cd "$DEST" && dart pub publish)
 ```
 
 Then, on the package's Admin page on pub.dev, enable automated publishing

@@ -40,6 +40,13 @@ PLUGIN="$ROOT/bindings/flutter/offline_protocol"
 STAGE="$REPO_ROOT/bindings/flutter/scripts/stage-plugin-native-artifacts.sh"
 REPOSITORY_URL="https://github.com/Offline-Protocol/offline-protocol-sdk"
 
+# The native files the package ships, and the only ones verify_layout accepts.
+ANDROID_ABIS="arm64-v8a armeabi-v7a x86 x86_64"
+ANDROID_LIBRARY="libuniffi_offline_protocol.so"
+IOS_XCFRAMEWORK="offline_protocol_uniffi.xcframework"
+IOS_SLICES="ios-arm64 ios-arm64_x86_64-simulator"
+IOS_LIBRARY="liboffline_protocol_uniffi.a"
+
 OUTPUT=""
 VERSION=""
 
@@ -114,12 +121,24 @@ assemble() {
   # hold the library, so the React Native tree's own copies would never be
   # read, and vendoring them would ship every native library twice and roughly
   # double the archive.
-  mkdir -p "$OUTPUT/android/src/main/jniLibs" "$OUTPUT/ios/Frameworks"
-  rsync -a "$PLUGIN/android/src/main/jniLibs/" "$OUTPUT/android/src/main/jniLibs/"
-  rsync -a "$PLUGIN/ios/Frameworks/" "$OUTPUT/ios/Frameworks/"
+  #
+  # Each ABI takes the one library the plugin loads, by name, never the
+  # directory: a jniLibs directory on a maintainer's machine can still hold a
+  # library from an older build under another name, and a pub.dev version is
+  # permanent. verify_layout refuses anything else under either location.
+  local abi
+  for abi in $ANDROID_ABIS; do
+    mkdir -p "$OUTPUT/android/src/main/jniLibs/$abi"
+    cp "$PLUGIN/android/src/main/jniLibs/$abi/$ANDROID_LIBRARY" \
+      "$OUTPUT/android/src/main/jniLibs/$abi/"
+  done
+  mkdir -p "$OUTPUT/ios/Frameworks"
+  rsync -a "$PLUGIN/ios/Frameworks/$IOS_XCFRAMEWORK/" "$OUTPUT/ios/Frameworks/$IOS_XCFRAMEWORK/"
 
+  # Tests and the Eclipse project file are tracked but build nothing for a
+  # consumer.
   copy_tracked "$ROOT/bindings/react-native/android" "$OUTPUT/android/bridge-rn" \
-    ':(exclude)src/main/jniLibs'
+    ':(exclude)src/main/jniLibs' ':(exclude)src/test' ':(exclude).project'
 
   printf '{"version":"%s"}\n' "$VERSION" >"$OUTPUT/android/pub_bridge_version.json"
 
@@ -186,10 +205,16 @@ verify_layout() {
       fail=1
     fi
   }
-  for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-    check "android/src/main/jniLibs/$abi/libuniffi_offline_protocol.so"
+  local abi slice
+  for abi in $ANDROID_ABIS; do
+    check "android/src/main/jniLibs/$abi/$ANDROID_LIBRARY"
   done
-  check "ios/Frameworks/offline_protocol_uniffi.xcframework/ios-arm64/liboffline_protocol_uniffi.a"
+  # Both slices: a framework without the simulator one builds for a device and
+  # fails every simulator build an application runs.
+  for slice in $IOS_SLICES; do
+    check "ios/Frameworks/$IOS_XCFRAMEWORK/$slice/$IOS_LIBRARY"
+  done
+  check "ios/Frameworks/$IOS_XCFRAMEWORK/Info.plist"
   check "ios/BridgeRN/Generated/offline_protocol.swift"
   check "android/bridge-rn/src/main/java/uniffi/offline_protocol/offline_protocol.kt"
   check "android/pub_bridge_version.json"
@@ -198,6 +223,26 @@ verify_layout() {
   check "README.md"
   check "CHANGELOG.md"
   check "LICENSE"
+  # Nothing but the expected native files: anything else is a stale or
+  # foreign binary that would ship in a permanent version.
+  local expected=" ios/Frameworks/$IOS_XCFRAMEWORK/Info.plist "
+  for abi in $ANDROID_ABIS; do
+    expected+="android/src/main/jniLibs/$abi/$ANDROID_LIBRARY "
+  done
+  for slice in $IOS_SLICES; do
+    expected+="ios/Frameworks/$IOS_XCFRAMEWORK/$slice/$IOS_LIBRARY "
+  done
+  local native
+  while IFS= read -r native; do
+    native="${native#"$root"/}"
+    case "$expected" in
+      *" $native "*) ;;
+      *)
+        echo "unexpected native file: $native" >&2
+        fail=1
+        ;;
+    esac
+  done < <(find "$root/android/src/main/jniLibs" "$root/ios/Frameworks" \( -type f -o -type l \))
   # One copy of each native library: see the vendoring step in assemble().
   for duplicate in android/bridge-rn/src/main/jniLibs ios/BridgeRN/libs; do
     if [ -e "$root/$duplicate" ]; then
