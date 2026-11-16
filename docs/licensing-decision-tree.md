@@ -25,7 +25,7 @@ flowchart TD
   start([You will ship or distribute something that links or embeds the SDK])
   start --> q1{Is the **whole product** allowed to be AGPL-3.0-only, with corresponding source offered to everyone you **distribute** the product to?}
   q1 -->|No| commercial[Stop: **Commercial license** — email legal@offlineprotocol.com]
-  q1 -->|Yes| q2{Distributing on the **Apple App Store** (any app license, including open source)?}
+  q1 -->|Yes| q2{"Distributing on the **Apple App Store** (including open source)?"}
   q2 -->|Yes| commercial
   q2 -->|No| q3{Distributing on **Google Play** or other stores as a **proprietary** app?}
   q3 -->|Yes| commercial
@@ -41,7 +41,9 @@ Plain-language reading of the branches:
    **commercial** ([FAQ](licensing-faq.md#can-i-ship-an-agpl-licensed-app-on-the-apple-app-store)).
    AGPL App Store distribution is unsupported; no §7 app-store exception is
    granted today.
-3. **Play Store proprietary apps** — same as iOS for a closed app ([FAQ](licensing-faq.md#what-about-google-play)).
+3. **Google Play** — proprietary apps → **commercial** (same as closed iOS). AGPL-3.0
+   apps with source offered to every recipient can follow the **AGPL** path when
+   q4 still allows it ([FAQ](licensing-faq.md#what-about-google-play)).
 4. **Modified SDK in mesh** — AGPL **§13** may require source offers to remote users, not only installers ([FAQ](licensing-faq.md#does-the-network-clause-13-matter-for-a-mesh-app)).
 
 ---
@@ -50,7 +52,9 @@ Plain-language reading of the branches:
 
 | Profile | Usual path | Next read |
 |---------|------------|-----------|
-| iOS/Android app on public stores (including AGPL open source on Apple App Store) | Commercial | [FAQ: App Store](licensing-faq.md#can-i-ship-an-agpl-licensed-app-on-the-apple-app-store) |
+| Any app on the **Apple App Store** (proprietary or AGPL open source) | Commercial | [FAQ: App Store](licensing-faq.md#can-i-ship-an-agpl-licensed-app-on-the-apple-app-store) |
+| **Proprietary** Android app on Google Play or other stores | Commercial | [FAQ: Google Play](licensing-faq.md#what-about-google-play) |
+| **AGPL-3.0** Android app on Google Play (source to recipients, combined-work rules met) | AGPL | [FAQ: Google Play](licensing-faq.md#what-about-google-play), [LICENSE](../LICENSE) |
 | Closed-source desktop or backend service | Commercial | FAQ: combined work |
 | AGPL-3.0 app (source published, recipients get corresponding source) | AGPL | [LICENSE](../LICENSE), [CONTRIBUTING](../CONTRIBUTING.md) |
 | OSS app under a license **incompatible** with AGPL for the combined work | Commercial or do not link | FAQ + your counsel |
