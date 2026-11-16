@@ -8,6 +8,7 @@
 [![crates.io](https://img.shields.io/crates/v/offline-protocol.svg?logo=rust)](https://crates.io/crates/offline-protocol)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only%20or%20Commercial-blue.svg)](#license)
 [![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20Android%20%7C%20macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#building-the-sdk)
+[![Discord](https://img.shields.io/badge/chat-Discord-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/9TQGrxaPJk)
 
 **Dual-licensed:** use it under [AGPL-3.0-only](LICENSE), or buy a [commercial license](LICENSE-COMMERCIAL.md), your call — see the [License](#license) section for the full breakdown.
 
@@ -302,6 +303,14 @@ behaviour:
   choices are what they are
 - [Bridge Contracts](docs/bridges/README.md) for Swift, Kotlin, Python, Ruby, Java,
   C and TypeScript
+
+## Community
+
+Building on the SDK? Join the [developer Discord](https://discord.gg/9TQGrxaPJk) to ask questions, get
+help debugging a mesh or a transport, share what you are building and hear about
+releases first. Bugs and feature requests still go to
+[GitHub issues](https://github.com/Offline-Protocol/offline-protocol-sdk/issues),
+and security reports follow [SECURITY.md](SECURITY.md), never Discord.
 
 ## Development
 

@@ -2,6 +2,9 @@
 
 Thank you for your interest in contributing! This document provides guidelines for contributing to the project.
 
+Questions before you start, or want to talk an idea through? Find the team in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).
+
 ## Development Setup
 
 ### Prerequisites
