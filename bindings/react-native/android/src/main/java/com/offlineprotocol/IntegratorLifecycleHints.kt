@@ -14,8 +14,11 @@ package com.offlineprotocol
  * valid order (after MLS init but before start, while stopped, while paused).
  *
  * The semantics mirror `bindings/react-native/src/lifecycleHints.ts`; keep the
- * two in step. One instance per host: the dedupe set and the applied interest
- * belong to that host, and are read from whatever thread calls it.
+ * two in step. One difference is native-only: the cleartext remedy names
+ * [OfflineProtocolDevelopmentCleartextConfig], because on the native path
+ * `encryptionEnabled = false` alone fails validation while `requireEncryption`
+ * keeps its `true` default. One instance per host: the dedupe set and the
+ * applied interest belong to that host, and are read from whatever thread calls it.
  */
 class IntegratorLifecycleHints(
     val enabled: Boolean,
@@ -57,7 +60,8 @@ class IntegratorLifecycleHints(
             "start:mls",
             "[OfflineProtocol] start() with encryption enabled before " +
                 "initializeMlsWithSecureStorage(). Secure send and handshake fail until it runs, " +
-                "or set encryptionEnabled to false for cleartext-only tests. See $DOC.",
+                "or build the config with OfflineProtocolDevelopmentCleartextConfig.make for " +
+                "lab-only cleartext tests. See $DOC.",
         )
     }
 
@@ -72,8 +76,8 @@ class IntegratorLifecycleHints(
             "mls:$context",
             "[OfflineProtocol] $context: encryption is enabled but MLS is not initialized. " +
                 "Secure send and handshake may fail until it is. Run " +
-                "initializeMlsWithSecureStorage() successfully, or set encryptionEnabled " +
-                "to false for cleartext-only tests.",
+                "initializeMlsWithSecureStorage() successfully, or build the config with " +
+                "OfflineProtocolDevelopmentCleartextConfig.make for lab-only cleartext tests.",
         )
     }
 

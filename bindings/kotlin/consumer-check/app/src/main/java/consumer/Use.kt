@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import com.offlineprotocol.InternetManager
+import com.offlineprotocol.OfflineProtocolDevelopmentCleartextConfig
 import com.offlineprotocol.OfflineProtocolReferenceStorage
 import com.offlineprotocol.StorageConformance
 import com.offlineprotocol.TransportManager
@@ -63,6 +64,10 @@ fun signOut(context: Context, protocol: OfflineProtocol, config: ProtocolConfig)
 // Verify a protocol-state backend before wiring it in (C11): green means
 // supported. Run it off the main thread, and on a scratch instance: the suite
 // blocks on writes of several megabytes.
+// Lab-only config factory (compile-checked; do not use in production apps).
+fun labCleartextConfig(appId: String, profile: String): ProtocolConfig =
+    OfflineProtocolDevelopmentCleartextConfig.make(appId, profile)
+
 fun isSupported(backend: ProtocolStateStorageProvider): Boolean {
     val report = StorageConformance.run(backend)
     report.failures.forEach { Log.e("ConsumerCheck", "${it.check}: ${it.detail}") }

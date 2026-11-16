@@ -50,6 +50,11 @@ public func signOut(engine: inout OfflineProtocol?, config: ProtocolConfig) thro
 // supported. Here it is the built-in store, opened for a scratch account and
 // wiped after. Run it off the main thread: the suite blocks on writes of
 // several megabytes.
+/// Lab-only config factory (compile-checked; do not use in production apps).
+public func labCleartextConfig(appId: String, profile: String) -> ProtocolConfig {
+    OfflineProtocolDevelopmentCleartextConfig.make(appId: appId, profile: profile)
+}
+
 public func referenceStateStoreIsSupported(appId: String, scratchProfile: String) throws -> Bool {
     defer { try? OfflineProtocolReferenceStorage.wipe(appId: appId, profile: scratchProfile) }
     let store = try OfflineProtocolReferenceStorage.makeProtocolStateStorage(
