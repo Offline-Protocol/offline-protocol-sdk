@@ -15,7 +15,7 @@
  */
 
 const path = require('node:path');
-const { DOCS_URL, runMeshDoctorChecks, exitCodeFromFindings } = require('./mesh-doctor-checks');
+const { DOCS_URL, COMMUNITY_URL, runMeshDoctorChecks, exitCodeFromFindings } = require('./mesh-doctor-checks');
 
 const USAGE = 'Usage: mesh-sdk-doctor [--root <app dir>]';
 
@@ -81,5 +81,6 @@ for (const f of findings) {
 
 console.log('');
 console.log(`Docs: ${DOCS_URL}`);
+console.log(`Help: ${COMMUNITY_URL}`);
 
 process.exit(exitCodeFromFindings(findings));

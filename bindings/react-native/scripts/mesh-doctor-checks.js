@@ -18,6 +18,8 @@ const path = require('node:path');
 
 const DOCS_URL =
   'https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/react-native-host-doctor.md';
+/** Where a developer the doctor could not unblock asks for help. */
+const COMMUNITY_URL = 'https://discord.gg/9TQGrxaPJk';
 const UPGRADING_URL =
   'https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/UPGRADING.md#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200';
 
@@ -225,6 +227,7 @@ function exitCodeFromFindings(findings) {
 
 module.exports = {
   DOCS_URL,
+  COMMUNITY_URL,
   runMeshDoctorChecks,
   exitCodeFromFindings,
 };
