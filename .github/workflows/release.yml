@@ -1001,7 +1001,7 @@ jobs:
 
   # The Flutter plugin pub.dev carries: shared bridge sources vendored into the
   # package, plus the same staged jniLibs and XCFramework the in-repo plugin
-  # links (friction #19). Assembled and dry-run published before the GitHub
+  # links. Assembled, podspec-verified, and dry-run published before the GitHub
   # release job; pub.dev publish runs after release when FLUTTER_PUBLISH is on.
   flutter-pub-package:
     name: Assemble Flutter pub package
@@ -1028,12 +1028,16 @@ jobs:
           channel: stable
           flutter-version: "3.27.4"
 
+      - name: Install CocoaPods for Flutter podspec verification
+        run: gem install cocoapods -v 1.16.2 --no-document
+
       - name: Assemble the pub.dev tree
         env:
           VERSION: ${{ needs.version-gate.outputs.VERSION }}
         run: |
           bash scripts/assemble-flutter-pub-package.sh \
             --output build/flutter-pub-package --version "$VERSION"
+          bash scripts/verify-flutter-pub-podspec.sh build/flutter-pub-package
           (cd build/flutter-pub-package && dart pub publish --dry-run)
 
       - uses: actions/upload-artifact@v7

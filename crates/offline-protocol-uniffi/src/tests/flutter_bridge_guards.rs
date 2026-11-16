@@ -649,6 +649,16 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
         assemble.contains("ios_deployment_target"),
         "assemble script must pin ios_deployment_target from MeshSdk.podspec"
     );
+    let verify = read_text(&repo.join("scripts/verify-flutter-pub-podspec.sh"));
+    assert!(
+        verify.contains("pod ipc spec"),
+        "verify-flutter-pub-podspec.sh must evaluate the podspec via pod ipc spec"
+    );
+    let release = read_text(&repo.join(".github/workflows/release.yml"));
+    assert!(
+        release.contains("verify-flutter-pub-podspec.sh"),
+        "release.yml must verify the Flutter pub podspec after assemble"
+    );
     let doc = std::fs::read_to_string(repo.join("docs/flutter-distribution.md"))
         .unwrap_or_else(|e| panic!("docs/flutter-distribution.md: {e}"));
     assert!(

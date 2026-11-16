@@ -7,6 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ASSEMBLE="$REPO_ROOT/scripts/assemble-flutter-pub-package.sh"
+VERIFY_PODSPEC="$REPO_ROOT/scripts/verify-flutter-pub-podspec.sh"
 STAGE="$REPO_ROOT/bindings/flutter/scripts/stage-plugin-native-artifacts.sh"
 
 FAILURES=0
@@ -39,6 +40,7 @@ build_fixture() {
   echo "// swift" >"$rn/ios/Generated/offline_protocol.swift"
   echo "swift" >"$rn/ios/offline_protocol.swift"
   printf '%s\n' 's.platforms    = { :ios => "13.0" }' >"$rn/MeshSdk.podspec"
+  touch "$rn/ios/PrivacyInfo.xcprivacy"
   for legal in LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md; do
     echo "$legal" >"$root/$legal"
   done
@@ -74,6 +76,12 @@ if [ -f "$OUT/android/bridge-rn/build.gradle" ] && \
   pass "layout and pub metadata"
 else
   fail "assembled tree missing expected publish layout"
+fi
+if bash "$VERIFY_PODSPEC" "$OUT" >"$WORK/pod.log" 2>&1; then
+  pass "iOS podspec evaluates (pod ipc spec)"
+else
+  fail "podspec verification failed"
+  cat "$WORK/pod.log" >&2
 fi
 
 if [ "$FAILURES" -eq 0 ]; then
