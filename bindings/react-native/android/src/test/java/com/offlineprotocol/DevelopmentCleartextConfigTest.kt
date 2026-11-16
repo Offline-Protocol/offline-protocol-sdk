@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.offline_protocol.OverflowPolicy
 import uniffi.offline_protocol.ProtocolException
 
 class DevelopmentCleartextConfigTest {
@@ -17,8 +18,14 @@ class DevelopmentCleartextConfigTest {
         assertFalse(config.autoKeyExchange)
         assertFalse(config.storePending)
         assertFalse(config.requireEncryption)
+        assertFalse(config.reticulumEnabled)
+        assertFalse(config.nostrEnabled)
+        assertFalse(config.preferOnline)
+        assertEquals(8u.toUByte(), config.initialTtl)
         assertEquals(64uL, config.maxPendingPerPeer)
         assertEquals(4096uL, config.maxPendingGlobal)
+        assertEquals(86_400_000uL, config.pendingTtlMs)
+        assertEquals(OverflowPolicy.DROP_OLDEST, config.overflowPolicy)
     }
 
     @Test

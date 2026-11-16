@@ -16,8 +16,14 @@ final class DevelopmentCleartextConfigTests: XCTestCase {
         XCTAssertFalse(config.autoKeyExchange)
         XCTAssertFalse(config.storePending)
         XCTAssertFalse(config.requireEncryption)
+        XCTAssertFalse(config.reticulumEnabled)
+        XCTAssertFalse(config.nostrEnabled)
+        XCTAssertFalse(config.preferOnline)
+        XCTAssertEqual(config.initialTtl, 8)
         XCTAssertEqual(config.maxPendingPerPeer, 64)
         XCTAssertEqual(config.maxPendingGlobal, 4096)
+        XCTAssertEqual(config.pendingTtlMs, 86_400_000)
+        XCTAssertEqual(config.overflowPolicy, .dropOldest)
     }
 
     func testEncryptFailedDiagnosticsFireOnce() throws {

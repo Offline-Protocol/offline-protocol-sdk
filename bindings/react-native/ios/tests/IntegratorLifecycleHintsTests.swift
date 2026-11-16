@@ -21,36 +21,9 @@ final class IntegratorLifecycleHintsTests: XCTestCase {
         h.callBeforeEngineStart(context: "sendMessage", engineRunning: false)
         h.startWithoutMls(encryptionEnabled: true, mlsReady: false)
         h.sendWithoutMls(context: "sendMessage", encryptionEnabled: true, mlsReady: false, engineRunning: true)
-        h.encryptFailedRemedy(context: "sendMessage", encryptionEnabled: true, mlsReady: false)
         h.dataStorageUnavailable(context: "dataCreateDoc")
         h.interestApplied(spaceId: "notes", patterns: ["a"], engineRunning: true)
         XCTAssertEqual(messages, [])
-    }
-
-    func testEncryptFailedRemedyFiresOnlyForAMissingMls() {
-        let h = hints()
-        // MLS ready: the engine returns EncryptFailed for a session encrypt
-        // failure or an unsealable transfer too, and "initialize MLS" is wrong there.
-        h.encryptFailedRemedy(context: "sendMessage", encryptionEnabled: true, mlsReady: true)
-        h.encryptFailedRemedy(context: "sendMessage", encryptionEnabled: false, mlsReady: false)
-        XCTAssertTrue(messages.isEmpty)
-        h.encryptFailedRemedy(context: "sendMessage", encryptionEnabled: true, mlsReady: false)
-        h.encryptFailedRemedy(context: "sendMessageRich", encryptionEnabled: true, mlsReady: false)
-        XCTAssertEqual(messages.count, 1)
-        XCTAssertTrue(messages[0].contains("sendMessage: send failed with EncryptFailed"))
-        XCTAssertTrue(messages[0].contains("initializeMlsWithSecureStorage()"))
-    }
-
-    func testEncryptFailedRemedyDefersToThePreSendHintForTheSameCall() {
-        let h = hints()
-        h.sendWithoutMls(context: "sendMessage", encryptionEnabled: true, mlsReady: false, engineRunning: true)
-        h.encryptFailedRemedy(context: "sendMessage", encryptionEnabled: true, mlsReady: false)
-        XCTAssertEqual(messages.count, 1)
-        XCTAssertTrue(messages[0].contains("OfflineProtocolDevelopmentCleartextConfig.make"))
-        // A call the pre-send hint did not cover still gets the remedy.
-        h.encryptFailedRemedy(context: "sendMessageRich", encryptionEnabled: true, mlsReady: false)
-        XCTAssertEqual(messages.count, 2)
-        XCTAssertTrue(messages[1].contains("sendMessageRich: send failed with EncryptFailed"))
     }
 
     func testEngineHintFiresOncePerContextAndNeverWhileRunning() {

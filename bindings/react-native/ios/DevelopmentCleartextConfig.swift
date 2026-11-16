@@ -75,7 +75,10 @@ public enum OfflineProtocolEncryptFailedDiagnostics {
     /// Logs `remedyMessage(context:)` at most once per process, for an
     /// `EncryptFailed` with MLS not initialized. With `mlsInitialized` true the
     /// error has another cause (a session encrypt failure, a transfer that
-    /// cannot leave unsealed) and nothing is logged.
+    /// cannot leave unsealed) and nothing is logged. Call it only from an app on
+    /// the default encrypted config: with the lab config, an `EncryptFailed`
+    /// comes from a feature that is sealed or not sent at all, and this text
+    /// would name the wrong fix.
     public static func logFirstRemedyIfNeeded(
         context: String,
         error: Error,

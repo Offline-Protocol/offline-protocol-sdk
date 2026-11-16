@@ -14,12 +14,11 @@ package com.offlineprotocol
  * valid order (after MLS init but before start, while stopped, while paused).
  *
  * The semantics mirror `bindings/react-native/src/lifecycleHints.ts`; keep the
- * two in step. Two differences are native-only: the cleartext remedy names
- * [OfflineProtocolDevelopmentCleartextConfig] (on the native path
+ * two in step. One difference is native-only: the cleartext remedy names
+ * [OfflineProtocolDevelopmentCleartextConfig], because on the native path
  * `encryptionEnabled = false` alone fails validation while `requireEncryption`
- * keeps its `true` default), and [encryptFailedRemedy] has no TypeScript twin.
- * One instance per host: the dedupe set and the applied interest
- * belong to that host, and are read from whatever thread calls it.
+ * keeps its `true` default. One instance per host: the dedupe set and the
+ * applied interest belong to that host, and are read from whatever thread calls it.
  */
 class IntegratorLifecycleHints(
     val enabled: Boolean,
@@ -82,27 +81,6 @@ class IntegratorLifecycleHints(
         )
     }
 
-    /**
-     * Call after a send failed with [ProtocolException.EncryptFailed]; the host
-     * classifies the error, so the Swift twin compiles in the policy harness
-     * without the generated error type.
-     *
-     * The variant alone does not say why the send failed: the engine also
-     * returns it with MLS initialized (a confirmed session whose encrypt failed,
-     * a transfer that cannot leave unsealed), and telling that app to initialize
-     * MLS is a hint on correct code. So this fires only with encryption on and
-     * MLS not ready, and stays quiet when [sendWithoutMls] already named the
-     * cause for this [context]: what is left is a send made before start(),
-     * which the pre-send hint does not cover.
-     */
-    fun encryptFailedRemedy(context: String, encryptionEnabled: Boolean, mlsReady: Boolean) {
-        if (!enabled || !encryptionEnabled || mlsReady) return
-        val first = synchronized(lock) {
-            !warnedKeys.contains("mls:$context") && warnedKeys.add("encrypt:failed")
-        }
-        if (first) sink(IntegratorEncryptionRemedy.message(context, HOST_MLS_INITIALIZER))
-    }
-
     /** The engine refused [context] with `DataStorageUnavailable`. */
     fun dataStorageUnavailable(context: String) {
         warnOnce(
@@ -134,9 +112,6 @@ class IntegratorLifecycleHints(
 
     companion object {
         private const val DOC = "docs/android-integration.md and docs/integrator-map.md"
-
-        /** What a [ProtocolEngineHost] caller runs to initialize MLS (the other hints name it too). */
-        private const val HOST_MLS_INITIALIZER = "initializeMlsWithSecureStorage()"
 
         /**
          * Whether interest pattern [outer] matches every document [inner]

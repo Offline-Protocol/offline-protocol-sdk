@@ -49,7 +49,10 @@ With default encryption and MLS not initialized, every send fails with
 different reason (an encrypt that failed on a confirmed session, or a
 document-layer transfer that cannot leave unsealed), so the error alone does not
 say MLS is missing. Direct UniFFI callers pass the engine's own answer, and the
-helper logs its one-shot remediation only when MLS is not initialized:
+helper logs its one-shot remediation only when MLS is not initialized. Use it
+only on the default encrypted config: with the lab config an `EncryptFailed`
+comes from a feature that is sealed or not sent at all (a document-layer
+transfer, a service subscription), and the remedy would name the wrong fix.
 
 ```swift
 do {
@@ -79,14 +82,13 @@ try {
 ```
 
 Hosts built on **`ProtocolEngineHost`** (Flutter, hand-written native hosts)
-receive the same remedy through the integrator lifecycle hints channel when
-`integratorLifecycleWarnings` is enabled in debug builds. It covers
-`sendMessage` and `sendMessageRich`, fires once per engine, and only when
-encryption is on and MLS is not initialized. A send made while the engine runs
-already gets the "encryption is enabled but MLS is not initialized" hint before
-the call, so the remedy appears for the case that hint does not cover: a send
-made before `start()`. Group sends are not wrapped: they need an MLS group, so
-they never fail this way for want of MLS.
+need no catch. With `integratorLifecycleWarnings` on (the default in debug
+builds), a `sendMessage` or `sendMessageRich` on a running engine with
+encryption on and MLS not initialized gets the "encryption is enabled but MLS
+is not initialized" hint before the call, once per method, and that hint names
+both fixes: `initializeMlsWithSecureStorage()` for production and this config
+for lab-only cleartext. A send before `start()` fails with `NotStarted`, never
+`EncryptFailed`, so there is nothing further to diagnose there.
 
 See also [MLS integration](mls-integration.md), [integrator map](integrator-map.md),
 and [configuration](configuration.md).

@@ -37,9 +37,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   React Native's pending-queue defaults. Setting `encryptionEnabled` to false
   alone is refused, because `requireEncryption` keeps its `true` default. Never
   ship a build that uses it. `OfflineProtocolEncryptFailedDiagnostics` logs a
-  one-shot remedy for an `EncryptFailed` send with MLS not initialized, and
-  `ProtocolEngineHost` gives the same remedy through its debug lifecycle hints
-  for a send made before `start()`.
+  one-shot remedy for an `EncryptFailed` send with MLS not initialized, and the
+  `ProtocolEngineHost` debug lifecycle hints for a missing MLS now name this
+  config instead of `encryptionEnabled = false`, which validation refuses.
 
 ### Fixed
 

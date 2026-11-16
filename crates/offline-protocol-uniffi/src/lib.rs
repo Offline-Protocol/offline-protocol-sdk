@@ -24908,9 +24908,11 @@ mod tests {
                 "u",
             ),
         ] {
-            // Digit separators are formatting, not values.
+            // Digit separators are formatting, not values. Every pinned field
+            // is followed by a comma, which is what stops `initialTtl: 8`
+            // matching `initialTtl: 80`.
             let body = read(path).replace('_', "");
-            let has = |field: &str, value: &str| body.contains(&format!("{field}{sep}{value}"));
+            let has = |field: &str, value: &str| body.contains(&format!("{field}{sep}{value},"));
             for (field, value) in [
                 ("bleEnabled", "true"),
                 ("wifiDirectEnabled", "false"),
