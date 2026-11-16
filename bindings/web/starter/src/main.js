@@ -1,4 +1,6 @@
 import { OfflineNode } from "@offline-protocol/web";
+// Bundle the worker (and its WASM imports) for dev and production preview.
+import workerUrl from "../engine-worker.js?worker&url";
 
 const $ = (id) => document.getElementById(id);
 const short = (address) => `${address.slice(0, 10)}…${address.slice(-6)}`;
@@ -28,8 +30,6 @@ function note(text) {
 }
 
 async function main() {
-  const workerUrl = new URL("../engine-worker.js", import.meta.url);
-
   const node = await OfflineNode.start({
     appId: "web-vite-starter",
     storage: "memory",

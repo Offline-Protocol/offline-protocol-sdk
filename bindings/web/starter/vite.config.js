@@ -21,4 +21,7 @@ export default defineConfig({
     },
   },
   assetsInclude: ["**/*.wasm"],
+  worker: {
+    format: "es",
+  },
 });

@@ -25522,6 +25522,7 @@ mod tests {
         for needle in [
             "bash bindings/web/scripts/build.sh",
             "wasm-bindgen-cli",
+            "wasm32-unknown-unknown",
             "npm run dev",
             "Go / no-go",
             "not a published npm package",
@@ -25538,6 +25539,12 @@ mod tests {
         assert!(
             vite_cfg.contains("@offline-protocol/web"),
             "starter vite.config.js must alias the browser binding"
+        );
+        let main_js =
+            std::fs::read_to_string(starter.join("src/main.js")).expect("starter main.js");
+        assert!(
+            main_js.contains("?worker&url"),
+            "starter must import the engine worker through Vite's worker pipeline"
         );
         assert!(
             map.contains("bindings/web/starter/README.md"),

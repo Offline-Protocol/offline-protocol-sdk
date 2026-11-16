@@ -10,6 +10,7 @@ Opinionated dev template for the **experimental** browser binding (friction
 
    ```bash
    cargo install wasm-bindgen-cli --version 0.2.105 --locked
+   rustup target add wasm32-unknown-unknown
    ```
 
 3. **Build the WASM module** (writes `bindings/web/pkg/`):
@@ -37,7 +38,7 @@ separate device (same model as [web-two-tabs](../../../examples/web-two-tabs/REA
 | Piece | Where |
 |-------|--------|
 | Page API | `@offline-protocol/web` → `bindings/web/src/index.js` (Vite alias) |
-| Worker | `engine-worker.js` imports `bindings/web/src/worker.js` |
+| Worker | `engine-worker.js` (Vite `?worker&url`) bundles `bindings/web/src/worker.js` + `pkg/` |
 | WASM glue | `bindings/web/pkg/` (from `build.sh`) |
 
 Read [docs/bridges/web.md](../../../docs/bridges/web.md) before adding WebRTC,
