@@ -77,6 +77,14 @@ if [ -f "$OUT/android/bridge-rn/build.gradle" ] && \
 else
   fail "assembled tree missing expected publish layout"
 fi
+if [ -f "$OUT/android/src/main/jniLibs/arm64-v8a/libuniffi_offline_protocol.so" ] && \
+  [ -f "$OUT/ios/Frameworks/offline_protocol_uniffi.xcframework/ios-arm64/liboffline_protocol_uniffi.a" ] && \
+  [ ! -e "$OUT/android/bridge-rn/src/main/jniLibs" ] && \
+  [ ! -e "$OUT/ios/BridgeRN/libs" ]; then
+  pass "each native library ships once, from the staged locations"
+else
+  fail "native libraries missing from the staged locations or duplicated in the vendored bridge"
+fi
 if bash "$VERIFY_PODSPEC" "$OUT" >"$WORK/pod.log" 2>&1; then
   pass "iOS podspec evaluates (pod ipc spec)"
 else

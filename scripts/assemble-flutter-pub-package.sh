@@ -16,7 +16,7 @@
 #     --output build/flutter-pub-package --version 0.33.0
 #
 # Environment:
-#   PACKAGE_SOURCE_ROOT  optional — defaults to the repository root
+#   PACKAGE_SOURCE_ROOT  optional, defaults to the repository root
 
 set -euo pipefail
 
@@ -78,10 +78,16 @@ assemble() {
     --exclude 'pubspec.lock' \
     "$PLUGIN/" "$OUTPUT/"
 
+  # The staged libraries under android/src/main/jniLibs and ios/Frameworks are
+  # the only native copies the package ships. The plugin's Gradle build and
+  # podspec prefer them whenever they hold the library, so the React Native
+  # tree's own copies would never be read, and vendoring them would ship every
+  # native library twice and roughly double the archive.
   mkdir -p "$OUTPUT/android/bridge-rn"
   rsync -a \
     --exclude 'build/' \
     --exclude '.gradle/' \
+    --exclude '/src/main/jniLibs/' \
     "$ROOT/bindings/react-native/android/" "$OUTPUT/android/bridge-rn/"
 
   printf '{"version":"%s"}\n' "$VERSION" >"$OUTPUT/android/pub_bridge_version.json"
@@ -105,6 +111,7 @@ assemble() {
     --exclude ProtocolEngineHostBridgeReactNative.swift \
     --exclude tests/ \
     --exclude Package.swift \
+    --exclude '/libs/' \
     "$RN_IOS/" "$DEST/"
 
   printf '{"version":"%s","ios_deployment_target":"%s"}\n' "$VERSION" "$IOS_DEPLOYMENT" \
@@ -150,6 +157,13 @@ verify_layout() {
   check "android/pub_bridge_version.json"
   check "ios/pub_bridge_version.json"
   check "pubspec.yaml"
+  # One copy of each native library: see the vendoring step in assemble().
+  for duplicate in android/bridge-rn/src/main/jniLibs ios/BridgeRN/libs; do
+    if [ -e "$root/$duplicate" ]; then
+      echo "duplicate native libraries: $duplicate" >&2
+      fail=1
+    fi
+  done
   [ "$fail" -eq 0 ] || die "assembled Flutter package failed layout checks"
 }
 

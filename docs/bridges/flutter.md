@@ -232,6 +232,12 @@ into a self-contained publish tree (vendored `android/bridge-rn` and
 `ios/BridgeRN`) so consumers never need the monorepo layout. Integrators:
 [flutter-distribution.md](../flutter-distribution.md).
 
+The publish tree carries each native library exactly once, in the staged
+locations. The vendored bridge leaves out the React Native package's own
+`src/main/jniLibs` and `libs/`: the staged copies always win there, so the
+vendored ones would never be read and would double the archive. The layout
+check refuses a tree that carries them.
+
 ## F9. Binary footprint
 
 The plugin links BLE and mesh bridge sources into the AAR and CocoaPod. CI runs
