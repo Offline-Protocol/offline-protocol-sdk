@@ -24,6 +24,7 @@ import logging
 import os
 import secrets
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +200,7 @@ class LocalApiServer:
             # Refused before the engine starts: a directory or a path the
             # server may not use is the operator's to fix, and no reason to
             # have opened the stores.
+            _check_socket_path_length(self.socket_path)
             _prepare_socket_directory(self.socket_path.parent)
             _remove_stale_socket(self.socket_path)
         self._manager.on_event(self._on_engine_event)
@@ -585,6 +587,29 @@ def _permission_denied(message: str) -> tuple[int, str, dict[str, Any]]:
     return error.code, error.message, error.data or {}
 
 
+class SocketPathError(ValueError):
+    """The socket path or its directory is one the server refuses to use.
+
+    Raised by :meth:`LocalApiServer.start` before the engine comes up, so an
+    operator's command line can report it as a mistake to fix rather than a
+    crash. A :class:`ValueError`, as these refusals always were.
+    """
+
+
+# `sun_path` holds the path and its terminating NUL: 104 bytes on macOS and
+# the BSDs, 108 on Linux. A longer path fails at bind, after the engine has
+# opened its stores, with only "AF_UNIX path too long".
+_SUN_PATH_MAX = 108 if sys.platform.startswith("linux") else 104
+
+
+def _check_socket_path_length(path: Path) -> None:
+    length = len(os.fsencode(path))
+    if length >= _SUN_PATH_MAX:
+        raise SocketPathError(
+            f"{path} is {length} bytes; a Unix socket path must be under {_SUN_PATH_MAX} on this system"
+        )
+
+
 def _prepare_socket_directory(directory: Path) -> None:
     """The socket's directory, owner-only, without touching what the server
     did not create.
@@ -603,13 +628,14 @@ def _prepare_socket_directory(directory: Path) -> None:
         os.chmod(directory, stat.S_IRWXU)
         return
     if not stat.S_ISDIR(found.st_mode):
-        raise ValueError(f"{directory} exists and is not a directory")
+        raise SocketPathError(f"{directory} exists and is not a directory")
     mode = stat.S_IMODE(found.st_mode)
     if found.st_uid != os.getuid() or mode & 0o077:
-        raise ValueError(
+        raise SocketPathError(
             f"{directory} must be owned by this user with no group or other "
             f"permissions (found mode {mode:04o}); the server does not narrow a "
-            "directory it did not create"
+            f"directory it did not create. Run `chmod 700 {directory}` if it is "
+            "yours to narrow, or put the socket in a directory of its own"
         )
 
 
@@ -620,5 +646,5 @@ def _remove_stale_socket(path: Path) -> None:
     except FileNotFoundError:
         return
     if not stat.S_ISSOCK(found.st_mode):
-        raise ValueError(f"{path} exists and is not a socket; refusing to remove it")
+        raise SocketPathError(f"{path} exists and is not a socket; refusing to remove it")
     path.unlink()
