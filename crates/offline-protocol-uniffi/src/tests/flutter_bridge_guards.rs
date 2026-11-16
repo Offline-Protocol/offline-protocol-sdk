@@ -232,20 +232,23 @@ fn flutter_ios_exclude_lists_agree_and_name_real_files() {
 
 // A version, an SDK level or a deployment target written down in the plugin is
 // right on the day it is made and drifts with nothing failing (ADR 0025
-// decision 5). The podspec and the Gradle build read them from the React
-// Native package; the pubspec cannot, so the release gate checks it.
+// decision 5). The podspec and Gradle read them from the React Native package
+// in the monorepo, or from pub_bridge_version.json when the pub assemble ships
+// a vendored bridge; release gates the pubspec version.
 #[test]
 fn flutter_native_builds_read_what_the_react_native_package_declares() {
     let plugin = flutter_plugin_dir();
     let podspec = read_text(&plugin.join("ios/offline_protocol.podspec"));
     let gradle = read_text(&plugin.join("android/build.gradle"));
     for needle in [
-        "s.version          = rn_package['version']",
+        "s.version          = package_version",
         "s.platform         = :ios, ios_deployment_target",
+        "pub_bridge_version.json",
+        "MeshSdk.podspec",
     ] {
         assert!(
             podspec.contains(needle),
-            "offline_protocol.podspec must read `{needle}` from the React Native package"
+            "offline_protocol.podspec must pin `{needle}` from RN or pub metadata"
         );
     }
     for needle in [
@@ -622,7 +625,7 @@ fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory()
     );
 }
 
-/// Friction #19: pub.dev packaging is scripted and documented; no ad-hoc copies.
+/// pub.dev packaging is scripted and documented; no ad-hoc copies.
 #[test]
 fn flutter_pub_distribution_path_is_documented_and_pinned() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -638,6 +641,14 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
         assemble.contains("bridge-rn"),
         "assemble script must vendor the Android bridge for pub consumers"
     );
+    assert!(
+        assemble.contains("ios/pub_bridge_version.json"),
+        "assemble script must write iOS pub_bridge_version.json for pub consumers"
+    );
+    assert!(
+        assemble.contains("ios_deployment_target"),
+        "assemble script must pin ios_deployment_target from MeshSdk.podspec"
+    );
     let doc = std::fs::read_to_string(repo.join("docs/flutter-distribution.md"))
         .unwrap_or_else(|e| panic!("docs/flutter-distribution.md: {e}"));
     assert!(
@@ -648,5 +659,14 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
     assert!(
         gradle.contains("file('bridge-rn')"),
         "Flutter android/build.gradle must support the pub assemble layout"
+    );
+    let podspec = read_text(&flutter_plugin_dir().join("ios/offline_protocol.podspec"));
+    assert!(
+        podspec.contains("pub_bridge_version.json"),
+        "offline_protocol.podspec must read pub_bridge_version.json in the pub layout"
+    );
+    assert!(
+        podspec.contains("ios_deployment_target"),
+        "offline_protocol.podspec must read ios_deployment_target from pub_bridge_version.json"
     );
 }

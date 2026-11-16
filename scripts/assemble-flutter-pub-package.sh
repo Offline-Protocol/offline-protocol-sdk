@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Assemble a self-contained Flutter plugin tree for pub.dev (G10 / friction #19).
+# Assemble a self-contained Flutter plugin tree for pub.dev.
 # The in-repository plugin reaches shared bridge sources under
 # bindings/react-native; a pub consumer has no such tree. This script copies
 # the bridge, stages prebuilt UniFFI libraries, and writes the version pin the
@@ -86,6 +86,14 @@ assemble() {
 
   printf '{"version":"%s"}\n' "$VERSION" >"$OUTPUT/android/pub_bridge_version.json"
 
+  MESH_PODSPEC="$ROOT/bindings/react-native/MeshSdk.podspec"
+  [ -f "$MESH_PODSPEC" ] || die "missing $MESH_PODSPEC (cannot pin iOS deployment target)"
+  IOS_DEPLOYMENT=$(
+    perl -ne 'if (/s\.platforms\s*=\s*\{\s*:ios\s*=>\s*"([0-9.]+)"/) { print $1; exit }' \
+      "$MESH_PODSPEC"
+  )
+  [ -n "$IOS_DEPLOYMENT" ] || die "MeshSdk.podspec has no :ios deployment target"
+
   IOS_DIR="$OUTPUT/ios"
   RN_IOS="$ROOT/bindings/react-native/ios"
   DEST="$IOS_DIR/BridgeRN"
@@ -98,6 +106,9 @@ assemble() {
     --exclude tests/ \
     --exclude Package.swift \
     "$RN_IOS/" "$DEST/"
+
+  printf '{"version":"%s","ios_deployment_target":"%s"}\n' "$VERSION" "$IOS_DEPLOYMENT" \
+    >"$IOS_DIR/pub_bridge_version.json"
 
   for legal in LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md; do
   cp "$REPO_ROOT/$legal" "$OUTPUT/"
@@ -137,6 +148,7 @@ verify_layout() {
   check "ios/BridgeRN/Generated/offline_protocol.swift"
   check "android/bridge-rn/src/main/java/uniffi/offline_protocol/offline_protocol.kt"
   check "android/pub_bridge_version.json"
+  check "ios/pub_bridge_version.json"
   check "pubspec.yaml"
   [ "$fail" -eq 0 ] || die "assembled Flutter package failed layout checks"
 }

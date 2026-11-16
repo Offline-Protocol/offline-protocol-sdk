@@ -38,6 +38,7 @@ build_fixture() {
   echo "kt" >"$rn/android/src/main/java/uniffi/offline_protocol/offline_protocol.kt"
   echo "// swift" >"$rn/ios/Generated/offline_protocol.swift"
   echo "swift" >"$rn/ios/offline_protocol.swift"
+  printf '%s\n' 's.platforms    = { :ios => "13.0" }' >"$rn/MeshSdk.podspec"
   for legal in LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md; do
     echo "$legal" >"$root/$legal"
   done
@@ -66,6 +67,8 @@ else
 fi
 if [ -f "$OUT/android/bridge-rn/build.gradle" ] && \
   [ -f "$OUT/ios/BridgeRN/Generated/offline_protocol.swift" ] && \
+  [ -f "$OUT/ios/pub_bridge_version.json" ] && \
+  grep -q '"ios_deployment_target":"13.0"' "$OUT/ios/pub_bridge_version.json" && \
   grep -q 'publish_to: https://pub.dev' "$OUT/pubspec.yaml" && \
   grep -q 'version: 1.2.3' "$OUT/pubspec.yaml"; then
   pass "layout and pub metadata"

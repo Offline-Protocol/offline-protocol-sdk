@@ -7,18 +7,25 @@ rn_ios = 'BridgeRN'
 plugin_ios = File.dirname(File.realpath(__FILE__))
 
 # Values the React Native package declares are read from it, never written
-# again here (ADR 0025 decision 5): a copy is right on the day it is made and
-# drifts with nothing failing. The version comes from package.json, which the
-# release gate keeps in step with the tag; the deployment target comes from the
-# line in MeshSdk.podspec that declares it, which has to be there exactly once.
-rn_root = File.expand_path('../../../react-native', plugin_ios)
-rn_package = JSON.parse(File.read(File.join(rn_root, 'package.json')))
-rn_targets = File.read(File.join(rn_root, 'MeshSdk.podspec'))
-  .scan(/s\.platforms\s*=\s*\{\s*:ios\s*=>\s*"([0-9.]+)"\s*\}/).flatten
-unless rn_targets.length == 1
-  raise "MeshSdk.podspec must declare the iOS deployment target exactly once (found #{rn_targets.length})"
+# again here (ADR 0025 decision 5). The pub.dev assemble script vendors a
+# pub_bridge_version.json beside this podspec so consumers outside the monorepo
+# do not need bindings/react-native on disk.
+pub_meta_path = File.join(plugin_ios, 'pub_bridge_version.json')
+if File.file?(pub_meta_path)
+  pub_meta = JSON.parse(File.read(pub_meta_path))
+  package_version = pub_meta.fetch('version') { raise 'pub_bridge_version.json missing version' }
+  ios_deployment_target = pub_meta.fetch('ios_deployment_target') { raise 'pub_bridge_version.json missing ios_deployment_target' }
+else
+  rn_root = File.expand_path('../../../react-native', plugin_ios)
+  rn_package = JSON.parse(File.read(File.join(rn_root, 'package.json')))
+  package_version = rn_package['version']
+  rn_targets = File.read(File.join(rn_root, 'MeshSdk.podspec'))
+    .scan(/s\.platforms\s*=\s*\{\s*:ios\s*=>\s*"([0-9.]+)"\s*\}/).flatten
+  unless rn_targets.length == 1
+    raise "MeshSdk.podspec must declare the iOS deployment target exactly once (found #{rn_targets.length})"
+  end
+  ios_deployment_target = rn_targets.first
 end
-ios_deployment_target = rn_targets.first
 
 # The compile surface is every shared bridge source except the ones named here
 # (ADR 0025 decision 3): a list of what to leave out, never a list of what to
@@ -34,7 +41,7 @@ rn_only_swift = [
 
 Pod::Spec.new do |s|
   s.name             = 'offline_protocol'
-  s.version          = rn_package['version']
+  s.version          = package_version
   s.summary          = 'Flutter bindings for the Offline Protocol SDK'
   s.description      = 'Offline-first mesh messaging with MLS encryption (Flutter plugin).'
   s.homepage         = 'https://github.com/Offline-Protocol/offline-protocol-sdk'
