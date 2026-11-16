@@ -17,7 +17,8 @@ Run these before you treat mesh as “done” on a platform.
 | Goal | Golden path | Proves |
 |------|-------------|--------|
 | React Native mesh between two phones | [React Native example app](../examples/react-native-app/README.md) on **two physical devices** (distinct `appId` if both apps on one phone) | Discovery, MLS, send/receive over real radios |
-| Host toolchain / linking | `npx --no-install mesh-sdk-doctor` | Native module, pods/Gradle, host compatibility ([react-native-host-doctor.md](react-native-host-doctor.md)) |
+| Static host-configuration checks (React Native) | `npx --no-install mesh-sdk-doctor` | Known Podfile / Gradle / Expo misconfigurations from **project files only** (no CocoaPods, Gradle, or app run); see [react-native-host-doctor.md](react-native-host-doctor.md) |
+| React Native native link / load | Build and launch your app (or the [example app](../examples/react-native-app/README.md)) on a simulator or device | Native module is linked and the engine reaches `start()` without load errors |
 | Local API / gateway delivery | [`offline-protocol-verify`](local-api.md#checking-what-the-network-did-offline-protocol-verify) against a running service | Event-backed proof of send, relay, receive, deliver ([examples/offline-first](../examples/offline-first/README.md)) |
 | Browser binding (two devices) | [web-devices checklist](bridges/web-devices.md) with [web-lobby](../examples/web-lobby/README.md) | Secure context, OPFS, WebRTC on hardware |
 | Browser binding (one machine) | `bash bindings/web/scripts/test-browser.sh` | Regression harness in three engines (not a substitute for two-device QA) |
@@ -28,7 +29,7 @@ Run these before you treat mesh as “done” on a platform.
 
 | Surface | Simulator / emulator | Physical device | Notes |
 |---------|---------------------|-----------------|-------|
-| **React Native** — UI, config, lifecycle, JS harness | Yes | Recommended for first mesh milestone | `mesh-sdk-doctor` + `npm run test:js` in the package; no BLE mesh fidelity on sim |
+| **React Native** — UI, config, lifecycle, JS harness | Yes | Recommended for first mesh milestone | Static `mesh-sdk-doctor` + `npm run test:js`; confirm **native build + launch**; no BLE mesh fidelity on sim |
 | **React Native** — BLE discovery & encrypted DM | No | **Required** | See [mobile-permissions § Verify before release](mobile-permissions.md#verify-before-release) |
 | **React Native** — Wi‑Fi Direct | No | **Required** | Budget **1–2+ minutes** for group formation; [troubleshooting.md](troubleshooting.md) |
 | **Native iOS / Android** — compile, unit tests | Yes (where XCTest/JUnit run) | Required before ship for transports | Native integration guides; [storage adapters](../examples/storage-adapters/README.md) if custom storage |
@@ -46,8 +47,9 @@ Run these before you treat mesh as “done” on a platform.
 
 1. Install SDK for your platform ([integrator map](integrator-map.md)).
 2. Follow lifecycle ordering (listeners → `start()` → send).
-3. React Native: `mesh-sdk-doctor` passes.
-4. Run package or repo tests relevant to your surface (see below).
+3. React Native: `mesh-sdk-doctor` passes (file checks only, not a native build).
+4. React Native: one successful native **build and app launch** (simulator or device).
+5. Run package or repo tests relevant to your surface (see below).
 
 ### Milestone B — Mesh smoke (hardware or two hosts)
 
