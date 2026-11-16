@@ -62,7 +62,7 @@ checklist.
 | Surface | Always check | Usually check on jump | Rare |
 |---------|--------------|----------------------|------|
 | **React Native** | [§8](#8-react-native-bridge-fallbacks-now-match-the-sdk-defaults), [§11](#11-events-you-must-now-handle), [§12](#12-build-and-packaging), [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) (iOS), [§13](#13-upgrade-test-checklist) | §14 identity, §16 data layer, §20 telemetry, §25–§30 behaviour | §1–§7 if never on pre-0.17 |
-| **Native Swift / Kotlin** | [§1](#1-initialize_mls-now-takes-two-storage-providers), [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence) (custom storage), [§14](#14-your-identity-is-derived-not-chosen-v0210), [§12](#12-build-and-packaging) (regenerate bindings) | §11 events, version-tagged iOS/Android behaviour in §18, §25–§30 | RN-only §8–§9 |
+| **Native Swift / Kotlin** | [§1](#1-initialize_mls-now-takes-two-storage-providers), [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence) (custom storage), [§14](#14-your-identity-is-derived-not-chosen-v0210), [§12](#12-build-and-packaging) ([§12.3](#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework) for Swift package apps) | §11 events, version-tagged iOS/Android behaviour in §18, §25–§30 | RN-only §8–§9; hand-built XCFramework §12.2 |
 | **Python** | [§1](#1-initialize_mls-now-takes-two-storage-providers) (`state_root`), [§14](#14-your-identity-is-derived-not-chosen-v0210) | §16 data, §25+ behaviour | RN §8–§9 |
 | **Rust app on crates** | [This release at a glance](#this-release-at-a-glance) Rust column, §15 API removals, §19 Reticulum crate | §25–§31 exhaustive `Event` / config field matches | Binding-only packaging |
 | **C / C# / Java** | [§12](#12-build-and-packaging), [§14](#14-your-identity-is-derived-not-chosen-v0210) | Same as native for storage if you implement providers | RN sections |
@@ -1400,6 +1400,56 @@ packages no longer resolve to an unversioned `react-android` dependency.
 
 Events cross the FFI as JSON strings, so **event field changes need no bindings
 regeneration** — only `bindings/react-native/src/types.ts`, which can drift.
+
+### 12.3 Native iOS: bump the Swift package, not a hand-built XCFramework
+
+**Applies to native Swift apps** that depend on `OfflineProtocolSDK` from
+[`offline-protocol-swift`](https://github.com/Offline-Protocol/offline-protocol-swift)
+(see [ios-native-distribution.md](ios-native-distribution.md)).
+
+**What to do on an SDK upgrade**
+
+1. Read [CHANGELOG](../CHANGELOG.md) and the version-tagged sections in this
+   file for every release between yours and the target, before you bump. The
+   package is 0.x, so a minor release can break the API, and `from:` accepts
+   any later 0.x. Regenerating bindings (§12.2) applies only when you compile
+   the bridge yourself, not when you consume a release package.
+2. Bump the package version in Xcode (**File → Packages → Update to Latest Package
+   Versions**) or raise the `from:` / exact version in `Package.swift` to match the
+   SDK release you are adopting (`X.Y.Z` aligns with the main repository tag).
+3. Clean-build the app. You do **not** need to rebuild `liboffline_protocol_uniffi.a`
+   or stitch an XCFramework unless you maintain a fork built from source
+   ([ios-integration.md](ios-integration.md#advanced-build-the-bridge-from-source)).
+
+**If your app already has accounts, keep its storage**
+
+Before 0.34.0 the package's Keychain store was internal, so an app on 0.28.0 to
+0.33.0 initializes MLS with its own `MlsStorageProvider` and
+`ProtocolStateStorageProvider`, or with `initializeMlsWithFileStores`. Keep
+doing so after the upgrade. `OfflineProtocolReferenceStorage` opens stores
+under the SDK's own per-account namespace, which hold nothing for an account
+your app created: switching an existing account to it starts a fresh MLS
+identity, with an empty outbox and an empty block list, and every session and
+group from the old identity stops decrypting. `adoption.warning` does not
+report this. It covers only the store the SDK itself wrote before storage was
+split per account, and it is nil here. Use the reference storage for new
+installs, or move existing accounts only with a migration you write and test.
+
+**What the release train publishes**
+
+Each `vX.Y.Z` GitHub release attaches the SwiftPM XCFramework archive and the
+assembled package tree (`offline-protocol-X.Y.Z-swift-package.tar.gz`). The
+distribution repository pulls those assets and tags `X.Y.Z`; SPM resolves that
+tag to a fixed revision, so integrators upgrade by version, not by copying
+Rust build artifacts.
+
+**If you vendor a tarball instead of the distribution repo**
+
+Verify both assets with `gh attestation verify <asset> --repo Offline-Protocol/offline-protocol-sdk`,
+then check that the `checksum:` in the tarball's `Package.swift` equals
+`swift package compute-checksum offline-protocol-X.Y.Z-swiftpm-xcframework.zip`
+for the zip from the same release, and replace your vendored tree. Do not edit
+generated sources by hand.
 
 ---
 

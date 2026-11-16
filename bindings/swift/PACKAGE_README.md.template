@@ -25,6 +25,11 @@ targets: [
 Requirements: iOS @@IOS_DEPLOYMENT_TARGET@@ or later. iOS only: the binary
 has no macOS or Mac Catalyst slice.
 
+Integrators should read the
+[Native iOS distribution guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/ios-native-distribution.md)
+on the main repository at the **same `X.Y.Z` as this package** (see `VERSION`)
+before wiring transports and permissions.
+
 ## What is in it
 
 | Part | What it is |
@@ -32,22 +37,42 @@ has no macOS or Mac Catalyst slice.
 | `offline_protocolFFI` | The Rust library, as an XCFramework for device and simulator |
 | Generated bindings | `OfflineProtocol`, `ProtocolConfig`, `MeshServices`, `DataStore` and the rest of the API, generated from the Rust interface |
 | Transports | The BLE, internet relay, Wi-Fi Direct, Nostr and Reticulum managers, the same sources the React Native module compiles |
-| Storage | The Keychain store for MLS material and the file store for protocol state |
+| Storage | The Keychain store for MLS material and the file store for protocol state, opened per account by `OfflineProtocolReferenceStorage` |
+| Integrator helpers | `OfflineProtocolReferenceStorage`, `StorageConformance`, `OfflineProtocolDevelopmentCleartextConfig`, `OfflineProtocolEncryptFailedDiagnostics` |
 
 The Rust core is an I/O-free engine. It queues, routes and encrypts, and never
 opens a socket or touches a radio for the protocol. A transport manager does
 the I/O for one transport: it drains the engine's outbound queue, sends, and
 hands inbound bytes back.
 
-## Status
+## Getting started
 
-The storage providers are not yet public, so an application cannot construct
-them, and wiring the transports to the engine is the application's to write.
-A public entry point that does both is the next addition to this package.
+1. `import OfflineProtocolSDK`
+2. Build `ProtocolConfig` (see [configuration](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/configuration.md) on the main repo)
+3. `let engine = try OfflineProtocol(config: config)`
+4. `engine.setEventCallback(callback: …)` **before** `start()`
+5. `let adoption = try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)`
+   opens the built-in stores. Report `adoption.warning` when it is set: it is
+   the only signal that this account started from a fresh MLS identity, with
+   an empty outbox and an empty block list.
+6. `try engine.start()`, then wire transports (see the integration guide on the main repo)
 
-What is public today is what the React Native module happened to need
-public. It is not yet a decided API, and names in it may change before the
-first release that says otherwise.
+Upgrading an app that already initializes MLS with its own storage providers
+or `initializeMlsWithFileStores` (every app on 0.33.0 and earlier)? Keep them.
+The reference storage holds nothing for those accounts, so switching starts a
+fresh identity, and `adoption.warning` does not report it (see
+[UPGRADING §12.3](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/UPGRADING.md#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework)).
+
+A custom protocol-state backend is verified once, before you wire it in: run
+`StorageConformance.run(on:)` against a scratch instance, off the main thread
+(the suite blocks on writes of several megabytes). Green is what makes a
+backend supported (see the
+[distribution guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/ios-native-distribution.md)).
+Lab-only cleartext and `OfflineProtocolDevelopmentCleartextConfig` are in
+[native development cleartext](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/native-development-cleartext.md).
+
+Transports, plist entries, and background modes are still application wiring;
+the package ships the managers, not a drop-in mesh UI.
 
 ## Where this package comes from
 

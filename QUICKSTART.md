@@ -141,33 +141,43 @@ val messageId = protocol.sendMessage(
 
 ---
 
-## For iOS Developers
+## For iOS Developers (native Swift)
 
-> Native (no React Native) integration needs the full `ProtocolConfig`, permission
-> setup, and a call to `initializeMls(secureStorage:protocolStateStorage:)` with two
-> storage providers you supply — there is no auto-initialization on the native path,
-> and encryption is fail-closed, so sends fail until MLS is initialized. See the
-> [iOS Integration Guide](docs/ios-integration.md) for the complete
-> walkthrough — the snippet below is just the shape.
+Native apps should install the **release Swift package** `OfflineProtocolSDK`, not
+build Rust by hand. Start with
+[ios-native-distribution.md](docs/ios-native-distribution.md), then
+[ios-integration.md](docs/ios-integration.md) for transports and plist setup.
 
-### 1. Build Rust Library
+The snippet below needs `OfflineProtocolSDK` 0.34.0 or later:
+`OfflineProtocolReferenceStorage` is not in 0.33.0 and earlier, where the
+application supplies its own storage providers.
 
-```bash
-cargo build --profile mobile --target aarch64-apple-ios
-```
+### 1. Add the package
 
-This produces `liboffline_protocol_uniffi.a`.
+In Xcode: **File → Add Package Dependencies…** →
+`https://github.com/Offline-Protocol/offline-protocol-swift.git`, version 0.34.0 or later
 
-### 2. Add to Xcode
-
-Add `liboffline_protocol_uniffi.a` (or the device and simulator XCFramework that
-`bindings/react-native/scripts/build-uniffi-ios.sh` builds) and the generated `offline_protocol.swift` to your project.
-
-### 3. Use in Swift
+### 2. Start the engine and send
 
 ```swift
-// Build `config` with the full ProtocolConfig(...) — see the iOS integration guide.
+import OfflineProtocolSDK
+
+// Build `config` with the full `ProtocolConfig(...)`: see
+// docs/configuration.md and docs/ios-native-distribution.md.
 let mesh = try OfflineProtocol(config: config)
+// `yourHandler` is your `EventCallback`. Register it before start(), or
+// events emitted during startup are lost.
+mesh.setEventCallback(callback: yourHandler)
+
+let adoption = try OfflineProtocolReferenceStorage.initializeMls(
+    on: mesh,
+    appId: config.appId,
+    profile: config.profile
+)
+if let warning = adoption.warning {
+    // The only signal that this account started from a fresh MLS identity.
+    print(warning)
+}
 try mesh.start()
 
 let messageId = try mesh.sendMessage(
@@ -177,6 +187,9 @@ let messageId = try mesh.sendMessage(
     replyToMsg: nil
 )
 ```
+
+Custom storage or an XCFramework built from source: see the integration and
+distribution guides above; that path is for maintainers, not the default app flow.
 
 ---
 

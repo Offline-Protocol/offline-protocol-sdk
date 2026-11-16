@@ -25110,4 +25110,118 @@ mod tests {
             "consumer-check Use.kt is the canonical sample: import com.offlineprotocol types by name"
         );
     }
+
+    /// The README rendered into every release Swift package must match the
+    /// integrator surface we ship (reference storage, not stale "private storage"
+    /// copy) and point at the distribution guide on the main repository.
+    #[test]
+    fn swift_package_distribution_readme_matches_shipped_integrator_kit() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let readme =
+            std::fs::read_to_string(repo.join("bindings/swift/PACKAGE_README.md.template"))
+                .expect("PACKAGE_README.md.template");
+        const STALE: &str = "storage providers are not yet public";
+        assert!(
+            !readme.contains(STALE),
+            "distribution README still claims storage is private"
+        );
+        const SHORTHAND_INIT: &str = "initializeMls(on:appId";
+        assert!(
+            !readme.contains(SHORTHAND_INIT),
+            "distribution README uses invalid initializeMls(on:appId:…) shorthand"
+        );
+        // The adoption result is the only signal that an account started from
+        // a fresh MLS identity. A snippet that discards it compiles with a
+        // warning and hides the loss, so both copy-paste sources must bind it
+        // and report its warning.
+        const BOUND_INIT: &str =
+            "let adoption = try OfflineProtocolReferenceStorage.initializeMls(";
+        assert!(
+            readme.contains(&format!("{BOUND_INIT}on: engine,")),
+            "distribution README must bind the result of initializeMls(on: engine, appId:, profile:)"
+        );
+        assert!(
+            readme.contains("adoption.warning"),
+            "distribution README must tell integrators to report adoption.warning"
+        );
+        let quickstart =
+            std::fs::read_to_string(repo.join("QUICKSTART.md")).expect("QUICKSTART.md");
+        assert!(
+            quickstart.contains(BOUND_INIT) && quickstart.contains("adoption.warning"),
+            "QUICKSTART's native Swift snippet must bind initializeMls and report adoption.warning"
+        );
+        for needle in [
+            "OfflineProtocolReferenceStorage",
+            "StorageConformance",
+            "docs/ios-native-distribution.md",
+            "offline-protocol-swift.git",
+        ] {
+            assert!(
+                readme.contains(needle),
+                "PACKAGE_README.md.template missing `{needle}`"
+            );
+        }
+        let upgrading = std::fs::read_to_string(repo.join("docs/UPGRADING.md")).expect("UPGRADING");
+        assert!(
+            upgrading.contains("12.3 Native iOS: bump the Swift package"),
+            "UPGRADING must document Swift package version bumps"
+        );
+        assert!(
+            upgrading.contains("ios-native-distribution.md"),
+            "UPGRADING §12.3 must link ios-native-distribution.md"
+        );
+        // §12.3 closes section 12: inserted earlier, it takes §12.2's trailing
+        // paragraphs under a native-iOS heading.
+        let section_12_3 = upgrading
+            .find("### 12.3 Native iOS")
+            .expect("UPGRADING §12.3 heading");
+        let section_13 = upgrading
+            .find("## 13. Upgrade test checklist")
+            .expect("UPGRADING §13 heading");
+        assert!(
+            section_12_3 < section_13
+                && !upgrading[section_12_3..section_13].contains("Events cross the FFI"),
+            "UPGRADING §12.3 must follow all of §12.2 and end section 12"
+        );
+        // Every app on 0.33.0 and earlier brought its own storage. Moving one
+        // of its accounts to the reference storage starts a fresh identity
+        // that `adoption.warning` never reports, so both places an upgrader
+        // reads must tell them to keep their providers.
+        assert!(
+            upgrading[section_12_3..section_13].contains("initializeMlsWithFileStores"),
+            "UPGRADING §12.3 must tell apps with existing accounts to keep their own storage"
+        );
+        assert!(
+            readme.contains("initializeMlsWithFileStores"),
+            "distribution README must tell apps with existing accounts to keep their own storage"
+        );
+        // The snippet does not compile against a package without the
+        // reference storage, so the reader must see the floor.
+        assert!(
+            quickstart.contains("0.34.0 or later"),
+            "QUICKSTART's native Swift section must name the first package with reference storage"
+        );
+        // A README is frozen into every release tag it ships in, so a link it
+        // carries cannot be corrected afterwards. Each path it names on the
+        // main repository must exist at the commit that renders it.
+        const VERSIONED: &str = "blob/v@@VERSION@@/";
+        let mut linked = 0;
+        for (at, _) in readme.match_indices(VERSIONED) {
+            let rest = &readme[at + VERSIONED.len()..];
+            let end = rest.find([')', '#', ' ', '\n']).unwrap_or(rest.len());
+            let path = &rest[..end];
+            assert!(
+                repo.join(path).is_file(),
+                "PACKAGE_README.md.template links `{path}`, which does not exist"
+            );
+            linked += 1;
+        }
+        assert!(
+            linked >= 4,
+            "PACKAGE_README.md.template carries {linked} versioned links; the check above saw none of them"
+        );
+    }
 }

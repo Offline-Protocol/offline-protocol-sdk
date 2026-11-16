@@ -37,7 +37,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.33.0"),
+    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.34.0"),
 ],
 targets: [
     .target(
@@ -58,7 +58,9 @@ Import **`OfflineProtocolSDK`** only. You do not add
 `bindings/react-native/ios/Generated/offline_protocol.swift` by hand; the
 package links the Rust library and generated bindings together.
 
-Minimal sequence (details and transports in [ios-integration.md](ios-integration.md)):
+Minimal sequence (details and transports in [ios-integration.md](ios-integration.md)).
+It needs 0.34.0 or later: `OfflineProtocolReferenceStorage` and
+`StorageConformance` are not in 0.33.0 and earlier.
 
 1. `import OfflineProtocolSDK`
 2. Build `ProtocolConfig` (see [configuration.md](configuration.md))
@@ -118,6 +120,12 @@ overwritten each release ([distribution README template](../bindings/swift/PACKA
 SDK maintainers and contributors still use the scripts in
 [ios-integration.md#advanced-build-the-bridge-from-source](ios-integration.md#advanced-build-the-bridge-from-source)
 and [bindings/swift/README.md](../bindings/swift/README.md) to validate changes.
+
+## Upgrading
+
+On a new SDK version, bump the Swift package dependency to the same `X.Y.Z`
+(release train). You do not rebuild Rust locally unless you fork from source.
+Details: [UPGRADING.md §12.3](UPGRADING.md#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework).
 
 ## See also
 
