@@ -153,18 +153,24 @@ build Rust by hand. Start with
 In Xcode: **File → Add Package Dependencies…** →
 `https://github.com/Offline-Protocol/offline-protocol-swift.git`
 
-### 2. Initialize MLS (built-in stores)
+### 2. Start the engine and send
 
 ```swift
 import OfflineProtocolSDK
 
-try OfflineProtocolReferenceStorage.initializeMls(on: mesh, appId: "my-app", profile: "default")
+// Build `config` with the full `ProtocolConfig(...)` — see
+// docs/configuration.md and docs/ios-native-distribution.md.
+let config = ProtocolConfig(/* … */)
+let mesh = try OfflineProtocol(config: config)
+mesh.setEventCallback(callback: yourHandler) // before start()
+
+try OfflineProtocolReferenceStorage.initializeMls(
+    on: mesh,
+    appId: config.appId,
+    profile: config.profile
+)
 try mesh.start()
-```
 
-### 3. Send a message
-
-```swift
 let messageId = try mesh.sendMessage(
     recipient: peerAddress, // the peer's off1… address
     content: "Hello!",

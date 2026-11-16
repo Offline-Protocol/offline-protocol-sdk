@@ -26,8 +26,9 @@ Requirements: iOS @@IOS_DEPLOYMENT_TARGET@@ or later. iOS only: the binary
 has no macOS or Mac Catalyst slice.
 
 Integrators should read the
-[Native iOS distribution guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/ios-native-distribution.md)
-on the main repository before wiring transports and permissions.
+[Native iOS distribution guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/ios-native-distribution.md)
+on the main repository at the **same `X.Y.Z` as this package** (see `VERSION`)
+before wiring transports and permissions.
 
 ## What is in it
 
@@ -46,9 +47,11 @@ hands inbound bytes back.
 ## Getting started
 
 1. `import OfflineProtocolSDK`
-2. Build `ProtocolConfig` and call `setEventCallback` before `start()`
-3. `try OfflineProtocolReferenceStorage.initializeMls(on:appId:profile:)` (built-in stores)
-4. Start transports and the engine (see the integration guide on the main repo)
+2. Build `ProtocolConfig` (see [configuration](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/configuration.md) on the main repo)
+3. `let engine = try OfflineProtocol(config: config)`
+4. `engine.setEventCallback(callback: …)` **before** `start()`
+5. `try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)` (built-in stores)
+6. `try engine.start()` — then wire transports (see the integration guide on the main repo)
 
 Custom protocol-state storage must pass `StorageConformance.run(on:)` before
 you call `initializeMls`. Lab-only cleartext is documented under

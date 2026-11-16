@@ -25128,6 +25128,15 @@ mod tests {
             !readme.contains(STALE),
             "distribution README still claims storage is private"
         );
+        const SHORTHAND_INIT: &str = "initializeMls(on:appId";
+        assert!(
+            !readme.contains(SHORTHAND_INIT),
+            "distribution README uses invalid initializeMls(on:appId:…) shorthand"
+        );
+        assert!(
+            readme.contains("initializeMls(on: engine,"),
+            "distribution README must show initializeMls(on: engine, appId: profile:)"
+        );
         for needle in [
             "OfflineProtocolReferenceStorage",
             "StorageConformance",
