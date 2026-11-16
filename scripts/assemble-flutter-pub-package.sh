@@ -7,6 +7,12 @@
 # Gradle build and the podspec read, then verifies the layout a `pub publish`
 # archive must carry.
 #
+# The package is the tracked files of the plugin and of the React Native bridge,
+# plus the staged native libraries, and nothing else. A working tree also holds
+# what a build or an IDE left there (local.properties, .idea/, .cxx/, .build/),
+# hidden only by the .gitignore files the tree cannot ship; copied with the
+# directory, it would publish to pub.dev, where a version is permanent.
+#
 # Two rules decide what pub puts in the archive, and both hide files silently:
 #   - Inside a git work tree pub lists the package through git, so the
 #     enclosing repository's .gitignore (build/, *.so, *.a) hides the pubspec,
@@ -80,31 +86,40 @@ if command -v git >/dev/null 2>&1 &&
   die "$OUTPUT is inside a git work tree, whose .gitignore pub would apply; assemble outside it (for example under \$RUNNER_TEMP)"
 fi
 
+# Copy the files git tracks under $1 into $2, less the pathspecs that follow,
+# with their working-tree content. A tracked file deleted from the working tree
+# fails the copy rather than leaving the package without it.
+copy_tracked() {
+  local src="$1" dest="$2"
+  shift 2
+  git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    die "$src is not in a git work tree; the package is built from tracked files only"
+  mkdir -p "$dest"
+  git -C "$src" ls-files -z --cached -- . "$@" |
+    tar -C "$src" --null -T - -cf - |
+    tar -C "$dest" -xf -
+}
+
 stage_and_verify() {
   PACKAGE_SOURCE_ROOT="$ROOT" bash "$STAGE"
   PACKAGE_SOURCE_ROOT="$ROOT" bash "$STAGE" --check
 }
 
 assemble() {
-  rsync -a \
-    --exclude '.dart_tool/' \
-    --exclude 'build/' \
-    --exclude '.gradle/' \
-    --exclude 'example/' \
-    --exclude 'pubspec.lock' \
-    "$PLUGIN/" "$OUTPUT/"
+  copy_tracked "$PLUGIN" "$OUTPUT" ':(exclude)example' ':(exclude)pubspec.lock'
 
   # The staged libraries under android/src/main/jniLibs and ios/Frameworks are
-  # the only native copies the package ships. The plugin's Gradle build and
-  # podspec prefer them whenever they hold the library, so the React Native
-  # tree's own copies would never be read, and vendoring them would ship every
-  # native library twice and roughly double the archive.
-  mkdir -p "$OUTPUT/android/bridge-rn"
-  rsync -a \
-    --exclude 'build/' \
-    --exclude '.gradle/' \
-    --exclude '/src/main/jniLibs/' \
-    "$ROOT/bindings/react-native/android/" "$OUTPUT/android/bridge-rn/"
+  # the only native copies the package ships, and the only untracked files it
+  # takes. The plugin's Gradle build and podspec prefer them whenever they
+  # hold the library, so the React Native tree's own copies would never be
+  # read, and vendoring them would ship every native library twice and roughly
+  # double the archive.
+  mkdir -p "$OUTPUT/android/src/main/jniLibs" "$OUTPUT/ios/Frameworks"
+  rsync -a "$PLUGIN/android/src/main/jniLibs/" "$OUTPUT/android/src/main/jniLibs/"
+  rsync -a "$PLUGIN/ios/Frameworks/" "$OUTPUT/ios/Frameworks/"
+
+  copy_tracked "$ROOT/bindings/react-native/android" "$OUTPUT/android/bridge-rn" \
+    ':(exclude)src/main/jniLibs'
 
   printf '{"version":"%s"}\n' "$VERSION" >"$OUTPUT/android/pub_bridge_version.json"
 
@@ -115,12 +130,16 @@ assemble() {
   [ -n "$ios_deployment" ] || die "MeshSdk.podspec has no :ios deployment target"
 
   # The same copy `pod install` makes in the repository, with the same
-  # exclude list, which a Rust guard holds to the podspec's. Only the React
-  # Native package's libs/ is dropped, for the reason given above.
-  BRIDGE_RN_SOURCE="$ROOT/bindings/react-native/ios" \
+  # exclude list, which a Rust guard holds to the podspec's, taken from the
+  # tracked files only. The React Native package's libs/ is untracked, so it
+  # stays out for the reason given above.
+  local rn_ios
+  rn_ios="$(mktemp -d)"
+  copy_tracked "$ROOT/bindings/react-native/ios" "$rn_ios"
+  BRIDGE_RN_SOURCE="$rn_ios" \
     BRIDGE_RN_DEST="$OUTPUT/ios/BridgeRN" \
     bash "$PLUGIN/ios/sync_bridge_rn.sh"
-  rm -rf "$OUTPUT/ios/BridgeRN/libs"
+  rm -rf "$rn_ios"
 
   printf '{"version":"%s","ios_deployment_target":"%s"}\n' "$VERSION" "$ios_deployment" \
     >"$OUTPUT/ios/pub_bridge_version.json"

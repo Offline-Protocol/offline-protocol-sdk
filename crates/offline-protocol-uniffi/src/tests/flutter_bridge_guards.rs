@@ -618,11 +618,39 @@ fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory()
         ignore.lines().any(|l| l.trim() == "Frameworks/"),
         "ios/.gitignore must keep the staged XCFramework out of the repository"
     );
+    // In the monorepo every `pod install` copies the shared bridge again, so an
+    // edit to a shared source reaches the pod. Only the pub tree, which ships
+    // BridgeRN and has no React Native package to copy from, skips the copy.
+    // Keyed on BridgeRN existing instead, the first sync would be the last.
     assert!(
-        podspec.contains("BridgeRN/Generated/offline_protocol.swift")
-            && podspec.contains("unless File.file?(bridge_generated)"),
-        "offline_protocol.podspec must skip prepare_command when BridgeRN is shipped"
+        podspec.contains("unless File.file?(pub_meta_path)\n    sync_script"),
+        "offline_protocol.podspec must skip prepare_command only in the pub layout"
     );
+    assert!(
+        !podspec.contains("bridge_generated"),
+        "offline_protocol.podspec must not skip prepare_command because BridgeRN exists"
+    );
+}
+
+/// The body of one job in a workflow file: from its key to the next line at
+/// job indentation (two spaces), which is the next job's key or the comment
+/// above it. A comment inside a job is indented further and stays in.
+fn workflow_job<'a>(workflow: &'a str, file: &str, name: &str) -> &'a str {
+    let header = format!("\n  {name}:\n");
+    let start = workflow
+        .find(&header)
+        .unwrap_or_else(|| panic!("{file} has no `{name}` job"))
+        + 1;
+    let body = start + header.len() - 1;
+    let end = workflow[body..]
+        .match_indices('\n')
+        .map(|(i, _)| body + i + 1)
+        .find(|&line| {
+            let rest = &workflow[line..];
+            rest.starts_with("  ") && !rest[2..].starts_with([' ', '\n'])
+        })
+        .unwrap_or(workflow.len());
+    &workflow[start..end]
 }
 
 /// pub.dev packaging is scripted and documented; no ad-hoc copies.
@@ -664,10 +692,22 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
         "assemble-flutter-pub-package.sh must reuse sync_bridge_rn.sh and the one \
          deployment-target parser rather than a copy of either"
     );
+    // A working tree holds what builds and IDEs leave in it, hidden only by
+    // the .gitignore files the package cannot ship. A pub.dev version is
+    // permanent, so the package is the tracked files plus the staged natives.
+    assert!(
+        assemble.contains("ls-files -z --cached")
+            && !assemble.contains("\"$PLUGIN/\" \"$OUTPUT/\""),
+        "assemble-flutter-pub-package.sh must copy tracked files, never the plugin directory"
+    );
     let fixture = read_text(&repo.join("scripts/tests/test-assemble-flutter-pub-package.sh"));
     assert!(
         fixture.contains("flutter pub publish --dry-run"),
         "the fixture test must dry-run publish the assembled tree"
+    );
+    assert!(
+        fixture.contains("untracked files in the source tree stay out of the package"),
+        "the fixture test must prove untracked files stay out of the package"
     );
     let verify = read_text(&repo.join("scripts/verify-flutter-pub-podspec.sh"));
     assert!(
@@ -679,14 +719,27 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
         release.contains("verify-flutter-pub-podspec.sh"),
         "release.yml must verify the Flutter pub podspec after assemble"
     );
-    let job = |name: &str| -> &str {
-        let start = release
-            .find(&format!("\n  {name}:\n"))
-            .unwrap_or_else(|| panic!("release.yml has no `{name}` job"));
-        let rest = &release[start + 1..];
-        let end = rest[2..].find("\n  # ").map_or(rest.len(), |i| i + 2);
-        &rest[..end]
-    };
+    let job = |name: &str| workflow_job(&release, "release.yml", name);
+    // `gem install` into the runner's system Ruby puts `pod` in a user
+    // directory that is not on PATH; setup-ruby puts its gem bin on PATH.
+    let ci = read_text(&repo.join(".github/workflows/ci.yml"));
+    for (file, body) in [
+        (
+            "ci.yml native-package-scripts",
+            workflow_job(&ci, "ci.yml", "native-package-scripts"),
+        ),
+        (
+            "release.yml flutter-pub-package",
+            job("flutter-pub-package"),
+        ),
+    ] {
+        let ruby = body.find("ruby/setup-ruby@");
+        let pods = body.find("gem install cocoapods");
+        assert!(
+            matches!((ruby, pods), (Some(r), Some(p)) if r < p),
+            "{file} must set up Ruby before installing CocoaPods, or `pod` is not on PATH"
+        );
+    }
     let assemble_job = job("flutter-pub-package");
     assert!(
         assemble_job.contains("$RUNNER_TEMP/flutter-pub-package")

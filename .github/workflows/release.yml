@@ -1031,8 +1031,17 @@ jobs:
           channel: stable
           flutter-version: "3.27.4"
 
+      # A gem installed into the runner's system Ruby lands in a user directory
+      # that is not on PATH, so `pod` would be installed and never found.
+      # setup-ruby puts its own gem bin directory on PATH.
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "3.3"
+
       - name: Install CocoaPods for Flutter podspec verification
-        run: gem install cocoapods -v 1.16.2 --no-document
+        run: |
+          gem install cocoapods -v 1.16.2 --no-document
+          pod --version
 
       - name: Assemble the pub.dev tree
         env:
@@ -2221,6 +2230,14 @@ jobs:
         if: vars.FLUTTER_PUBLISH == 'true' && env.REAL_RELEASE == 'true' && env.TAG_PUSH == 'true'
         run: |
           set -euo pipefail
+          cd "$RUNNER_TEMP/flutter-pub-package"
+          # A re-run of a release whose version is already on pub.dev succeeds
+          # instead of failing on the duplicate, as skip-existing does for PyPI.
+          PUB_VERSION="$(grep -m1 '^version: ' pubspec.yaml | sed 's/^version: //')"
+          if curl -fs -o /dev/null "https://pub.dev/api/packages/offline_protocol/versions/$PUB_VERSION"; then
+            echo "::warning title=pub.dev publish is a no-op::offline_protocol $PUB_VERSION is already on pub.dev. Expected when re-running a release that already reached it."
+            exit 0
+          fi
           PUB_TOKEN="$(curl -sSf \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https%3A%2F%2Fpub.dev" | jq -r '.value')"
@@ -2231,7 +2248,6 @@ jobs:
           echo "::add-mask::$PUB_TOKEN"
           export PUB_TOKEN
           dart pub token add https://pub.dev --env-var PUB_TOKEN
-          cd "$RUNNER_TEMP/flutter-pub-package"
           dart pub publish --force
 
   # ghcr.io/offline-protocol/offline-protocol-service, built from

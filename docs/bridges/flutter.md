@@ -246,6 +246,19 @@ and `Frameworks`. So the script refuses an output inside a work tree, deletes
 every `.gitignore` it copied, and the fixture test ends in
 `flutter pub publish --dry-run` with the archive listing checked.
 
+Deleting those `.gitignore` files would also publish whatever a build or an
+IDE left in the working tree (`local.properties`, `.idea/`, `.cxx/`,
+`.build/`), so the script never copies a directory: it takes the files git
+tracks in the plugin and the React Native bridge, and adds the staged native
+libraries. The fixture test leaves such files in its source tree and checks
+none reach the package.
+
+In the monorepo the podspec's `prepare_command` copies the shared bridge into
+`BridgeRN` on every `pod install`; only the pub tree, marked by
+`ios/pub_bridge_version.json`, skips it. Keyed on `BridgeRN` existing, the
+first copy in a checkout would be the last, and an edited shared source would
+never reach the pod.
+
 ## F9. Binary footprint
 
 The plugin links BLE and mesh bridge sources into the AAR and CocoaPod. CI runs

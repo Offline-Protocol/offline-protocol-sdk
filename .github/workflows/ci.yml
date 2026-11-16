@@ -1885,8 +1885,17 @@ jobs:
       - name: Publish the Swift package to a local repository
         run: bash scripts/tests/test-publish-swift-package.sh
 
+      # A gem installed into the runner's system Ruby lands in a user directory
+      # that is not on PATH, so `pod` would be installed and never found.
+      # setup-ruby puts its own gem bin directory on PATH.
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "3.3"
+
       - name: Install CocoaPods for Flutter podspec verification
-        run: gem install cocoapods -v 1.16.2 --no-document
+        run: |
+          gem install cocoapods -v 1.16.2 --no-document
+          pod --version
 
       # The fixture test ends in `flutter pub publish --dry-run`: what pub puts
       # in the archive depends on ignore files no layout check can see.

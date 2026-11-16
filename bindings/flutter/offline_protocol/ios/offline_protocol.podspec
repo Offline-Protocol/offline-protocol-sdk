@@ -51,8 +51,11 @@ Pod::Spec.new do |s|
   s.platform         = :ios, ios_deployment_target
   s.swift_version    = '5.5'
 
-  bridge_generated = File.join(plugin_ios, 'BridgeRN/Generated/offline_protocol.swift')
-  unless File.file?(bridge_generated)
+  # The monorepo copies the shared bridge on every `pod install`, so an edited
+  # shared source reaches the pod. The pub tree ships BridgeRN and has no React
+  # Native package to copy from, so it skips the copy. Keyed on BridgeRN
+  # existing instead, the first copy in a checkout would be the last.
+  unless File.file?(pub_meta_path)
     sync_script = File.join(plugin_ios, 'sync_bridge_rn.sh')
     s.prepare_command = "bash #{sync_script.shellescape}"
   end

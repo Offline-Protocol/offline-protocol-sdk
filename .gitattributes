@@ -23,6 +23,9 @@
 #     the generator builds with `\n`, by `the_generated_c_dispatch_is_current`
 #     and by `tools/capi-dispatch-gen --check`. Pinning `*.rs` rather than
 #     that one file covers the next guard that reads Rust source too.
+#   - Workflow guards (the Flutter pub package's, among others) slice
+#     `.github/workflows/*.yml` into jobs by matching `\n  <job>:\n`. A CRLF
+#     checkout finds no job and the guard fails on Windows alone.
 #
 # Pinning these to LF makes the bytes on disk the bytes the tests expect on
 # every platform. Nothing in the toolchain (cargo, gradle, node, Xcode) wants
@@ -39,3 +42,5 @@
 *.podspec text eol=lf
 *.h text eol=lf
 *.m text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

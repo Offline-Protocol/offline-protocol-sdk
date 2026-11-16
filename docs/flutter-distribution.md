@@ -16,7 +16,8 @@ and declares permissions ([mobile-permissions.md](mobile-permissions.md)).
 flutter pub add offline_protocol
 ```
 
-Pin the same **version** as the SDK release you adopt (`0.33.0` with tag `v0.33.0`).
+Pin the same **version** as the SDK release you adopt: `X.Y.Z` for the release
+tagged `vX.Y.Z`. The first release on pub.dev is the first one this applies to.
 
 ### Minimal wiring
 
@@ -52,6 +53,10 @@ UniFFI artifacts are available, dry-runs `dart pub publish` on every release,
 and publishes through pub.dev automated publishing (OIDC, no stored token) from
 a pushed tag when `FLUTTER_PUBLISH` is on. The first version is uploaded by
 hand. See [CONTRIBUTING.md](../CONTRIBUTING.md#cutting-a-release).
+
+The tree holds the tracked files of the plugin and the bridge plus the staged
+native libraries, never a copy of a working directory: anything a build or an
+IDE left there would otherwise publish, and a pub.dev version is permanent.
 
 The tree must be assembled outside any git checkout, and ships no `.gitignore`:
 pub honours both, and either one silently drops the native libraries or the

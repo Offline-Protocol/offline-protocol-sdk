@@ -6,7 +6,7 @@
 # The success path ends in `flutter pub publish --dry-run`, because what pub
 # puts in the archive is decided by ignore files the layout check cannot see:
 # a tree that passes every file test can still publish without its iOS bridge.
-# Needs Flutter and CocoaPods on PATH.
+# Needs git, Flutter and CocoaPods on PATH.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +49,24 @@ build_fixture() {
   printf '%s\n' '.build/' >"$rn/ios/.gitignore"
   for legal in LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md; do
     echo "$legal" >"$root/$legal"
+  done
+  # The package is built from tracked files, as in a checkout. The native
+  # libraries are untracked there (the repository ignores *.so and *.a), so
+  # they stay untracked here.
+  git -C "$root" init -q
+  git -C "$root" add -A
+  git -C "$root" rm -q -r --cached \
+    "bindings/react-native/android/src/main/jniLibs" "bindings/react-native/ios/libs"
+  git -C "$root" -c user.name=fixture -c user.email=fixture@invalid \
+    commit -q -m fixture
+  # What a build or an IDE leaves in a working tree; none of it may ship.
+  for junk in \
+    bindings/flutter/offline_protocol/android/local.properties \
+    bindings/flutter/offline_protocol/.idea/workspace.xml \
+    bindings/react-native/android/.cxx/junk \
+    bindings/react-native/ios/.build/junk; do
+    mkdir -p "$(dirname "$root/$junk")"
+    echo junk >"$root/$junk"
   done
 }
 
@@ -102,6 +120,11 @@ if [ -f "$OUT/android/src/main/jniLibs/arm64-v8a/libuniffi_offline_protocol.so" 
   pass "each native library ships once, from the staged locations"
 else
   fail "native libraries missing from the staged locations or duplicated in the vendored bridge"
+fi
+if [ -z "$(find "$OUT" \( -name local.properties -o -name .idea -o -name .cxx -o -name .build \))" ]; then
+  pass "untracked files in the source tree stay out of the package"
+else
+  fail "untracked files from the source tree were copied into the package"
 fi
 if [ -z "$(find "$OUT" \( -name .gitignore -o -name .pubignore \) -not -path "$OUT/.pubignore")" ]; then
   pass "no ignore file but the root .pubignore ships"

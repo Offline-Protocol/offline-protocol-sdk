@@ -37,7 +37,7 @@ def exactlyOne = { String name, String pattern ->
     def found = (moduleBuild =~ pattern).collect { it[1] }
     if (found.size() != 1) {
         throw new GradleException(
-            "react-native/android/build.gradle must declare ${name} exactly once (found ${found.size()})")
+            "${new File(bridgeDir, 'build.gradle').path} must declare ${name} exactly once (found ${found.size()})")
     }
     found[0]
 }
