@@ -24893,6 +24893,13 @@ mod tests {
                 "{path} must disable storePending (RN developmentCleartext posture)"
             );
             assert!(
+                (body.contains("maxPendingPerPeer: 64")
+                    || body.contains("maxPendingPerPeer = 64"))
+                    && (body.contains("maxPendingGlobal: 4_096")
+                        || body.contains("maxPendingGlobal = 4096")),
+                "{path} must use RN default pending queue sizes (64 / 4096)"
+            );
+            assert!(
                 body.contains("OfflineProtocolDevelopmentCleartextConfig"),
                 "{path} must export the native helper type"
             );

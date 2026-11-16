@@ -39,8 +39,8 @@ public enum OfflineProtocolDevelopmentCleartextConfig {
             autoKeyExchange: false,
             storePending: false,
             requireEncryption: false,
-            maxPendingPerPeer: 100,
-            maxPendingGlobal: 1_000,
+            maxPendingPerPeer: 64,
+            maxPendingGlobal: 4_096,
             pendingTtlMs: 86_400_000,
             overflowPolicy: .dropOldest
         )

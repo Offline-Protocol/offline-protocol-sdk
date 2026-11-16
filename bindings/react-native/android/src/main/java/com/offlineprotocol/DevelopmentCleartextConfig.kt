@@ -40,8 +40,8 @@ object OfflineProtocolDevelopmentCleartextConfig {
             autoKeyExchange = false,
             storePending = false,
             requireEncryption = false,
-            maxPendingPerPeer = 100u,
-            maxPendingGlobal = 1000u,
+            maxPendingPerPeer = 64u,
+            maxPendingGlobal = 4096u,
             pendingTtlMs = 86_400_000u,
             overflowPolicy = OverflowPolicy.DROP_OLDEST,
         )
