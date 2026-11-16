@@ -9,8 +9,23 @@ building an XCFramework by hand are for SDK maintainers and advanced setups.
 
 ## Prerequisites
 
+What you need depends on how you install the SDK.
+
+### Using the release Swift package
+
+If you followed [ios-native-distribution.md](ios-native-distribution.md), you
+only need:
+
 - Xcode 15+
-- Rust toolchain with iOS targets
+
+The package ships the XCFramework and UniFFI bindings. You do **not** need Rust
+on the app team machine.
+
+### Building the bridge from source (maintainers)
+
+The [advanced section](#advanced-build-the-bridge-from-source) below is for SDK
+development or when you cannot use a release package. It additionally requires a
+Rust toolchain and the iOS targets installed in its first step.
 
 ## Advanced: build the bridge from source
 

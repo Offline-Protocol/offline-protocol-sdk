@@ -62,15 +62,22 @@ Minimal sequence (details and transports in [ios-integration.md](ios-integration
 
 1. `import OfflineProtocolSDK`
 2. Build `ProtocolConfig` (see [configuration.md](configuration.md))
-3. `setEventCallback` **before** `start()`
-4. `try OfflineProtocolReferenceStorage.initializeMls(on:appId:profile:)` (built-in stores)
-5. `try offlineProtocol.start()`
+3. `let engine = try OfflineProtocol(config: config)`
+4. `engine.setEventCallback(callback: …)` **before** `start()` (events emitted
+   during startup are lost if the callback is registered late)
+5. `try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)` (built-in stores)
+6. `try engine.start()`
 
 Lab-only cleartext and `EncryptFailed` hints: [native-development-cleartext.md](native-development-cleartext.md).
-Custom protocol-state storage: verify with `StorageConformance.run(on:)` (C11).
 
-Compile-checked sample (depends on the package as an app would):
-[bindings/swift/consumer-check](../bindings/swift/consumer-check/).
+Custom protocol-state storage: run `StorageConformance.run(on:)` on a scratch
+backend before you wire it in. Green on the
+[storage conformance suite](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)
+is what makes a protocol-state backend supported.
+
+Compile-checked sample (package dependency, same call order as above):
+[bindings/swift/consumer-check](../bindings/swift/consumer-check/) (`startWithReferenceStorage` in
+`Use.swift`).
 
 ### What the package contains
 
