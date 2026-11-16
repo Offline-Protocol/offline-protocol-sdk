@@ -24849,84 +24849,140 @@ mod tests {
         }
     }
 
-    /// Native lab cleartext must match React Native's `developmentCleartext`
-    /// preset (`encryptionEnabled` and `requireEncryption` false, BLE on). The
-    /// remedial `EncryptFailed` copy is one string in each platform's
-    /// `IntegratorEncryptionRemedy`, pinned so integrator hints cannot drift.
+    /// Native lab cleartext must match what React Native's
+    /// `developmentCleartext` preset reaches after `create()`, and that config
+    /// must build an engine. The RN numbers are read from `index.ts`, not
+    /// copied here, so a change to an RN default fails this test until both
+    /// native factories follow it. The remedial `EncryptFailed` copy is one
+    /// string in each platform's `IntegratorEncryptionRemedy`, pinned so the
+    /// two cannot drift.
     #[test]
     fn development_cleartext_helpers_are_shipped_on_native_bridges() {
-        let rn =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let read = |path: &str| {
-            std::fs::read_to_string(rn.join(path))
+            std::fs::read_to_string(root.join(path))
                 .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
         };
-        let swift_config = read("ios/DevelopmentCleartextConfig.swift");
-        let kotlin_config =
-            read("android/src/main/java/com/offlineprotocol/DevelopmentCleartextConfig.kt");
-        for (path, body) in [
-            ("DevelopmentCleartextConfig.swift", swift_config.as_str()),
-            ("DevelopmentCleartextConfig.kt", kotlin_config.as_str()),
+
+        // The RN default for `field`, from `<prefix>field ?? <value>` in index.ts.
+        let index_ts = read("bindings/react-native/src/index.ts");
+        let rn_default = |needle: &str| -> String {
+            let at = index_ts
+                .find(needle)
+                .unwrap_or_else(|| panic!("index.ts no longer has `{needle}`"));
+            index_ts[at + needle.len()..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '\'')
+                .collect::<String>()
+                .trim_matches('\'')
+                .to_string()
+        };
+        let per_peer = rn_default("pendingQueue?.maxPendingPerPeer ??");
+        let global = rn_default("pendingQueue?.maxPendingGlobal ??");
+        let ttl_ms = rn_default("pendingQueue?.pendingTtlMs ??");
+        let initial_ttl = rn_default("network?.initialTtl ??");
+        let overflow = rn_default("pendingQueue?.overflowPolicy ??");
+        assert_eq!(
+            overflow, "drop_oldest",
+            "update both native factories' overflowPolicy"
+        );
+
+        let scenarios = read("bindings/react-native/src/configScenarios.ts");
+        let preset = scenarios
+            .split("case 'developmentCleartext':")
+            .nth(1)
+            .and_then(|rest| rest.split("case ").next())
+            .expect("configScenarios.ts has no developmentCleartext case");
+        let preset: String = preset.split_whitespace().collect();
+        assert!(
+            preset.contains("ble:{enabled:true}") && preset.contains("encryption:{enabled:false"),
+            "developmentCleartext changed shape; update both native factories to match"
+        );
+
+        for (path, sep, int_suffix) in [
+            ("bindings/react-native/ios/DevelopmentCleartextConfig.swift", ": ", ""),
+            (
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/DevelopmentCleartextConfig.kt",
+                " = ",
+                "u",
+            ),
         ] {
+            // Digit separators are formatting, not values. Every pinned field
+            // is followed by a comma, which is what stops `initialTtl: 8`
+            // matching `initialTtl: 80`.
+            let body = read(path).replace('_', "");
+            let has = |field: &str, value: &str| body.contains(&format!("{field}{sep}{value},"));
+            for (field, value) in [
+                ("bleEnabled", "true"),
+                ("wifiDirectEnabled", "false"),
+                ("internetEnabled", "false"),
+                ("reticulumEnabled", "false"),
+                ("nostrEnabled", "false"),
+                ("preferOnline", "false"),
+                ("encryptionEnabled", "false"),
+                // RN derives these three from encryption.enabled; the core
+                // refuses requireEncryption without encryptionEnabled.
+                ("autoKeyExchange", "false"),
+                ("storePending", "false"),
+                ("requireEncryption", "false"),
+            ] {
+                assert!(has(field, value), "{path} must set {field} {value}");
+            }
+            for (field, value) in [
+                ("initialTtl", &initial_ttl),
+                ("maxPendingPerPeer", &per_peer),
+                ("maxPendingGlobal", &global),
+                ("pendingTtlMs", &ttl_ms),
+            ] {
+                assert!(
+                    has(field, &format!("{value}{int_suffix}")),
+                    "{path} must set {field} to React Native's default {value}"
+                );
+            }
             assert!(
-                body.contains("bleEnabled: true") || body.contains("bleEnabled = true"),
-                "{path} must enable BLE for developmentCleartext parity"
-            );
-            assert!(
-                body.contains("encryptionEnabled: false")
-                    || body.contains("encryptionEnabled = false"),
-                "{path} must disable encryption for lab cleartext"
-            );
-            assert!(
-                body.contains("requireEncryption: false")
-                    || body.contains("requireEncryption = false"),
-                "{path} must set requireEncryption false (core rejects enabled-false alone)"
-            );
-            assert!(
-                body.contains("autoKeyExchange: false") || body.contains("autoKeyExchange = false"),
-                "{path} must disable autoKeyExchange (RN developmentCleartext posture)"
-            );
-            assert!(
-                body.contains("storePending: false") || body.contains("storePending = false"),
-                "{path} must disable storePending (RN developmentCleartext posture)"
-            );
-            assert!(
-                (body.contains("maxPendingPerPeer: 64") || body.contains("maxPendingPerPeer = 64"))
-                    && (body.contains("maxPendingGlobal: 4_096")
-                        || body.contains("maxPendingGlobal = 4096")),
-                "{path} must use RN default pending queue sizes (64 / 4096)"
-            );
-            assert!(
-                body.contains("OfflineProtocolDevelopmentCleartextConfig"),
-                "{path} must export the native helper type"
+                body.contains("dropOldest") || body.contains("DROPOLDEST"),
+                "{path} must use React Native's drop_oldest overflow policy"
             );
         }
-        let swift_remedy = read("ios/IntegratorEncryptionRemedy.swift");
-        let kotlin_remedy =
-            read("android/src/main/java/com/offlineprotocol/IntegratorEncryptionRemedy.kt");
+
+        // The same values build an engine: field assertions alone would pass
+        // a combination a future validation rule refuses.
+        let mut config = create_ble_only_config();
+        config.wifi_direct_enabled = false;
+        config.internet_enabled = false;
+        config.reticulum_enabled = false;
+        config.nostr_enabled = false;
+        config.prefer_online = false;
+        config.initial_ttl = initial_ttl.parse().expect("initialTtl");
+        config.encryption_enabled = false;
+        config.auto_key_exchange = false;
+        config.store_pending = false;
+        config.require_encryption = false;
+        config.max_pending_per_peer = per_peer.parse().expect("maxPendingPerPeer");
+        config.max_pending_global = global.parse().expect("maxPendingGlobal");
+        config.pending_ttl_ms = ttl_ms.parse().expect("pendingTtlMs");
+        config.overflow_policy = OverflowPolicy::DropOldest;
+        OfflineProtocol::new(config).expect("the lab cleartext config must build an engine");
+
         const NEEDLE_A: &str = "send failed with EncryptFailed because";
-        const NEEDLE_B: &str = "encryption is fail-closed by default";
-        for (name, body) in [
-            ("IntegratorEncryptionRemedy.swift", swift_remedy.as_str()),
-            ("IntegratorEncryptionRemedy.kt", kotlin_remedy.as_str()),
+        const NEEDLE_B: &str = "encryption is fail-closed by default and MLS is not initialized";
+        for path in [
+            "bindings/react-native/ios/IntegratorEncryptionRemedy.swift",
+            "bindings/react-native/android/src/main/java/com/offlineprotocol/IntegratorEncryptionRemedy.kt",
         ] {
+            let body = read(path);
             assert!(
                 body.contains(NEEDLE_A) && body.contains(NEEDLE_B),
-                "{name} missing pinned remedial copy"
+                "{path} missing pinned remedial copy"
             );
         }
         for path in [
             "bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift",
             "bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt",
         ] {
-            let body = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../..")
-                    .join(path),
-            )
-            .expect("read consumer-check");
             assert!(
-                body.contains("OfflineProtocolDevelopmentCleartextConfig"),
+                read(path).contains("OfflineProtocolDevelopmentCleartextConfig"),
                 "{path} must compile the lab config helper"
             );
         }

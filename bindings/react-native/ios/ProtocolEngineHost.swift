@@ -158,15 +158,6 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         )
     }
 
-    private func withEncryptFailedHint<T>(_ context: String, _ body: () throws -> T) rethrows -> T {
-        do {
-            return try body()
-        } catch {
-            lifecycleHints.encryptFailedRemedy(context: context, error: error)
-            throw error
-        }
-    }
-
     // MARK: - Lifecycle
 
     /// Builds the core and every transport manager the config enables, wires
@@ -712,22 +703,18 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     func sendMessage(recipient: String, content: String, priority: Int, replyToMsg: String?) throws -> String {
         warnLifecycleNeedsEngine("sendMessage")
         warnLifecycleSendMls("sendMessage")
-        return try withEncryptFailedHint("sendMessage") {
-            try requireProtocol().sendMessage(
-                recipient: recipient,
-                content: content,
-                priority: Self.messagePriority(fromInt: priority),
-                replyToMsg: replyToMsg
-            )
-        }
+        return try requireProtocol().sendMessage(
+            recipient: recipient,
+            content: content,
+            priority: Self.messagePriority(fromInt: priority),
+            replyToMsg: replyToMsg
+        )
     }
 
     func sendMessageRich(recipient: String, content: String, options: SendMessageOptions) throws -> String {
         warnLifecycleNeedsEngine("sendMessageRich")
         warnLifecycleSendMls("sendMessageRich")
-        return try withEncryptFailedHint("sendMessageRich") {
-            try requireProtocol().sendMessageRich(recipient: recipient, content: content, options: options)
-        }
+        return try requireProtocol().sendMessageRich(recipient: recipient, content: content, options: options)
     }
 
     func receiveMessage() -> String? {
@@ -922,14 +909,12 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         priority: String?,
         replyToMsg: String?
     ) throws -> [String] {
-        try withEncryptFailedHint("meshSendGroupMessage") {
-            try requireProtocol().sendGroupMessage(
-                groupId: groupId,
-                content: content,
-                priority: priority.flatMap { Self.messagePriority(fromString: $0) },
-                replyToMsg: replyToMsg
-            )
-        }
+        try requireProtocol().sendGroupMessage(
+            groupId: groupId,
+            content: content,
+            priority: priority.flatMap { Self.messagePriority(fromString: $0) },
+            replyToMsg: replyToMsg
+        )
     }
 
     func meshForwardMessageToGroup(
@@ -937,13 +922,11 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         groupId: String,
         priority: String?
     ) throws -> [String] {
-        try withEncryptFailedHint("meshForwardMessageToGroup") {
-            try requireProtocol().forwardMessageToGroup(
-                originalMessageJson: originalMessageJson,
-                groupId: groupId,
-                priority: priority.flatMap { Self.messagePriority(fromString: $0) }
-            )
-        }
+        try requireProtocol().forwardMessageToGroup(
+            originalMessageJson: originalMessageJson,
+            groupId: groupId,
+            priority: priority.flatMap { Self.messagePriority(fromString: $0) }
+        )
     }
 
     func meshRemoveFromGroup(groupId: String, memberId: String) throws {

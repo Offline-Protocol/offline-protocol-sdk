@@ -122,8 +122,8 @@ conformance suite and returns a typed report. See
 
 For **lab-only** cleartext smoke tests (never production), use
 **`OfflineProtocolDevelopmentCleartextConfig.make`**, the native counterpart of
-React Native's `developmentCleartext` preset. The first production-path
-`EncryptFailed` on a send can be diagnosed with
+React Native's `developmentCleartext` preset. An `EncryptFailed` on a send with
+MLS not initialized can be diagnosed with
 **`OfflineProtocolEncryptFailedDiagnostics`**. See
 [native-development-cleartext.md](native-development-cleartext.md).
 
