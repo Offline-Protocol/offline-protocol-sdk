@@ -18,7 +18,10 @@ object OfflineProtocolDevelopmentCleartextConfig {
             "tests only. Production builds must use default encryption and " +
             "OfflineProtocolReferenceStorage.initializeMls before start()."
 
-    /** Same encryption posture as `forScenario("developmentCleartext")` after `create()`. */
+    /**
+     * Same encryption posture as `forScenario("developmentCleartext")` after `create()`:
+     * encryption off, `requireEncryption` off, and sibling MLS flags off.
+     */
     fun make(
         appId: String,
         profile: String,
@@ -34,8 +37,8 @@ object OfflineProtocolDevelopmentCleartextConfig {
             preferOnline = false,
             initialTtl = 8u,
             encryptionEnabled = false,
-            autoKeyExchange = true,
-            storePending = true,
+            autoKeyExchange = false,
+            storePending = false,
             requireEncryption = false,
             maxPendingPerPeer = 100u,
             maxPendingGlobal = 1000u,

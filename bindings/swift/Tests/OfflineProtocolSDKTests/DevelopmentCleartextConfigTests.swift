@@ -13,6 +13,8 @@ final class DevelopmentCleartextConfigTests: XCTestCase {
         XCTAssertFalse(config.wifiDirectEnabled)
         XCTAssertFalse(config.internetEnabled)
         XCTAssertFalse(config.encryptionEnabled)
+        XCTAssertFalse(config.autoKeyExchange)
+        XCTAssertFalse(config.storePending)
         XCTAssertFalse(config.requireEncryption)
     }
 

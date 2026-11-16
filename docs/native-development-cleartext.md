@@ -74,7 +74,9 @@ try {
 
 Hosts built on **`ProtocolEngineHost`** (Flutter, hand-written native hosts)
 receive the same text through the integrator lifecycle hints channel when
-`integratorLifecycleWarnings` is enabled in debug builds.
+`integratorLifecycleWarnings` is enabled in debug builds. That includes
+`sendMessage`, `sendMessageRich`, `meshSendGroupMessage`, and
+`meshForwardMessageToGroup` (one hint per process for any `EncryptFailed`).
 
 See also [MLS integration](mls-integration.md), [integrator map](integrator-map.md),
 and [configuration](configuration.md).

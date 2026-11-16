@@ -22,7 +22,8 @@ public enum OfflineProtocolDevelopmentCleartextConfig {
         + "OfflineProtocolReferenceStorage.initializeMls before start()."
 
     /// Builds a `ProtocolConfig` with the same encryption posture React Native's
-    /// `forScenario(\"developmentCleartext\")` reaches after `create()`.
+    /// `forScenario(\"developmentCleartext\")` reaches after `create()`:
+    /// encryption off, `requireEncryption` off, and sibling MLS flags off.
     public static func make(appId: String, profile: String) -> ProtocolConfig {
         ProtocolConfig(
             appId: appId,
@@ -35,8 +36,8 @@ public enum OfflineProtocolDevelopmentCleartextConfig {
             preferOnline: false,
             initialTtl: 8,
             encryptionEnabled: false,
-            autoKeyExchange: true,
-            storePending: true,
+            autoKeyExchange: false,
+            storePending: false,
             requireEncryption: false,
             maxPendingPerPeer: 100,
             maxPendingGlobal: 1_000,

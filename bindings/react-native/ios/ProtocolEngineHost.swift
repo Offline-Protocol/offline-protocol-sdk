@@ -922,12 +922,14 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         priority: String?,
         replyToMsg: String?
     ) throws -> [String] {
-        try requireProtocol().sendGroupMessage(
-            groupId: groupId,
-            content: content,
-            priority: priority.flatMap { Self.messagePriority(fromString: $0) },
-            replyToMsg: replyToMsg
-        )
+        try withEncryptFailedHint("meshSendGroupMessage") {
+            try requireProtocol().sendGroupMessage(
+                groupId: groupId,
+                content: content,
+                priority: priority.flatMap { Self.messagePriority(fromString: $0) },
+                replyToMsg: replyToMsg
+            )
+        }
     }
 
     func meshForwardMessageToGroup(
@@ -935,11 +937,13 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         groupId: String,
         priority: String?
     ) throws -> [String] {
-        try requireProtocol().forwardMessageToGroup(
-            originalMessageJson: originalMessageJson,
-            groupId: groupId,
-            priority: priority.flatMap { Self.messagePriority(fromString: $0) }
-        )
+        try withEncryptFailedHint("meshForwardMessageToGroup") {
+            try requireProtocol().forwardMessageToGroup(
+                originalMessageJson: originalMessageJson,
+                groupId: groupId,
+                priority: priority.flatMap { Self.messagePriority(fromString: $0) }
+            )
+        }
     }
 
     func meshRemoveFromGroup(groupId: String, memberId: String) throws {

@@ -14,6 +14,8 @@ class DevelopmentCleartextConfigTest {
         assertFalse(config.wifiDirectEnabled)
         assertFalse(config.internetEnabled)
         assertFalse(config.encryptionEnabled)
+        assertFalse(config.autoKeyExchange)
+        assertFalse(config.storePending)
         assertFalse(config.requireEncryption)
     }
 

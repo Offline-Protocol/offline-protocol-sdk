@@ -635,12 +635,16 @@ class ProtocolEngineHost(
 
     fun meshSendGroupMessage(groupId: String, content: String, priority: String?, replyToMsg: String?): List<String> {
         val msgPriority = priority?.let { messagePriorityFromString(it) }
-        return requireProtocol().sendGroupMessage(groupId, content, msgPriority, replyToMsg)
+        return withEncryptFailedHint("meshSendGroupMessage") {
+            requireProtocol().sendGroupMessage(groupId, content, msgPriority, replyToMsg)
+        }
     }
 
     fun meshForwardMessageToGroup(originalMessageJson: String, groupId: String, priority: String?): List<String> {
         val msgPriority = priority?.let { messagePriorityFromString(it) }
-        return requireProtocol().forwardMessageToGroup(originalMessageJson, groupId, msgPriority)
+        return withEncryptFailedHint("meshForwardMessageToGroup") {
+            requireProtocol().forwardMessageToGroup(originalMessageJson, groupId, msgPriority)
+        }
     }
 
     fun meshRemoveFromGroup(groupId: String, memberId: String) =
