@@ -44,8 +44,12 @@ val protocol = OfflineProtocol(config)
 
 ## When sends fail with `EncryptFailed`
 
-With default encryption, the first `EncryptFailed` on a send means MLS is missing
-or not ready. Direct UniFFI callers can log a one-shot remediation:
+With default encryption and MLS not initialized, every send fails with
+`EncryptFailed`. The same error also comes back with MLS initialized, for a
+different reason (an encrypt that failed on a confirmed session, or a
+document-layer transfer that cannot leave unsealed), so the error alone does not
+say MLS is missing. Direct UniFFI callers pass the engine's own answer, and the
+helper logs its one-shot remediation only when MLS is not initialized:
 
 ```swift
 do {
@@ -54,6 +58,7 @@ do {
     OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded(
         context: "sendMessage",
         error: error,
+        mlsInitialized: mesh.isMlsInitialized(),
         sink: { print($0) }
     )
     throw error
@@ -67,16 +72,21 @@ try {
     OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded(
         "sendMessage",
         error,
+        protocol.isMlsInitialized(),
     ) { Log.w("Mesh", it) }
     throw error
 }
 ```
 
 Hosts built on **`ProtocolEngineHost`** (Flutter, hand-written native hosts)
-receive the same text through the integrator lifecycle hints channel when
-`integratorLifecycleWarnings` is enabled in debug builds. That includes
-`sendMessage`, `sendMessageRich`, `meshSendGroupMessage`, and
-`meshForwardMessageToGroup` (one hint per process for any `EncryptFailed`).
+receive the same remedy through the integrator lifecycle hints channel when
+`integratorLifecycleWarnings` is enabled in debug builds. It covers
+`sendMessage` and `sendMessageRich`, fires once per engine, and only when
+encryption is on and MLS is not initialized. A send made while the engine runs
+already gets the "encryption is enabled but MLS is not initialized" hint before
+the call, so the remedy appears for the case that hint does not cover: a send
+made before `start()`. Group sends are not wrapped: they need an MLS group, so
+they never fail this way for want of MLS.
 
 See also [MLS integration](mls-integration.md), [integrator map](integrator-map.md),
 and [configuration](configuration.md).

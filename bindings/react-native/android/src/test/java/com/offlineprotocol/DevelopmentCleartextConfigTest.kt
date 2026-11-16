@@ -26,9 +26,21 @@ class DevelopmentCleartextConfigTest {
         OfflineProtocolEncryptFailedDiagnostics.resetForTests()
         val sink = mutableListOf<String>()
         val error = ProtocolException.EncryptFailed("boom")
-        OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded("sendMessage", error, sink::add)
-        OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded("sendMessage", error, sink::add)
+        // MLS initialized: the error has another cause, so nothing is logged
+        // and the once-guard is not spent.
+        OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded("sendMessage", error, true, sink::add)
+        assertEquals(0, sink.size)
+        OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded("sendMessage", error, false, sink::add)
+        OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded("sendMessage", error, false, sink::add)
         assertEquals(1, sink.size)
         assertTrue(sink[0].contains("OfflineProtocolDevelopmentCleartextConfig"))
+        assertTrue(sink[0].contains("OfflineProtocolReferenceStorage.initializeMls"))
+    }
+
+    @Test
+    fun onlyEncryptFailedIsClassifiedAsEncryptFailed() {
+        assertTrue(OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(ProtocolException.EncryptFailed("x")))
+        assertFalse(OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(ProtocolException.InvalidArgument("x")))
+        assertFalse(OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(IllegalStateException("EncryptFailed")))
     }
 }

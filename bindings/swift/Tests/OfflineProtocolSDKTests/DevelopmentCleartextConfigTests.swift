@@ -24,28 +24,30 @@ final class DevelopmentCleartextConfigTests: XCTestCase {
         OfflineProtocolEncryptFailedDiagnostics.resetForTests()
         var lines: [String] = []
         let error = ProtocolError.EncryptFailed(message: "boom")
+        // MLS initialized: the error has another cause, so nothing is logged
+        // and the once-guard is not spent.
         OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded(
             context: "sendMessage",
             error: error,
+            mlsInitialized: true,
             sink: { lines.append($0) }
         )
-        OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded(
-            context: "sendMessage",
-            error: error,
-            sink: { lines.append($0) }
-        )
+        XCTAssertTrue(lines.isEmpty)
+        for _ in 0..<2 {
+            OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded(
+                context: "sendMessage",
+                error: error,
+                mlsInitialized: false,
+                sink: { lines.append($0) }
+            )
+        }
         XCTAssertEqual(lines.count, 1)
         XCTAssertTrue(lines[0].contains("OfflineProtocolDevelopmentCleartextConfig"))
+        XCTAssertTrue(lines[0].contains("OfflineProtocolReferenceStorage.initializeMls"))
     }
 
-    func testLifecycleHintsEmitEncryptFailedRemedyOnce() {
-        var messages: [String] = []
-        let hints = IntegratorLifecycleHints(enabled: true) { messages.append($0) }
-        let error = ProtocolError.EncryptFailed(message: "boom")
-        hints.encryptFailedRemedy(context: "sendMessage", error: error)
-        hints.encryptFailedRemedy(context: "sendMessageRich", error: error)
-        XCTAssertEqual(messages.count, 1)
-        XCTAssertTrue(messages[0].contains("send failed with EncryptFailed"))
-        XCTAssertTrue(messages[0].contains("native-development-cleartext"))
+    func testOnlyEncryptFailedIsClassifiedAsEncryptFailed() {
+        XCTAssertTrue(OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(ProtocolError.EncryptFailed(message: "x")))
+        XCTAssertFalse(OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(ProtocolError.InvalidArgument(message: "x")))
     }
 }

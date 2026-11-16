@@ -83,7 +83,15 @@ class ProtocolEngineHost(
         try {
             body()
         } catch (error: Throwable) {
-            lifecycleHints.encryptFailedRemedy(context, error)
+            if (lifecycleHints.enabled && OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(error)) {
+                protocol?.let {
+                    lifecycleHints.encryptFailedRemedy(
+                        context,
+                        encryptionEnabledForHints(),
+                        it.isMlsInitialized(),
+                    )
+                }
+            }
             throw error
         }
 
@@ -635,16 +643,12 @@ class ProtocolEngineHost(
 
     fun meshSendGroupMessage(groupId: String, content: String, priority: String?, replyToMsg: String?): List<String> {
         val msgPriority = priority?.let { messagePriorityFromString(it) }
-        return withEncryptFailedHint("meshSendGroupMessage") {
-            requireProtocol().sendGroupMessage(groupId, content, msgPriority, replyToMsg)
-        }
+        return requireProtocol().sendGroupMessage(groupId, content, msgPriority, replyToMsg)
     }
 
     fun meshForwardMessageToGroup(originalMessageJson: String, groupId: String, priority: String?): List<String> {
         val msgPriority = priority?.let { messagePriorityFromString(it) }
-        return withEncryptFailedHint("meshForwardMessageToGroup") {
-            requireProtocol().forwardMessageToGroup(originalMessageJson, groupId, msgPriority)
-        }
+        return requireProtocol().forwardMessageToGroup(originalMessageJson, groupId, msgPriority)
     }
 
     fun meshRemoveFromGroup(groupId: String, memberId: String) =

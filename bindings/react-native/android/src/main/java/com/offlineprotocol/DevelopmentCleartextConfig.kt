@@ -49,8 +49,9 @@ object OfflineProtocolDevelopmentCleartextConfig {
 
 /**
  * One-shot remediation when fail-closed encryption rejects a send with
- * `EncryptFailed`. Direct UniFFI callers use this in a catch; [ProtocolEngineHost]
- * emits the same text through [IntegratorLifecycleHints].
+ * `EncryptFailed` because MLS is not initialized. Direct UniFFI callers use this
+ * in a catch, passing `protocol.isMlsInitialized()`; [ProtocolEngineHost] emits
+ * the same text through [IntegratorLifecycleHints].
  */
 object OfflineProtocolEncryptFailedDiagnostics {
     @Volatile
@@ -58,7 +59,7 @@ object OfflineProtocolEncryptFailedDiagnostics {
 
     /** Resets the once-per-process guard (tests only). */
     @JvmStatic
-    fun resetForTests() {
+    internal fun resetForTests() {
         warned = false
     }
 
@@ -68,13 +69,20 @@ object OfflineProtocolEncryptFailedDiagnostics {
     @JvmStatic
     fun remedyMessage(context: String): String = IntegratorEncryptionRemedy.message(context)
 
+    /**
+     * Logs [remedyMessage] at most once per process, for an `EncryptFailed` with
+     * MLS not initialized. With [mlsInitialized] true the error has another
+     * cause (a session encrypt failure, a transfer that cannot leave unsealed)
+     * and nothing is logged.
+     */
     @JvmStatic
     fun logFirstRemedyIfNeeded(
         context: String,
         error: Throwable,
+        mlsInitialized: Boolean,
         sink: (String) -> Unit,
     ) {
-        if (!isEncryptFailed(error)) return
+        if (mlsInitialized || !isEncryptFailed(error)) return
         val first = synchronized(this) {
             if (warned) false else {
                 warned = true

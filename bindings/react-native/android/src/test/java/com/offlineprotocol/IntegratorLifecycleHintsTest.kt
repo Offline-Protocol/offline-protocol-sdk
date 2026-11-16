@@ -4,7 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import uniffi.offline_protocol.ProtocolException
 
 /**
  * The hints mirror `lifecycleHints.ts`: each fires only on a real ordering
@@ -21,21 +20,45 @@ class IntegratorLifecycleHintsTest {
         h.callBeforeEngineStart("sendMessage", engineRunning = false)
         h.startWithoutMls(encryptionEnabled = true, mlsReady = false)
         h.sendWithoutMls("sendMessage", encryptionEnabled = true, mlsReady = false, engineRunning = true)
-        h.encryptFailedRemedy("sendMessage", ProtocolException.EncryptFailed("boom"))
+        h.encryptFailedRemedy("sendMessage", encryptionEnabled = true, mlsReady = false)
         h.dataStorageUnavailable("dataCreateDoc")
         h.interestApplied("notes", listOf("a"), engineRunning = true)
         assertEquals(emptyList<String>(), messages)
     }
 
     @Test
-    fun encryptFailedRemedyFiresOnce() {
+    fun encryptFailedRemedyFiresOnceForAMissingMls() {
         val h = hints()
-        val error = ProtocolException.EncryptFailed("boom")
-        h.encryptFailedRemedy("sendMessage", error)
-        h.encryptFailedRemedy("sendMessageRich", error)
+        h.encryptFailedRemedy("sendMessage", encryptionEnabled = true, mlsReady = false)
+        h.encryptFailedRemedy("sendMessageRich", encryptionEnabled = true, mlsReady = false)
         assertEquals(1, messages.size)
-        assertTrue(messages[0].contains("send failed with EncryptFailed"))
+        assertTrue(messages[0].contains("sendMessage: send failed with EncryptFailed"))
+        assertTrue(messages[0].contains("initializeMlsWithSecureStorage()"))
         assertTrue(messages[0].contains("native-development-cleartext"))
+    }
+
+    @Test
+    fun encryptFailedRemedyIsSilentWhenMlsIsNotTheCause() {
+        val h = hints()
+        // MLS ready: the engine returns EncryptFailed for a session encrypt
+        // failure or an unsealable transfer too, and "initialize MLS" is wrong there.
+        h.encryptFailedRemedy("sendMessage", encryptionEnabled = true, mlsReady = true)
+        h.encryptFailedRemedy("sendMessage", encryptionEnabled = false, mlsReady = false)
+        assertEquals(emptyList<String>(), messages)
+    }
+
+    @Test
+    fun encryptFailedRemedyDefersToThePreSendHintForTheSameCall() {
+        val h = hints()
+        h.sendWithoutMls("sendMessage", encryptionEnabled = true, mlsReady = false, engineRunning = true)
+        h.encryptFailedRemedy("sendMessage", encryptionEnabled = true, mlsReady = false)
+        assertEquals(1, messages.size)
+        assertTrue(messages[0].contains("sendMessage: encryption is enabled but MLS is not initialized"))
+        assertTrue(messages[0].contains("OfflineProtocolDevelopmentCleartextConfig.make"))
+        // A call the pre-send hint did not cover still gets the remedy.
+        h.encryptFailedRemedy("sendMessageRich", encryptionEnabled = true, mlsReady = false)
+        assertEquals(2, messages.size)
+        assertTrue(messages[1].contains("sendMessageRich: send failed with EncryptFailed"))
     }
 
     @Test

@@ -48,14 +48,15 @@ public enum OfflineProtocolDevelopmentCleartextConfig {
 }
 
 /// One-shot remediation when fail-closed encryption rejects a send with
-/// `EncryptFailed`. Hosts that call UniFFI directly use this in a `catch`;
+/// `EncryptFailed` because MLS is not initialized. Hosts that call UniFFI
+/// directly use this in a `catch`, passing `mesh.isMlsInitialized()`;
 /// `ProtocolEngineHost` wires the same text through `IntegratorLifecycleHints`.
 public enum OfflineProtocolEncryptFailedDiagnostics {
     private static let lock = NSLock()
     private static var warned = false
 
     /// Resets the once-per-process guard (tests only).
-    public static func resetForTests() {
+    static func resetForTests() {
         lock.lock()
         warned = false
         lock.unlock()
@@ -71,9 +72,17 @@ public enum OfflineProtocolEncryptFailedDiagnostics {
         IntegratorEncryptionRemedy.message(context: context)
     }
 
-    /// Logs `remedyMessage(context)` at most once for any `EncryptFailed`.
-    public static func logFirstRemedyIfNeeded(context: String, error: Error, sink: (String) -> Void) {
-        guard isEncryptFailed(error) else { return }
+    /// Logs `remedyMessage(context:)` at most once per process, for an
+    /// `EncryptFailed` with MLS not initialized. With `mlsInitialized` true the
+    /// error has another cause (a session encrypt failure, a transfer that
+    /// cannot leave unsealed) and nothing is logged.
+    public static func logFirstRemedyIfNeeded(
+        context: String,
+        error: Error,
+        mlsInitialized: Bool,
+        sink: (String) -> Void
+    ) {
+        guard !mlsInitialized, isEncryptFailed(error) else { return }
         lock.lock()
         let first = !warned
         if first { warned = true }

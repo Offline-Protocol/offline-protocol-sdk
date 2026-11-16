@@ -12,7 +12,12 @@
 // valid order (after MLS init but before start, while stopped, while paused).
 //
 // The semantics mirror bindings/react-native/src/lifecycleHints.ts and the
-// Kotlin IntegratorLifecycleHints; keep the three in step. One instance per
+// Kotlin IntegratorLifecycleHints; keep the three in step. Two differences
+// are native-only: the cleartext remedy names
+// OfflineProtocolDevelopmentCleartextConfig (on the native path
+// `encryptionEnabled: false` alone fails validation while `requireEncryption`
+// keeps its `true` default), and encryptFailedRemedy has no TypeScript twin.
+// One instance per
 // host: the dedupe set and the applied interest belong to that host, and are
 // read from whatever queue calls it, so both sit behind a lock.
 //
@@ -66,7 +71,8 @@ final class IntegratorLifecycleHints {
             key: "start:mls",
             message: "[OfflineProtocol] start() with encryption enabled before "
                 + "initializeMlsWithSecureStorage(). Secure send and handshake fail until it runs, "
-                + "or set encryptionEnabled to false for cleartext-only tests. See \(Self.doc)."
+                + "or build the config with OfflineProtocolDevelopmentCleartextConfig.make for "
+                + "lab-only cleartext tests. See \(Self.doc)."
         )
     }
 
@@ -76,27 +82,35 @@ final class IntegratorLifecycleHints {
             key: "mls:\(context)",
             message: "[OfflineProtocol] \(context): encryption is enabled but MLS is not initialized. "
                 + "Secure send and handshake may fail until it is. Run "
-                + "initializeMlsWithSecureStorage() successfully, or set encryptionEnabled "
-                + "to false for cleartext-only tests."
+                + "initializeMlsWithSecureStorage() successfully, or build the config with "
+                + "OfflineProtocolDevelopmentCleartextConfig.make for lab-only cleartext tests."
         )
     }
 
-    /// After a fail-closed send returns `EncryptFailed` (production default).
-    func encryptFailedRemedy(context: String, error: Error) {
-        guard Self.errorIsEncryptFailed(error) else { return }
-        warnOnce(
-            key: "encrypt:failed",
-            message: IntegratorEncryptionRemedy.message(context: context)
-        )
+    /// Call after a send failed with `EncryptFailed`; the host classifies the
+    /// error, so this file compiles in the policy harness without the
+    /// Generated error type.
+    ///
+    /// The variant alone does not say why the send failed: the engine also
+    /// returns it with MLS initialized (a confirmed session whose encrypt
+    /// failed, a transfer that cannot leave unsealed), and telling that app to
+    /// initialize MLS is a hint on correct code. So this fires only with
+    /// encryption on and MLS not ready, and stays quiet when `sendWithoutMls`
+    /// already named the cause for this `context`: what is left is a send made
+    /// before start(), which the pre-send hint does not cover.
+    func encryptFailedRemedy(context: String, encryptionEnabled: Bool, mlsReady: Bool) {
+        guard enabled, encryptionEnabled, !mlsReady else { return }
+        lock.lock()
+        let first = !warnedKeys.contains("mls:\(context)")
+            && warnedKeys.insert("encrypt:failed").inserted
+        lock.unlock()
+        if first {
+            sink(IntegratorEncryptionRemedy.message(context: context, initializer: Self.hostMlsInitializer))
+        }
     }
 
-    private static func errorIsEncryptFailed(_ error: Error) -> Bool {
-        #if OFFLINE_PROTOCOL_HARNESS_SHIMS
-        return String(reflecting: error).contains("EncryptFailed")
-        #else
-        return OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(error)
-        #endif
-    }
+    /// What a ProtocolEngineHost caller runs to initialize MLS (the other hints name it too).
+    private static let hostMlsInitializer = "initializeMlsWithSecureStorage()"
 
     /// The engine refused `context` with `DataStorageUnavailable`.
     func dataStorageUnavailable(context: String) {

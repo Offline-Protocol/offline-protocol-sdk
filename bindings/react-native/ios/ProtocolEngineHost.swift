@@ -162,7 +162,15 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         do {
             return try body()
         } catch {
-            lifecycleHints.encryptFailedRemedy(context: context, error: error)
+            if lifecycleHints.enabled,
+               OfflineProtocolEncryptFailedDiagnostics.isEncryptFailed(error),
+               let proto = protocolInstance {
+                lifecycleHints.encryptFailedRemedy(
+                    context: context,
+                    encryptionEnabled: encryptionEnabledForHints(),
+                    mlsReady: proto.isMlsInitialized()
+                )
+            }
             throw error
         }
     }
@@ -922,14 +930,12 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         priority: String?,
         replyToMsg: String?
     ) throws -> [String] {
-        try withEncryptFailedHint("meshSendGroupMessage") {
-            try requireProtocol().sendGroupMessage(
-                groupId: groupId,
-                content: content,
-                priority: priority.flatMap { Self.messagePriority(fromString: $0) },
-                replyToMsg: replyToMsg
-            )
-        }
+        try requireProtocol().sendGroupMessage(
+            groupId: groupId,
+            content: content,
+            priority: priority.flatMap { Self.messagePriority(fromString: $0) },
+            replyToMsg: replyToMsg
+        )
     }
 
     func meshForwardMessageToGroup(
@@ -937,13 +943,11 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         groupId: String,
         priority: String?
     ) throws -> [String] {
-        try withEncryptFailedHint("meshForwardMessageToGroup") {
-            try requireProtocol().forwardMessageToGroup(
-                originalMessageJson: originalMessageJson,
-                groupId: groupId,
-                priority: priority.flatMap { Self.messagePriority(fromString: $0) }
-            )
-        }
+        try requireProtocol().forwardMessageToGroup(
+            originalMessageJson: originalMessageJson,
+            groupId: groupId,
+            priority: priority.flatMap { Self.messagePriority(fromString: $0) }
+        )
     }
 
     func meshRemoveFromGroup(groupId: String, memberId: String) throws {
