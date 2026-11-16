@@ -160,7 +160,6 @@ import OfflineProtocolSDK
 
 // Build `config` with the full `ProtocolConfig(...)` — see
 // docs/configuration.md and docs/ios-native-distribution.md.
-let config = ProtocolConfig(/* … */)
 let mesh = try OfflineProtocol(config: config)
 mesh.setEventCallback(callback: yourHandler) // before start()
 

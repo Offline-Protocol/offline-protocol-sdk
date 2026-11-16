@@ -54,8 +54,10 @@ hands inbound bytes back.
 6. `try engine.start()` — then wire transports (see the integration guide on the main repo)
 
 Custom protocol-state storage must pass `StorageConformance.run(on:)` before
-you call `initializeMls`. Lab-only cleartext is documented under
-`OfflineProtocolDevelopmentCleartextConfig` in the same guide.
+you call `initializeMls` (see the
+[distribution guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/ios-native-distribution.md)).
+Lab-only cleartext and `OfflineProtocolDevelopmentCleartextConfig` are in
+[native development cleartext](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/native-development-cleartext.md).
 
 Transports, plist entries, and background modes are still application wiring;
 the package ships the managers, not a drop-in mesh UI.
