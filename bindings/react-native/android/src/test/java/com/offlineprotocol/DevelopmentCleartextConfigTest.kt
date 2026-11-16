@@ -17,8 +17,8 @@ class DevelopmentCleartextConfigTest {
         assertFalse(config.autoKeyExchange)
         assertFalse(config.storePending)
         assertFalse(config.requireEncryption)
-        assertEquals(64u, config.maxPendingPerPeer)
-        assertEquals(4096u, config.maxPendingGlobal)
+        assertEquals(64uL, config.maxPendingPerPeer)
+        assertEquals(4096uL, config.maxPendingGlobal)
     }
 
     @Test

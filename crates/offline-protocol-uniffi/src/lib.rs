@@ -24883,18 +24883,15 @@ mod tests {
                 "{path} must set requireEncryption false (core rejects enabled-false alone)"
             );
             assert!(
-                body.contains("autoKeyExchange: false")
-                    || body.contains("autoKeyExchange = false"),
+                body.contains("autoKeyExchange: false") || body.contains("autoKeyExchange = false"),
                 "{path} must disable autoKeyExchange (RN developmentCleartext posture)"
             );
             assert!(
-                body.contains("storePending: false")
-                    || body.contains("storePending = false"),
+                body.contains("storePending: false") || body.contains("storePending = false"),
                 "{path} must disable storePending (RN developmentCleartext posture)"
             );
             assert!(
-                (body.contains("maxPendingPerPeer: 64")
-                    || body.contains("maxPendingPerPeer = 64"))
+                (body.contains("maxPendingPerPeer: 64") || body.contains("maxPendingPerPeer = 64"))
                     && (body.contains("maxPendingGlobal: 4_096")
                         || body.contains("maxPendingGlobal = 4096")),
                 "{path} must use RN default pending queue sizes (64 / 4096)"
