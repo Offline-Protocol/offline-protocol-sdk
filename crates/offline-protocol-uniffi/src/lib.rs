@@ -25437,9 +25437,8 @@ mod tests {
         let index = std::fs::read_to_string(rn.join("src/index.ts")).expect("index.ts");
         let ts_doc = std::fs::read_to_string(repo.join("docs/bridges/typescript.md"))
             .expect("typescript.md");
-        let integration =
-            std::fs::read_to_string(repo.join("docs/react-native-integration.md"))
-                .expect("react-native-integration.md");
+        let integration = std::fs::read_to_string(repo.join("docs/react-native-integration.md"))
+            .expect("react-native-integration.md");
 
         let ts_tags: BTreeSet<String> = types_ts
             .lines()
