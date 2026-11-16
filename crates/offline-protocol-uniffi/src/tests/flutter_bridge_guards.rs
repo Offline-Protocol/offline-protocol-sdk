@@ -649,6 +649,26 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
         assemble.contains("ios_deployment_target"),
         "assemble script must pin ios_deployment_target from MeshSdk.podspec"
     );
+    // Pub hides files through ignore rules no layout check sees: the
+    // repository's .gitignore when the tree sits inside a git work tree, and
+    // any .gitignore shipped in the tree (the plugin's own ios/.gitignore hides
+    // BridgeRN and Frameworks). The script refuses the first and deletes the
+    // second; the fixture test's dry-run proves the archive.
+    assert!(
+        assemble.contains("inside a git work tree")
+            && assemble.contains("-name .gitignore -type f -delete"),
+        "assemble-flutter-pub-package.sh must refuse a git work tree and ship no .gitignore"
+    );
+    assert!(
+        assemble.contains("sync_bridge_rn.sh") && assemble.contains("ios-deployment-target.sh"),
+        "assemble-flutter-pub-package.sh must reuse sync_bridge_rn.sh and the one \
+         deployment-target parser rather than a copy of either"
+    );
+    let fixture = read_text(&repo.join("scripts/tests/test-assemble-flutter-pub-package.sh"));
+    assert!(
+        fixture.contains("flutter pub publish --dry-run"),
+        "the fixture test must dry-run publish the assembled tree"
+    );
     let verify = read_text(&repo.join("scripts/verify-flutter-pub-podspec.sh"));
     assert!(
         verify.contains("pod ipc spec"),
@@ -658,6 +678,29 @@ fn flutter_pub_distribution_path_is_documented_and_pinned() {
     assert!(
         release.contains("verify-flutter-pub-podspec.sh"),
         "release.yml must verify the Flutter pub podspec after assemble"
+    );
+    let job = |name: &str| -> &str {
+        let start = release
+            .find(&format!("\n  {name}:\n"))
+            .unwrap_or_else(|| panic!("release.yml has no `{name}` job"));
+        let rest = &release[start + 1..];
+        let end = rest[2..].find("\n  # ").map_or(rest.len(), |i| i + 2);
+        &rest[..end]
+    };
+    let assemble_job = job("flutter-pub-package");
+    assert!(
+        assemble_job.contains("$RUNNER_TEMP/flutter-pub-package")
+            && assemble_job.contains("include-hidden-files: true"),
+        "flutter-pub-package must assemble outside the checkout and upload the tree with \
+         its .pubignore"
+    );
+    let publish_job = job("publish-flutter-pub");
+    assert!(
+        publish_job.contains("id-token: write")
+            && publish_job.contains("audience=https%3A%2F%2Fpub.dev")
+            && !publish_job.contains("secrets."),
+        "publish-flutter-pub must publish through pub.dev automated publishing (OIDC), \
+         with no stored token"
     );
     let doc = std::fs::read_to_string(repo.join("docs/flutter-distribution.md"))
         .unwrap_or_else(|e| panic!("docs/flutter-distribution.md: {e}"));

@@ -2,13 +2,17 @@
 # Exercises scripts/assemble-flutter-pub-package.sh on a fixture tree (refusals
 # and one success path). The success path needs no NDK: it stubs jniLibs,
 # XCFramework, and generated bindings where the layout check looks.
+#
+# The success path ends in `flutter pub publish --dry-run`, because what pub
+# puts in the archive is decided by ignore files the layout check cannot see:
+# a tree that passes every file test can still publish without its iOS bridge.
+# Needs Flutter and CocoaPods on PATH.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ASSEMBLE="$REPO_ROOT/scripts/assemble-flutter-pub-package.sh"
 VERIFY_PODSPEC="$REPO_ROOT/scripts/verify-flutter-pub-podspec.sh"
-STAGE="$REPO_ROOT/bindings/flutter/scripts/stage-plugin-native-artifacts.sh"
 
 FAILURES=0
 pass() { echo "  ok: $*"; }
@@ -41,6 +45,8 @@ build_fixture() {
   echo "swift" >"$rn/ios/offline_protocol.swift"
   printf '%s\n' 's.platforms    = { :ios => "13.0" }' >"$rn/MeshSdk.podspec"
   touch "$rn/ios/PrivacyInfo.xcprivacy"
+  # The React Native package carries its own ios/.gitignore; pub would honour it.
+  printf '%s\n' '.build/' >"$rn/ios/.gitignore"
   for legal in LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md; do
     echo "$legal" >"$root/$legal"
   done
@@ -54,6 +60,18 @@ if PACKAGE_SOURCE_ROOT="$WORK/fixture-refuse" bash "$ASSEMBLE" \
   fail "non-empty output was accepted"
 else
   pass "non-empty output refused"
+fi
+
+echo "== assemble refuses an output inside a git work tree =="
+mkdir -p "$WORK/repo"
+git -C "$WORK/repo" init -q
+if PACKAGE_SOURCE_ROOT="$WORK/fixture-refuse" bash "$ASSEMBLE" \
+  --output "$WORK/repo/out" --version 1.0.0 >"$WORK/git.log" 2>&1; then
+  fail "an output inside a git work tree was accepted"
+elif grep -q 'inside a git work tree' "$WORK/git.log"; then
+  pass "output inside a git work tree refused"
+else
+  fail "refused for another reason: $(cat "$WORK/git.log")"
 fi
 
 echo "== success on a fixture tree =="
@@ -85,12 +103,42 @@ if [ -f "$OUT/android/src/main/jniLibs/arm64-v8a/libuniffi_offline_protocol.so" 
 else
   fail "native libraries missing from the staged locations or duplicated in the vendored bridge"
 fi
+if [ -z "$(find "$OUT" \( -name .gitignore -o -name .pubignore \) -not -path "$OUT/.pubignore")" ]; then
+  pass "no ignore file but the root .pubignore ships"
+else
+  fail "an ignore file ships in the tree and would hide files from pub"
+fi
+if [ -f "$OUT/README.md" ] && grep -q '^## 1.2.3$' "$OUT/CHANGELOG.md"; then
+  pass "README and a CHANGELOG naming the version"
+else
+  fail "README.md or CHANGELOG.md missing, or the CHANGELOG does not name 1.2.3"
+fi
 if bash "$VERIFY_PODSPEC" "$OUT" >"$WORK/pod.log" 2>&1; then
   pass "iOS podspec evaluates (pod ipc spec)"
 else
   fail "podspec verification failed"
   cat "$WORK/pod.log" >&2
 fi
+
+echo "== pub publish --dry-run on the assembled tree =="
+if (cd "$OUT" && flutter pub publish --dry-run) >"$WORK/dry.log" 2>&1; then
+  pass "dry-run publish passes with no errors or warnings"
+else
+  fail "dry-run publish failed"
+  cat "$WORK/dry.log" >&2
+fi
+# The archive listing is a tree, so match the names that only appear where the
+# iOS bridge, the staged framework and the staged libraries live.
+for entry in BridgeRN Generated Frameworks liboffline_protocol_uniffi.a \
+  libuniffi_offline_protocol.so pub_bridge_version.json README.md CHANGELOG.md LICENSE; do
+  # Anchored to a tree line, so pub's own "Please add a CHANGELOG.md" warning
+  # does not count as the file.
+  if grep -qE -- "── ${entry//./\\.}( |\$)" "$WORK/dry.log"; then
+    pass "archive carries $entry"
+  else
+    fail "archive is missing $entry"
+  fi
+done
 
 if [ "$FAILURES" -eq 0 ]; then
   echo "All Flutter pub package assemble checks passed."

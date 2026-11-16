@@ -255,6 +255,9 @@ jobs:
 
             native_scripts:
               - 'scripts/**'
+              # The Flutter pub package is assembled from these.
+              - 'bindings/flutter/offline_protocol/**'
+              - 'bindings/flutter/scripts/**'
               - 'bindings/swift/**'
               - 'bindings/kotlin/**'
               - 'bindings/react-native/ios/**'
@@ -1884,6 +1887,13 @@ jobs:
 
       - name: Install CocoaPods for Flutter podspec verification
         run: gem install cocoapods -v 1.16.2 --no-document
+
+      # The fixture test ends in `flutter pub publish --dry-run`: what pub puts
+      # in the archive depends on ignore files no layout check can see.
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: "3.27.4"
 
       - name: Assemble the Flutter pub package against a fixture tree
         run: bash scripts/tests/test-assemble-flutter-pub-package.sh

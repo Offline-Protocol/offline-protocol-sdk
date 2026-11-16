@@ -3,17 +3,24 @@
 # Assemble a self-contained Flutter plugin tree for pub.dev.
 # The in-repository plugin reaches shared bridge sources under
 # bindings/react-native; a pub consumer has no such tree. This script copies
-# the bridge, stages prebuilt UniFFI libraries, and writes the version pin the
-# Gradle build reads, then verifies the layout a `flutter pub publish` tarball
-# must carry.
+# the bridge, stages prebuilt UniFFI libraries, and writes the version pins the
+# Gradle build and the podspec read, then verifies the layout a `pub publish`
+# archive must carry.
+#
+# Two rules decide what pub puts in the archive, and both hide files silently:
+#   - Inside a git work tree pub lists the package through git, so the
+#     enclosing repository's .gitignore (build/, *.so, *.a) hides the pubspec,
+#     the legal files and every native library. The output must be outside one.
+#   - Pub honours a .gitignore inside the package even outside git, and the
+#     plugin's ios/.gitignore ignores BridgeRN and Frameworks, which is the
+#     whole iOS build. No .gitignore ships in the tree.
 #
 # Run after npm run build:uniffi:all (or after a release has downloaded the
-# same artifacts into the React Native tree) and
-# bindings/flutter/scripts/stage-plugin-native-artifacts.sh.
+# same artifacts into the React Native tree).
 #
 # Usage:
 #   bash scripts/assemble-flutter-pub-package.sh \
-#     --output build/flutter-pub-package --version 0.33.0
+#     --output "$RUNNER_TEMP/flutter-pub-package" --version 0.33.0
 #
 # Environment:
 #   PACKAGE_SOURCE_ROOT  optional, defaults to the repository root
@@ -25,6 +32,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT="${PACKAGE_SOURCE_ROOT:-$REPO_ROOT}"
 PLUGIN="$ROOT/bindings/flutter/offline_protocol"
 STAGE="$REPO_ROOT/bindings/flutter/scripts/stage-plugin-native-artifacts.sh"
+REPOSITORY_URL="https://github.com/Offline-Protocol/offline-protocol-sdk"
 
 OUTPUT=""
 VERSION=""
@@ -63,17 +71,25 @@ if [ -e "$OUTPUT" ]; then
     die "$OUTPUT exists and is not empty"
   fi
 fi
+mkdir -p "$OUTPUT"
+OUTPUT="$(cd "$OUTPUT" && pwd)"
+
+# See the header: pub would list the tree through git and lose most of it.
+if command -v git >/dev/null 2>&1 &&
+  git -C "$OUTPUT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  die "$OUTPUT is inside a git work tree, whose .gitignore pub would apply; assemble outside it (for example under \$RUNNER_TEMP)"
+fi
 
 stage_and_verify() {
-  bash "$STAGE"
-  bash "$STAGE" --check
+  PACKAGE_SOURCE_ROOT="$ROOT" bash "$STAGE"
+  PACKAGE_SOURCE_ROOT="$ROOT" bash "$STAGE" --check
 }
 
 assemble() {
-  mkdir -p "$OUTPUT"
-
   rsync -a \
     --exclude '.dart_tool/' \
+    --exclude 'build/' \
+    --exclude '.gradle/' \
     --exclude 'example/' \
     --exclude 'pubspec.lock' \
     "$PLUGIN/" "$OUTPUT/"
@@ -92,34 +108,39 @@ assemble() {
 
   printf '{"version":"%s"}\n' "$VERSION" >"$OUTPUT/android/pub_bridge_version.json"
 
-  MESH_PODSPEC="$ROOT/bindings/react-native/MeshSdk.podspec"
-  [ -f "$MESH_PODSPEC" ] || die "missing $MESH_PODSPEC (cannot pin iOS deployment target)"
-  IOS_DEPLOYMENT=$(
-    perl -ne 'if (/s\.platforms\s*=\s*\{\s*:ios\s*=>\s*"([0-9.]+)"/) { print $1; exit }' \
-      "$MESH_PODSPEC"
-  )
-  [ -n "$IOS_DEPLOYMENT" ] || die "MeshSdk.podspec has no :ios deployment target"
+  # The one parser for the deployment target (scripts/ios-deployment-target.sh),
+  # which refuses a podspec that does not declare it exactly once.
+  local ios_deployment
+  ios_deployment="$(PACKAGE_SOURCE_ROOT="$ROOT" bash "$REPO_ROOT/scripts/ios-deployment-target.sh")"
+  [ -n "$ios_deployment" ] || die "MeshSdk.podspec has no :ios deployment target"
 
-  IOS_DIR="$OUTPUT/ios"
-  RN_IOS="$ROOT/bindings/react-native/ios"
-  DEST="$IOS_DIR/BridgeRN"
-  rm -rf "$DEST"
-  mkdir -p "$DEST"
-  rsync -a \
-    --exclude OfflineProtocolModule.swift \
-    --exclude OfflineProtocolModule.m \
-    --exclude ProtocolEngineHostBridgeReactNative.swift \
-    --exclude tests/ \
-    --exclude Package.swift \
-    --exclude '/libs/' \
-    "$RN_IOS/" "$DEST/"
+  # The same copy `pod install` makes in the repository, with the same
+  # exclude list, which a Rust guard holds to the podspec's. Only the React
+  # Native package's libs/ is dropped, for the reason given above.
+  BRIDGE_RN_SOURCE="$ROOT/bindings/react-native/ios" \
+    BRIDGE_RN_DEST="$OUTPUT/ios/BridgeRN" \
+    bash "$PLUGIN/ios/sync_bridge_rn.sh"
+  rm -rf "$OUTPUT/ios/BridgeRN/libs"
 
-  printf '{"version":"%s","ios_deployment_target":"%s"}\n' "$VERSION" "$IOS_DEPLOYMENT" \
-    >"$IOS_DIR/pub_bridge_version.json"
+  printf '{"version":"%s","ios_deployment_target":"%s"}\n' "$VERSION" "$ios_deployment" \
+    >"$OUTPUT/ios/pub_bridge_version.json"
 
   for legal in LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md; do
-  cp "$REPO_ROOT/$legal" "$OUTPUT/"
+    [ -f "$ROOT/$legal" ] || die "missing $ROOT/$legal"
+    cp "$ROOT/$legal" "$OUTPUT/"
   done
+
+  # pub.dev shows this file as the package's changelog and warns when it does
+  # not name the version being published. The notes themselves live with the
+  # release, so it points there rather than copying them.
+  cat >"$OUTPUT/CHANGELOG.md" <<CHANGELOG
+## $VERSION
+
+Release notes: $REPOSITORY_URL/releases/tag/v$VERSION
+CHANGELOG
+
+  # See the header: every .gitignore copied in above would hide files from pub.
+  find "$OUTPUT" -name .gitignore -type f -delete
 
   cat >"$OUTPUT/.pubignore" <<'PUBIGNORE'
 # Maintainer paths only; the publish tree is not a git checkout.
@@ -141,9 +162,7 @@ verify_layout() {
   local root="$1"
   local fail=0
   check() {
-    if [ -e "$root/$1" ]; then
-      :
-    else
+    if [ ! -e "$root/$1" ]; then
       echo "missing: $1" >&2
       fail=1
     fi
@@ -157,6 +176,9 @@ verify_layout() {
   check "android/pub_bridge_version.json"
   check "ios/pub_bridge_version.json"
   check "pubspec.yaml"
+  check "README.md"
+  check "CHANGELOG.md"
+  check "LICENSE"
   # One copy of each native library: see the vendoring step in assemble().
   for duplicate in android/bridge-rn/src/main/jniLibs ios/BridgeRN/libs; do
     if [ -e "$root/$duplicate" ]; then
@@ -164,6 +186,13 @@ verify_layout() {
       fail=1
     fi
   done
+  # Any ignore file but the root .pubignore hides files from pub.
+  local ignore
+  while IFS= read -r ignore; do
+    echo "ignore file in the publish tree: ${ignore#"$root"/}" >&2
+    fail=1
+  done < <(find "$root" \( -name .gitignore -o -name .pubignore \) \
+    -not -path "$root/.pubignore")
   [ "$fail" -eq 0 ] || die "assembled Flutter package failed layout checks"
 }
 

@@ -238,6 +238,14 @@ locations. The vendored bridge leaves out the React Native package's own
 vendored ones would never be read and would double the archive. The layout
 check refuses a tree that carries them.
 
+Pub decides what the archive holds from ignore files, and both traps drop
+files with no error: inside a git work tree it applies the repository's
+`.gitignore` (`build/`, `*.so`, `*.a`), and it honours a `.gitignore` inside the
+package even outside git, where the plugin's `ios/.gitignore` hides `BridgeRN`
+and `Frameworks`. So the script refuses an output inside a work tree, deletes
+every `.gitignore` it copied, and the fixture test ends in
+`flutter pub publish --dry-run` with the archive listing checked.
+
 ## F9. Binary footprint
 
 The plugin links BLE and mesh bridge sources into the AAR and CocoaPod. CI runs

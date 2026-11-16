@@ -48,5 +48,13 @@ You do **not** rebuild Rust locally unless you develop the plugin from source.
 
 `scripts/assemble-flutter-pub-package.sh` copies shared bridge sources, staged
 natives, and legal files into a publish tree. Release CI runs it after the mobile
-UniFFI artifacts are available, then `dart pub publish` when `FLUTTER_PUBLISH` is
-on. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+UniFFI artifacts are available, dry-runs `dart pub publish` on every release,
+and publishes through pub.dev automated publishing (OIDC, no stored token) from
+a pushed tag when `FLUTTER_PUBLISH` is on. The first version is uploaded by
+hand. See [CONTRIBUTING.md](../CONTRIBUTING.md#cutting-a-release).
+
+The tree must be assembled outside any git checkout, and ships no `.gitignore`:
+pub honours both, and either one silently drops the native libraries or the
+iOS bridge from the archive. The script refuses the first and removes the
+second, and `scripts/tests/test-assemble-flutter-pub-package.sh` dry-runs the
+publish to prove the archive.
