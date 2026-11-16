@@ -573,3 +573,8 @@ manager or bridge is asked to advertise or discover; the base install imports
 neither. The `http` extra (`pip install 'offline-protocol-sdk[http]'`) adds
 [aiohttp](https://pypi.org/project/aiohttp/) (Apache-2.0 AND MIT) and its
 dependencies, used by the HTTP front, and imported only when a front starts.
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

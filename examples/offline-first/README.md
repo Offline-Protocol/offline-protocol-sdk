@@ -159,3 +159,8 @@ each:
 
 Nothing on this page has been run between separate hosts, over Bluetooth
 LE, over a relay, through a gateway daemon, or with a phone.
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

@@ -1618,3 +1618,8 @@ The Offline Protocol SDK is **dual-licensed**:
   the AGPL. See [LICENSE-COMMERCIAL.md](./LICENSE-COMMERCIAL.md) (contact legal@offlineprotocol.com).
 
 You may use the SDK under **either** license; you do not need both.
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

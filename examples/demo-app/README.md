@@ -84,3 +84,8 @@ emulator have no working Bluetooth stack.
 
 For Android, grant location and nearby-device permissions when prompted so BLE
 discovery can run.
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

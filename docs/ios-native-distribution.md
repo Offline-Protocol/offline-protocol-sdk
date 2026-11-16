@@ -6,6 +6,8 @@ recommended install path instead of a multi-day hand-built XCFramework workflow.
 React Native integrators should use [QUICKSTART.md](../QUICKSTART.md) and
 `@offline-protocol/mesh-sdk` instead.
 
+> **Stuck?** Ask in the [developer Discord](https://discord.gg/9TQGrxaPJk), where the team and other integrators answer questions.
+
 ## Choose your path
 
 | You are… | Use |

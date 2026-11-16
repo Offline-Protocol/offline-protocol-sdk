@@ -172,3 +172,8 @@ start), subscribes to events, and prints the device `off1…` address. Details:
   with it; the release refuses a tag the pubspec does not match.
 - **AAR footprint:** [baselines/README.md](baselines/README.md).
 - **Rust guards:** `crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs`.
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

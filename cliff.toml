@@ -24,6 +24,12 @@ body = """
 {% endfor %}
 {% endfor %}
 """
+footer = """
+
+---
+
+Questions about this release? Ask in the [developer Discord](https://discord.gg/9TQGrxaPJk).
+"""
 trim = true
 
 [git]

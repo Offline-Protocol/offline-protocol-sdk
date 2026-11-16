@@ -264,3 +264,8 @@ This example app is part of the Offline Protocol SDK and follows the same licens
 - Optimized for phones and tablets
 - Adaptive layouts for different screen sizes
 - Consistent experience across devices
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

@@ -5,6 +5,9 @@ contact_links:
   - name: 🔒 Report a security vulnerability
     url: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/SECURITY.md
     about: Do NOT open a public issue for vulnerabilities. Follow our Security Policy to report privately.
+  - name: 💬 Chat with developers on Discord
+    url: https://discord.gg/9TQGrxaPJk
+    about: Get help, ask quick questions and share what you are building with other developers and the team.
   - name: 💬 Questions & discussion
     url: https://github.com/Offline-Protocol/offline-protocol-sdk/discussions
     about: Ask usage questions or propose ideas in GitHub Discussions.

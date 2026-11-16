@@ -123,3 +123,8 @@ against two in-process hosts (`tests/http_front/test_demo.py`).
 
 Not run: two physical hosts, host networking, a token-protected front from
 the compose file.
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

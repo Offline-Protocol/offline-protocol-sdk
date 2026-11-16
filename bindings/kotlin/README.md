@@ -116,3 +116,8 @@ without being registered anywhere. A file that imports React cannot be: the
 library fails to compile, in the pull request that added the import. Put the
 React half in `OfflineProtocolModule.kt`, or add the file to `reactOnly` in
 the library's build file if all of it needs React.
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

@@ -11,6 +11,9 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+Questions about a release, or about upgrading to one? Ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).
+
 ## [Unreleased]
 
 ### Added

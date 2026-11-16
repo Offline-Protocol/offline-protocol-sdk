@@ -11,3 +11,8 @@ python3 -m http.server 8000 --bind 127.0.0.1                 # from the reposito
 Open <http://127.0.0.1:8000/examples/web-two-tabs/> in two tabs of the same browser. Each shows its own `off1…` address and, within a second or two, the other tab as a neighbour with an encrypted session. Pick it and send.
 
 This page keeps each identity in memory (`storage: "memory"`), so any number of tabs can be open and reloading one makes it a new device. A durable node keeps its identity across reloads and is one per account per origin; [`examples/web-lobby`](../web-lobby) uses one, and links devices over WebRTC. See [docs/bridges/web.md](../../docs/bridges/web.md).
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

@@ -2,6 +2,8 @@
 
 This guide covers integrating the Offline Protocol SDK into React Native applications: installation, configuration, transports (BLE, Wi‑Fi Direct, Internet), Dynamic Offline Relay Switch (DORS), **MLS-encrypted group messaging via SDK group methods**, and a **complete API reference** for every function.
 
+> **Stuck?** Ask in the [developer Discord](https://discord.gg/9TQGrxaPJk), where the team and other integrators answer questions.
+
 ---
 
 ## 1. Getting Started

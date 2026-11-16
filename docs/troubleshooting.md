@@ -9,6 +9,9 @@ For host setup mistakes (Expo Go, Podfile), see
 [react-native-host-doctor.md](react-native-host-doctor.md). For permissions,
 see [mobile-permissions.md](mobile-permissions.md).
 
+Not on this page, or still stuck after it? Ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk) with the platform, SDK version and the events you see.
+
 ---
 
 ## Symptom index
@@ -157,6 +160,8 @@ Details: [changelog 0.32](changelog/0.32.md),
    [mobile-permissions.md](mobile-permissions.md#android-17-api-37-local-network)).
 4. Simulators are **not** sufficient for BLE or Wi‑Fi Direct mesh QA.
 5. Run `npx mesh-sdk-doctor` for linking and Expo issues.
+6. Still nothing? Post the platform, SDK version and event log in the
+   [developer Discord](https://discord.gg/9TQGrxaPJk).
 
 ---
 

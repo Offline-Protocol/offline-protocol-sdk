@@ -7,6 +7,8 @@ This guide shows how to integrate the Offline Protocol SDK into a native iOS app
 (`OfflineProtocolSDK` from `offline-protocol-swift`). The sections below on
 building an XCFramework by hand are for SDK maintainers and advanced setups.
 
+> **Stuck?** Ask in the [developer Discord](https://discord.gg/9TQGrxaPJk), where the team and other integrators answer questions.
+
 ## Prerequisites
 
 What you need depends on how you install the SDK.

@@ -66,3 +66,8 @@ Service discovery runs over BLE, so it needs two real devices.
    device A over the mesh and the answer comes back over the same path
 
 Turning the pack off on device A should make it disappear from device B.
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

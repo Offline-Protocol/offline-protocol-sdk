@@ -94,3 +94,8 @@ still apply to the pod and the harness.
 
 A file that imports React cannot be in the package. The assemble script
 refuses it by name, and says what to do.
+
+## Community
+
+Questions, or stuck on an integration? Join the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

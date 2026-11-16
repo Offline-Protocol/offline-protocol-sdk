@@ -85,3 +85,8 @@ starts Ruby, because the loader reads it only at launch
   [R3](../../docs/bridges/ruby.md#r3-an-engine-that-is-collected-while-it-holds-a-callback-leaks-the-callback).
 - The host fills the telemetry platform:
   [R4](../../docs/bridges/ruby.md#r4-the-host-fills-the-telemetry-platform).
+
+## Community
+
+Built something with this example, or stuck running it? Share it or ask in the
+[developer Discord](https://discord.gg/9TQGrxaPJk).

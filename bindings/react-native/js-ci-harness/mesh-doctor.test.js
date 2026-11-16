@@ -188,7 +188,7 @@ test('a missing, malformed or non-object package.json is an error, never a crash
   }
 });
 
-test('the CLI exits 1 on an error and 0 on warnings only, and prints the docs URL', () => {
+test('the CLI exits 1 on an error and 0 on warnings only, and prints the docs and help URLs', () => {
   const broken = tmpRoot({
     'package.json': manifest(SDK_DEP),
     'ios/Podfile': "pod 'MeshSdk'\n",
@@ -197,11 +197,13 @@ test('the CLI exits 1 on an error and 0 on warnings only, and prints the docs UR
   assert.equal(errorRun.status, 1, errorRun.stderr);
   assert.match(errorRun.stdout, /ERROR \[legacy-meshsdk-pod\]/);
   assert.match(errorRun.stdout, /https:\/\/github\.com\/.*react-native-host-doctor\.md/);
+  assert.match(errorRun.stdout, /Help: https:\/\/discord\.gg\//);
 
   const warned = tmpRoot({ 'package.json': manifest({ ...SDK_DEP, expo: '52.0.0' }) });
   const warnRun = runCli([`--root=${warned}`], os.tmpdir());
   assert.equal(warnRun.status, 0, warnRun.stderr);
   assert.match(warnRun.stdout, /WARN \[expo-without-dev-client\]/);
+  assert.match(warnRun.stdout, /Help: https:\/\/discord\.gg\//);
 });
 
 test('the CLI defaults to the working directory', () => {
@@ -209,6 +211,7 @@ test('the CLI defaults to the working directory', () => {
   const run = runCli([], clean);
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /no issues found/);
+  assert.doesNotMatch(run.stdout, /discord/);
 });
 
 test('the CLI refuses --root without a value and unknown arguments with exit 2', () => {
