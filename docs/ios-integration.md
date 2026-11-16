@@ -3,7 +3,7 @@
 This guide shows how to integrate the Offline Protocol SDK into a native iOS app (Swift).
 
 **Native app integrators:** install the shipped **Swift package** first. See
-[ios-native-distribution.md](ios-native-distribution.md) for the blessed path
+[ios-native-distribution.md](ios-native-distribution.md) for the recommended path
 (`OfflineProtocolSDK` from `offline-protocol-swift`). The sections below on
 building an XCFramework by hand are for SDK maintainers and advanced setups.
 
@@ -88,15 +88,23 @@ Swift, Kotlin, Python, Ruby and Java together because they are one artifact set 
 UDL, and a subset leaves the rest describing a different ABI, which fails at
 the app's first FFI call rather than at build time.
 
-### 4. Use in Swift
+## Use the SDK
 
-The generated `offline_protocol.swift` declares the public types (`OfflineProtocol`,
-`ProtocolConfig`, `EventCallback`, `MessagePriority`, …). When it compiles into your app
-target no extra `import` is needed — the low-level FFI is exposed to it as the
-`offline_protocolFFI` clang module referenced from the generated file.
+Everything from here on applies however you installed the SDK.
+
+### Use in Swift
+
+The generated UniFFI layer declares the public types (`OfflineProtocol`,
+`ProtocolConfig`, `EventCallback`, `MessagePriority`, …). With the Swift
+package, `import OfflineProtocolSDK` brings them in along with the integrator
+helpers below. Built from source, the generated `offline_protocol.swift`
+compiles into your app target and no extra `import` is needed: the low-level
+FFI is exposed to it as the `offline_protocolFFI` clang module referenced from
+the generated file.
 
 ```swift
 import Foundation
+import OfflineProtocolSDK  // Swift package only; omit when built from source
 
 // Events are delivered as JSON strings — implement `EventCallback` to receive them.
 final class MeshEventHandler: EventCallback {
@@ -163,8 +171,8 @@ final class MeshController {
             // REQUIRED before you can send anything. Encryption is fail-closed
             // by default, so with MLS uninitialized every send fails with
             // encryptFailed. Catch that once with
-            // OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded,
-            // or use OfflineProtocolDevelopmentCleartextConfig for lab-only
+            // OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded
+            // (pass mesh.isMlsInitialized()), or use OfflineProtocolDevelopmentCleartextConfig for lab-only
             // cleartext (never ship to users). See
             // docs/native-development-cleartext.md. Unlike React Native nothing
             // opens storage for you on the native path: this opens the SDK's
@@ -209,7 +217,7 @@ final class MeshController {
 }
 ```
 
-### 5. Storage: Two Providers, Two Lifecycles
+### Storage: Two Providers, Two Lifecycles
 
 `initializeMls` takes two providers because key material and restartable delivery
 state have different lifetimes. The shipped **`OfflineProtocolReferenceStorage`**
@@ -312,7 +320,7 @@ Add to `Info.plist`:
 | Surface | Install |
 |---------|---------|
 | React Native | `npm install @offline-protocol/mesh-sdk` |
-| **Native iOS (blessed)** | Swift package `OfflineProtocolSDK` — [ios-native-distribution.md](ios-native-distribution.md) |
+| **Native iOS (recommended)** | Swift package `OfflineProtocolSDK` ([ios-native-distribution.md](ios-native-distribution.md)) |
 | SDK maintainers | [bindings/swift/README.md](../bindings/swift/README.md), [ADR 0025](adr/0025-native-packages-are-assembled-in-place.md) |
 
 The package ships the XCFramework, generated UniFFI bindings, transports, and

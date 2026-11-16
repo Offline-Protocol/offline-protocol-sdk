@@ -122,22 +122,22 @@ conformance suite and returns a typed report. See
 
 For **lab-only** cleartext smoke tests (never production), use
 **`OfflineProtocolDevelopmentCleartextConfig.make`**, the native counterpart of
-React Native's `developmentCleartext` preset. The first production-path
-`EncryptFailed` on a send can be diagnosed with
+React Native's `developmentCleartext` preset. An `EncryptFailed` on a send with
+MLS not initialized can be diagnosed with
 **`OfflineProtocolEncryptFailedDiagnostics`**. See
 [native-development-cleartext.md](native-development-cleartext.md).
 
 Native guides: [ios-native-distribution.md](ios-native-distribution.md),
 [ios-integration.md](ios-integration.md),
-[android-integration.md](android-integration.md). Android manual path: JNI names
-and Kotlin imports in [android-jni-and-imports.md](android-jni-and-imports.md).
+[android-integration.md](android-integration.md), and for Android the native
+library names and Kotlin imports in [android-jni-and-imports.md](android-jni-and-imports.md).
 
 **Distribution shortcuts**
 
 | Surface | Preferred install |
 |---------|---------------------|
 | React Native | npm `@offline-protocol/mesh-sdk` |
-| Native iOS | [ios-native-distribution.md](ios-native-distribution.md) — Swift package `OfflineProtocolSDK` (not hand-built XCFramework) |
+| Native iOS | Swift package `OfflineProtocolSDK` ([ios-native-distribution.md](ios-native-distribution.md)), not a hand-built XCFramework |
 | Native Android | Maven coordinates `com.offlineprotocol:offline-protocol-sdk` or jniLibs from RN build scripts |
 
 ---

@@ -30,6 +30,33 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `failures` with each check and its detail, `isGreen`) instead of the JSON
   string `runStorageConformance` returns. Green is the definition of a
   supported backend.
+- **Native iOS and Android applications get a lab-only cleartext config.**
+  `OfflineProtocolDevelopmentCleartextConfig.make(appId, profile)` builds the
+  `ProtocolConfig` React Native's `developmentCleartext` scenario reaches: BLE
+  on, every other transport off, encryption and `requireEncryption` off, and
+  React Native's pending-queue defaults. Setting `encryptionEnabled` to false
+  alone is refused, because `requireEncryption` keeps its `true` default. Never
+  ship a build that uses it. `OfflineProtocolEncryptFailedDiagnostics` logs a
+  one-shot remedy for an `EncryptFailed` send with MLS not initialized, and the
+  `ProtocolEngineHost` debug lifecycle hints for a missing MLS now name this
+  config instead of `encryptionEnabled = false`, which validation refuses.
+- **Native Android applications that copy the `.so` files themselves can check
+  the names.** The generated Kotlin loads `libuniffi_offline_protocol.so`,
+  cargo writes `liboffline_protocol_uniffi.so`, and a copy that keeps the cargo
+  name fails at the first engine call with `UnsatisfiedLinkError`.
+  `scripts/check_manual_android_jni_libs.py` checks a `jniLibs` tree, the
+  Android library exposes both names as `OfflineProtocolJniLibrary`, and
+  [docs/android-jni-and-imports.md](docs/android-jni-and-imports.md) gives the
+  names and which package to import the engine and the bridge types from.
+  Applications on the Maven library are unaffected: the AAR already carries the
+  loaded name.
+- **Native iOS applications have one install path.**
+  [docs/ios-native-distribution.md](docs/ios-native-distribution.md) installs
+  `OfflineProtocolSDK` from `offline-protocol-swift` (or the release's
+  `swift-package` tarball) and gives the call order that starts an engine on
+  it. The iOS integration guide no longer lists Rust as a prerequisite for an
+  application and moves the hand-built XCFramework under a section for
+  building the bridge from source.
 
 ### Fixed
 

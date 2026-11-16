@@ -1,4 +1,4 @@
-# Native iOS: blessed distribution path
+# Native iOS: the Swift package
 
 This page is for a **native Swift app** (no React Native). It is the single
 recommended install path instead of a multi-day hand-built XCFramework workflow.
@@ -65,7 +65,9 @@ Minimal sequence (details and transports in [ios-integration.md](ios-integration
 3. `let engine = try OfflineProtocol(config: config)`
 4. `engine.setEventCallback(callback: …)` **before** `start()` (events emitted
    during startup are lost if the callback is registered late)
-5. `try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)` (built-in stores)
+5. `let adoption = try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)`
+   opens the built-in stores. Report `adoption.warning` when it is set: it is
+   the only signal that this account started from a fresh MLS identity.
 6. `try engine.start()`
 
 Lab-only cleartext and `EncryptFailed` hints: [native-development-cleartext.md](native-development-cleartext.md).
@@ -85,8 +87,8 @@ Compile-checked sample (package dependency, same call order as above):
 |-------|--------|
 | `offline_protocolFFI.xcframework` | Rust `offline-protocol-uniffi`, device + simulator slices |
 | Generated UniFFI API | `OfflineProtocol`, `ProtocolConfig`, events, data layer types |
-| Bridge transports | BLE, internet, Wi‑Fi Direct, Nostr, Reticulum managers (same as RN pod, minus React-only files) |
-| Integrator helpers | `OfflineProtocolReferenceStorage`, `StorageConformance`, lifecycle/diagnostic helpers |
+| Bridge transports | `BleManager`, `InternetManager`, `WifiDirectManager` (the peer-stream slot: TCP over a LAN or AWDL, not Wi-Fi Direct), `NostrManager`, `ReticulumManager`; the React Native pod's sources minus the two that need React |
+| Integrator helpers | `OfflineProtocolReferenceStorage`, `StorageConformance`, `OfflineProtocolDevelopmentCleartextConfig`, `OfflineProtocolEncryptFailedDiagnostics` |
 
 Transports still need app-side wiring (permissions, background modes, starting
 managers). See [ios-integration.md](ios-integration.md) and
@@ -119,7 +121,7 @@ and [bindings/swift/README.md](../bindings/swift/README.md) to validate changes.
 
 ## See also
 
-- [ios-integration.md](ios-integration.md) — app patterns, plist, transports, groups
-- [integrator-map.md](integrator-map.md) — compare RN vs native effort
-- [bridges/swift.md](bridges/swift.md) — bridge contract and CI layout
-- [UPGRADING.md](UPGRADING.md) — version-specific iOS steps
+- [ios-integration.md](ios-integration.md): app patterns, plist, transports, groups
+- [integrator-map.md](integrator-map.md): compare RN vs native effort
+- [bridges/swift.md](bridges/swift.md): bridge contract and CI layout
+- [UPGRADING.md](UPGRADING.md): version-specific iOS steps

@@ -1,18 +1,17 @@
 # Android library consumer check
 
-Minimal application that depends on `com.offlineprotocol:offline-protocol-sdk`
-the way a native app would: one implementation dependency, release build with
-R8, no extra libraries.
+A minimal application that depends on `com.offlineprotocol:offline-protocol-sdk`
+the way a native app does: one implementation dependency, a release build with
+R8, and no other library. If the library's public API or its consumer rules
+break, this stops compiling or R8 stops on a missing class.
 
-| Path | Role |
-|------|------|
-| `app/src/main/java/consumer/Use.kt` | Canonical engine vs bridge imports and API touch points |
-| `app/build.gradle.kts` | `checkJniLibraryNames` if you add manual `jniLibs/` (see below) |
+`app/src/main/java/consumer/Use.kt` is the canonical set of imports: the engine
+from `uniffi.offline_protocol`, the hand-written bridge types from
+`com.offlineprotocol`. [docs/android-jni-and-imports.md](../../../docs/android-jni-and-imports.md)
+explains the split, and the native library names for an application that copies
+the `.so` files itself instead of using the AAR.
 
-JNI naming for hand-copied `.so` files:
-[docs/android-jni-and-imports.md](../../../docs/android-jni-and-imports.md).
-
-Build after publishing the library to the local Maven repo (see
+Build it after publishing the library to the staging repository (see
 [bindings/kotlin/README.md](../README.md)):
 
 ```bash

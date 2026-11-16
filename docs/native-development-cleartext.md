@@ -44,8 +44,15 @@ val protocol = OfflineProtocol(config)
 
 ## When sends fail with `EncryptFailed`
 
-With default encryption, the first `EncryptFailed` on a send means MLS is missing
-or not ready. Direct UniFFI callers can log a one-shot remediation:
+With default encryption and MLS not initialized, every send fails with
+`EncryptFailed`. The same error also comes back with MLS initialized, for a
+different reason (an encrypt that failed on a confirmed session, or a
+document-layer transfer that cannot leave unsealed), so the error alone does not
+say MLS is missing. Direct UniFFI callers pass the engine's own answer, and the
+helper logs its one-shot remediation only when MLS is not initialized. Use it
+only on the default encrypted config: with the lab config an `EncryptFailed`
+comes from a feature that is sealed or not sent at all (a document-layer
+transfer, a service subscription), and the remedy would name the wrong fix.
 
 ```swift
 do {
@@ -54,6 +61,7 @@ do {
     OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded(
         context: "sendMessage",
         error: error,
+        mlsInitialized: mesh.isMlsInitialized(),
         sink: { print($0) }
     )
     throw error
@@ -67,16 +75,20 @@ try {
     OfflineProtocolEncryptFailedDiagnostics.logFirstRemedyIfNeeded(
         "sendMessage",
         error,
+        protocol.isMlsInitialized(),
     ) { Log.w("Mesh", it) }
     throw error
 }
 ```
 
 Hosts built on **`ProtocolEngineHost`** (Flutter, hand-written native hosts)
-receive the same text through the integrator lifecycle hints channel when
-`integratorLifecycleWarnings` is enabled in debug builds. That includes
-`sendMessage`, `sendMessageRich`, `meshSendGroupMessage`, and
-`meshForwardMessageToGroup` (one hint per process for any `EncryptFailed`).
+need no catch. With `integratorLifecycleWarnings` on (the default in debug
+builds), a `sendMessage` or `sendMessageRich` on a running engine with
+encryption on and MLS not initialized gets the "encryption is enabled but MLS
+is not initialized" hint before the call, once per method, and that hint names
+both fixes: `initializeMlsWithSecureStorage()` for production and this config
+for lab-only cleartext. A send before `start()` fails with `NotStarted`, never
+`EncryptFailed`, so there is nothing further to diagnose there.
 
 See also [MLS integration](mls-integration.md), [integrator map](integrator-map.md),
 and [configuration](configuration.md).

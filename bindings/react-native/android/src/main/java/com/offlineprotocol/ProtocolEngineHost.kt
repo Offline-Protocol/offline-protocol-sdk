@@ -79,14 +79,6 @@ class ProtocolEngineHost(
         )
     }
 
-    private fun <T> withEncryptFailedHint(context: String, body: () -> T): T =
-        try {
-            body()
-        } catch (error: Throwable) {
-            lifecycleHints.encryptFailedRemedy(context, error)
-            throw error
-        }
-
     data class InternetTransportEventHandlers(
         val serverMessageEmitter: (String) -> Unit,
         val connectionStatusEmitter: (Boolean, Boolean) -> Unit,
@@ -533,17 +525,13 @@ class ProtocolEngineHost(
         warnLifecycleNeedsEngine("sendMessage")
         warnLifecycleSendMls("sendMessage")
         val msgPriority = messagePriorityFromInt(priority)
-        return withEncryptFailedHint("sendMessage") {
-            requireProtocol().sendMessage(recipient, content, msgPriority, replyToMsg)
-        }
+        return requireProtocol().sendMessage(recipient, content, msgPriority, replyToMsg)
     }
 
     fun sendMessageRich(recipient: String, content: String, options: SendMessageOptions): String {
         warnLifecycleNeedsEngine("sendMessageRich")
         warnLifecycleSendMls("sendMessageRich")
-        return withEncryptFailedHint("sendMessageRich") {
-            requireProtocol().sendMessageRich(recipient, content, options)
-        }
+        return requireProtocol().sendMessageRich(recipient, content, options)
     }
 
     fun receiveMessage(): String? = protocol?.receiveMessage()
@@ -635,16 +623,12 @@ class ProtocolEngineHost(
 
     fun meshSendGroupMessage(groupId: String, content: String, priority: String?, replyToMsg: String?): List<String> {
         val msgPriority = priority?.let { messagePriorityFromString(it) }
-        return withEncryptFailedHint("meshSendGroupMessage") {
-            requireProtocol().sendGroupMessage(groupId, content, msgPriority, replyToMsg)
-        }
+        return requireProtocol().sendGroupMessage(groupId, content, msgPriority, replyToMsg)
     }
 
     fun meshForwardMessageToGroup(originalMessageJson: String, groupId: String, priority: String?): List<String> {
         val msgPriority = priority?.let { messagePriorityFromString(it) }
-        return withEncryptFailedHint("meshForwardMessageToGroup") {
-            requireProtocol().forwardMessageToGroup(originalMessageJson, groupId, msgPriority)
-        }
+        return requireProtocol().forwardMessageToGroup(originalMessageJson, groupId, msgPriority)
     }
 
     fun meshRemoveFromGroup(groupId: String, memberId: String) =

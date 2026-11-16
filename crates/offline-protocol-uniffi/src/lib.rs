@@ -24849,154 +24849,265 @@ mod tests {
         }
     }
 
-    /// Native lab cleartext must match React Native's `developmentCleartext`
-    /// preset (`encryptionEnabled` and `requireEncryption` false, BLE on). The
-    /// remedial `EncryptFailed` copy is one string in each platform's
-    /// `IntegratorEncryptionRemedy`, pinned so integrator hints cannot drift.
+    /// Native lab cleartext must match what React Native's
+    /// `developmentCleartext` preset reaches after `create()`, and that config
+    /// must build an engine. The RN numbers are read from `index.ts`, not
+    /// copied here, so a change to an RN default fails this test until both
+    /// native factories follow it. The remedial `EncryptFailed` copy is one
+    /// string in each platform's `IntegratorEncryptionRemedy`, pinned so the
+    /// two cannot drift.
     #[test]
     fn development_cleartext_helpers_are_shipped_on_native_bridges() {
-        let rn =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let read = |path: &str| {
-            std::fs::read_to_string(rn.join(path))
+            std::fs::read_to_string(root.join(path))
                 .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
         };
-        let swift_config = read("ios/DevelopmentCleartextConfig.swift");
-        let kotlin_config =
-            read("android/src/main/java/com/offlineprotocol/DevelopmentCleartextConfig.kt");
-        for (path, body) in [
-            ("DevelopmentCleartextConfig.swift", swift_config.as_str()),
-            ("DevelopmentCleartextConfig.kt", kotlin_config.as_str()),
+
+        // The RN default for `field`, from `<prefix>field ?? <value>` in index.ts.
+        let index_ts = read("bindings/react-native/src/index.ts");
+        let rn_default = |needle: &str| -> String {
+            let at = index_ts
+                .find(needle)
+                .unwrap_or_else(|| panic!("index.ts no longer has `{needle}`"));
+            index_ts[at + needle.len()..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '\'')
+                .collect::<String>()
+                .trim_matches('\'')
+                .to_string()
+        };
+        let per_peer = rn_default("pendingQueue?.maxPendingPerPeer ??");
+        let global = rn_default("pendingQueue?.maxPendingGlobal ??");
+        let ttl_ms = rn_default("pendingQueue?.pendingTtlMs ??");
+        let initial_ttl = rn_default("network?.initialTtl ??");
+        let overflow = rn_default("pendingQueue?.overflowPolicy ??");
+        assert_eq!(
+            overflow, "drop_oldest",
+            "update both native factories' overflowPolicy"
+        );
+
+        let scenarios = read("bindings/react-native/src/configScenarios.ts");
+        let preset = scenarios
+            .split("case 'developmentCleartext':")
+            .nth(1)
+            .and_then(|rest| rest.split("case ").next())
+            .expect("configScenarios.ts has no developmentCleartext case");
+        let preset: String = preset.split_whitespace().collect();
+        assert!(
+            preset.contains("ble:{enabled:true}") && preset.contains("encryption:{enabled:false"),
+            "developmentCleartext changed shape; update both native factories to match"
+        );
+
+        for (path, sep, int_suffix) in [
+            ("bindings/react-native/ios/DevelopmentCleartextConfig.swift", ": ", ""),
+            (
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/DevelopmentCleartextConfig.kt",
+                " = ",
+                "u",
+            ),
         ] {
+            // Digit separators are formatting, not values. Every pinned field
+            // is followed by a comma, which is what stops `initialTtl: 8`
+            // matching `initialTtl: 80`.
+            let body = read(path).replace('_', "");
+            let has = |field: &str, value: &str| body.contains(&format!("{field}{sep}{value},"));
+            for (field, value) in [
+                ("bleEnabled", "true"),
+                ("wifiDirectEnabled", "false"),
+                ("internetEnabled", "false"),
+                ("reticulumEnabled", "false"),
+                ("nostrEnabled", "false"),
+                ("preferOnline", "false"),
+                ("encryptionEnabled", "false"),
+                // RN derives these three from encryption.enabled; the core
+                // refuses requireEncryption without encryptionEnabled.
+                ("autoKeyExchange", "false"),
+                ("storePending", "false"),
+                ("requireEncryption", "false"),
+            ] {
+                assert!(has(field, value), "{path} must set {field} {value}");
+            }
+            for (field, value) in [
+                ("initialTtl", &initial_ttl),
+                ("maxPendingPerPeer", &per_peer),
+                ("maxPendingGlobal", &global),
+                ("pendingTtlMs", &ttl_ms),
+            ] {
+                assert!(
+                    has(field, &format!("{value}{int_suffix}")),
+                    "{path} must set {field} to React Native's default {value}"
+                );
+            }
             assert!(
-                body.contains("bleEnabled: true") || body.contains("bleEnabled = true"),
-                "{path} must enable BLE for developmentCleartext parity"
-            );
-            assert!(
-                body.contains("encryptionEnabled: false")
-                    || body.contains("encryptionEnabled = false"),
-                "{path} must disable encryption for lab cleartext"
-            );
-            assert!(
-                body.contains("requireEncryption: false")
-                    || body.contains("requireEncryption = false"),
-                "{path} must set requireEncryption false (core rejects enabled-false alone)"
-            );
-            assert!(
-                body.contains("autoKeyExchange: false") || body.contains("autoKeyExchange = false"),
-                "{path} must disable autoKeyExchange (RN developmentCleartext posture)"
-            );
-            assert!(
-                body.contains("storePending: false") || body.contains("storePending = false"),
-                "{path} must disable storePending (RN developmentCleartext posture)"
-            );
-            assert!(
-                (body.contains("maxPendingPerPeer: 64") || body.contains("maxPendingPerPeer = 64"))
-                    && (body.contains("maxPendingGlobal: 4_096")
-                        || body.contains("maxPendingGlobal = 4096")),
-                "{path} must use RN default pending queue sizes (64 / 4096)"
-            );
-            assert!(
-                body.contains("OfflineProtocolDevelopmentCleartextConfig"),
-                "{path} must export the native helper type"
+                body.contains("dropOldest") || body.contains("DROPOLDEST"),
+                "{path} must use React Native's drop_oldest overflow policy"
             );
         }
-        let swift_remedy = read("ios/IntegratorEncryptionRemedy.swift");
-        let kotlin_remedy =
-            read("android/src/main/java/com/offlineprotocol/IntegratorEncryptionRemedy.kt");
+
+        // The same values build an engine: field assertions alone would pass
+        // a combination a future validation rule refuses.
+        let mut config = create_ble_only_config();
+        config.wifi_direct_enabled = false;
+        config.internet_enabled = false;
+        config.reticulum_enabled = false;
+        config.nostr_enabled = false;
+        config.prefer_online = false;
+        config.initial_ttl = initial_ttl.parse().expect("initialTtl");
+        config.encryption_enabled = false;
+        config.auto_key_exchange = false;
+        config.store_pending = false;
+        config.require_encryption = false;
+        config.max_pending_per_peer = per_peer.parse().expect("maxPendingPerPeer");
+        config.max_pending_global = global.parse().expect("maxPendingGlobal");
+        config.pending_ttl_ms = ttl_ms.parse().expect("pendingTtlMs");
+        config.overflow_policy = OverflowPolicy::DropOldest;
+        OfflineProtocol::new(config).expect("the lab cleartext config must build an engine");
+
         const NEEDLE_A: &str = "send failed with EncryptFailed because";
-        const NEEDLE_B: &str = "encryption is fail-closed by default";
-        for (name, body) in [
-            ("IntegratorEncryptionRemedy.swift", swift_remedy.as_str()),
-            ("IntegratorEncryptionRemedy.kt", kotlin_remedy.as_str()),
+        const NEEDLE_B: &str = "encryption is fail-closed by default and MLS is not initialized";
+        for path in [
+            "bindings/react-native/ios/IntegratorEncryptionRemedy.swift",
+            "bindings/react-native/android/src/main/java/com/offlineprotocol/IntegratorEncryptionRemedy.kt",
         ] {
+            let body = read(path);
             assert!(
                 body.contains(NEEDLE_A) && body.contains(NEEDLE_B),
-                "{name} missing pinned remedial copy"
+                "{path} missing pinned remedial copy"
             );
         }
         for path in [
             "bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift",
             "bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt",
         ] {
-            let body = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../..")
-                    .join(path),
-            )
-            .expect("read consumer-check");
             assert!(
-                body.contains("OfflineProtocolDevelopmentCleartextConfig"),
+                read(path).contains("OfflineProtocolDevelopmentCleartextConfig"),
                 "{path} must compile the lab config helper"
             );
         }
     }
 
-    /// Manual Android integrators confuse the cargo `.so` name with the name
-    /// UniFFI loads, and mix `com.offlineprotocol` bridge types with the
-    /// `uniffi.offline_protocol` engine. The constants, doc, checker script,
-    /// and consumer-check imports are pinned together.
+    /// The generated Kotlin loads `lib<findLibraryName>.so`, and cargo writes
+    /// `lib<[lib] name>.so`. An application that copies cargo's output into
+    /// its own `jniLibs` without renaming builds, installs, and fails at the
+    /// first engine call with `UnsatisfiedLinkError`. Both names are derived
+    /// here from those two sources, never written down, so a renamed crate or
+    /// UniFFI namespace fails this test instead of leaving the constant, the
+    /// checkers, the build script and the doc agreeing with each other and
+    /// wrong. The consumer check is the canonical import sample, and a
+    /// wildcard import of `com.offlineprotocol` is the trap the doc warns of.
     #[test]
     fn android_jni_naming_and_imports_are_pinned_for_native_integrators() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
             .expect("repository root");
-        let jni = std::fs::read_to_string(
-            repo.join(
+        let read = |rel: &str| {
+            std::fs::read_to_string(repo.join(rel))
+                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+        };
+
+        // What the generated Kotlin opens: the one string `findLibraryName`
+        // returns when no override is set.
+        let generated =
+            read("bindings/react-native/android/src/main/java/uniffi/offline_protocol/offline_protocol.kt");
+        let body_start = generated
+            .find("private fun findLibraryName(")
+            .expect("generated Kotlin declares findLibraryName");
+        let body = &generated[body_start..];
+        let body = &body[..body.find("\n}").expect("findLibraryName closes")];
+        let returned: Vec<&str> = body
+            .match_indices("return \"")
+            .map(|(at, prefix)| {
+                let rest = &body[at + prefix.len()..];
+                &rest[..rest.find('"').expect("closing quote")]
+            })
+            .collect();
+        assert_eq!(
+            returned.len(),
+            1,
+            "findLibraryName must return exactly one literal name: {returned:?}"
+        );
+        let loaded = format!("lib{}.so", returned[0]);
+
+        // What cargo writes: the `[lib]` name of this crate.
+        let manifest = read("crates/offline-protocol-uniffi/Cargo.toml");
+        let lib_section = &manifest[manifest.find("\n[lib]").expect("[lib] section")..];
+        let lib_section = match lib_section[1..].find("\n[") {
+            Some(end) => &lib_section[..end + 1],
+            None => lib_section,
+        };
+        let lib_name = lib_section
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("name = \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("[lib] name");
+        let cargo = format!("lib{lib_name}.so");
+        assert_ne!(
+            loaded, cargo,
+            "the two names differ, which is the whole trap"
+        );
+
+        for (rel, needles) in [
+            (
                 "bindings/react-native/android/src/main/java/com/offlineprotocol/OfflineProtocolJniLibrary.kt",
+                vec![
+                    format!("const val LOADED_BASENAME: String = \"{loaded}\""),
+                    format!("const val CARGO_OUTPUT_BASENAME: String = \"{cargo}\""),
+                ],
             ),
-        )
-        .expect("OfflineProtocolJniLibrary.kt");
-        const LOADED: &str = "libuniffi_offline_protocol.so";
-        const CARGO: &str = "liboffline_protocol_uniffi.so";
-        assert!(
-            jni.contains(LOADED),
-            "OfflineProtocolJniLibrary must name the loaded .so"
-        );
-        assert!(
-            jni.contains(CARGO),
-            "OfflineProtocolJniLibrary must name the cargo output"
-        );
-        let aar_check = std::fs::read_to_string(repo.join("scripts/check_android_aar.py"))
-            .expect("check_android_aar.py");
-        assert!(
-            aar_check.contains(&format!("NATIVE_LIBRARY = \"{LOADED}\"")),
-            "check_android_aar.py must agree on the loaded JNI name"
-        );
-        let doc = std::fs::read_to_string(repo.join("docs/android-jni-and-imports.md"))
-            .expect("android-jni-and-imports.md");
+            (
+                "scripts/check_android_aar.py",
+                vec![format!("NATIVE_LIBRARY = \"{loaded}\"")],
+            ),
+            (
+                "scripts/check_manual_android_jni_libs.py",
+                vec![format!("LOADED = \"{loaded}\""), format!("STALE = \"{cargo}\"")],
+            ),
+            (
+                "bindings/react-native/scripts/build-uniffi-android.sh",
+                vec![
+                    format!("so_path=\"$so_root/{cargo}\""),
+                    format!("cp \"$so_path\" \"$OUTPUT_DIR/$abi/{loaded}\""),
+                ],
+            ),
+            (
+                "bindings/react-native/scripts/mesh-doctor-checks.js",
+                vec![format!("'{cargo}'")],
+            ),
+            (
+                "docs/android-jni-and-imports.md",
+                vec![
+                    loaded.clone(),
+                    cargo.clone(),
+                    "uniffi.offline_protocol".to_owned(),
+                    "OfflineProtocolModule".to_owned(),
+                    "scripts/check_manual_android_jni_libs.py".to_owned(),
+                ],
+            ),
+        ] {
+            let code = read(rel);
+            for needle in needles {
+                assert!(code.contains(&needle), "{rel} must contain `{needle}`");
+            }
+        }
+
+        let consumer = read("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt");
         for needle in [
-            LOADED,
-            CARGO,
-            "uniffi.offline_protocol",
-            "OfflineProtocolModule",
+            "\nimport uniffi.offline_protocol.OfflineProtocol\n",
+            "\nimport com.offlineprotocol.OfflineProtocolReferenceStorage\n",
+            "OfflineProtocolJniLibrary.LOADED_BASENAME",
         ] {
             assert!(
-                doc.contains(needle),
-                "android-jni-and-imports.md missing `{needle}`"
-            );
-        }
-        let script = std::fs::read_to_string(repo.join("scripts/check_manual_android_jni_libs.py"))
-            .expect("check_manual_android_jni_libs.py");
-        assert!(script.contains(LOADED) && script.contains(CARGO));
-        let consumer_use = std::fs::read_to_string(
-            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
-        )
-        .expect("consumer Use.kt");
-        for needle in [
-            "import uniffi.offline_protocol.OfflineProtocol",
-            "import com.offlineprotocol.OfflineProtocolReferenceStorage",
-            "OfflineProtocolJniLibrary",
-        ] {
-            assert!(
-                consumer_use.contains(needle),
-                "consumer Use.kt missing canonical import `{needle}`"
+                consumer.contains(needle),
+                "consumer-check Use.kt must contain `{}`",
+                needle.trim()
             );
         }
         assert!(
-            !consumer_use.contains("import com.offlineprotocol.OfflineProtocolModule"),
-            "consumer Use.kt must not import OfflineProtocolModule"
+            !consumer.contains("import com.offlineprotocol.*"),
+            "consumer-check Use.kt is the canonical sample: import com.offlineprotocol types by name"
         );
     }
 }

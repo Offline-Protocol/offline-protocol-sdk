@@ -14,9 +14,10 @@ What lives here is the build, and what exists only for the library.
 
 Coordinates: `com.offlineprotocol:offline-protocol-sdk`.
 
-Manual `jniLibs` copies must ship `libuniffi_offline_protocol.so`, not the cargo
-output name (`OfflineProtocolJniLibrary` in the library sources, or
-[android-jni-and-imports.md](../../docs/android-jni-and-imports.md)).
+The AAR carries the native library under the name the generated Kotlin loads,
+`libuniffi_offline_protocol.so`. An application that copies the `.so` files
+itself must rename cargo's output to it; see
+[android-jni-and-imports.md](../../docs/android-jni-and-imports.md).
 
 Verify a custom `ProtocolStateStorageProvider` with `StorageConformance.run(provider)`
 and check `report.isGreen` (see [C11](../../docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
