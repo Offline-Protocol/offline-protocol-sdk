@@ -20,7 +20,7 @@ build. There is **no Maven artifact that bundles** the `.so` / `.dylib` / `.dll`
 the JVM loads natives from your disk (`java.library.path` or
 `libraryOverride`).
 
-## Step 1 — Pick the release native archive
+## Step 1: Pick the release native archive
 
 From [GitHub releases](https://github.com/Offline-Protocol/offline-protocol-sdk/releases)
 for version `vX.Y.Z`:
@@ -37,7 +37,7 @@ mix platforms: the archive matches one OS/CPU.
 
 Python hosts can use `pip install` instead ([python-distribution.md](python-distribution.md)).
 
-## Java — Maven + native path
+## Java: Maven and native path
 
 **Dependency** (version = SDK release):
 
@@ -53,8 +53,9 @@ Published when `MAVEN_CENTRAL_PUBLISH` is enabled on the release train
 **Run the JVM** with native access and the library on the path:
 
 ```bash
-export JAVA_LIBRARY_PATH=/opt/offline-protocol/lib
-java --enable-native-access=ALL-UNNAMED -jar your-app.jar
+java --enable-native-access=ALL-UNNAMED \
+  -Djava.library.path=/opt/offline-protocol/lib \
+  -jar your-app.jar
 ```
 
 Or an absolute override:
@@ -72,7 +73,7 @@ JDK **22+** is required (`java.lang.foreign`). Full quick start:
 [configuration.md](configuration.md)) or wrap construction in your own builder in
 application code.
 
-## C# — .NET + `OFFLINE_PROTOCOL_LIBRARY_DIR`
+## C#: .NET and `OFFLINE_PROTOCOL_LIBRARY_DIR`
 
 Add the SDK project (from a release tag or `bindings/csharp`) and point the
 loader at the unpacked DLL directory:
