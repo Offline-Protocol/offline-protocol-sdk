@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-white.png">
+    <img src="docs/assets/logo-black.png" width="120" alt="Offline Protocol logo">
+  </picture>
+</p>
+
 # Offline Protocol SDK
 
 > Offline-first messaging protocol with intelligent multi-transport switching, mesh networking, and automatic end-to-end encryption
