@@ -40,6 +40,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   one-shot remedy for an `EncryptFailed` send with MLS not initialized, and the
   `ProtocolEngineHost` debug lifecycle hints for a missing MLS now name this
   config instead of `encryptionEnabled = false`, which validation refuses.
+- **Native Android applications that copy the `.so` files themselves can check
+  the names.** The generated Kotlin loads `libuniffi_offline_protocol.so`,
+  cargo writes `liboffline_protocol_uniffi.so`, and a copy that keeps the cargo
+  name fails at the first engine call with `UnsatisfiedLinkError`.
+  `scripts/check_manual_android_jni_libs.py` checks a `jniLibs` tree, the
+  Android library exposes both names as `OfflineProtocolJniLibrary`, and
+  [docs/android-jni-and-imports.md](docs/android-jni-and-imports.md) gives the
+  names and which package to import the engine and the bridge types from.
+  Applications on the Maven library are unaffected: the AAR already carries the
+  loaded name.
 
 ### Fixed
 

@@ -1,8 +1,9 @@
 package consumer
 
-// Canonical native Android imports. Engine: uniffi.offline_protocol.* ;
-// bridge helpers: com.offlineprotocol.* (not OfflineProtocolModule — RN only).
-// See docs/android-jni-and-imports.md and this file in the repository.
+// Canonical native Android imports. The engine is uniffi.offline_protocol.*;
+// the hand-written bridge types are com.offlineprotocol.*. OfflineProtocolModule
+// is React Native only and is not in the library. See
+// docs/android-jni-and-imports.md.
 
 import android.app.Activity
 import android.content.Context
