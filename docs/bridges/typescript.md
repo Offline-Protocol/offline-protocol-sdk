@@ -157,6 +157,36 @@ block ending in a blank line, because that is how the guard finds it, and do
 not "simplify" it to `Record<string, unknown>`. The union is the only thing
 telling an application that `attachment` is a shape it has to handle.
 
+## T10. Parsing opaque event JSON
+
+Events still cross as JSON strings ([C3](README.md#c3-events-cross-as-opaque-json)).
+`OfflineProtocol.on(...)` parses them internally; when you handle raw `eventJson`
+yourself (logging, relay taps, tests), use the exported helpers in
+`src/parseProtocolEvent.ts`:
+
+| Export | Role |
+|--------|------|
+| `parseProtocolEvent` | Validates JSON, object shape, and (by default) a catalogued `type` |
+| `tryParseProtocolEvent` | Same as `parseProtocolEvent`, returns `null` on failure |
+| `ProtocolEventEnvelope` | Success shape: validated `type` string; other fields untyped |
+| `PROTOCOL_EVENT_TYPES` | Every discriminant declared in `types.ts` |
+| `narrowProtocolEvent` | Narrows an envelope by `type` (still does not validate payload fields) |
+
+Parse helpers **do not** check that payload fields match the interfaces in
+`types.ts`. For example, `{ type: "message_received" }` is `ok: true` but has no
+`content`. Use `OfflineProtocol.on("message_received", …)` when you need a typed
+payload, or read fields defensively after parse.
+
+`requireKnownType: false` accepts any non-empty `type` string, including tags
+not yet in `PROTOCOL_EVENT_TYPES` (forward compatibility). The engine dispatch
+path uses that mode so a new tag never stalls delivery while `types.ts` catches
+up.
+
+Adding an event interface means updating `types.ts`, the `ProtocolEvent` union,
+**and** appending the tag to `PROTOCOL_EVENT_TYPES` in the same change.
+`react_native_protocol_event_parse_helpers_are_documented` pins the catalog to
+the interfaces.
+
 ## Testing
 
 ```bash
