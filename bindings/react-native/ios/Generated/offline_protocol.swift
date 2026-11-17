@@ -1899,7 +1899,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func wifiDirectPeerDisconnected(peerId: String) throws 
     
-    func wifiDirectSetFastLinkRoles(canHost: Bool, canJoin: Bool) 
+    func wifiDirectSetFastLinkRoles(canHost: Bool, canJoin: Bool, acceptUnrequested: Bool) 
     
     func wifiDirectStatusChanged(isConnected: Bool) throws 
     
@@ -3776,12 +3776,13 @@ open func wifiDirectPeerDisconnected(peerId: String)throws   {try rustCallWithEr
 }
 }
     
-open func wifiDirectSetFastLinkRoles(canHost: Bool, canJoin: Bool)  {try! rustCall() {
+open func wifiDirectSetFastLinkRoles(canHost: Bool, canJoin: Bool, acceptUnrequested: Bool)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(
             self.uniffiCloneHandle(),
         FfiConverterBool.lower(canHost),
-        FfiConverterBool.lower(canJoin),uniffiCallStatus
+        FfiConverterBool.lower(canJoin),
+        FfiConverterBool.lower(acceptUnrequested),uniffiCallStatus
     )
 }
 }
@@ -12085,7 +12086,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 15986) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() != 20631) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() != 62518) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 12337) {

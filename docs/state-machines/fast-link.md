@@ -49,8 +49,12 @@ wake-up that drains outbound stream bodies:
 | `close` | Ends the stream it opened for the link and leaves or removes the network | nothing |
 
 A platform declares what it can do with
-`wifi_direct_set_fast_link_roles(can_host, can_join)`. Until it does, both are
-false and every request is refused.
+`wifi_direct_set_fast_link_roles(can_host, can_join, accept_unrequested)`.
+Until it does, all are false and every request is refused. The third is the
+application's `wifiDirect.fastLink` setting, not the platform's: with it
+false (`requestedOnly`), a peer's `request` and an `offer` this device did
+not ask for are answered `declined`, so only links this application asked
+for go ahead and no join prompt or group appears that it did not want.
 
 ## The host
 

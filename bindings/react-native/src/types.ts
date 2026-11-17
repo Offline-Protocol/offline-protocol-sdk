@@ -443,6 +443,20 @@ export interface WifiDirectTransportConfig {
    */
   autoAccept?: boolean;
   /**
+   * How far this app takes part in fast links (ADR 0038), the Wi-Fi network
+   * two devices bring up for each other over their session:
+   * - `'any'` (default): host for a peer's request (Android) and join an
+   *   offer this app did not ask for, which shows the iOS join prompt
+   *   unprompted and moves an Android device onto the peer's group silently.
+   * - `'requestedOnly'`: take part only in links this app asked for with
+   *   `requestFastLink`; a peer's request or unasked-for offer is answered
+   *   `declined`. Two apps both set to this never link.
+   * - `'off'`: never host or join one.
+   * An enable that leaves it out keeps the current setting; an unknown value
+   * is `'off'`.
+   */
+  fastLink?: 'off' | 'requestedOnly' | 'any';
+  /**
    * @deprecated Not used. The device with the lowest address owns a group
    * the SDK forms.
    */

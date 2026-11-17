@@ -7777,7 +7777,7 @@ module UniFFILib
     :void
   
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles,
-    [:uint64, :int8, :int8, RustCallStatus.by_ref],
+    [:uint64, :int8, :int8, :int8, RustCallStatus.by_ref],
     :void
   
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed,
@@ -13264,12 +13264,14 @@ end
       ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected,uniffi_clone_handle(),RustBuffer.alloc_from_string(peer_id))
   end
   
-  def wifi_direct_set_fast_link_roles(can_host, can_join)
+  def wifi_direct_set_fast_link_roles(can_host, can_join, accept_unrequested)
         can_host = can_host ? true : false
         
         can_join = can_join ? true : false
         
-      ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles,uniffi_clone_handle(),(can_host ? 1 : 0),(can_join ? 1 : 0))
+        accept_unrequested = accept_unrequested ? true : false
+        
+      ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles,uniffi_clone_handle(),(can_host ? 1 : 0),(can_join ? 1 : 0),(accept_unrequested ? 1 : 0))
   end
   
   def wifi_direct_status_changed(is_connected)

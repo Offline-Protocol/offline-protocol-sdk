@@ -158,6 +158,13 @@ class WifiDirectManager(
      */
     @Volatile var formGroups: Boolean = false
 
+    /**
+     * `wifiDirect.fastLink` (ADR 0038): whether this application takes part
+     * in fast links a peer starts ([FastLinkMode]). Set before [start], which
+     * declares it with the roles.
+     */
+    @Volatile var fastLinkMode: FastLinkMode = FastLinkMode.ANY
+
     // MARK: - Properties
     
     private val wifiP2pManager: WifiP2pManager? = 
@@ -1466,9 +1473,9 @@ class WifiDirectManager(
      * Android 10 and later, both host and join.
      */
     private fun declareFastLinkRoles(p2p: Boolean) {
-        val able = p2p && fastLinkSupported
+        val able = p2p && fastLinkSupported && fastLinkMode != FastLinkMode.OFF
         try {
-            protocol.wifiDirectSetFastLinkRoles(able, able)
+            protocol.wifiDirectSetFastLinkRoles(able, able, fastLinkMode == FastLinkMode.ANY)
         } catch (e: Exception) {
             Log.w(TAG, "Could not declare fast-link roles", e)
         }
@@ -1736,7 +1743,7 @@ class WifiDirectManager(
         hosted?.let { fastLinkEnded(it.linkId, "failed") }
         joined?.let { fastLinkEnded(it.linkId, "failed") }
         try {
-            protocol.wifiDirectSetFastLinkRoles(false, false)
+            protocol.wifiDirectSetFastLinkRoles(false, false, false)
         } catch (_: Exception) {}
     }
 
@@ -2254,6 +2261,31 @@ internal object FastLinkGroupConfig {
                 .build()
         } catch (e: IllegalArgumentException) {
             null
+        }
+    }
+}
+
+/**
+ * `wifiDirect.fastLink`: how far this application takes part in fast links
+ * (ADR 0038). [ANY] hosts for a peer's request and joins an offer it did not
+ * ask for; [REQUESTED_ONLY] takes part only in links it asked for, and
+ * answers the peer's initiative `declined`; [OFF] declares no role.
+ */
+enum class FastLinkMode {
+    OFF, REQUESTED_ONLY, ANY;
+
+    companion object {
+        /**
+         * The mode a config value names, or [current] when it names none: an
+         * enable that does not mention `fastLink` keeps the setting, as
+         * `autoAccept` does. An unknown value is [OFF], so a typo never
+         * widens what the application allowed.
+         */
+        fun parse(value: String?, current: FastLinkMode): FastLinkMode = when (value) {
+            null -> current
+            "any" -> ANY
+            "requestedOnly" -> REQUESTED_ONLY
+            else -> OFF
         }
     }
 }

@@ -89,13 +89,20 @@ pub const MAX_ENDED_REMEMBERED: usize = 16;
 /// 250 bytes.
 pub const MAX_FRAME_BODY_BYTES: usize = 2048;
 
-/// What this device's platform can do. Both false until it says otherwise.
+/// What this device's platform can do, and what its application allows.
+/// All false until the platform says otherwise.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FastLinkRoles {
     /// It can bring up a network for a peer and admit only that peer.
     pub can_host: bool,
     /// It can join a network by name and passphrase and dial an address on it.
     pub can_join: bool,
+    /// The application takes part in links a peer starts: it hosts for a
+    /// peer's request and joins an offer it did not ask for. Without it only
+    /// links this device's application asked for go ahead, and the peer's
+    /// initiative is answered `declined`, so no join prompt and no group ever
+    /// appears that this application did not ask for.
+    pub accept_unrequested: bool,
 }
 
 /// Which side of a link this device is.
@@ -752,6 +759,10 @@ impl FastLinks {
             self.reply_close(peer, link_id, CloseReason::CannotHost);
             return;
         }
+        if !self.roles.accept_unrequested {
+            self.reply_close(peer, link_id, CloseReason::Declined);
+            return;
+        }
         self.host_backoff
             .retain(|(_, at)| now.saturating_duration_since(*at) < HOST_BACKOFF);
         if self
@@ -789,11 +800,15 @@ impl FastLinks {
             self.reply_close(peer, link_id, CloseReason::Declined);
             return;
         }
+        // Whether this device's application asked for a link with the peer:
+        // its request is waiting, or it is hosting for the peer itself.
+        let mut asked = false;
         if let Some(link) = self.link.clone() {
             if link.peer != peer {
                 self.reply_close(peer, link_id, CloseReason::Busy);
                 return;
             }
+            asked = true;
             match link.role {
                 FastLinkRole::Host => {
                     // Both are hosting for each other. The lower address
@@ -832,6 +847,10 @@ impl FastLinks {
         }
         if !self.roles.can_join {
             self.reply_close(peer, link_id, CloseReason::CannotJoin);
+            return;
+        }
+        if !asked && !self.roles.accept_unrequested {
+            self.reply_close(peer, link_id, CloseReason::Declined);
             return;
         }
         let ttl = Duration::from_millis(offer.ttl_ms.min(MAX_OFFER_TTL_MS));
@@ -1189,6 +1208,7 @@ mod tests {
         FastLinkRoles {
             can_host: true,
             can_join: true,
+            accept_unrequested: true,
         }
     }
 
@@ -1196,6 +1216,7 @@ mod tests {
         FastLinkRoles {
             can_host: false,
             can_join: true,
+            accept_unrequested: true,
         }
     }
 
@@ -2202,6 +2223,71 @@ mod tests {
         assert!(
             !iphone.has_directives(),
             "no prompt for a request already answered"
+        );
+    }
+
+    #[test]
+    fn a_device_that_takes_only_its_own_links_declines_the_peers_initiative() {
+        let t0 = Instant::now();
+        let own_only = |roles: FastLinkRoles| FastLinkRoles {
+            accept_unrequested: false,
+            ..roles
+        };
+        let mut android = machine(own_only(host_roles()));
+        let mut iphone = machine(own_only(join_roles()));
+
+        // A peer's request is declined, not hosted.
+        let id = fresh(1).link_id;
+        android.on_frame(
+            HIGH,
+            LOW,
+            Frame::new(&id, FrameBody::Request),
+            fresh(2),
+            t0,
+            0,
+        );
+        assert!(!android.has_directives());
+        assert_eq!(
+            android.take_frames()[0].1.body,
+            FrameBody::Close {
+                reason: "declined".to_string()
+            }
+        );
+
+        // An offer nobody here asked for is declined, never prompted.
+        let offer = Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+        };
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&id, FrameBody::Offer(offer.clone())),
+            fresh(3),
+            t0,
+            0,
+        );
+        assert!(!iphone.has_directives());
+        iphone.take_frames();
+
+        // An offer that answers this device's own request goes ahead.
+        let asked = iphone.request(LOW, fresh(4), t0).unwrap();
+        iphone.take_frames();
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&asked, FrameBody::Offer(offer)),
+            fresh(5),
+            t0,
+            0,
+        );
+        assert_eq!(
+            iphone.next_directive(t0).unwrap().kind,
+            FastLinkDirectiveKind::Join
         );
     }
 

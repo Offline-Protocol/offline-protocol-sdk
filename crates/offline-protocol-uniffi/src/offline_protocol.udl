@@ -1488,9 +1488,13 @@ interface OfflineProtocol {
     // docs/state-machines/fast-link.md). The platform declares what it can
     // do once it knows its permissions: an Android device that can create a
     // Wi-Fi Direct group with given credentials hosts and joins, an iPhone
-    // with the Hotspot Configuration entitlement joins. Until it does, both
-    // are false and every request is refused.
-    void wifi_direct_set_fast_link_roles(boolean can_host, boolean can_join);
+    // with the Hotspot Configuration entitlement joins. `accept_unrequested`
+    // is the application's `wifiDirect.fastLink` setting: true ("any") takes
+    // part in links a peer starts, false ("requestedOnly") answers a peer's
+    // request or unasked-for offer `declined`, so no join prompt or group ever
+    // appears that this application did not ask for. Until the platform
+    // declares, all are false and every request is refused.
+    void wifi_direct_set_fast_link_roles(boolean can_host, boolean can_join, boolean accept_unrequested);
 
     // The next instruction for the platform, drained alongside
     // `wifi_direct_get_next_message` whenever the transport callback fires:

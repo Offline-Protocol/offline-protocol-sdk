@@ -171,6 +171,9 @@ public class WifiDirectManager: NSObject, TransportManager {
     private var generation = 0
     /// The fast link this device is joining or has joined, if any.
     private var fastLink: FastLinkJoin?
+    /// `wifiDirect.fastLink` (ADR 0038). Set before `start()`, which
+    /// declares it with the roles.
+    var fastLinkMode: FastLinkMode = .any
 
     /// Guards [_state] and [_isPaused], which the lifecycle writes from the
     /// bridge queue and the send path reads from any thread. Everything
@@ -291,8 +294,13 @@ public class WifiDirectManager: NSObject, TransportManager {
         updateState(.running)
         try? protocolInstance.wifiDirectStatusChanged(isConnected: true)
         emitDiagnostic("info", "Peer-stream transport started")
-        // An iPhone joins a fast link and cannot host one (ADR 0038).
-        try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: true)
+        // An iPhone joins a fast link and cannot host one (ADR 0038), as far
+        // as the application's `wifiDirect.fastLink` allows.
+        try? protocolInstance.wifiDirectSetFastLinkRoles(
+            canHost: false,
+            canJoin: fastLinkMode != .off,
+            acceptUnrequested: fastLinkMode == .any
+        )
     }
 
     public func stop() {
@@ -328,7 +336,7 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
 
         try? protocolInstance.wifiDirectStatusChanged(isConnected: false)
-        try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: false)
+        try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: false, acceptUnrequested: false)
         onLinkQueueSync { endFastLink(reason: "failed") }
 
         updateState(.stopped)
@@ -1011,6 +1019,26 @@ extension WifiDirectManager {
         NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: link.ssid)
         if let reason = reason {
             protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: reason)
+        }
+    }
+}
+
+/// `wifiDirect.fastLink`: how far this application takes part in fast links
+/// (ADR 0038). `.any` joins an offer it did not ask for; `.requestedOnly`
+/// takes part only in links it asked for and answers the peer's initiative
+/// `declined`; `.off` declares no role.
+public enum FastLinkMode: Equatable {
+    case off, requestedOnly, any
+
+    /// The mode a config value names, or `current` when it names none: an
+    /// enable that does not mention `fastLink` keeps the setting. An unknown
+    /// value is `.off`, so a typo never widens what the application allowed.
+    static func parse(_ value: Any?, current: FastLinkMode) -> FastLinkMode {
+        guard let value = value else { return current }
+        switch value as? String {
+        case "any": return .any
+        case "requestedOnly": return .requestedOnly
+        default: return .off
         }
     }
 }

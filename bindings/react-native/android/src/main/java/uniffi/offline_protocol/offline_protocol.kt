@@ -1894,7 +1894,7 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(`ptr`: Long,`canHost`: Byte,`canJoin`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(`ptr`: Long,`canHost`: Byte,`canJoin`: Byte,`acceptUnrequested`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2753,7 +2753,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() and 0xFFFF) != 15986) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() and 0xFFFF) != 20631) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() and 0xFFFF) != 62518) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() and 0xFFFF) != 12337) {
@@ -5096,7 +5096,7 @@ public interface OfflineProtocolInterface {
     
     fun `wifiDirectPeerDisconnected`(`peerId`: kotlin.String)
     
-    fun `wifiDirectSetFastLinkRoles`(`canHost`: kotlin.Boolean, `canJoin`: kotlin.Boolean)
+    fun `wifiDirectSetFastLinkRoles`(`canHost`: kotlin.Boolean, `canJoin`: kotlin.Boolean, `acceptUnrequested`: kotlin.Boolean)
     
     fun `wifiDirectStatusChanged`(`isConnected`: kotlin.Boolean)
     
@@ -7880,7 +7880,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
-    override fun `wifiDirectSetFastLinkRoles`(`canHost`: kotlin.Boolean, `canJoin`: kotlin.Boolean)
+    override fun `wifiDirectSetFastLinkRoles`(`canHost`: kotlin.Boolean, `canJoin`: kotlin.Boolean, `acceptUnrequested`: kotlin.Boolean)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
@@ -7888,7 +7888,8 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         it,
         
         FfiConverterBoolean.lower(`canHost`),
-        FfiConverterBoolean.lower(`canJoin`),_status)
+        FfiConverterBoolean.lower(`canJoin`),
+        FfiConverterBoolean.lower(`acceptUnrequested`),_status)
 }
     }
     

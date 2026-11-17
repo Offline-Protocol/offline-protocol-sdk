@@ -1483,7 +1483,9 @@ own Wi-Fi, dials the group owner's address and not the offer's), and the
 stream must prove the offerer's own
 address, so a link that proves nothing ends when its offer expires, at most
 300 s later. It can also put the iOS join prompt in front of a user who did
-not ask: an offer needs no request. Once the user declines, that peer's
+not ask: an offer needs no request, unless the application set
+`wifiDirect.fastLink` to `requestedOnly`, which answers every offer it did not
+ask for `declined` and never shows it. Under the default, once the user declines, that peer's
 offers are refused for ten minutes, and a second offer while one is on screen
 is refused, so the most it gets is one prompt per ten minutes per session. An
 Android joiner shows no prompt at all: Wi-Fi Direct joins a group by name and

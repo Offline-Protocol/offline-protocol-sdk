@@ -113,8 +113,8 @@ fn pair() -> (Node, Node) {
         node.protocol.peer_fast_link.insert(peer.clone());
         node.transport.add_connected_peer(peer, -40);
     }
-    alice.protocol.set_fast_link_roles(true, true);
-    bob.protocol.set_fast_link_roles(false, true);
+    alice.protocol.set_fast_link_roles(true, true, true);
+    bob.protocol.set_fast_link_roles(false, true, true);
     (alice, bob)
 }
 
@@ -240,14 +240,14 @@ fn a_request_is_refused_without_capability_session_or_roles() {
         .confirmed_sessions
         .insert(bob.address.clone());
 
-    alice.protocol.set_fast_link_roles(false, false);
+    alice.protocol.set_fast_link_roles(false, false, false);
     assert!(matches!(
         alice.protocol.request_fast_link(&bob.address),
         Err(Error::InvalidState(_))
     ));
 
     alice.transport.remove_connected_peer(&bob.address);
-    alice.protocol.set_fast_link_roles(true, true);
+    alice.protocol.set_fast_link_roles(true, true, true);
     assert!(
         alice.protocol.request_fast_link(&bob.address).is_err(),
         "a request needs a live direct link to carry it"
@@ -259,7 +259,7 @@ fn a_request_is_refused_without_capability_session_or_roles() {
 #[test]
 fn a_peer_that_cannot_host_says_so() {
     let (mut alice, mut bob) = pair();
-    alice.protocol.set_fast_link_roles(false, true);
+    alice.protocol.set_fast_link_roles(false, true, true);
 
     bob.protocol.request_fast_link(&alice.address).unwrap();
     alice.deliver(bob.take_sent());

@@ -6168,7 +6168,7 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
-    public void wifiDirectSetFastLinkRoles(boolean canHost, boolean canJoin)  {
+    public void wifiDirectSetFastLinkRoles(boolean canHost, boolean canJoin, boolean acceptUnrequested)  {
             try {
                 
     callWithHandle(_uniffiHandle -> {
@@ -6176,7 +6176,7 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
     
     UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
         UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(_uniffiHandle,
-            FfiConverterBoolean.INSTANCE.lower(canHost), FfiConverterBoolean.INSTANCE.lower(canJoin), _status);
+            FfiConverterBoolean.INSTANCE.lower(canHost), FfiConverterBoolean.INSTANCE.lower(canJoin), FfiConverterBoolean.INSTANCE.lower(acceptUnrequested), _status);
     });
     } catch (java.lang.RuntimeException _uniffi_ex) {
             throw _uniffi_ex;

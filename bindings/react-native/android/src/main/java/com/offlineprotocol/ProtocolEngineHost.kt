@@ -334,6 +334,10 @@ class ProtocolEngineHost(
                     manager.stop()
                 }
                 manager.formGroups = WifiDirectGroupFormation.formGroupsAfterEnable(manager.formGroups, autoAccept)
+                manager.fastLinkMode = FastLinkMode.parse(
+                    config?.let { json -> if (json.has("fastLink") && !json.isNull("fastLink")) json.getString("fastLink") else null },
+                    manager.fastLinkMode,
+                )
                 wireTransportCallbacks(proto)
                 manager.start()
                 onDiagnostic("info", "WiFi Direct transport enabled", emptyMap())

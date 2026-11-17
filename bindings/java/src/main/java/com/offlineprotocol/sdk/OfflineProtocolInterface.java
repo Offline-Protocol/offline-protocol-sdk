@@ -189,7 +189,7 @@ public interface OfflineProtocolInterface {
     public FastLinkDirective wifiDirectNextFastLinkDirective();
     public void wifiDirectPeerConnected(java.lang.String peerId) throws ProtocolException;
     public void wifiDirectPeerDisconnected(java.lang.String peerId) throws ProtocolException;
-    public void wifiDirectSetFastLinkRoles(boolean canHost, boolean canJoin);
+    public void wifiDirectSetFastLinkRoles(boolean canHost, boolean canJoin, boolean acceptUnrequested);
     public void wifiDirectStatusChanged(boolean isConnected) throws ProtocolException;
     
 }

@@ -25,11 +25,20 @@ use crate::fast_link::{
 use crate::{Error, Event, Result};
 
 impl OfflineProtocol {
-    /// Declares what this device's platform can do. Until it does, both are
+    /// Declares what this device's platform can do, and whether its
+    /// application takes part in links a peer starts. Until it does, all are
     /// false and every request is refused or answered `cannot_*`.
-    pub fn set_fast_link_roles(&mut self, can_host: bool, can_join: bool) {
-        self.fast_links
-            .set_roles(FastLinkRoles { can_host, can_join });
+    pub fn set_fast_link_roles(
+        &mut self,
+        can_host: bool,
+        can_join: bool,
+        accept_unrequested: bool,
+    ) {
+        self.fast_links.set_roles(FastLinkRoles {
+            can_host,
+            can_join,
+            accept_unrequested,
+        });
     }
 
     /// Asks for a fast link to `peer`, and returns its id.

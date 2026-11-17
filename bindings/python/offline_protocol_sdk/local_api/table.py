@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "7ea1a6e39085fcd2446161bcca4ee2816f2f2b1ab2582fe7a3aa73417dbac781"
+UDL_SHA256 = "64ab3614ff8f0c44ede4b975aa90f81cca642b688f19a7c9b59817e6fc02892a"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',
@@ -577,7 +577,9 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                  'wifi_direct_peer_disconnected': ((('peer_id', 'string'),),
                                                                    'void'),
                                  'wifi_direct_set_fast_link_roles': ((('can_host', 'boolean'),
-                                                                      ('can_join', 'boolean')),
+                                                                      ('can_join', 'boolean'),
+                                                                      ('accept_unrequested',
+                                                                       'boolean')),
                                                                      'void'),
                                  'wifi_direct_status_changed': ((('is_connected', 'boolean'),),
                                                                 'void')},

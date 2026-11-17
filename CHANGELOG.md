@@ -31,8 +31,11 @@ Questions about a release, or about upgrading to one? Ask in the
   the foreground, or on `closeFastLink`. An iOS app needs the Hotspot
   Configuration entitlement, and an Android app `NEARBY_WIFI_DEVICES` (fine
   location below Android 13); see [mobile permissions](docs/mobile-permissions.md#fast-link).
-  Platforms declare what they can do through four new peer-stream driver
-  calls, `wifi_direct_set_fast_link_roles` and its siblings; a custom
+  `wifiDirect.fastLink` decides how far an app takes part: `any` (the
+  default) also hosts for a peer's request and joins an offer it did not ask
+  for, `requestedOnly` takes part only in links the app asked for, `off`
+  never. Platforms declare what they can do through four new peer-stream
+  driver calls, `wifi_direct_set_fast_link_roles` and its siblings; a custom
   platform that declares nothing is never asked to host or join.
 
 - **Native iOS and Android applications get the SDK's built-in storage.**

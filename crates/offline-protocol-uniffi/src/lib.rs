@@ -7988,9 +7988,14 @@ impl OfflineProtocol {
     }
 
     /// The platform says what it can do for a fast link.
-    pub fn wifi_direct_set_fast_link_roles(&self, can_host: bool, can_join: bool) {
+    pub fn wifi_direct_set_fast_link_roles(
+        &self,
+        can_host: bool,
+        can_join: bool,
+        accept_unrequested: bool,
+    ) {
         if let Ok(mut guard) = self.lock_inner() {
-            guard.set_fast_link_roles(can_host, can_join);
+            guard.set_fast_link_roles(can_host, can_join, accept_unrequested);
         }
     }
 

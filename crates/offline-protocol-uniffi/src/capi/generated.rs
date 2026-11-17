@@ -2739,8 +2739,9 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
         "wifi_direct_set_fast_link_roles" => {
             let arg_can_host = args.take("can_host")?;
             let arg_can_join = args.take("can_join")?;
+            let arg_accept_unrequested = args.take("accept_unrequested")?;
             args.finish()?;
-            target.wifi_direct_set_fast_link_roles(arg_can_host, arg_can_join);
+            target.wifi_direct_set_fast_link_roles(arg_can_host, arg_can_join, arg_accept_unrequested);
             Ok(Value::Null)
         }
         "wifi_direct_next_fast_link_directive" => {

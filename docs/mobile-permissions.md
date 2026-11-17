@@ -140,7 +140,10 @@ the local-network keys above, since the stream is a local-network connection.
 Without the entitlement every join ends `failed`.
 
 iOS shows "“App” Wants to Join Wi‑Fi Network “DIRECT-…”?" on every join, and
-the phone leaves its own Wi-Fi while the link lasts. Ask for a link when a
+the phone leaves its own Wi-Fi while the link lasts. By default a peer's app
+can start a link too, which shows that prompt without your app asking; set
+`wifiDirect.fastLink` to `'requestedOnly'` to take part only in links your
+app requests, or `'off'` to never join one. Ask for a link when a
 transfer is worth that to your user. The link ends when the app leaves the
 foreground.
 

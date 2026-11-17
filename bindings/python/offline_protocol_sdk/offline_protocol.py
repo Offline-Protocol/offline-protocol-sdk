@@ -1037,7 +1037,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 15986:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() != 20631:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() != 62518:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 12337:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -3333,6 +3333,7 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles.argtypes = (
     ctypes.c_uint64,
+    ctypes.c_int8,
     ctypes.c_int8,
     ctypes.c_int8,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -11575,7 +11576,7 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def wifi_direct_peer_disconnected(self, peer_id: str) -> None:
         raise NotImplementedError
-    def wifi_direct_set_fast_link_roles(self, can_host: bool,can_join: bool) -> None:
+    def wifi_direct_set_fast_link_roles(self, can_host: bool,can_join: bool,accept_unrequested: bool) -> None:
         raise NotImplementedError
     def wifi_direct_status_changed(self, is_connected: bool) -> None:
         raise NotImplementedError
@@ -14489,15 +14490,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def wifi_direct_set_fast_link_roles(self, can_host: bool,can_join: bool) -> None:
+    def wifi_direct_set_fast_link_roles(self, can_host: bool,can_join: bool,accept_unrequested: bool) -> None:
         
         _UniffiFfiConverterBoolean.check_lower(can_host)
 
         _UniffiFfiConverterBoolean.check_lower(can_join)
+
+        _UniffiFfiConverterBoolean.check_lower(accept_unrequested)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
             _UniffiFfiConverterBoolean.lower(can_host),
             _UniffiFfiConverterBoolean.lower(can_join),
+            _UniffiFfiConverterBoolean.lower(accept_unrequested),
         )
         _uniffi_lift_return = lambda val: None
         _uniffi_error_converter = None

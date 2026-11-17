@@ -58,7 +58,11 @@ the foreground and deleted the passphrase.
    Android 10 and later both, iOS join only, everything else neither. A
    requester that can host hosts; one that can only join asks its peer to
    host. When both ask at once, the lower address (compared by UTF-8 bytes, as
-   for streams) hosts and the other side joins.
+   for streams) hosts and the other side joins. Whether a device takes part in
+   a link its peer starts is its application's choice too, through
+   `wifiDirect.fastLink`: `any` (the default) hosts for a peer's request and
+   joins an offer it did not ask for, `requestedOnly` answers both `declined`,
+   `off` declares no role.
 
 4. **The engine makes the credentials, fresh for every link.** The network
    name is `DIRECT-`, two random characters, `-` and twelve random hex digits:
