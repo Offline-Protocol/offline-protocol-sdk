@@ -490,6 +490,36 @@ fn a_transfer_on_the_link_fails_when_the_link_ends() {
     assert_eq!(failed, [on_link]);
 }
 
+/// Stopping the engine ends a link too: a platform that starts it again
+/// would otherwise find the old link held and every request answered `busy`.
+#[test]
+fn stopping_the_engine_ends_a_link() {
+    let (mut alice, mut bob) = pair();
+    let link_id = alice.protocol.request_fast_link(&bob.address).unwrap();
+    alice.protocol.next_fast_link_directive();
+    alice
+        .protocol
+        .fast_link_hosting(&link_id, "192.168.49.1", 8988)
+        .unwrap();
+    bob.deliver(alice.take_sent());
+
+    alice.protocol.stop().unwrap();
+    assert_eq!(
+        alice.protocol.next_fast_link_directive().unwrap().kind,
+        FastLinkDirectiveKind::Close
+    );
+    assert_eq!(
+        alice.link_states().last().unwrap(),
+        &("closed".to_string(), Some("closed".to_string()))
+    );
+    bob.protocol.next_fast_link_directive();
+    bob.deliver(alice.take_sent());
+    assert_eq!(
+        bob.link_states().last().unwrap(),
+        &("closed".to_string(), Some("closed".to_string()))
+    );
+}
+
 /// Pausing the engine ends a link: a paused engine runs no timers, so an
 /// Android host's group would otherwise stay up until the app returned.
 #[test]

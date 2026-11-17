@@ -152,7 +152,9 @@ application sends it again over what remains.
 
 Pausing the engine ends a link with `background`: a paused engine runs none
 of these timers, and a host's group would otherwise stay on the air until the
-application returned, with nothing bounding it.
+application returned, with nothing bounding it. Stopping it ends a link with
+`closed`, for the same reason and one more: an engine started again would
+find the old link still held and answer every request `busy`.
 
 A joiner's platform that is about to lose the network reports it as `ended`
 first: on iOS, leaving the foreground, after which iOS disconnects at 15 s

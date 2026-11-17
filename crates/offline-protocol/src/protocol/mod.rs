@@ -2402,6 +2402,11 @@ impl OfflineProtocol {
         // take the cancellations. Nothing pumps relays or sweeps deadlines once
         // stopped, so a resolution left here is an event that never comes.
         self.flush_username_resolutions_for_stop();
+        // A stopped engine runs no timers either, and a platform that starts
+        // it again would find a link from before still held, answering every
+        // request `busy`. It ends while the transport can still carry the
+        // peer's `close`.
+        self.end_fast_link_for(crate::fast_link::CloseReason::Closed);
 
         // Clear event callbacks to release shared_state references.
         // NOTE: the routing-decision callback is deliberately NOT cleared
@@ -2439,7 +2444,7 @@ impl OfflineProtocol {
         // A paused engine runs no timers, so a fast link would outlive every
         // bound its state machine promises while the host's group stays on
         // the air. It ends here, as the iPhone's side already does.
-        self.end_fast_link_on_pause();
+        self.end_fast_link_for(crate::fast_link::CloseReason::Background);
         Ok(())
     }
 

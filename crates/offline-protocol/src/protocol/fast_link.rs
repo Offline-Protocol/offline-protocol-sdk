@@ -92,12 +92,11 @@ impl OfflineProtocol {
         closed
     }
 
-    /// The engine is pausing: any link ends with `background`, the peer and
-    /// this device's platform told.
-    pub(crate) fn end_fast_link_on_pause(&mut self) {
+    /// The engine is pausing (`background`) or stopping (`closed`): any link
+    /// ends, the peer and this device's platform told.
+    pub(crate) fn end_fast_link_for(&mut self, reason: CloseReason) {
         if let Some(peer) = self.fast_links.peer().map(str::to_string) {
-            self.fast_links
-                .end_for(&peer, CloseReason::Background, Instant::now());
+            self.fast_links.end_for(&peer, reason, Instant::now());
             self.flush_fast_link();
         }
     }
