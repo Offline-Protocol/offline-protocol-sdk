@@ -1075,9 +1075,10 @@ impl FastLinks {
     }
 
     /// Counts an offer `peer` made without being asked that ended: one that
-    /// came up resets the count; one that did not adds to it, unless this
-    /// device ended it for a reason of its own (its application closing it,
-    /// leaving the foreground) or its user declined, which pauses already.
+    /// came up resets the count; one that did not adds to it, whatever the
+    /// peer's reason, unless this device ended it itself (its application
+    /// closing it, leaving the foreground, or its user declining, which
+    /// pauses already).
     /// [`MAX_UNANSWERED_HOSTINGS`] in a row start the decline pause.
     fn count_offer(
         &mut self,
@@ -1092,8 +1093,14 @@ impl FastLinks {
                 .retain(|(unanswered, _)| unanswered != peer);
             return;
         }
-        if reason == CloseReason::Declined
-            || (!by_peer && matches!(reason, CloseReason::Closed | CloseReason::Background))
+        // Only this device's own ends are skipped. A host never has cause to
+        // close its own offer `declined`, which only a joiner's user does;
+        // skipping the peer's let it offer and close that way forever.
+        if !by_peer
+            && matches!(
+                reason,
+                CloseReason::Declined | CloseReason::Closed | CloseReason::Background
+            )
         {
             return;
         }
@@ -2450,6 +2457,46 @@ mod tests {
         assert_eq!(
             iphone.next_directive(now).unwrap().kind,
             FastLinkDirectiveKind::Join
+        );
+    }
+
+    #[test]
+    fn a_host_closing_its_own_offers_declined_is_still_paused() {
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let now = Instant::now();
+        for seed in [1, 2] {
+            let id = android.request(HIGH, fresh(seed), now).unwrap();
+            android.next_directive(now);
+            assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+            deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+            assert!(iphone.next_directive(now).is_some(), "offer {seed} prompts");
+            // The host ends its own offer with a reason only a joiner gives.
+            iphone.on_frame(
+                LOW,
+                HIGH,
+                Frame::new(
+                    &id,
+                    FrameBody::Close {
+                        reason: "declined".to_string(),
+                    },
+                ),
+                fresh(seed + 10),
+                now,
+                0,
+            );
+            assert!(iphone.peer().is_none());
+            assert!(android.close(HIGH, now));
+            android.take_frames();
+            iphone.take_frames();
+        }
+        let id = android.request(HIGH, fresh(3), now).unwrap();
+        android.next_directive(now);
+        assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+        deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+        assert!(
+            !iphone.has_directives(),
+            "the third unasked offer is never shown"
         );
     }
 
