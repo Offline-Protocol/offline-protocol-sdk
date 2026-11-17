@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import stat
+from pathlib import Path
 
 import pytest
 import websockets
@@ -21,7 +22,7 @@ from offline_protocol_sdk.local_api import (
     Policy,
 )
 from offline_protocol_sdk.local_api import codec
-from offline_protocol_sdk.local_api.server import FILE_SIZE_LIMIT
+from offline_protocol_sdk.local_api.server import FILE_SIZE_LIMIT, SocketPathError
 from offline_protocol_sdk.protocol_manager import ProtocolManager
 
 from .conftest import RpcFailure, make_config
@@ -553,10 +554,40 @@ async def test_a_wide_pre_existing_directory_is_refused_and_not_narrowed(harness
     os.chmod(wide, 0o755)
     manager = ProtocolManager(make_config(profile="unix-wide"))
     server = LocalApiServer(manager, socket_path=wide / "api.sock")
-    with pytest.raises(ValueError, match="no group or other"):
+    with pytest.raises(SocketPathError, match="no group or other") as err:
         await server.start()
+    # The refusal names the fix, and stays a ValueError for older callers.
+    assert f"chmod 700 {wide}" in str(err.value)
+    assert isinstance(err.value, ValueError)
     assert stat.S_IMODE(os.stat(wide).st_mode) == 0o755
     assert not (wide / "api.sock").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix sockets and POSIX modes only")
+async def test_a_socket_path_too_long_to_bind_is_refused_before_the_engine_starts(harness):
+    directory = harness._tmp / ("d" * 120)
+    manager = ProtocolManager(make_config(profile="unix-long"))
+    server = LocalApiServer(manager, socket_path=directory / "api.sock")
+    with pytest.raises(SocketPathError, match="Unix socket path must be under"):
+        await server.start()
+    assert not directory.exists(), "refused before anything was created"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix sockets and POSIX modes only")
+def test_the_cli_reports_a_refused_socket_directory_without_a_traceback(tmp_path):
+    import shutil
+    import tempfile
+
+    # Short enough to bind on macOS, where pytest's own temp path is not.
+    wide = Path(tempfile.mkdtemp(prefix="op-", dir="/tmp"))
+    try:
+        os.chmod(wide, 0o755)
+        cli, _ = _cli_args(tmp_path)
+        argv = [*_cli_argv(tmp_path), "--socket", str(wide / "api.sock")]
+        with pytest.raises(SystemExit, match=r"^--socket: .* `chmod 700 "):
+            cli.main(argv)
+    finally:
+        shutil.rmtree(wide)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix sockets and POSIX modes only")
@@ -738,14 +769,17 @@ def _cli_args(tmp_path, *extra, **config):
     path = tmp_path / "config.json"
     path.write_text(json.dumps(fields))
     os.environ["OP_TEST_CLI_KEY"] = "ab" * 32
-    argv = [
-        "--config", str(path),
+    argv = [*_cli_argv(tmp_path), *extra]
+    return cli, cli.build_parser().parse_args(argv)
+
+
+def _cli_argv(tmp_path):
+    return [
+        "--config", str(tmp_path / "config.json"),
         "--mls-root", str(tmp_path / "mls"),
         "--state-root", str(tmp_path / "state"),
         "--store-key-env", "OP_TEST_CLI_KEY",
-        *extra,
     ]
-    return cli, cli.build_parser().parse_args(argv)
 
 
 async def test_the_cli_configures_the_gateway_from_its_option(tmp_path):

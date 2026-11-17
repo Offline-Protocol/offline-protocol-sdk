@@ -32,7 +32,7 @@ from ..http_front.front import LOOPBACK_HOSTS, HttpFront
 from ..protocol_manager import ProtocolManager
 from . import codec
 from .authz import Policy
-from .server import LocalApiServer
+from .server import LocalApiServer, SocketPathError
 
 DEFAULT_STORE_KEY_ENV = "OFFLINE_PROTOCOL_STORE_KEY"
 DEFAULT_RELAY_TOKEN_ENV = "OFFLINE_PROTOCOL_RELAY_TOKEN"
@@ -288,7 +288,10 @@ def main(argv: list[str] | None = None) -> int:
         server = build_server(args, manager)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    asyncio.run(run(server, http))
+    try:
+        asyncio.run(run(server, http))
+    except SocketPathError as exc:
+        raise SystemExit(f"--socket: {exc}") from None
     return 0
 
 

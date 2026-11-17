@@ -118,6 +118,23 @@ ignore = [
     { id = "RUSTSEC-2026-0247", reason = "bitmaps unmaintained (archived upstream); compiled, beneath im under the CRDT engine; no safe upgrade exists and the successor fork requires an upstream loro change" },
     { id = "RUSTSEC-2026-0248", reason = "im unmaintained (archived upstream); compiled, the CRDT engine's persistent-collection library; no safe upgrade exists and the successor fork requires an upstream loro change" },
     { id = "RUSTSEC-2026-0251", reason = "sized-chunks unmaintained (archived upstream); compiled, beneath im under the CRDT engine; no safe upgrade exists and the successor fork requires an upstream loro change" },
+    # `chrono` was declared unmaintained on 2026-11-17 (announcement:
+    # chronotope/chrono#1768). This one is ours, not a transitive crate: it is
+    # a direct workspace dependency of offline-protocol, offline-protocol-mls,
+    # offline-protocol-reliability and offline-protocol-router, compiled and
+    # shipped in every library.
+    #
+    # What makes it a waiver and not a blocker: it is a maintenance-status
+    # notice, not a known vulnerability, and the advisory covers every
+    # version, so there is no release to move to. The remedy is a migration to
+    # `jiff` or `time`, which touches timestamps that are persisted and
+    # serialized and so cannot be done as a lockfile change.
+    #
+    # Standing obligation: this waiver buys time for that migration, it does
+    # not replace it. Drop it in the pull request that removes chrono from the
+    # workspace, and treat a real vulnerability against chrono as a reason to
+    # migrate at once, not to renew.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; direct dependency, compiled and shipped; a notice, not a vulnerability; all versions affected so no safe upgrade exists; removal needs a migration to jiff or time" },
 ]
 
 [licenses]

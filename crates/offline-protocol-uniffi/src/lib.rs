@@ -25692,4 +25692,511 @@ mod tests {
             "PACKAGE_README.md.template carries {linked} versioned links; the check above saw none of them"
         );
     }
+
+    /// The Python distribution page names every wheel a release builds, the
+    /// glibc floor the Python README states, and the service image the
+    /// container README points at. Each comes from a source the page does not
+    /// own: the platform list is the release matrix and the cases in
+    /// build-wheel.sh, so a fifth platform fails here until the page names it,
+    /// and the image tag is bumped in the container README at each release,
+    /// so a bump that misses this page fails here instead of sending readers
+    /// to the previous release's image.
+    #[test]
+    fn python_wheel_distribution_path_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let read = |path: &str| {
+            std::fs::read_to_string(repo.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+        };
+        let doc = read("docs/python-distribution.md");
+
+        // The platforms build-wheel.sh can tag: its two-space-indented case
+        // arms, not the names in its comments, which survive a deleted arm.
+        let script = read("bindings/python/scripts/build-wheel.sh");
+        let mut script_platforms: Vec<&str> = script
+            .lines()
+            .filter_map(|line| line.strip_prefix("  ")?.strip_suffix(')'))
+            .filter(|arm| {
+                !arm.is_empty()
+                    && arm.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+                    })
+            })
+            .collect();
+        script_platforms.sort_unstable();
+
+        // The platforms a release builds: the python-package job's matrix.
+        let release = read(".github/workflows/release.yml");
+        let job = release
+            .split("\n  python-package:\n")
+            .nth(1)
+            .expect("release.yml has a python-package job");
+        let job = job
+            .lines()
+            .take_while(|line| {
+                !(line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':'))
+            })
+            .collect::<Vec<_>>();
+        let mut release_platforms: Vec<&str> = job
+            .iter()
+            .filter_map(|line| line.trim().strip_prefix("- platform: "))
+            .collect();
+        release_platforms.sort_unstable();
+
+        assert_eq!(
+            script_platforms,
+            [
+                "linux-aarch64",
+                "linux-x86_64",
+                "macos-arm64",
+                "windows-x86_64"
+            ],
+            "build-wheel.sh's platform cases changed: update python-distribution.md and this list"
+        );
+        assert_eq!(
+            release_platforms, script_platforms,
+            "release.yml's python-package matrix and build-wheel.sh's cases disagree"
+        );
+
+        // Each platform as the page shows it to a reader: its wheel tag.
+        for tag in [
+            "macosx_14_0_arm64",
+            "manylinux_2_34_x86_64",
+            "manylinux_2_34_aarch64",
+            "win_amd64",
+        ] {
+            assert!(
+                doc.contains(tag),
+                "python-distribution.md must list the `{tag}` wheel"
+            );
+        }
+
+        // The glibc floor: every manylinux tag the Python README (the PyPI
+        // page) states is one this page states.
+        let readme = read("bindings/python/README.md");
+        let readme_tags: Vec<&str> = readme
+            .match_indices("manylinux_2_")
+            .map(|(at, _)| {
+                let rest = &readme[at..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .filter(|tag| tag.ends_with("_x86_64") || tag.ends_with("_aarch64"))
+            .collect();
+        assert!(
+            !readme_tags.is_empty(),
+            "the Python README states no manylinux tag"
+        );
+        for tag in readme_tags {
+            assert!(
+                doc.contains(tag),
+                "the Python README states `{tag}` and python-distribution.md does not"
+            );
+        }
+
+        // The image: every tag the page pulls is the one the container README,
+        // which each release bumps, points at.
+        const IMAGE: &str = "ghcr.io/offline-protocol/offline-protocol-service:";
+        let image_tags = |text: &str| -> Vec<String> {
+            text.match_indices(IMAGE)
+                .map(|(at, _)| {
+                    text[at + IMAGE.len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect()
+                })
+                .collect()
+        };
+        let docker_readme = read("bindings/python/docker/README.md");
+        let current = image_tags(&docker_readme)
+            .into_iter()
+            .next()
+            .expect("the container README pulls the published image");
+        let page_tags = image_tags(&doc);
+        assert!(
+            !page_tags.is_empty(),
+            "python-distribution.md must pull the published image"
+        );
+        for tag in page_tags {
+            assert_eq!(
+                tag, current,
+                "python-distribution.md pulls {IMAGE}{tag}; the container README is on {current}"
+            );
+        }
+
+        for needle in [
+            "pip install offline-protocol-sdk",
+            "state_root",
+            "no source distribution",
+        ] {
+            assert!(
+                doc.contains(needle),
+                "python-distribution.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            read("docs/integrator-map.md").contains("python-distribution.md"),
+            "integrator-map must link python-distribution.md"
+        );
+    }
+
+    /// Friction #23: Java Maven + release natives and C# library dir are one doc.
+    #[test]
+    fn desktop_java_csharp_distribution_path_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let doc = std::fs::read_to_string(repo.join("docs/desktop-java-csharp-distribution.md"))
+            .expect("desktop-java-csharp-distribution.md");
+        for needle in [
+            "com.offlineprotocol:offline-protocol-java",
+            "OFFLINE_PROTOCOL_LIBRARY_DIR",
+            "--enable-native-access=ALL-UNNAMED",
+            "-Djava.library.path",
+            "offline-protocol-X.Y.Z-linux-x86_64",
+            "no NuGet",
+        ] {
+            assert!(
+                doc.contains(needle),
+                "desktop-java-csharp-distribution.md must mention `{needle}`"
+            );
+        }
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        assert!(
+            map.contains("desktop-java-csharp-distribution.md"),
+            "integrator-map must link desktop-java-csharp-distribution.md"
+        );
+        let upgrading = std::fs::read_to_string(repo.join("docs/UPGRADING.md")).expect("UPGRADING");
+        assert!(
+            upgrading.contains("desktop-java-csharp-distribution.md"),
+            "UPGRADING version index must link desktop-java-csharp-distribution.md"
+        );
+        for path in ["bindings/java/README.md", "bindings/csharp/README.md"] {
+            let readme = std::fs::read_to_string(repo.join(path)).unwrap_or_else(|e| {
+                panic!("{path} must be readable for desktop distribution guard: {e}")
+            });
+            assert!(
+                readme.contains("desktop-java-csharp-distribution.md"),
+                "{path} must link desktop-java-csharp-distribution.md"
+            );
+        }
+    }
+
+    /// Friction #5: the TypeScript catalog of event tags must stay aligned with
+    /// `types.ts`, and integrators must have a documented parse entry point.
+    #[test]
+    fn react_native_protocol_event_parse_helpers_are_documented() {
+        use std::collections::BTreeSet;
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let rn = repo.join("bindings/react-native");
+        let types_ts = std::fs::read_to_string(rn.join("src/types.ts")).expect("types.ts");
+        let parser = std::fs::read_to_string(rn.join("src/parseProtocolEvent.ts"))
+            .expect("parseProtocolEvent.ts");
+        let index = std::fs::read_to_string(rn.join("src/index.ts")).expect("index.ts");
+        let ts_doc = std::fs::read_to_string(repo.join("docs/bridges/typescript.md"))
+            .expect("typescript.md");
+        let integration = std::fs::read_to_string(repo.join("docs/react-native-integration.md"))
+            .expect("react-native-integration.md");
+
+        let ts_tags: BTreeSet<String> = types_ts
+            .lines()
+            .filter_map(|l| l.strip_prefix("  type: '"))
+            .filter_map(|rest| rest.strip_suffix("';"))
+            .map(str::to_string)
+            .collect();
+
+        let mut in_array = false;
+        let mut catalog = BTreeSet::new();
+        for line in parser.lines() {
+            if line.contains("export const PROTOCOL_EVENT_TYPES = [") {
+                in_array = true;
+                continue;
+            }
+            if in_array {
+                if line.contains("] as const") {
+                    break;
+                }
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix('\'') {
+                    if let Some(tag) = rest.strip_suffix("',") {
+                        catalog.insert(tag.to_string());
+                    }
+                }
+            }
+        }
+
+        assert!(
+            catalog.len() >= 60,
+            "PROTOCOL_EVENT_TYPES catalog looks truncated ({})",
+            catalog.len()
+        );
+        let missing: Vec<_> = ts_tags.difference(&catalog).collect();
+        assert!(
+            missing.is_empty(),
+            "types.ts event tags missing from PROTOCOL_EVENT_TYPES: {missing:?}"
+        );
+        let stale: Vec<_> = catalog.difference(&ts_tags).collect();
+        assert!(
+            stale.is_empty(),
+            "PROTOCOL_EVENT_TYPES has tags not declared in types.ts: {stale:?}"
+        );
+
+        for needle in [
+            "parseProtocolEvent",
+            "tryParseProtocolEvent",
+            "PROTOCOL_EVENT_TYPES",
+        ] {
+            assert!(
+                index.contains(needle),
+                "bindings/react-native/src/index.ts must re-export `{needle}`"
+            );
+        }
+        assert!(
+            ts_doc.contains("## T10. Parsing opaque event JSON"),
+            "docs/bridges/typescript.md must document parseProtocolEvent (T10)"
+        );
+        assert!(
+            integration.contains("parseProtocolEvent"),
+            "react-native-integration.md must mention parseProtocolEvent"
+        );
+    }
+
+    /// Friction #25: browser integrators get a Vite starter and integrator-map
+    /// pointers with explicit experimental boundaries.
+    #[test]
+    fn web_vite_quickstart_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let starter = repo.join("bindings/web/starter");
+        let readme = std::fs::read_to_string(starter.join("README.md")).expect("starter README");
+        let pkg =
+            std::fs::read_to_string(starter.join("package.json")).expect("starter package.json");
+        let vite_cfg = std::fs::read_to_string(starter.join("vite.config.js"))
+            .expect("starter vite.config.js");
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        for needle in [
+            "bash bindings/web/scripts/build.sh",
+            "wasm-bindgen-cli",
+            "wasm32-unknown-unknown",
+            "npm run dev",
+            "Go / no-go",
+            "not a published npm package",
+        ] {
+            assert!(
+                readme.contains(needle),
+                "bindings/web/starter/README.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            pkg.contains("\"vite\"") && pkg.contains("\"dev\": \"vite\""),
+            "starter package.json must define a Vite dev script"
+        );
+        assert!(
+            vite_cfg.contains("@offline-protocol/web"),
+            "starter vite.config.js must alias the browser binding"
+        );
+        let main_js =
+            std::fs::read_to_string(starter.join("src/main.js")).expect("starter main.js");
+        assert!(
+            main_js.contains("?worker&url"),
+            "starter must import the engine worker through Vite's worker pipeline"
+        );
+        // Only a build proves the worker and the module are bundled.
+        let ci = std::fs::read_to_string(repo.join(".github/workflows/ci.yml")).expect("ci.yml");
+        assert!(
+            ci.contains("working-directory: bindings/web/starter")
+                && ci.contains("npm run build")
+                && ci.contains("dist/assets/*.wasm"),
+            "ci.yml must build the Vite starter and check its bundled module"
+        );
+        assert!(
+            map.contains("bindings/web/starter/README.md"),
+            "integrator-map must link bindings/web/starter/README.md"
+        );
+        assert!(
+            map.contains("go/no-go"),
+            "integrator-map Web row must mention the starter go/no-go section"
+        );
+    }
+
+    /// Friction #28: integrators get a testing matrix with golden paths and
+    /// explicit simulator vs hardware boundaries.
+    #[test]
+    fn integration_testing_matrix_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let doc = std::fs::read_to_string(repo.join("docs/integration-testing-matrix.md"))
+            .expect("integration-testing-matrix.md");
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        let docs_readme =
+            std::fs::read_to_string(repo.join("docs/README.md")).expect("docs README");
+        for needle in [
+            "Golden paths",
+            "physical devices",
+            "offline-protocol-verify",
+            "examples/react-native-app",
+            "web-devices",
+            "Milestone B",
+        ] {
+            assert!(
+                doc.contains(needle),
+                "integration-testing-matrix.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            map.contains("integration-testing-matrix.md"),
+            "integrator-map must link integration-testing-matrix.md"
+        );
+        assert!(
+            map.contains("Integration testing matrix"),
+            "integrator-map examples table must name the testing matrix"
+        );
+        assert!(
+            docs_readme.contains("integration-testing-matrix.md"),
+            "docs/README.md must list integration-testing-matrix.md"
+        );
+    }
+
+    /// Friction #30 (C12): the native consumer-check apps show the lifecycle
+    /// wiring a Swift or Kotlin host owes, and telemetry.md sends integrators
+    /// there. The needles are the obligations, not helper names: a stub that
+    /// forwards both edges back to back compiles and looks right, and closes no
+    /// session when the app backgrounds.
+    #[test]
+    fn consumer_check_telemetry_lifecycle_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let swift = std::fs::read_to_string(
+            repo.join("bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift"),
+        )
+        .expect("swift consumer-check");
+        let kotlin = std::fs::read_to_string(
+            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
+        )
+        .expect("kotlin consumer-check");
+        let telemetry =
+            std::fs::read_to_string(repo.join("docs/telemetry.md")).expect("telemetry.md");
+        for (path, body, needles) in [
+            (
+                "Use.swift",
+                swift.as_str(),
+                &[
+                    // The binding fills the platform.
+                    "os: .ios",
+                    "operatingSystemVersion.majorVersion",
+                    // The edges come from the application notifications.
+                    "UIApplication.didEnterBackgroundNotification",
+                    "UIApplication.willEnterForegroundNotification",
+                    // The background flush runs inside a background task.
+                    "beginBackgroundTask",
+                    "flushTelemetryBlocking(deadlineMs: 3000)",
+                    "notifyAppState(state: .background)",
+                    "notifyAppState(state: .active)",
+                    // Enabling is seeded from the current state.
+                    "appState: lifecycle.appState",
+                ][..],
+            ),
+            (
+                "Use.kt",
+                kotlin.as_str(),
+                &[
+                    "TelemetryOs.ANDROID",
+                    "Build.VERSION.SDK_INT",
+                    // The process boundary, never Activity.onPause.
+                    "Application.ActivityLifecycleCallbacks",
+                    "registerActivityLifecycleCallbacks",
+                    "IdentityHashMap",
+                    "isChangingConfigurations",
+                    // A throw from a lifecycle callback kills the process.
+                    "catch (e: Exception)",
+                    "notifyQuietly(AppState.BACKGROUND)",
+                    "notifyQuietly(AppState.ACTIVE)",
+                    "protocol?.notifyAppState(state)",
+                    "lifecycle.appState)",
+                ][..],
+            ),
+        ] {
+            for needle in needles {
+                assert!(
+                    body.contains(needle),
+                    "bindings/.../consumer-check {path} must show `{needle}` (C12)"
+                );
+            }
+        }
+        for needle in [
+            "../bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift",
+            "../bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt",
+            "bridges/csharp.md#cs5-telemetry-c12",
+            "TelemetryLifecycleForwarder",
+        ] {
+            assert!(
+                telemetry.contains(needle),
+                "telemetry.md must send native hosts to the lifecycle wiring (`{needle}`)"
+            );
+        }
+    }
+
+    /// Friction #31: integrators get a license decision tree linked from package
+    /// READMEs and the integrator map.
+    #[test]
+    fn licensing_decision_tree_is_linked_from_package_readmes() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let tree = std::fs::read_to_string(repo.join("docs/licensing-decision-tree.md"))
+            .expect("licensing-decision-tree.md");
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        for needle in [
+            "not legal advice",
+            "Commercial license",
+            "AGPL-3.0-only",
+            "legal@offlineprotocol.com",
+            "licensing-faq.md",
+        ] {
+            assert!(
+                tree.contains(needle),
+                "licensing-decision-tree.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            map.contains("licensing-decision-tree.md"),
+            "integrator-map must link licensing-decision-tree.md"
+        );
+        for (path, label) in [
+            ("README.md", "repository README"),
+            (
+                "bindings/react-native/README.md",
+                "React Native package README",
+            ),
+            ("bindings/python/README.md", "Python package README"),
+            ("bindings/flutter/README.md", "Flutter README"),
+        ] {
+            let readme = std::fs::read_to_string(repo.join(path))
+                .unwrap_or_else(|e| panic!("read {label}: {e}"));
+            assert!(
+                readme.contains("licensing-decision-tree.md"),
+                "{label} must link licensing-decision-tree.md"
+            );
+        }
+    }
 }

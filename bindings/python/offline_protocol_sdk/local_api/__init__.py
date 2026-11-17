@@ -10,7 +10,7 @@ from .authz import METHOD_GROUPS, Policy, ServiceOwnership  # noqa: F401
 from .codec import RpcError  # noqa: F401
 from .dispatch import BEFORE_HELLO, EXPOSED, ID_RESULTS, PLATFORM, SESSION_METHODS  # noqa: F401
 from .mux import HELD_TAGS, HOLD_CAPACITY, EventRouter  # noqa: F401
-from .server import API_VERSION, MAX_MESSAGE_SIZE, SERVER_NAME, LocalApiServer  # noqa: F401
+from .server import API_VERSION, MAX_MESSAGE_SIZE, SERVER_NAME, LocalApiServer, SocketPathError  # noqa: F401
 from .session import Session  # noqa: F401
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "Policy",
     "RpcError",
     "SERVER_NAME",
+    "SocketPathError",
     "SESSION_METHODS",
     "ServiceOwnership",
     "Session",

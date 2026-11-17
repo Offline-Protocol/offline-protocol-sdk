@@ -5402,10 +5402,20 @@ impl OfflineProtocol {
         self.write_lamport_clock_to_storage(current);
     }
 
-    /// Forces the Lamport clock to storage regardless of debounce state.
-    /// Called on shutdown to avoid losing any un-flushed ticks.
+    /// Writes the Lamport clock to storage regardless of debounce state, when
+    /// storage does not already hold it. Called on stop, pause and drop so no
+    /// tick is lost.
+    ///
+    /// Skipping a write storage already has is what lets a stopped engine be
+    /// freed without calling its storage provider: a host frees it whenever
+    /// its runtime gets round to it, Python during interpreter shutdown, when
+    /// a provider can no longer run and UniFFI panics on the failed callback.
     pub(crate) fn flush_lamport_clock(&mut self) {
-        self.write_lamport_clock_to_storage(self.lamport_clock.value());
+        let current = self.lamport_clock.value();
+        if current == self.last_persisted_lamport {
+            return;
+        }
+        self.write_lamport_clock_to_storage(current);
     }
 
     fn write_lamport_clock_to_storage(&mut self, value: u64) {
@@ -5429,29 +5439,38 @@ impl OfflineProtocol {
     ///
     /// Uses `max(current, restored)` so the clock never goes backward even
     /// if the in-memory value has advanced before storage was attached.
+    /// `last_persisted_lamport` becomes what this storage holds (zero when it
+    /// holds nothing usable), not the clock: ticks taken before it was
+    /// attached are not in it yet, and `flush_lamport_clock` skips a value it
+    /// believes is stored.
     pub(crate) fn restore_lamport_clock(&mut self) {
         let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
-        if let Ok(Some(data)) = self.read_state_record(
+        match self.read_state_record(
             storage.as_ref(),
             storage_keys::LAMPORT_CLOCK,
             storage_keys::LAMPORT_CLOCK_ID,
         ) {
-            if data.len() == 8 {
+            Ok(Some(data)) if data.len() == 8 => {
                 let restored = u64::from_le_bytes(data.try_into().expect("verified length is 8"));
                 let restored_clock = LamportClock::from_value(restored);
                 if restored_clock > self.lamport_clock {
                     self.lamport_clock = restored_clock;
                 }
-                self.last_persisted_lamport = self.lamport_clock.value();
+                self.last_persisted_lamport = restored;
                 debug!(clock = %self.lamport_clock, "Restored Lamport clock from storage");
-            } else {
+            }
+            Ok(Some(data)) => {
                 warn!(
                     len = data.len(),
                     "Corrupted Lamport clock in storage (expected 8 bytes), starting fresh"
                 );
+                self.last_persisted_lamport = 0;
             }
+            Ok(None) => self.last_persisted_lamport = 0,
+            // Unknown: keep the watermark, as before.
+            Err(_) => {}
         }
     }
 }

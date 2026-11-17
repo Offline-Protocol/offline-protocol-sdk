@@ -21140,6 +21140,76 @@ fn test_lamport_clock_restore_never_goes_backward() {
 }
 
 #[test]
+fn test_a_stopped_protocol_is_dropped_without_writing_the_lamport_clock() {
+    // A host frees the engine when its runtime decides to (Python during
+    // interpreter shutdown, when the storage provider can no longer run): a
+    // stopped engine must have nothing left to write by then.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    protocol.start().unwrap();
+    protocol
+        .send_message("bob", "one", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.stop().unwrap();
+    assert!(storage
+        .load(storage_keys::LAMPORT_CLOCK, storage_keys::LAMPORT_CLOCK_ID)
+        .unwrap()
+        .is_some());
+
+    storage
+        .delete(storage_keys::LAMPORT_CLOCK, storage_keys::LAMPORT_CLOCK_ID)
+        .unwrap();
+    drop(protocol);
+    assert!(
+        storage
+            .load(storage_keys::LAMPORT_CLOCK, storage_keys::LAMPORT_CLOCK_ID)
+            .unwrap()
+            .is_none(),
+        "drop wrote a clock stop() had already stored"
+    );
+}
+
+#[test]
+fn test_lamport_ticks_taken_before_storage_was_attached_are_flushed() {
+    let storage = Arc::new(InMemoryStorage::new());
+    storage
+        .store(
+            storage_keys::LAMPORT_CLOCK,
+            storage_keys::LAMPORT_CLOCK_ID,
+            &3u64.to_le_bytes(),
+        )
+        .unwrap();
+    {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        for _ in 0..7 {
+            protocol.lamport_clock.tick();
+        }
+        protocol
+            .enable_message_persistence_for_test(storage.clone())
+            .unwrap();
+        assert_eq!(protocol.lamport_clock.value(), 7);
+        protocol.flush_lamport_clock();
+    }
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert_eq!(
+        protocol.lamport_clock.value(),
+        7,
+        "storage held 3 before the flush"
+    );
+}
+
+#[test]
 fn test_lamport_clock_merge_on_internal_message() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 

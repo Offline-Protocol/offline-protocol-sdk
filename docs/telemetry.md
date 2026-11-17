@@ -47,6 +47,25 @@ await pm.start()
 pm.enable_telemetry("mp_…", "app_…", app_version="1.4.2")
 ```
 
+A Python host with a lifecycle of its own (a desktop UI) reports it with
+`notify_app_state`; a service with none never calls it.
+
+**Native Swift and Kotlin** (the Swift package and the Android library, not
+React Native or Flutter): the application is the binding. It fills `os` and
+`os_major` from the device and forwards the lifecycle itself
+([C12](bridges/README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform)).
+The consumer-check apps hold compile-checked wiring to copy:
+
+| Binding | File | What it shows |
+|---------|------|---------------|
+| Swift | [Use.swift](../bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift) | `TelemetryLifecycleForwarder`: `UIApplication` notifications, the background flush inside a background task, both edges on one serial queue |
+| Kotlin | [Use.kt](../bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt) | `TelemetryLifecycleForwarder`: an `Application.ActivityLifecycleCallbacks` watcher registered in `Application.onCreate`, the edge drawn when the last started activity stops |
+| C# | [csharp.md CS5](bridges/csharp.md#cs5-telemetry-c12) | A UI host forwards its own edges with `NotifyAppStateAsync`; the C API fills `os` |
+
+On Android the boundary is the process leaving the foreground, never
+`Activity.onPause`: that fires for a permission dialog or the share sheet, and
+would rotate the session every time a user granted a permission.
+
 Rust:
 
 ```rust

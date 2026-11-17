@@ -22,13 +22,13 @@ before reading all of [UPGRADING.md](UPGRADING.md).
 | Native iOS (Swift) | [ios-native-distribution.md](ios-native-distribution.md) → [ios-integration.md](ios-integration.md) | ~2 h with release package (longer if building from source) | RN path is much faster; native adds storage + transport wiring via `OfflineProtocolSDK`. |
 | Native Android (Kotlin) | [android-integration.md](android-integration.md) | 2 h–2 days | Same parity gap as iOS for MLS storage. |
 | Flutter | [flutter-distribution.md](flutter-distribution.md) → [bindings/flutter/README.md](../bindings/flutter/README.md) | ~1 h with the pub.dev package, 1–4 h from source | `flutter pub add offline_protocol` once it is on pub.dev; until then a path dependency and a UniFFI build, as for React Native. |
-| Python (desktop / gateway) | [bindings/python/README.md](../bindings/python/README.md) | ~30 min with wheels | `pip install offline-protocol-sdk`; set `state_root` explicitly. |
+| Python (desktop / gateway) | [python-distribution.md](python-distribution.md) → [bindings/python/README.md](../bindings/python/README.md) | ~30 min with wheels | `pip install offline-protocol-sdk`; set `state_root` explicitly. Alpine or an older glibc: the service image. Intel Mac: build from source. |
 | Local API (multi-app on one host) | [local-api.md](local-api.md) | ~1 h | Service + policy file; clients over socket. |
 | C / C++ / Go (via C) | [bindings/c/README.md](../bindings/c/README.md) | 1–2 h | Build or ship `liboffline_protocol_uniffi`; JSON config + callbacks. |
-| C# / .NET 8 | [bindings/csharp/README.md](../bindings/csharp/README.md) | 1–2 h | `OFFLINE_PROTOCOL_LIBRARY_DIR` + engine thread rules. |
-| Java (JVM 22+) | [bindings/java/README.md](../bindings/java/README.md) | 1–2 h | `--enable-native-access`; positional `ProtocolConfig`. |
+| C# / .NET 8 | [desktop-java-csharp-distribution.md](desktop-java-csharp-distribution.md) → [bindings/csharp/README.md](../bindings/csharp/README.md) | ~1 h with release natives | Release desktop archive + `OFFLINE_PROTOCOL_LIBRARY_DIR` (no NuGet yet). |
+| Java (JVM 22+) | [desktop-java-csharp-distribution.md](desktop-java-csharp-distribution.md) → [bindings/java/README.md](../bindings/java/README.md) | ~1 h with Maven + release natives | `com.offlineprotocol:offline-protocol-java` + `--enable-native-access`. |
 | Ruby | [bindings/ruby/README.md](../bindings/ruby/README.md) | ~1 h | Keep engine alive while callbacks exist. |
-| Web (browser) | [bridges/web.md](bridges/web.md) | days (experimental) | Worker + OPFS; not a drop-in npm widget. |
+| Web (browser) | [Web Vite starter](../bindings/web/starter/README.md) → [bridges/web.md](bridges/web.md) | ~1–2 h tab mesh (experimental) | Dedicated worker + WASM build; **not** an npm drop-in. See starter [go/no-go](../bindings/web/starter/README.md#go--no-go-pick-another-platform-when). |
 
 ---
 
@@ -209,7 +209,8 @@ call `requestMeshPermissions()` before `start()` (see that guide).
 | Example app copy-paste blocks | [example app integration guide](../examples/react-native-app/INTEGRATION_GUIDE.md) (should match the canonical guide) |
 
 **Testing:** BLE and Wi‑Fi Direct need **physical devices**; simulators are not
-enough for mesh QA.
+enough for mesh QA. Use the [integration testing matrix](integration-testing-matrix.md)
+(golden paths: example app, `offline-protocol-verify`, web-devices).
 
 **QA thinks the SDK is hung or pairing is wrong?** See
 [troubleshooting.md](troubleshooting.md) (Wi‑Fi Direct often needs **1–2
@@ -259,11 +260,13 @@ version for the index).
 
 | Resource | Use when |
 |----------|----------|
-| [React Native example app](../examples/react-native-app/README.md) | You want a full app to copy patterns from |
+| [Integration testing matrix](integration-testing-matrix.md) | QA: simulator vs hardware, release milestones |
+| [React Native example app](../examples/react-native-app/README.md) | **Golden path:** two-device RN mesh smoke |
 | [Demo app](../examples/demo-app/README.md) | Discovery, chat, groups, services in one RN app |
 | [Storage adapters](../examples/storage-adapters/README.md) | Custom protocol-state storage (Swift/Kotlin/Python) |
-| `offline-protocol-verify` (Python) | Smoke test pairing/delivery against a running service |
-| [Mesh between tabs](../examples/web-two-tabs/README.md) | Browser worker mesh |
+| [`offline-protocol-verify`](local-api.md#checking-what-the-network-did-offline-protocol-verify) (Python) | **Golden path:** event-backed delivery proof on a service |
+| [Web Vite starter](../bindings/web/starter/README.md) | Cloneable dev template (tab mesh, `npm run dev`) |
+| [Mesh between tabs](../examples/web-two-tabs/README.md) | Same tab mesh without Vite (static `http.server`) |
 
 ---
 
@@ -274,4 +277,5 @@ version for the index).
 | [Documentation index](README.md) | Full list of guides and spec |
 | [Bridge contracts](bridges/README.md) | Boundary rules (silent failures if violated) |
 | [Architecture](architecture.md) | Crate layout and design |
-| [Licensing FAQ](licensing-faq.md) | AGPL vs commercial |
+| [License decision tree](licensing-decision-tree.md) | AGPL vs commercial — start here for legal triage |
+| [Licensing FAQ](licensing-faq.md) | App Store, §13, telemetry (after the tree) |

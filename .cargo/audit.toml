@@ -185,4 +185,13 @@ ignore = [
     "RUSTSEC-2026-0248",
     # RUSTSEC-2026-0251 — sized-chunks unmaintained.
     "RUSTSEC-2026-0251",
+
+    # Mirrors deny.toml, where the full rationale is. `chrono` is a direct
+    # workspace dependency, compiled and shipped, declared unmaintained on
+    # 2026-11-17 with every version affected. It is a notice, not a
+    # vulnerability. Drop this in the pull request that migrates the
+    # workspace to `jiff` or `time`.
+    #
+    # RUSTSEC-2026-0543: chrono unmaintained.
+    "RUSTSEC-2026-0543",
 ]

@@ -576,6 +576,11 @@ fn the_wasm_bindgen_pins_agree() {
             ".github/workflows/ci.yml",
             format!("cargo install wasm-bindgen-cli --version {locked} --locked"),
         ),
+        // The starter tells people which CLI to install by hand.
+        (
+            "bindings/web/starter/README.md",
+            format!("cargo install wasm-bindgen-cli --version {locked} --locked"),
+        ),
     ] {
         let text = read_repo_file(&root.join(file)).expect(file);
         assert!(

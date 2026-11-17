@@ -195,6 +195,18 @@ distribution guides above; that path is for maintainers, not the default app flo
 
 ---
 
+## For Python (desktop / gateway)
+
+```bash
+pip install 'offline-protocol-sdk[lan,http]'
+```
+
+Set `state_root` explicitly when you construct `ProtocolManager`. Supported
+hosts, and what to run on Alpine, an older glibc or an Intel Mac:
+[python-distribution.md](docs/python-distribution.md).
+
+---
+
 ## Next Steps
 
 - **[Upgrading](docs/UPGRADING.md)** - Read this first if you are moving an existing app onto the storage-split release

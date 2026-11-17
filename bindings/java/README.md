@@ -1,5 +1,8 @@
 # The Offline Protocol SDK from Java
 
+**Desktop integrators:** Maven coordinate + release native archive — see
+[docs/desktop-java-csharp-distribution.md](../../docs/desktop-java-csharp-distribution.md).
+
 A typed Java API for the JVM on desktop and server, generated from the same
 interface definition as the Swift, Kotlin and Python bindings by
 [`uniffi-bindgen-java`](https://github.com/IronCoreLabs/uniffi-bindgen-java).
