@@ -1589,6 +1589,7 @@ class WifiDirectManager(
             override fun onFailure(reason: Int) {
                 if (fastLinkHosted !== hosted) return
                 fastLinkHosted = null
+                recordHostedFastLinkGroup(null)
                 emitDiagnostic("warning", "Fast link: the network did not come up", mapOf(
                     "reason" to reasonToString(reason),
                 ))
@@ -1756,7 +1757,13 @@ class WifiDirectManager(
     /** This device left whatever group it was in. */
     private fun fastLinkGroupGone() {
         fastLinkLeaving = false
-        recordHostedFastLinkGroup(null)
+        // Not while a hosted group is still forming: Android reports the
+        // device out of any group while createGroup brings one up, and
+        // clearing the name then left a host killed before the group was
+        // seen with its group on the air and nothing on disk. The group was
+        // never seen, so this cannot be it going; a failed createGroup clears
+        // the name itself.
+        if (fastLinkHosted?.reported != false) recordHostedFastLinkGroup(null)
         parkedFastLinkJoin?.let { parked ->
             parkedFastLinkJoin = null
             try {

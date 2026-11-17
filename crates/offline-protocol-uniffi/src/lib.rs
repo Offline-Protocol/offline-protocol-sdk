@@ -20453,6 +20453,8 @@ mod tests {
     /// any group while the group is still forming, which clears the first
     /// record, so a host killed while hosting left the group on the air with
     /// no name on disk and its next start adopted it as an ordinary group.
+    /// That broadcast also leaves the record alone while the hosted group is
+    /// unseen, which closes the window before the group is first seen.
     #[test]
     fn an_android_host_records_its_group_once_it_sees_it() {
         let kotlin =
@@ -20464,6 +20466,14 @@ mod tests {
             ),
             "WifiDirectManager.kt: fastLinkGroupChanged must record the hosted group's name \
              when it first sees the group"
+        );
+        assert!(
+            kotlin.contains(
+                "private fun fastLinkGroupGone() { fastLinkLeaving = false \
+                 if (fastLinkHosted?.reported != false) recordHostedFastLinkGroup(null)"
+            ),
+            "WifiDirectManager.kt: the out-of-group broadcast during createGroup must not clear \
+             the name of a hosted group not yet seen"
         );
     }
 
