@@ -137,7 +137,9 @@ Bluetooth. An iPhone joins the network the peer hosts, which needs the
 `com.apple.developer.networking.HotspotConfiguration` to the app's
 entitlements (Xcode adds it to the App ID with automatic signing), and keep
 the local-network keys above, since the stream is a local-network connection.
-Without the entitlement every join ends `failed`.
+Without the entitlement every join ends `failed`. An iPhone joins from iOS
+14, which can say what network the phone is on; below it a request is refused
+and a peer's offer answered `cannot_join`.
 
 iOS shows "“App” Wants to Join Wi‑Fi Network “DIRECT-…”?" on every join, and
 the phone leaves its own Wi-Fi while the link lasts. By default a peer's app

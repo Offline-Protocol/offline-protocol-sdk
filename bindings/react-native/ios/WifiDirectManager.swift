@@ -14,6 +14,7 @@ import Network
 // every use of Network's ambiguous in this file.
 import class NetworkExtension.NEHotspotConfiguration
 import class NetworkExtension.NEHotspotConfigurationManager
+import class NetworkExtension.NEHotspotNetwork
 import enum NetworkExtension.NEHotspotConfigurationError
 import let NetworkExtension.NEHotspotConfigurationErrorDomain
 
@@ -297,10 +298,14 @@ public class WifiDirectManager: NSObject, TransportManager {
         try? protocolInstance.wifiDirectStatusChanged(isConnected: true)
         emitDiagnostic("info", "Peer-stream transport started")
         // An iPhone joins a fast link and cannot host one (ADR 0038), as far
-        // as the application's `wifiDirect.fastLink` allows.
+        // as the application's `wifiDirect.fastLink` allows. Only from iOS
+        // 14, which can say what network the phone is on: a join is dialed
+        // only once it is on the offered one (`dialFastLink`).
+        let canConfirmNetwork: Bool
+        if #available(iOS 14.0, *) { canConfirmNetwork = true } else { canConfirmNetwork = false }
         try? protocolInstance.wifiDirectSetFastLinkRoles(
             canHost: false,
-            canJoin: fastLinkMode != .off,
+            canJoin: fastLinkMode != .off && canConfirmNetwork,
             acceptUnrequested: fastLinkMode == .any
         )
     }
@@ -997,6 +1002,37 @@ extension WifiDirectManager {
         }
         guard streams.count < Self.MAX_STREAMS,
               let port = NWEndpoint.Port(rawValue: link.port) else { return }
+        // Dialed only from the offered network. `apply` can finish with no
+        // error while the phone stays on its own Wi-Fi (a wrong passphrase,
+        // a group already gone), and `.wifi` alone would then send the dial,
+        // and the preamble, to whatever the offer named on the user's home
+        // network. Until the phone is on it, the dial waits; the engine's
+        // deadline bounds the wait.
+        guard #available(iOS 14.0, *) else { return }
+        NEHotspotNetwork.fetchCurrent { [weak self] network in
+            guard let self = self else { return }
+            self.linkQueue.async {
+                guard self.fastLink === link else { return }
+                if network?.ssid == link.ssid {
+                    self.openFastLinkStream(link, port: port)
+                } else {
+                    self.scheduleFastLinkRedial(link)
+                }
+            }
+        }
+    }
+
+    /// Opens the link's stream, bound to Wi-Fi, claiming the host. linkQueue
+    /// only, and only once the phone is on the link's network.
+    private func openFastLinkStream(_ link: FastLinkJoin, port: NWEndpoint.Port) {
+        guard link.joined, state == .running,
+              ProcessInfo.processInfo.systemUptime < link.deadline,
+              streams.count < Self.MAX_STREAMS else { return }
+        if let held = peers.handle(for: link.peer), streams.contains(held) { return }
+        if let current = link.stream as? Stream, streams.contains(current) {
+            scheduleFastLinkRedial(link)
+            return
+        }
         let parameters = Self.makeParameters()
         parameters.requiredInterfaceType = .wifi
         let stream = Stream(

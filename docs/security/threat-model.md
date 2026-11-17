@@ -1478,8 +1478,10 @@ the host's address and can hand them on, and a peer that shares a session can
 already send anything. A hostile session peer can offer a network it controls
 and so take the joiner off its own Wi-Fi, after the system prompt on iOS. The
 offered address must be a private or link-local IP literal, the joiner's dial
-stays on the group (an iPhone binds it to Wi-Fi; an Android, which keeps its
-own Wi-Fi, dials the group owner's address and not the offer's), and the
+stays on the group (an iPhone dials only once iOS reports it is on the
+offered network, since a join can finish with no error while the phone stays
+on its own Wi-Fi; an Android, which keeps its own Wi-Fi, dials the group
+owner's address and not the offer's), and the
 stream must prove the offerer's own
 address, so a link that proves nothing ends when its offer expires, at most
 300 s later. It can also put the iOS join prompt in front of a user who did
