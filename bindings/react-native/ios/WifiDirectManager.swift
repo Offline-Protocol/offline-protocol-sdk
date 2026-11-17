@@ -1023,8 +1023,14 @@ extension WifiDirectManager {
             scheduleFastLinkRedial(link)
             return
         }
-        guard streams.count < Self.MAX_STREAMS,
-              let port = NWEndpoint.Port(rawValue: link.port) else { return }
+        guard let port = NWEndpoint.Port(rawValue: link.port) else { return }
+        // A full stream table is a "not yet" like any other: returning ended
+        // the redial chain, and the join sat out its offer with the host's
+        // group on the air. The deadline above still bounds it.
+        guard streams.count < Self.MAX_STREAMS else {
+            scheduleFastLinkRedial(link)
+            return
+        }
         // Dialed only from the offered network. `apply` can finish with no
         // error while the phone stays on its own Wi-Fi (a wrong passphrase,
         // a group already gone), and `.wifi` alone would then send the dial,
@@ -1079,8 +1085,11 @@ extension WifiDirectManager {
     /// only, and only once the phone is on the link's network.
     private func openFastLinkStream(_ link: FastLinkJoin, port: NWEndpoint.Port) {
         guard link.joined, state == .running,
-              ProcessInfo.processInfo.systemUptime < link.deadline,
-              streams.count < Self.MAX_STREAMS else { return }
+              ProcessInfo.processInfo.systemUptime < link.deadline else { return }
+        guard streams.count < Self.MAX_STREAMS else {
+            scheduleFastLinkRedial(link)
+            return
+        }
         if let held = peers.handle(for: link.peer), streams.contains(held) { return }
         if let current = link.stream as? Stream, streams.contains(current) {
             scheduleFastLinkRedial(link)

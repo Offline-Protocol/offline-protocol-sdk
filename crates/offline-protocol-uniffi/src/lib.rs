@@ -20447,6 +20447,14 @@ mod tests {
             "ios/WifiDirectManager.swift: a join that never reaches the group must end \
              `failed` after a bounded number of looks, not wait out its offer"
         );
+        assert_eq!(
+            swift
+                .matches("guard streams.count < Self.MAX_STREAMS else { scheduleFastLinkRedial(link) return }")
+                .count(),
+            2,
+            "ios/WifiDirectManager.swift: a fast-link dial that finds the stream table full \
+             must try again, not end the redial chain"
+        );
     }
     /// An Android host records its fast link's group name once it sees the
     /// group, not only before `createGroup`. Android reports the device out of
