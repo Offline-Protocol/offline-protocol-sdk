@@ -1,5 +1,8 @@
 # C# / .NET bindings
 
+**Desktop integrators:** release native archive + `OFFLINE_PROTOCOL_LIBRARY_DIR` —
+see [docs/desktop-java-csharp-distribution.md](../../docs/desktop-java-csharp-distribution.md).
+
 .NET host for the [Offline Protocol SDK](https://github.com/Offline-Protocol/offline-protocol-sdk)
 on Windows (primary) and other desktop targets. The binding calls the same
 **C API** and native library as [bindings/c](../c/README.md) (`offline_protocol_uniffi.dll`

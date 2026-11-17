@@ -25375,4 +25375,48 @@ mod tests {
             "integrator-map must link python-distribution.md"
         );
     }
+
+    /// Friction #23: Java Maven + release natives and C# library dir are one doc.
+    #[test]
+    fn desktop_java_csharp_distribution_path_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let doc = std::fs::read_to_string(repo.join("docs/desktop-java-csharp-distribution.md"))
+            .expect("desktop-java-csharp-distribution.md");
+        for needle in [
+            "com.offlineprotocol:offline-protocol-java",
+            "OFFLINE_PROTOCOL_LIBRARY_DIR",
+            "--enable-native-access=ALL-UNNAMED",
+            "-Djava.library.path",
+            "offline-protocol-X.Y.Z-linux-x86_64",
+            "no NuGet",
+        ] {
+            assert!(
+                doc.contains(needle),
+                "desktop-java-csharp-distribution.md must mention `{needle}`"
+            );
+        }
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        assert!(
+            map.contains("desktop-java-csharp-distribution.md"),
+            "integrator-map must link desktop-java-csharp-distribution.md"
+        );
+        let upgrading = std::fs::read_to_string(repo.join("docs/UPGRADING.md")).expect("UPGRADING");
+        assert!(
+            upgrading.contains("desktop-java-csharp-distribution.md"),
+            "UPGRADING version index must link desktop-java-csharp-distribution.md"
+        );
+        for path in ["bindings/java/README.md", "bindings/csharp/README.md"] {
+            let readme = std::fs::read_to_string(repo.join(path)).unwrap_or_else(|e| {
+                panic!("{path} must be readable for desktop distribution guard: {e}")
+            });
+            assert!(
+                readme.contains("desktop-java-csharp-distribution.md"),
+                "{path} must link desktop-java-csharp-distribution.md"
+            );
+        }
+    }
 }
