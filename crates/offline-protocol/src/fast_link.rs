@@ -1105,7 +1105,12 @@ impl FastLinks {
             }
             self.ended_joins
                 .push_back((link.id.clone(), link.peer.clone()));
-            if reason == CloseReason::Declined {
+            // Only this device's user declining a network it was asked to
+            // join starts the pause. A peer's `declined` answers this
+            // device's request; counting it refused that peer's own link
+            // for ten minutes, with no prompt ever shown here.
+            if reason == CloseReason::Declined && tell_peer && link.state == FastLinkState::Joining
+            {
                 self.record_decline(link.peer.clone(), now);
             }
         }
@@ -2285,6 +2290,33 @@ mod tests {
             t0,
             0,
         );
+        assert_eq!(
+            iphone.next_directive(t0).unwrap().kind,
+            FastLinkDirectiveKind::Join
+        );
+    }
+
+    #[test]
+    fn a_peers_decline_never_pauses_its_own_offers() {
+        let t0 = Instant::now();
+        let mut android = machine(FastLinkRoles {
+            accept_unrequested: false,
+            ..host_roles()
+        });
+        let mut iphone = machine(join_roles());
+
+        // The iPhone asks; the Android takes only its own links.
+        iphone.request(LOW, fresh(1), t0).unwrap();
+        deliver(&mut iphone, HIGH, &mut android, LOW, t0, 0);
+        deliver(&mut android, LOW, &mut iphone, HIGH, t0, 0);
+        assert!(iphone.peer().is_none(), "the request ended with declined");
+
+        // The Android's user then asks; the iPhone's user saw no prompt, so
+        // the offer goes ahead.
+        let id = android.request(HIGH, fresh(2), t0).unwrap();
+        android.next_directive(t0);
+        assert!(android.hosting(&id, "192.168.49.1", 8988, t0, 0));
+        deliver(&mut android, LOW, &mut iphone, HIGH, t0, 0);
         assert_eq!(
             iphone.next_directive(t0).unwrap().kind,
             FastLinkDirectiveKind::Join
