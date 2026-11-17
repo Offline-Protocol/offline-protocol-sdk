@@ -173,6 +173,13 @@ application returned, with nothing bounding it. Stopping it ends a link with
 `closed`, for the same reason and one more: an engine started again would
 find the old link still held and answer every request `busy`.
 
+A host whose process dies ends nothing: an Android group belongs to the
+system, not the process, and stays on the air. The host's platform keeps the
+group's name on disk until it sees the group gone, and on its next start
+removes an owned group of that name rather than joining the socket layer to
+it as an ordinary group, which left it up with no timer and refused every
+later link.
+
 A joiner's platform that is about to lose the network reports it as `ended`
 first: on iOS, leaving the foreground, after which iOS disconnects at 15 s
 whatever the engine thinks. Without the report the host learns from TCP

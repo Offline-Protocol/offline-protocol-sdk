@@ -90,6 +90,8 @@ class WifiDirectManager(
 
     companion object {
         private const val TAG = "WifiDirectManager"
+        private const val FAST_LINK_PREFS = "offline_protocol_fast_link"
+        private const val HOSTED_FAST_LINK_GROUP = "hosted_group"
         
         // Fallback interval for message polling. Primary send path is event-driven
         // via onMessagesAvailable(); this timer only catches edge cases.
@@ -587,8 +589,30 @@ class WifiDirectManager(
         if (channel == null) return
         wifiP2pManager?.requestConnectionInfo(channel) { info ->
             if (info?.groupFormed == true && state == TransportState.RUNNING) {
-                emitDiagnostic("info", "Joining a group formed before start")
-                handleConnectionChanged(true)
+                val adopt = {
+                    emitDiagnostic("info", "Joining a group formed before start")
+                    handleConnectionChanged(true)
+                }
+                val leftover = fastLinkPrefs.getString(HOSTED_FAST_LINK_GROUP, null)
+                if (leftover == null || !info.isGroupOwner) {
+                    adopt()
+                } else {
+                    wifiP2pManager?.requestGroupInfo(channel) { group ->
+                        if (group != null && group.isGroupOwner && group.networkName == leftover) {
+                            // A fast link's group from a process that died:
+                            // its link went with the process, and adopted it
+                            // would stay on the air with no timer, refusing
+                            // every later link.
+                            recordHostedFastLinkGroup(null)
+                            emitDiagnostic("info", "Fast link: removing a group left by an earlier run")
+                            wifiP2pManager?.removeGroup(channel, quietListener("remove leftover fast-link group"))
+                        } else {
+                            adopt()
+                        }
+                    }
+                }
+            } else if (state == TransportState.RUNNING) {
+                recordHostedFastLinkGroup(null)
             }
         }
     }
@@ -1558,6 +1582,7 @@ class WifiDirectManager(
         }
         val hosted = FastLinkHosted(directive.linkId, directive.peerId, ssid)
         fastLinkHosted = hosted
+        recordHostedFastLinkGroup(ssid)
         emitDiagnostic("info", "Fast link: bringing up a network", mapOf("linkId" to directive.linkId))
         p2p.createGroup(ch, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {}
@@ -1694,6 +1719,22 @@ class WifiDirectManager(
         }
     }
 
+    /**
+     * The name of the group this device brought up for a fast link, kept on
+     * disk until the group is seen gone. The group belongs to the system, not
+     * the process, so one left by a process that died outlives it, and on the
+     * next start [adoptExistingGroup] removes it rather than adopting it.
+     */
+    private val fastLinkPrefs by lazy {
+        context.getSharedPreferences(FAST_LINK_PREFS, Context.MODE_PRIVATE)
+    }
+
+    private fun recordHostedFastLinkGroup(ssid: String?) {
+        val edit = fastLinkPrefs.edit()
+        if (ssid == null) edit.remove(HOSTED_FAST_LINK_GROUP) else edit.putString(HOSTED_FAST_LINK_GROUP, ssid)
+        edit.apply()
+    }
+
     /** Removes the group a closed link brought up after it was closed. */
     @SuppressLint("MissingPermission")
     private fun removeOrphanedFastLinkGroup() {
@@ -1709,6 +1750,7 @@ class WifiDirectManager(
     /** This device left whatever group it was in. */
     private fun fastLinkGroupGone() {
         fastLinkLeaving = false
+        recordHostedFastLinkGroup(null)
         parkedFastLinkJoin?.let { parked ->
             parkedFastLinkJoin = null
             try {
