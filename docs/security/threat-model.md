@@ -1494,7 +1494,11 @@ no route onward.
 
 **Availability:** anyone who can drop Bluetooth frames between the two can stop
 a link from forming, which is no more than they could already do to the
-messages themselves. The traffic stays on Bluetooth.
+messages themselves. The traffic stays on Bluetooth. A session peer can make
+an Android host bring up a group by asking, and holds the device's one group
+(and so its own group formation) while it lasts: at most two offer lifetimes,
+about four minutes, before the host stops answering that peer's requests for
+ten minutes.
 
 **Why it stands:** a network that does not broadcast its existence cannot be
 joined by an iPhone that was handed its name, and the session is the only

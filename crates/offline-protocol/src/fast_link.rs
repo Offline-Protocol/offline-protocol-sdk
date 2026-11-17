@@ -70,6 +70,18 @@ pub const ENDED_MEMORY: Duration = Duration::from_millis(MAX_OFFER_TTL_MS + 300_
 /// the moment one was declined.
 pub const DECLINE_BACKOFF: Duration = Duration::from_secs(600);
 
+/// Links in a row a host may bring up for a peer's requests that expire with
+/// no stream from that peer before it stops answering them for
+/// [`HOST_BACKOFF`]. Two, so an honest user who missed the prompt once can
+/// ask again at once.
+pub const MAX_UNANSWERED_HOSTINGS: u8 = 2;
+
+/// How long a host refuses a peer's requests after [`MAX_UNANSWERED_HOSTINGS`]
+/// went unused. Without it a peer that never joins could keep a group on the
+/// air, and the device's own group formation locked out, by requesting again
+/// each time an offer expired.
+pub const HOST_BACKOFF: Duration = Duration::from_secs(600);
+
 /// How many ended link ids are remembered. One link at a time, so a few.
 pub const MAX_ENDED_REMEMBERED: usize = 16;
 
@@ -482,6 +494,8 @@ struct Link {
     platform_engaged: bool,
     /// The peer knows of this link, so its end needs a `close` frame.
     peer_engaged: bool,
+    /// A host link brought up because the peer asked.
+    requested_by_peer: bool,
 }
 
 /// The machine. One link at a time (invariant 3).
@@ -506,6 +520,11 @@ pub(crate) struct FastLinks {
     /// could otherwise close its link while the prompt was on screen, and the
     /// user's Cancel would be reported for a link the engine no longer held.
     ended_joins: VecDeque<(String, String)>,
+    /// Per peer, the links hosted in a row for its requests that expired
+    /// with no stream from it.
+    unanswered: VecDeque<(String, u8)>,
+    /// Peers whose requests are refused, and since when ([`HOST_BACKOFF`]).
+    host_backoff: VecDeque<(String, Instant)>,
 }
 
 impl FastLinks {
@@ -532,8 +551,12 @@ impl FastLinks {
                 Err(FastLinkRefusal::Busy)
             };
         }
-        // The user asking is the user's answer to an earlier decline.
+        // The user asking is the user's answer to an earlier decline, and to
+        // the peer's unanswered requests.
         self.declined.retain(|(declined, _)| declined != peer);
+        self.unanswered.retain(|(unanswered, _)| unanswered != peer);
+        self.host_backoff
+            .retain(|(backed_off, _)| backed_off != peer);
         if self.roles.can_host {
             let id = fresh.link_id.clone();
             self.start_host(peer, fresh, now, false);
@@ -556,6 +579,7 @@ impl FastLinks {
             offer: None,
             platform_engaged: false,
             peer_engaged: true,
+            requested_by_peer: false,
         });
         self.changed(None);
         Ok(id)
@@ -587,6 +611,7 @@ impl FastLinks {
             offer: None,
             platform_engaged: false,
             peer_engaged,
+            requested_by_peer: peer_engaged,
         });
         self.changed(None);
     }
@@ -712,6 +737,16 @@ impl FastLinks {
             self.reply_close(peer, link_id, CloseReason::CannotHost);
             return;
         }
+        self.host_backoff
+            .retain(|(_, at)| now.saturating_duration_since(*at) < HOST_BACKOFF);
+        if self
+            .host_backoff
+            .iter()
+            .any(|(backed_off, _)| backed_off == peer)
+        {
+            self.reply_close(peer, link_id, CloseReason::Busy);
+            return;
+        }
         // Under the requester's id, so its close and our offer name one link.
         let fresh = FreshLink {
             link_id: link_id.to_string(),
@@ -770,6 +805,11 @@ impl FastLinks {
                     } else {
                         // The offer answers our request; it supersedes the
                         // request's link quietly, whatever id the host chose.
+                        // The request's id is remembered as ended, so a host
+                        // that acts on the request late cannot prompt.
+                        if link.id != link_id {
+                            self.remember_ended(&link.id, now);
+                        }
                         self.link = None;
                     }
                 }
@@ -805,6 +845,7 @@ impl FastLinks {
             offer: None,
             platform_engaged: false,
             peer_engaged: true,
+            requested_by_peer: false,
         });
         self.changed(None);
     }
@@ -923,6 +964,39 @@ impl FastLinks {
         }
     }
 
+    /// Counts a link hosted for `peer`'s request that ended: one its stream
+    /// used resets the count, one that expired unused adds to it, and
+    /// [`MAX_UNANSWERED_HOSTINGS`] in a row start [`HOST_BACKOFF`].
+    fn count_hosting(&mut self, peer: &str, used: bool, reason: CloseReason, now: Instant) {
+        if used {
+            self.unanswered.retain(|(unanswered, _)| unanswered != peer);
+            return;
+        }
+        if reason != CloseReason::Expired {
+            return;
+        }
+        let count = match self.unanswered.iter_mut().find(|(p, _)| p == peer) {
+            Some((_, count)) => {
+                *count = count.saturating_add(1);
+                *count
+            }
+            None => {
+                if self.unanswered.len() >= MAX_ENDED_REMEMBERED {
+                    self.unanswered.pop_front();
+                }
+                self.unanswered.push_back((peer.to_string(), 1));
+                1
+            }
+        };
+        if count >= MAX_UNANSWERED_HOSTINGS {
+            self.unanswered.retain(|(unanswered, _)| unanswered != peer);
+            if self.host_backoff.len() >= MAX_ENDED_REMEMBERED {
+                self.host_backoff.pop_front();
+            }
+            self.host_backoff.push_back((peer.to_string(), now));
+        }
+    }
+
     fn record_decline(&mut self, peer: String, now: Instant) {
         if self.declined.len() >= MAX_ENDED_REMEMBERED {
             self.declined.pop_front();
@@ -961,6 +1035,9 @@ impl FastLinks {
         self.directives
             .retain(|pending| pending.directive.link_id != link.id);
         self.remember_ended(&link.id, now);
+        if link.role == FastLinkRole::Host && link.requested_by_peer {
+            self.count_hosting(&link.peer, link.state == FastLinkState::Up, reason, now);
+        }
         if link.role == FastLinkRole::Join {
             if self.ended_joins.len() >= MAX_ENDED_REMEMBERED {
                 self.ended_joins.pop_front();
@@ -1931,6 +2008,108 @@ mod tests {
             0,
         );
         assert!(!iphone.has_directives(), "the decline holds: no new prompt");
+    }
+
+    #[test]
+    fn requests_that_go_unused_twice_are_refused_for_a_while() {
+        let t0 = Instant::now();
+        let mut android = machine(host_roles());
+        let host_once = |android: &mut FastLinks, seed: u8, at: Instant| {
+            let id = fresh(seed).link_id;
+            android.on_frame(
+                HIGH,
+                LOW,
+                Frame::new(&id, FrameBody::Request),
+                fresh(seed + 1),
+                at,
+                0,
+            );
+            let hosted = android.next_directive(at).map(|d| d.kind);
+            if hosted.is_some() {
+                android.hosting(&id, "192.168.49.1", 8988, at, 0);
+                android.tick(at + OFFER_TTL, |_| false);
+                android.next_directive(at + OFFER_TTL);
+            }
+            android.take_frames();
+            hosted
+        };
+        assert_eq!(
+            host_once(&mut android, 1, t0),
+            Some(FastLinkDirectiveKind::Host)
+        );
+        assert_eq!(
+            host_once(&mut android, 3, t0),
+            Some(FastLinkDirectiveKind::Host),
+            "one miss is forgiven"
+        );
+        assert_eq!(
+            host_once(&mut android, 5, t0),
+            None,
+            "two in a row: refused"
+        );
+        assert_eq!(
+            host_once(&mut android, 7, t0 + OFFER_TTL + HOST_BACKOFF),
+            Some(FastLinkDirectiveKind::Host),
+            "until the backoff ends"
+        );
+
+        // The host's own request to that peer ends the backoff at once.
+        let mut android = machine(host_roles());
+        host_once(&mut android, 1, t0);
+        host_once(&mut android, 3, t0);
+        let own = android.request(HIGH, fresh(9), t0).unwrap();
+        android.close(HIGH, t0);
+        let _ = own;
+        android.next_directive(t0);
+        android.take_frames();
+        assert_eq!(
+            host_once(&mut android, 11, t0),
+            Some(FastLinkDirectiveKind::Host)
+        );
+    }
+
+    #[test]
+    fn a_superseded_request_cannot_be_hosted_into_a_prompt_later() {
+        let t0 = Instant::now();
+        let mut iphone = machine(join_roles());
+        let request_id = iphone.request(LOW, fresh(1), t0).unwrap();
+        iphone.take_frames();
+        // The peer's own link arrives instead and supersedes the request.
+        let offer = || Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+        };
+        let theirs = fresh(2).link_id;
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&theirs, FrameBody::Offer(offer())),
+            fresh(3),
+            t0,
+            0,
+        );
+        iphone.next_directive(t0);
+        iphone.close(LOW, t0);
+        iphone.next_directive(t0);
+        iphone.take_frames();
+
+        // The request reaches the host late, and its offer arrives.
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&request_id, FrameBody::Offer(offer())),
+            fresh(4),
+            t0,
+            0,
+        );
+        assert!(
+            !iphone.has_directives(),
+            "no prompt for a request already answered"
+        );
     }
 
     #[test]

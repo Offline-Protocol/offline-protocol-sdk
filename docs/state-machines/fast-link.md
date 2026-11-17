@@ -74,7 +74,16 @@ false and every request is refused.
 (`cannot_host`); one holding a link with another peer answers `close` (`busy`).
 One that already offered this peer a link sends the same offer again, since
 the request means the first one was lost. Otherwise it starts hosting under
-the request's link id.
+the request's link id, unless two links it hosted in a row for that peer's
+requests expired with no stream from the peer: then it answers `busy` for ten
+minutes, so a peer that never joins cannot keep a group on the air, and the
+device's own group formation locked out, by asking again each time. One miss
+is forgiven, so a user who did not tap in time can ask again, and this
+device's own request to the peer ends the pause.
+
+When an offer answers this device's request under a different link id, the
+request's id is remembered as ended, so a host that acts on the request late
+cannot bring up a second network and prompt the user for it.
 
 **An `offer` arrives.** A device that cannot join answers `close`
 (`cannot_join`), and one holding a link with another peer answers `busy`. For
