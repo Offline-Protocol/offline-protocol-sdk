@@ -95,11 +95,12 @@ Questions about a release, or about upgrading to one? Ask in the
 
 ### Changed
 
-- **A file transfer over a peer stream keeps 16 chunks in flight, not 4.**
-  Every peer-stream carrier gets it (a fast link, a Wi-Fi Direct group, a LAN,
-  AWDL): with four, a 1 MiB file over a fast link took 8 s waiting on
-  acknowledgements rather than on the link. Bluetooth, internet and Nostr
-  windows are unchanged.
+- **A file transfer over a peer stream keeps 512 KiB in flight, not 128 KiB:**
+  eight 64 KiB chunks instead of four of 32 KiB. Every peer-stream carrier
+  gets it (a fast link, a Wi-Fi Direct group, a LAN, AWDL): with the old
+  window, a 1 MiB file over a fast link took 8 s waiting on acknowledgements
+  rather than on the link. Bluetooth, internet and Nostr windows are
+  unchanged.
 
 ### Fixed
 

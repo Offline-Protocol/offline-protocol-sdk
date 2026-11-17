@@ -105,10 +105,13 @@ the foreground and deleted the passphrase.
    time and an Android device owns at most one Wi-Fi Direct group, so a second
    request is refused as busy rather than queued.
 
-9. **The media window on the peer-stream slot is 16 chunks, not 4.** With
-   32 KiB chunks and a window of 4 the transfer waited on acknowledgements:
-   about 128 KiB a round, which is what the spike measured (126 KB/s), far
-   below the link. Every other slot keeps its window.
+9. **The peer-stream slot keeps 512 KiB in flight: eight 64 KiB chunks, not
+   four of 32 KiB.** With four of 32 KiB the transfer waited on
+   acknowledgements: about 128 KiB a round, which is what the spike measured
+   (126 KB/s), far below the link. The bytes grow through the chunk size and
+   not the chunk count because each chunk is a ratchet generation, and the
+   receiver keeps 32 for late arrivals: two transfers of sixteen would use
+   them all. Every other slot keeps its window.
 
 ### Why not LocalOnlyHotspot as a fallback
 

@@ -271,15 +271,17 @@ fn a_peer_that_cannot_host_says_so() {
     );
 }
 
-/// A transfer pinned to the peer-stream slot leaves sixteen chunks before it
-/// waits for an acknowledgement, not four: at four, a fast link spent its
-/// time waiting on receipts rather than on the link (ADR 0038, decision 9).
+/// A transfer pinned to the peer-stream slot leaves eight 64 KiB chunks before
+/// it waits for an acknowledgement, 512 KiB, not four of 32 KiB: at that, a
+/// fast link spent its time waiting on receipts rather than on the link (ADR
+/// 0038, decision 9). Eight and not more, because each chunk is a ratchet
+/// generation.
 #[test]
-fn a_transfer_on_the_peer_stream_slot_fills_a_window_of_sixteen() {
+fn a_transfer_on_the_peer_stream_slot_keeps_512_kib_in_flight() {
     use offline_protocol_core::ContentType;
     use offline_protocol_transport::PeerLink;
 
-    use crate::constants::{DEFAULT_CHUNK_SIZE, MEDIA_WINDOW_SIZE_PEER_STREAM};
+    use crate::constants::{CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM};
 
     let (mut alice, bob) = pair();
     let stream = MockTransport::new(TransportType::WiFiDirect);
@@ -291,7 +293,7 @@ fn a_transfer_on_the_peer_stream_slot_fills_a_window_of_sixteen() {
         .add_transport(TransportType::WiFiDirect, Box::new(stream.clone()));
     alice.take_sent();
 
-    let file = vec![0x5a; DEFAULT_CHUNK_SIZE * 20];
+    let file = vec![0x5a; CHUNK_SIZE_PEER_STREAM * 20];
     alice
         .protocol
         .send_media(&bob.address, file, "big.bin", ContentType::File, None)
@@ -304,7 +306,10 @@ fn a_transfer_on_the_peer_stream_slot_fills_a_window_of_sixteen() {
         .filter(|message| message.content_type == ContentType::FileChunk)
         .count();
     assert_eq!(chunks, MEDIA_WINDOW_SIZE_PEER_STREAM);
-    assert_eq!(MEDIA_WINDOW_SIZE_PEER_STREAM, 16);
+    assert_eq!(
+        MEDIA_WINDOW_SIZE_PEER_STREAM * CHUNK_SIZE_PEER_STREAM,
+        512 * 1024
+    );
 }
 
 /// A fast-link frame goes over Bluetooth LE when the peer is linked there,

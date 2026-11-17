@@ -2896,8 +2896,8 @@ impl OfflineProtocol {
                 (CHUNK_SIZE_INTERNET, MEDIA_WINDOW_SIZE_INTERNET)
             }
             TransportType::WiFiDirect => {
-                use crate::constants::{DEFAULT_CHUNK_SIZE, MEDIA_WINDOW_SIZE_PEER_STREAM};
-                (DEFAULT_CHUNK_SIZE, MEDIA_WINDOW_SIZE_PEER_STREAM)
+                use crate::constants::{CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM};
+                (CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM)
             }
             TransportType::Reticulum => {
                 // Reticulum is low-bandwidth (LoRa); use BLE-like chunk sizes.
