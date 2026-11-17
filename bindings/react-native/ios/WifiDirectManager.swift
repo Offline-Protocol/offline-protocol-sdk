@@ -940,6 +940,11 @@ extension WifiDirectManager {
         guard fastLink === link else {
             // Closed while the user read the prompt: leave what was joined.
             NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: link.ssid)
+            // A refusal still counts against the peer, which may have closed
+            // its link on purpose to keep the user's Cancel from registering.
+            if error?.code == Self.HOTSPOT_USER_DENIED {
+                protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "declined")
+            }
             return
         }
         if let error = error, error.code != Self.HOTSPOT_ALREADY_ASSOCIATED {

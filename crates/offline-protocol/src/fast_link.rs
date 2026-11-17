@@ -501,6 +501,11 @@ pub(crate) struct FastLinks {
     /// Peers whose network this device's user declined, and when; their
     /// offers are refused for [`DECLINE_BACKOFF`] unless the user asks.
     declined: VecDeque<(String, Instant)>,
+    /// Joined links that ended, and their peer, so a decline the platform
+    /// reports after the link ended still counts against that peer: a peer
+    /// could otherwise close its link while the prompt was on screen, and the
+    /// user's Cancel would be reported for a link the engine no longer held.
+    ended_joins: VecDeque<(String, String)>,
 }
 
 impl FastLinks {
@@ -818,7 +823,17 @@ impl FastLinks {
                 self.end(reason, true, now);
                 true
             }
-            _ => false,
+            _ => {
+                // The link already ended, from the peer's close while the
+                // prompt was up, say. The user's refusal still stands.
+                if reason == CloseReason::Declined {
+                    if let Some((_, peer)) = self.ended_joins.iter().find(|(id, _)| id == link_id) {
+                        let peer = peer.clone();
+                        self.record_decline(peer, now);
+                    }
+                }
+                false
+            }
         }
     }
 
@@ -908,6 +923,13 @@ impl FastLinks {
         }
     }
 
+    fn record_decline(&mut self, peer: String, now: Instant) {
+        if self.declined.len() >= MAX_ENDED_REMEMBERED {
+            self.declined.pop_front();
+        }
+        self.declined.push_back((peer, now));
+    }
+
     fn remember_ended(&mut self, link_id: &str, now: Instant) {
         if self.ended.len() >= MAX_ENDED_REMEMBERED {
             self.ended.pop_front();
@@ -939,11 +961,15 @@ impl FastLinks {
         self.directives
             .retain(|pending| pending.directive.link_id != link.id);
         self.remember_ended(&link.id, now);
-        if reason == CloseReason::Declined && link.role == FastLinkRole::Join {
-            if self.declined.len() >= MAX_ENDED_REMEMBERED {
-                self.declined.pop_front();
+        if link.role == FastLinkRole::Join {
+            if self.ended_joins.len() >= MAX_ENDED_REMEMBERED {
+                self.ended_joins.pop_front();
             }
-            self.declined.push_back((link.peer.clone(), now));
+            self.ended_joins
+                .push_back((link.id.clone(), link.peer.clone()));
+            if reason == CloseReason::Declined {
+                self.record_decline(link.peer.clone(), now);
+            }
         }
         if link.platform_engaged {
             self.directives.push_back(PendingDirective {
@@ -1852,6 +1878,59 @@ mod tests {
             0,
         );
         assert!(!iphone.has_directives());
+    }
+
+    #[test]
+    fn a_decline_counts_after_the_peer_closed_its_link() {
+        let t0 = Instant::now();
+        let offer = || Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+        };
+        let mut iphone = machine(join_roles());
+        let first = fresh(1).link_id;
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&first, FrameBody::Offer(offer())),
+            fresh(2),
+            t0,
+            0,
+        );
+        iphone.next_directive(t0);
+        // The peer closes its link while the prompt is on screen...
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(
+                &first,
+                FrameBody::Close {
+                    reason: "closed".to_string(),
+                },
+            ),
+            fresh(3),
+            t0,
+            0,
+        );
+        iphone.next_directive(t0);
+        // ...and the user's Cancel arrives for a link the engine let go.
+        assert!(!iphone.platform_ended(&first, CloseReason::Declined, t0));
+        iphone.take_frames();
+
+        let second = fresh(4).link_id;
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&second, FrameBody::Offer(offer())),
+            fresh(5),
+            t0,
+            0,
+        );
+        assert!(!iphone.has_directives(), "the decline holds: no new prompt");
     }
 
     #[test]
