@@ -5,9 +5,14 @@ the way a native app does: one implementation dependency, a release build with
 R8, and no other library. If the library's public API or its consumer rules
 break, this stops compiling or R8 stops on a missing class.
 
-`app/src/main/java/consumer/Use.kt` is the canonical set of imports: the engine
-from `uniffi.offline_protocol`, the hand-written bridge types from
-`com.offlineprotocol`. [docs/android-jni-and-imports.md](../../../docs/android-jni-and-imports.md)
+| Path | Role |
+|------|------|
+| `app/src/main/java/consumer/Use.kt` | Canonical engine vs bridge imports, storage, and the C12 telemetry lifecycle (`TelemetryLifecycleForwarder`) |
+| `jniNamesForDocs()` in `Use.kt` | The native library names, for an application that copies the `.so` files into `jniLibs/` itself |
+
+`Use.kt` imports the engine from `uniffi.offline_protocol` and hand-written
+bridge types from `com.offlineprotocol`.
+[docs/android-jni-and-imports.md](../../../docs/android-jni-and-imports.md)
 explains the split, and the native library names for an application that copies
 the `.so` files itself instead of using the AAR.
 

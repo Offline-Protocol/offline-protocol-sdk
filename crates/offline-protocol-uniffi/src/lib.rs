@@ -25604,4 +25604,85 @@ mod tests {
             "docs/README.md must list integration-testing-matrix.md"
         );
     }
+
+    /// Friction #30 (C12): the native consumer-check apps show the lifecycle
+    /// wiring a Swift or Kotlin host owes, and telemetry.md sends integrators
+    /// there. The needles are the obligations, not helper names: a stub that
+    /// forwards both edges back to back compiles and looks right, and closes no
+    /// session when the app backgrounds.
+    #[test]
+    fn consumer_check_telemetry_lifecycle_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let swift = std::fs::read_to_string(
+            repo.join("bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift"),
+        )
+        .expect("swift consumer-check");
+        let kotlin = std::fs::read_to_string(
+            repo.join("bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt"),
+        )
+        .expect("kotlin consumer-check");
+        let telemetry =
+            std::fs::read_to_string(repo.join("docs/telemetry.md")).expect("telemetry.md");
+        for (path, body, needles) in [
+            (
+                "Use.swift",
+                swift.as_str(),
+                &[
+                    // The binding fills the platform.
+                    "os: .ios",
+                    "operatingSystemVersion.majorVersion",
+                    // The edges come from the application notifications.
+                    "UIApplication.didEnterBackgroundNotification",
+                    "UIApplication.willEnterForegroundNotification",
+                    // The background flush runs inside a background task.
+                    "beginBackgroundTask",
+                    "flushTelemetryBlocking(deadlineMs: 3000)",
+                    "notifyAppState(state: .background)",
+                    "notifyAppState(state: .active)",
+                    // Enabling is seeded from the current state.
+                    "appState: lifecycle.appState",
+                ][..],
+            ),
+            (
+                "Use.kt",
+                kotlin.as_str(),
+                &[
+                    "TelemetryOs.ANDROID",
+                    "Build.VERSION.SDK_INT",
+                    // The process boundary, never Activity.onPause.
+                    "Application.ActivityLifecycleCallbacks",
+                    "registerActivityLifecycleCallbacks",
+                    "IdentityHashMap",
+                    "isChangingConfigurations",
+                    // A throw from a lifecycle callback kills the process.
+                    "catch (e: Exception)",
+                    "notifyQuietly(AppState.BACKGROUND)",
+                    "notifyQuietly(AppState.ACTIVE)",
+                    "protocol?.notifyAppState(state)",
+                    "lifecycle.appState)",
+                ][..],
+            ),
+        ] {
+            for needle in needles {
+                assert!(
+                    body.contains(needle),
+                    "bindings/.../consumer-check {path} must show `{needle}` (C12)"
+                );
+            }
+        }
+        for needle in [
+            "../bindings/swift/consumer-check/Sources/ConsumerCheck/Use.swift",
+            "../bindings/kotlin/consumer-check/app/src/main/java/consumer/Use.kt",
+            "bridges/csharp.md#cs5-telemetry-c12",
+            "TelemetryLifecycleForwarder",
+        ] {
+            assert!(
+                telemetry.contains(needle),
+                "telemetry.md must send native hosts to the lifecycle wiring (`{needle}`)"
+            );
+        }
+    }
 }
