@@ -1100,7 +1100,8 @@ public enum FastLinkMode: Equatable {
     /// enable that does not mention `fastLink` keeps the setting. An unknown
     /// value is `.off`, so a typo never widens what the application allowed.
     static func parse(_ value: Any?, current: FastLinkMode) -> FastLinkMode {
-        guard let value = value else { return current }
+        // An explicit JavaScript null keeps the setting too, as on Android.
+        guard let value = value, !(value is NSNull) else { return current }
         switch value as? String {
         case "any": return .any
         case "requestedOnly": return .requestedOnly
