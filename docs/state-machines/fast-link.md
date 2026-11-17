@@ -111,7 +111,11 @@ decline is ever reported and the pause never begins. An
 offer that fails validation (below) is answered `close` (`invalid`) and nothing
 else happens. When both devices are hosting for each other, the lower address
 keeps hosting: the higher one closes its own link and joins, and the lower one
-ignores the higher one's offer, which its owner is about to withdraw.
+ignores the higher one's offer, which its owner is about to withdraw. A host
+whose link is already up answers any offer `busy`, as a joiner does: the
+tie-break is for two hosts racing, and applied once a link is up it would
+swap a working link for a second group, which an Android joins with no
+prompt.
 
 **A `close` arrives.** It ends the link with that id, if there is one, and is
 never answered.

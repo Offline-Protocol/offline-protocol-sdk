@@ -825,6 +825,14 @@ impl FastLinks {
             asked = true;
             match link.role {
                 FastLinkRole::Host => {
+                    // A link already up is never torn down for an offer:
+                    // the tie-break below is for two hosts racing, and an
+                    // offer once one is up would swap a working link for a
+                    // second group, which the Android joins with no prompt.
+                    if link.state == FastLinkState::Up {
+                        self.reply_close(peer, link_id, CloseReason::Busy);
+                        return;
+                    }
                     // Both are hosting for each other. The lower address
                     // keeps hosting; the higher closes its own and joins.
                     if local.as_bytes() < peer.as_bytes() {
@@ -2442,6 +2450,53 @@ mod tests {
         assert_eq!(
             iphone.next_directive(now).unwrap().kind,
             FastLinkDirectiveKind::Join
+        );
+    }
+
+    #[test]
+    fn a_hosted_link_that_is_up_is_never_swapped_for_an_offer() {
+        let t0 = Instant::now();
+        // HIGH hosts and its link comes up; the lower-addressed peer then
+        // offers a network of its own, which the tie-break would favour.
+        let mut high = machine(host_roles());
+        let id = high.request(LOW, fresh(1), t0).unwrap();
+        high.next_directive(t0);
+        assert!(high.hosting(&id, "192.168.49.1", 8988, t0, 0));
+        high.take_frames();
+        high.stream_proved(LOW, t0);
+        high.take_changes();
+
+        let offer = Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+        };
+        let other = fresh(2).link_id;
+        high.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&other, FrameBody::Offer(offer)),
+            fresh(3),
+            t0,
+            0,
+        );
+        assert_eq!(high.peer(), Some(LOW));
+        assert!(high.take_changes().is_empty(), "the link that is up stands");
+        assert!(!high.has_directives(), "no join, no close");
+        assert_eq!(
+            high.take_frames(),
+            [(
+                LOW.to_string(),
+                Frame::new(
+                    &other,
+                    FrameBody::Close {
+                        reason: "busy".to_string()
+                    }
+                )
+            )]
         );
     }
 
