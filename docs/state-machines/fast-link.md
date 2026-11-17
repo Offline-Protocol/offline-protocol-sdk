@@ -198,9 +198,12 @@ it as an ordinary group, which left it up with no timer and refused every
 later link.
 
 A joiner's platform that is about to lose the network reports it as `ended`
-first: on iOS, leaving the foreground, after which iOS disconnects at 15 s
-whatever the engine thinks. Without the report the host learns from TCP
-keepalive, about 40 s later.
+first: on iOS, when the application pauses the engine on leaving the
+foreground, after which iOS disconnects at 15 s whatever the engine thinks.
+Without the report the host learns from TCP keepalive, about 40 s later. An
+application that leaves the foreground without pausing still ends the link:
+its transport reports itself down, which ends an up link `lost`, and a join
+still in progress ends `expired` at its offer's lifetime.
 
 ## Events
 

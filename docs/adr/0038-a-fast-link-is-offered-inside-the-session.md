@@ -102,9 +102,13 @@ the foreground and deleted the passphrase.
    proved stream is lost, after 60 s with nothing large carried (a body of
    16 KiB or more) and no transfer to the peer under way, on either side's `close`, and on the application's
    `close_fast_link`. A joiner's platform reports its own end when it can no
-   longer hold the network: iOS does when the application leaves the
-   foreground, because iOS disconnects 15 s later anyway and the host would
-   otherwise hold a dead stream until keepalive notices, measured at 40 s.
+   longer hold the network: iOS does when the application pauses the engine
+   on leaving the foreground, because iOS disconnects 15 s later anyway and
+   the host would otherwise hold a dead stream until keepalive notices,
+   measured at 40 s. An application that does not pause still loses the
+   link: its transport reports itself down on leaving the foreground, which
+   ends an up link `lost`, and a join still in progress ends when its offer
+   expires.
    Bluetooth stays up throughout and carries the traffic before, during the
    switch and after.
 
