@@ -255,6 +255,12 @@ pub(crate) struct Offer {
     pub(crate) port: u16,
     pub(crate) issued_at_ms: i64,
     pub(crate) ttl_ms: u64,
+    /// The request this offer answers when it is sent again for a request
+    /// under another id (a retry after a lost offer). Only such an offer
+    /// may answer a request after its own link id was given up; any other
+    /// late offer names a network that may already be gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) re: Option<String>,
 }
 
 impl fmt::Debug for Offer {
@@ -267,6 +273,7 @@ impl fmt::Debug for Offer {
             .field("port", &self.port)
             .field("issued_at_ms", &self.issued_at_ms)
             .field("ttl_ms", &self.ttl_ms)
+            .field("re", &self.re)
             .finish()
     }
 }
@@ -334,7 +341,8 @@ impl Offer {
         let oldest = now_ms - self.ttl_ms as i64 - OFFER_CLOCK_SLACK_MS;
         let newest = now_ms + OFFER_CLOCK_SLACK_MS;
         let time_ok = ttl_ok && (oldest..=newest).contains(&self.issued_at_ms);
-        ssid_ok && passphrase_ok && is_local_host(&self.host) && self.port != 0 && time_ok
+        let re_ok = self.re.as_deref().is_none_or(is_link_id);
+        ssid_ok && passphrase_ok && is_local_host(&self.host) && self.port != 0 && time_ok && re_ok
     }
 }
 
@@ -705,6 +713,7 @@ impl FastLinks {
             port,
             issued_at_ms: now_ms,
             ttl_ms: OFFER_TTL.as_millis() as u64,
+            re: None,
         };
         link.state = FastLinkState::Offered;
         link.deadline = Some(now + OFFER_TTL);
@@ -732,12 +741,15 @@ impl FastLinks {
         // wanted, and a host still holding the old network answers the new
         // request with it. Refused, the retry after a lost offer met a host
         // that resent the old one, and ended `no_offer` with nothing shown.
-        let answers_request = matches!(frame.body, FrameBody::Offer(_))
-            && self.link.as_ref().is_some_and(|link| {
+        let answers_request = match &frame.body {
+            FrameBody::Offer(offer) => self.link.as_ref().is_some_and(|link| {
                 link.peer == peer
                     && link.role == FastLinkRole::Join
                     && link.state == FastLinkState::Requested
-            });
+                    && offer.re.as_deref() == Some(link.id.as_str())
+            }),
+            _ => false,
+        };
         if !answers_request && self.ended_recently(&frame.link, now) {
             // A late request needs no answer: its sender has given up on it.
             // A late offer gets one, so the host takes its network down.
@@ -793,6 +805,11 @@ impl FastLinks {
                     if let Some(deadline) = link.deadline {
                         offer.ttl_ms = deadline.saturating_duration_since(now).as_millis() as u64;
                     }
+                    // Naming the request it answers when that request has an
+                    // id of its own: the requester gave the offer's id up,
+                    // and takes this offer only because it names the request
+                    // still waiting.
+                    offer.re = (link.id != link_id).then(|| link_id.to_string());
                     let frame = Frame::new(&link.id, FrameBody::Offer(offer));
                     self.frames.push_back((peer.to_string(), frame));
                 }
@@ -1612,6 +1629,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 1_000_000,
             ttl_ms: 120_000,
+            re: None,
         };
         assert!(good.is_valid(1_000_000));
         let bad = [
@@ -1704,6 +1722,28 @@ mod tests {
             Frame::parse(&format!("{{\"v\":1,\"link\":\"{id}\",\"kind\":\"dance\"}}")).is_none()
         );
         assert!(Frame::parse(&" ".repeat(MAX_FRAME_BODY_BYTES + 1)).is_none());
+        // An offer's `re` is left out when it names nothing, so an offer
+        // reads the same to a receiver from before it.
+        let offer = Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+            re: None,
+        };
+        let plain = Frame::new(&id, FrameBody::Offer(offer.clone()));
+        assert!(!plain.encode().contains("\"re\""));
+        assert_eq!(Frame::parse(&plain.encode()), Some(plain));
+        let resent = Frame::new(
+            &id,
+            FrameBody::Offer(Offer {
+                re: Some(fresh(2).link_id),
+                ..offer
+            }),
+        );
+        assert_eq!(Frame::parse(&resent.encode()), Some(resent));
         // A later field is ignored, not refused.
         let later = wire.replacen('{', "{\"later\":true,", 1);
         assert!(Frame::parse(&later).is_some());
@@ -1787,6 +1827,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         iphone.on_frame(
             LOW,
@@ -1979,6 +2020,43 @@ mod tests {
     }
 
     #[test]
+    fn a_late_offer_for_a_removed_network_never_answers_a_new_request() {
+        let t0 = Instant::now();
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let first = iphone.request(LOW, fresh(1), t0).unwrap();
+        deliver(&mut iphone, HIGH, &mut android, LOW, t0, 0);
+        android.next_directive(t0);
+        assert!(android.hosting(&first, "192.168.49.1", 8988, t0, 0));
+        // The offer is delayed; the requester gives up and its close reaches
+        // the host, which takes that network down.
+        let late_offer = android.take_frames();
+        let gave_up = t0 + REQUEST_TIMEOUT;
+        iphone.tick(gave_up, |_| false);
+        deliver(&mut iphone, HIGH, &mut android, LOW, gave_up, 0);
+        assert!(android.peer().is_none());
+        android.next_directive(gave_up);
+
+        // The user asks again, and the host brings up a second network.
+        let second = iphone.request(LOW, fresh(2), gave_up).unwrap();
+        deliver(&mut iphone, HIGH, &mut android, LOW, gave_up, 0);
+        android.next_directive(gave_up);
+        assert!(android.hosting(&second, "192.168.49.1", 8988, gave_up, 0));
+
+        // The first network's offer lands now: refused, never prompted.
+        for (_, frame) in late_offer {
+            iphone.on_frame(LOW, HIGH, frame, fresh(3), gave_up, 0);
+        }
+        assert!(!iphone.has_directives(), "a prompt for a removed network");
+        iphone.take_frames();
+        // The second network's offer is the one joined.
+        deliver(&mut android, LOW, &mut iphone, HIGH, gave_up, 0);
+        let join = iphone.next_directive(gave_up).unwrap();
+        assert_eq!(join.kind, FastLinkDirectiveKind::Join);
+        assert_eq!(join.link_id, second);
+    }
+
+    #[test]
     fn a_late_offer_for_a_link_given_up_on_is_refused_not_joined() {
         let t0 = Instant::now();
         let mut android = machine(host_roles());
@@ -2081,6 +2159,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         iphone.on_frame(
             LOW,
@@ -2112,6 +2191,7 @@ mod tests {
                 port: 8988,
                 issued_at_ms: 0,
                 ttl_ms: 120_000,
+                re: None,
             };
             links.on_frame(
                 LOW,
@@ -2193,6 +2273,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         iphone.on_frame(
             LOW,
@@ -2215,6 +2296,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         let mut iphone = machine(join_roles());
         let first = fresh(1).link_id;
@@ -2273,6 +2355,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         let mut iphone = machine(join_roles());
         let first = fresh(1).link_id;
@@ -2433,6 +2516,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         let theirs = fresh(2).link_id;
         iphone.on_frame(
@@ -2499,6 +2583,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         iphone.on_frame(
             LOW,
@@ -2649,7 +2734,7 @@ mod tests {
         let mut now = Instant::now();
         // The peer asks, joins, proves its stream, carries nothing, and lets
         // the link idle out; then asks again.
-        let mut round = |android: &mut FastLinks, seed, now: Instant, carry: bool| {
+        let round = |android: &mut FastLinks, seed, now: Instant, carry: bool| {
             let id = fresh(seed).link_id;
             android.on_frame(
                 HIGH,
@@ -2697,7 +2782,7 @@ mod tests {
     fn a_miss_long_ago_is_not_one_in_a_row() {
         let mut android = machine(host_roles());
         let t0 = Instant::now();
-        let mut miss = |android: &mut FastLinks, seed, now: Instant| {
+        let miss = |android: &mut FastLinks, seed, now: Instant| {
             let id = fresh(seed).link_id;
             android.on_frame(
                 HIGH,
@@ -2744,6 +2829,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         let id = fresh(1).link_id;
         high.on_frame(
@@ -2806,6 +2892,7 @@ mod tests {
             port: 8988,
             issued_at_ms: 0,
             ttl_ms: 120_000,
+            re: None,
         };
         let other = fresh(2).link_id;
         high.on_frame(

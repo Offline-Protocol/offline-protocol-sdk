@@ -80,8 +80,9 @@ for go ahead and no join prompt or group appears that it did not want.
 **A `request` arrives.** A device that cannot host answers `close`
 (`cannot_host`); one holding a link with another peer answers `close` (`busy`).
 One that already offered this peer a link sends the same offer again, since
-the request means the first one was lost, with only the lifetime it has left:
-the joiner counts an offer's lifetime from its arrival. Otherwise it starts hosting under
+the request means the first one was lost, with only the lifetime it has left
+(the joiner counts an offer's lifetime from its arrival) and, when the
+request has an id of its own, naming that request in `re`. Otherwise it starts hosting under
 the request's link id, unless two links it hosted in a row for that peer's
 requests carried nothing (no body of 16 KiB or more, no transfer) and ended by
 expiring, going idle, losing their stream, or at the peer's hand, whatever
@@ -137,11 +138,15 @@ request is dropped; an offer is answered `close` (`expired`), so the host
 takes its network down, and is never joined. On two phones a request
 delayed 63 s reached the host after the requester had given up, and before
 this rule its offer prompted the requester's user to join a network that had
-already been removed. The one exception is an offer from a peer this device
-is waiting on now, its own request to that peer still open: the user has just
-asked again, so the prompt is wanted, and the offer answers the new request.
-A host still offering the old network sends it again for the new request, and
-refusing it ended the user's second attempt `no_offer` with nothing shown.
+already been removed. The one exception is an offer that names, in its
+`re`, the request this device is waiting on now: a host still offering the
+old network sends it again for a request under a new id (the requester's
+`close` for the old one was lost too), and refusing it ended the user's
+second attempt `no_offer` with nothing shown. An offer that is merely late,
+however much the user has asked again since, is refused as above: let
+through, it prompted for a network the host had already removed, and the
+second network's offer, then refused as late, started the host's backoff
+against a user who had only asked twice.
 
 An offer is valid when its name is 9 to 32 bytes starting `DIRECT-`, as a
 Wi-Fi Direct group's is, its passphrase 8 to 63

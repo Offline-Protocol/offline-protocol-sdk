@@ -482,7 +482,7 @@ random:
 | `kind` | Further fields | Meaning |
 |--------|----------------|---------|
 | `request` | none | The sender can join a network and asks the recipient to host one |
-| `offer` | `ssid`, `passphrase`, `host`, `port`, `issued_at_ms`, `ttl_ms` | The sender is hosting a network for the recipient: join `ssid` with `passphrase` and dial `host:port`, within `ttl_ms` of arrival |
+| `offer` | `ssid`, `passphrase`, `host`, `port`, `issued_at_ms`, `ttl_ms`, and `re` when it is sent again for a request under another id | The sender is hosting a network for the recipient: join `ssid` with `passphrase` and dial `host:port`, within `ttl_ms` of arrival. `re` names the request it answers; left out otherwise |
 | `close` | `reason` | The link with this id is over |
 
 Four rules hold for every frame of the family:
@@ -509,7 +509,8 @@ Four rules hold for every frame of the family:
   not an IP literal in a private or link-local range, whose `port` is 0, whose
   `ttl_ms` is over 300,000, or whose `issued_at_ms` lies more than 300 s ahead
   of its clock or more than `ttl_ms` plus 300 s behind it, and answers it with
-  a `close` whose `reason` is `invalid`. A `host` is never resolved as a name.
+  a `close` whose `reason` is `invalid`, as it does one whose `re` is present
+  and not a link id. A `host` is never resolved as a name.
 
 `reason` is one of `declined`, `failed`, `host_failed`, `cannot_host`,
 `cannot_join`, `busy`, `invalid`, `expired`, `no_offer`, `lost`, `idle`,
