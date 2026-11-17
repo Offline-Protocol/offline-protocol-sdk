@@ -311,6 +311,14 @@ the same exposure as a Bluetooth LE advertisement, and the same answer: the
 address is public by design, and what it does not reveal (who the human is,
 who they talk to) is protected above this layer.
 
+Where two devices share no network, one may bring a network up for the other
+on request, with its credentials sent inside their session: the fast link
+([ADR 0038](../adr/0038-a-fast-link-is-offered-inside-the-session.md)). Nothing
+in this chapter changes over it. There is no discovery record: the joiner
+dials the address and port the offer named, with the host's address as its
+claim (step four above), and the host admits no other proved address on the
+network it made.
+
 ## Position among the transports
 
 The engine has one slot for a platform-established peer stream, and it is the

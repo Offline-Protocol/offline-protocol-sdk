@@ -1448,6 +1448,52 @@ signature it cannot otherwise check, on a field whose only effect is bounded
 this way. Without generations a frame or receipt lost past the first forwarder
 stayed lost for the whole window, which is the larger cost.
 
+### R34. A fast-link network is visible in range, and its offer trusts the session
+
+While a fast link is up ([ADR 0038](../adr/0038-a-fast-link-is-offered-inside-the-session.md)),
+its host broadcasts a Wi-Fi Direct group. Anyone in radio range (A1) sees that a
+group exists, its name, its channel, and when it comes and goes, and can
+correlate it with the Bluetooth LE advertisement of the device beside it. The
+name is random and derives from nothing, so it says no more than that a
+Wi-Fi Direct group is up.
+
+**Who can join:** unlike the formation group of
+[R22](#r22-an-android-wi-fi-direct-group-admits-anyone-who-knows-the-application-id),
+the passphrase is 128 random bits, fresh for each link, and leaves the host
+only sealed in its confirmed session with the invitee. A device in range cannot
+compute it, and a WPA2 handshake it captures does not give it up to an offline
+guess at that length. Wi-Fi Direct also lets a nearby device ask the owner to
+admit it by push button or PIN, which Android puts to the owner's user as a
+system invitation; a user who accepts one admits that device to the network,
+and nothing more.
+
+**What being on the network gives:** a stream, opened like any other, that must
+prove an address with the preamble. The host refuses any proved address but
+the invitee's on that network, and a replayed preamble
+([R16](#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier))
+labels a stream with the invitee's address that its holder cannot use.
+
+**What the offer trusts:** the session. The invitee learns the passphrase and
+the host's address and can hand them on, and a peer that shares a session can
+already send anything. A hostile session peer can offer a network it controls
+and so take the joiner off its own Wi-Fi, after the system prompt on iOS. The
+offered address must be a private or link-local IP literal, the joiner's dial
+is bound to the Wi-Fi interface, and the stream must prove the offerer's own
+address, so a link that proves nothing ends when its offer expires, at most
+300 s later. While a joiner is on the host's network the host is its access
+point, and sees whatever else the joiner's device sends there, as any access
+point does: name lookups and connection attempts of other applications, with
+no route onward.
+
+**Availability:** anyone who can drop Bluetooth frames between the two can stop
+a link from forming, which is no more than they could already do to the
+messages themselves. The traffic stays on Bluetooth.
+
+**Why it stands:** a network that does not broadcast its existence cannot be
+joined by an iPhone that was handed its name, and the session is the only
+channel the two devices share. Both sides of the residual are the price of a
+link the user asked for and can see.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

@@ -1,6 +1,6 @@
 # State machines
 
-Seven state machines govern the protocol's runtime behaviour. Each is documented
+Eight state machines govern the protocol's runtime behaviour. Each is documented
 with its states, its transitions, the invariants that hold across them, and the
 failure modes that the current shape exists to prevent.
 
@@ -13,6 +13,7 @@ failure modes that the current shape exists to prevent.
 | [Transport lifecycle](transport-lifecycle.md) | Transport availability, scoring, switching, and escalation |
 | [Document replication](data-replication.md) | A document from edit to durable record, a space from offer to convergence, an attachment fetch to one of six ends |
 | [Service subscriptions](service-subscriptions.md) | A subscription from subscribe to end on both sides, and an update from publish to delivery |
+| [Fast link](fast-link.md) | A Wi-Fi link two devices bring up through their session, from request to close |
 
 ## How to read these
 
@@ -24,7 +25,7 @@ Several of these shapes look over-engineered until you know which bug they close
 and the surrounding prose is there so a future change does not undo one by
 accident.
 
-## The one invariant that spans all seven
+## The one invariant that spans all eight
 
 **Custody of an undelivered message stays with the sender until a receiver
 positively confirms it.**
@@ -49,3 +50,8 @@ and the newer value takes custody in its place
 is never written to the outbox's store, so a restart, after which the stream
 or `sub_id` it names no longer exists, discards it. Neither gives up a value
 the receiver still needs.
+
+A fast link holds no message at all. Its own frames are ephemeral and are lost
+rather than delivered late ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)),
+and what it carries is ordinary traffic on the ordinary ladder, which falls
+back to Bluetooth LE when the link ends.
