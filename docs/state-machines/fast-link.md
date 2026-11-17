@@ -115,7 +115,11 @@ ignores the higher one's offer, which its owner is about to withdraw. A host
 whose link is already up answers any offer `busy`, as a joiner does: the
 tie-break is for two hosts racing, and applied once a link is up it would
 swap a working link for a second group, which an Android joins with no
-prompt.
+prompt. So does a host whose link the peer asked for: a peer that asks
+cannot host, so its offer is never honest, and acted on it ended the hosted
+link uncounted and joined an offer taken as asked for, so a peer that asked
+and then offered, over and over, met neither the host backoff nor the pause
+on unasked offers.
 
 **A `close` arrives.** It ends the link with that id, if there is one, and is
 never answered.

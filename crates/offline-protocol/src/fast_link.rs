@@ -847,7 +847,12 @@ impl FastLinks {
                     // the tie-break below is for two hosts racing, and an
                     // offer once one is up would swap a working link for a
                     // second group, which the Android joins with no prompt.
-                    if link.state == FastLinkState::Up {
+                    // Nor is one hosted because the peer asked: a peer that
+                    // asks cannot host, so its offer is never honest, and
+                    // the tie-break below would end this link uncounted and
+                    // join an offer marked as asked for, around both the
+                    // host backoff and the pause on unasked offers.
+                    if link.state == FastLinkState::Up || link.requested_by_peer {
                         self.reply_close(peer, link_id, CloseReason::Busy);
                         return;
                     }
@@ -2563,6 +2568,61 @@ mod tests {
         assert!(
             !iphone.has_directives(),
             "the third unasked offer is never shown"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_asked_cannot_then_offer_around_the_limits() {
+        let t0 = Instant::now();
+        // HIGH can host and join, as an Android; LOW asks it to host and then
+        // offers a network of its own, which the tie-break would favour.
+        let mut high = machine(host_roles());
+        let offer = Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+        };
+        let id = fresh(1).link_id;
+        high.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&id, FrameBody::Request),
+            fresh(2),
+            t0,
+            0,
+        );
+        assert_eq!(
+            high.next_directive(t0).unwrap().kind,
+            FastLinkDirectiveKind::Host
+        );
+        high.take_changes();
+        let other = fresh(3).link_id;
+        high.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&other, FrameBody::Offer(offer)),
+            fresh(4),
+            t0,
+            0,
+        );
+
+        assert_eq!(high.peer(), Some(LOW), "still hosting for the request");
+        assert!(high.take_changes().is_empty());
+        assert!(!high.has_directives(), "no join");
+        assert_eq!(
+            high.take_frames(),
+            [(
+                LOW.to_string(),
+                Frame::new(
+                    &other,
+                    FrameBody::Close {
+                        reason: "busy".to_string()
+                    }
+                )
+            )]
         );
     }
 
