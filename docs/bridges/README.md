@@ -130,7 +130,7 @@ in the uniffi crate pins the mobile call sites, which no CI job executes.
 ## C5. Hand-mirrored constants must be pinned in every language
 
 Some constants exist in several places no single compiler sees together.
-Seventeen sets do today, and they are pinned by **two different** mechanisms, so
+Eighteen sets do today, and they are pinned by **two different** mechanisms, so
 knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
@@ -164,6 +164,13 @@ it must name all five transports, and the two entry points that take a name
 (`getTransportMetrics`, `forceTransport`) must go through it. Each of those
 used to carry its own three-name copy that defaulted the rest to BLE, so
 forcing a transport the copy did not know silently forced the radio.
+
+The fast link's tokens are the eighteenth set: the reasons each mobile bridge
+reports through `wifi_direct_fast_link_ended` and the directive kinds it
+branches on cross the FFI as strings, and the engine reads an unknown reason
+as `failed`, so a misspelt `declined` silently switches off the decline pause
+the threat model counts on. `fast_link_tokens_in_the_bridges_are_the_engines`
+reads both managers and holds each token to the engine's own.
 
 The per-send application id is pinned the same way, by
 `react_native_rich_sends_carry_the_app_id_end_to_end`. It is optional at every

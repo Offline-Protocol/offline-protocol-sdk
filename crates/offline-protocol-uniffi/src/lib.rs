@@ -20231,6 +20231,134 @@ mod tests {
         }
     }
 
+    /// The fast-link tokens the bridges hand the engine, and the directive
+    /// kinds they branch on, are the engine's own (C5). Both cross the FFI as
+    /// strings, and the engine reads an unknown reason as `failed` without a
+    /// word: a typo in a bridge's `declined` would switch off the decline
+    /// pause that threat model R34 bounds iOS join prompts with, and a typo
+    /// in a kind would ignore that directive.
+    #[test]
+    fn fast_link_tokens_in_the_bridges_are_the_engines() {
+        use offline_protocol::fast_link::{CloseReason, FastLinkDirectiveKind};
+
+        /// Every string literal inside the parentheses that follow `call`.
+        fn literals_in_calls(code: &str, call: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            for (at, _) in code.match_indices(call) {
+                let rest = &code[at + call.len()..];
+                let end = rest.find(')').unwrap_or(rest.len());
+                found.extend(literals(&rest[..end]));
+            }
+            found
+        }
+        /// Every string literal in `text`.
+        fn literals(text: &str) -> Vec<String> {
+            text.split('"')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        }
+        /// The literal right after each `marker`.
+        fn literal_after(code: &str, marker: &str) -> Vec<String> {
+            code.match_indices(marker)
+                .filter_map(|(at, _)| {
+                    let rest = &code[at + marker.len()..];
+                    rest.split('"').nth(1).map(str::to_string)
+                })
+                .collect()
+        }
+
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+
+        let mut kotlin_reasons = literals_in_calls(&kotlin, "fastLinkEnded(");
+        kotlin_reasons.sort();
+        kotlin_reasons.dedup();
+        let mut swift_reasons = literals_in_calls(&swift, "FastLinkEnded(");
+        swift_reasons.extend(literals_in_calls(&swift, "endFastLink("));
+        for line in swift
+            .lines()
+            .filter(|l| l.trim_start().starts_with("let reason ="))
+        {
+            swift_reasons.extend(literals(line));
+        }
+        swift_reasons.sort();
+        swift_reasons.dedup();
+
+        for (bridge, reasons, must) in [
+            (
+                "WifiDirectManager.kt",
+                &kotlin_reasons,
+                &["background", "failed", "host_failed", "invalid", "lost"][..],
+            ),
+            (
+                "WifiDirectManager.swift",
+                &swift_reasons,
+                &["background", "declined", "failed", "host_failed"][..],
+            ),
+        ] {
+            for reason in reasons.iter() {
+                assert_eq!(
+                    CloseReason::parse(reason).as_str(),
+                    reason,
+                    "{bridge} reports the fast-link reason {reason:?}, which the engine does not \
+                     know and reads as `failed`"
+                );
+            }
+            for expected in must {
+                assert!(
+                    reasons.iter().any(|r| r == expected),
+                    "{bridge}: the scan found no {expected:?} among {reasons:?}, so it is no \
+                     longer reading the reasons the bridge sends"
+                );
+            }
+        }
+
+        let kinds = [
+            FastLinkDirectiveKind::Host.as_str(),
+            FastLinkDirectiveKind::Join.as_str(),
+            FastLinkDirectiveKind::Close.as_str(),
+        ];
+        let mut kotlin_kinds = literal_after(&kotlin, "directive.kind == ");
+        kotlin_kinds.extend(literal_after(&kotlin, "directive.kind != "));
+        let drain_start = swift
+            .find("func drainFastLinkDirectives")
+            .expect("the iOS manager drains fast-link directives");
+        let drain_end = swift[drain_start..]
+            .find("private func joinFastLink")
+            .map_or(swift.len(), |end| drain_start + end);
+        let swift_drain = &swift[drain_start..drain_end];
+        let mut swift_kinds = literal_after(swift_drain, "case ");
+        swift_kinds.extend(literal_after(swift_drain, "directive.kind != "));
+        for (bridge, found, must) in [
+            (
+                "WifiDirectManager.kt",
+                &kotlin_kinds,
+                &["close", "host", "join"][..],
+            ),
+            (
+                "WifiDirectManager.swift",
+                &swift_kinds,
+                &["close", "join"][..],
+            ),
+        ] {
+            for kind in found.iter() {
+                assert!(
+                    kinds.contains(&kind.as_str()),
+                    "{bridge} branches on the directive kind {kind:?}, which the engine never sends"
+                );
+            }
+            for expected in must {
+                assert!(
+                    found.iter().any(|k| k == expected),
+                    "{bridge}: the scan found no {expected:?} among {found:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code =
