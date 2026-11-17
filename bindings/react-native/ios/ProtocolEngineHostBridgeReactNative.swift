@@ -63,18 +63,6 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
-    static func requestFastLink(_ module: OfflineProtocolModule, _ peerId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FAST_LINK", errorMessage: "Failed to request a fast link", mapProtocolErrors: true) { host, env in
-            try ProtocolEngineHostBridge.requestFastLink(host: host, env: env, arguments: ["peerId": peerId])
-        }
-    }
-
-    static func closeFastLink(_ module: OfflineProtocolModule, _ peerId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FAST_LINK", errorMessage: "Failed to close the fast link") { host, env in
-            try ProtocolEngineHostBridge.closeFastLink(host: host, env: env, arguments: ["peerId": peerId])
-        }
-    }
-
     static func blockUser(_ module: OfflineProtocolModule, _ userId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BLOCK_USER", errorMessage: "Failed to block user") { host, env in
             try ProtocolEngineHostBridge.blockUser(host: host, env: env, arguments: ["userId": userId])
@@ -102,6 +90,12 @@ enum ProtocolEngineHostBridgeReactNative {
     static func clearServiceTopic(_ module: OfflineProtocolModule, _ serviceId: String, topic: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_SERVICE_SUBSCRIPTION", errorMessage: "Failed to clear service topic", mapProtocolErrors: true) { host, env in
             try ProtocolEngineHostBridge.clearServiceTopic(host: host, env: env, arguments: ["serviceId": serviceId, "topic": topic])
+        }
+    }
+
+    static func closeFastLink(_ module: OfflineProtocolModule, _ peerId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FAST_LINK", errorMessage: "Failed to close the fast link") { host, env in
+            try ProtocolEngineHostBridge.closeFastLink(host: host, env: env, arguments: ["peerId": peerId])
         }
     }
 
@@ -528,6 +522,12 @@ enum ProtocolEngineHostBridgeReactNative {
     static func requestEnableBluetooth(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BLUETOOTH", errorMessage: "Bluetooth not available on this device") { host, env in
             try ProtocolEngineHostBridge.requestEnableBluetooth(host: host, env: env, arguments: nil)
+        }
+    }
+
+    static func requestFastLink(_ module: OfflineProtocolModule, _ peerId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FAST_LINK", errorMessage: "Failed to request a fast link", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.requestFastLink(host: host, env: env, arguments: ["peerId": peerId])
         }
     }
 

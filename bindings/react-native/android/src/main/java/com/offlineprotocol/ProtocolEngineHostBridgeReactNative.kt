@@ -68,18 +68,6 @@ fun bleGetPeerCount(module: OfflineProtocolModule, promise: Promise) {
     }
 }
 
-fun requestFastLink(module: OfflineProtocolModule, peerId: String, promise: Promise) {
-    run(module, promise, "ERROR_FAST_LINK", "Failed to request a fast link", mapProtocolErrors = true) { host, context ->
-        ProtocolEngineHostBridge.requestFastLink(host, context, mapOf("peerId" to peerId))
-    }
-}
-
-fun closeFastLink(module: OfflineProtocolModule, peerId: String, promise: Promise) {
-    run(module, promise, "ERROR_FAST_LINK", "Failed to close the fast link") { host, context ->
-        ProtocolEngineHostBridge.closeFastLink(host, context, mapOf("peerId" to peerId))
-    }
-}
-
 fun blockUser(module: OfflineProtocolModule, userId: String, promise: Promise) {
     run(module, promise, "ERROR_BLOCK_USER", "Failed to block user") { host, context ->
         ProtocolEngineHostBridge.blockUser(host, context, mapOf("userId" to userId))
@@ -107,6 +95,12 @@ fun checkInternetPresence(module: OfflineProtocolModule, userId: String, options
 fun clearServiceTopic(module: OfflineProtocolModule, serviceId: String, topic: String, promise: Promise) {
     run(module, promise, "ERROR_SERVICE_SUBSCRIPTION", "Failed to clear service topic", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.clearServiceTopic(host, context, mapOf("serviceId" to serviceId, "topic" to topic))
+    }
+}
+
+fun closeFastLink(module: OfflineProtocolModule, peerId: String, promise: Promise) {
+    run(module, promise, "ERROR_FAST_LINK", "Failed to close the fast link") { host, context ->
+        ProtocolEngineHostBridge.closeFastLink(host, context, mapOf("peerId" to peerId))
     }
 }
 
@@ -533,6 +527,12 @@ fun releaseTransportLock(module: OfflineProtocolModule, promise: Promise) {
 fun requestEnableBluetooth(module: OfflineProtocolModule, promise: Promise) {
     run(module, promise, "ERROR_BLUETOOTH", "Bluetooth not available on this device") { host, context ->
         ProtocolEngineHostBridge.requestEnableBluetooth(host, context, null)
+    }
+}
+
+fun requestFastLink(module: OfflineProtocolModule, peerId: String, promise: Promise) {
+    run(module, promise, "ERROR_FAST_LINK", "Failed to request a fast link", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.requestFastLink(host, context, mapOf("peerId" to peerId))
     }
 }
 
