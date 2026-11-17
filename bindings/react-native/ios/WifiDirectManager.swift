@@ -875,6 +875,8 @@ private final class FastLinkJoin {
     let deadline: TimeInterval
     /// iOS reported the join.
     var joined = false
+    /// Looks in a row, one per redial, that found the phone off the group.
+    var offGroup = 0
     /// The stream dialed toward the host for this link.
     weak var stream: AnyObject?
 
@@ -898,6 +900,14 @@ private final class FastLinkJoin {
 extension WifiDirectManager {
     /// Gives a dial this long to become ready before it is tried again.
     private static let FAST_LINK_REDIAL: TimeInterval = 2.0
+    /// Looks in a row, one per redial, in which the Wi-Fi path's gateway is
+    /// not the offered host, before the join is given up as `failed`. `apply`
+    /// can finish with no error while the phone stays on its own Wi-Fi (a
+    /// wrong passphrase, a group already gone), and the link would otherwise
+    /// wait out its offer, two minutes, with nothing said and the host's
+    /// group refusing every other link. Twenty seconds: on an iPhone 16 the
+    /// group's address arrived about 3 s after the join.
+    private static let FAST_LINK_OFF_GROUP_LIMIT = 10
 
     /// Whether `error` is the hotspot error `code`. The domain is checked:
     /// another framework's error that shares the number would otherwise read
@@ -1024,8 +1034,8 @@ extension WifiDirectManager {
         // Not `NEHotspotNetwork.fetchCurrent`: a `joinOnce` network is not
         // one the app configured as iOS counts it, so without location
         // permission that names no network at all, and every join failed.
-        // Until the phone is on it, the dial waits; the engine's deadline
-        // bounds the wait.
+        // Until the phone is on it, the dial waits, for at most
+        // FAST_LINK_OFF_GROUP_LIMIT looks.
         let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
         monitor.pathUpdateHandler = { [weak self] path in
             // One look per dial. The handler holds the monitor, so it is
@@ -1034,8 +1044,15 @@ extension WifiDirectManager {
             monitor.cancel()
             guard let self = self, self.fastLink === link else { return }
             if Self.isGateway(link.host, of: path) {
+                link.offGroup = 0
                 self.openFastLinkStream(link, port: port)
+            } else if link.offGroup + 1 >= Self.FAST_LINK_OFF_GROUP_LIMIT {
+                self.emitDiagnostic("error", "Fast link: the phone is not on the offered network", context: [
+                    "linkId": link.linkId,
+                ])
+                self.endFastLink(reason: "failed")
             } else {
+                link.offGroup += 1
                 self.scheduleFastLinkRedial(link)
             }
         }

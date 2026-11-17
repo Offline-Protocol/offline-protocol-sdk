@@ -20422,6 +20422,9 @@ mod tests {
     /// iPhone 16 every join was given up `failed` five seconds after the
     /// phone was on the group. The Android host names the group's owner
     /// address in its offer, and that address is the gateway of the path.
+    /// The wait for it is bounded: `apply` can finish with no error while the
+    /// phone stays on its own Wi-Fi, and an unbounded wait held the host's
+    /// group for the offer's two minutes with nothing said.
     #[test]
     fn an_iphone_confirms_the_fast_link_network_by_its_gateway() {
         let swift = rn_source_code_only("ios/WifiDirectManager.swift");
@@ -20431,9 +20434,18 @@ mod tests {
              network without location permission; confirm the network by the gateway"
         );
         assert!(
-            swift.contains("if Self.isGateway(link.host, of: path) { self.openFastLinkStream(link, port: port) }"),
+            swift.contains(
+                "if Self.isGateway(link.host, of: path) { link.offGroup = 0 \
+                 self.openFastLinkStream(link, port: port) }"
+            ),
             "ios/WifiDirectManager.swift: a fast-link dial must wait for the offered host to \
              be the Wi-Fi path's gateway"
+        );
+        assert!(
+            swift.contains("} else if link.offGroup + 1 >= Self.FAST_LINK_OFF_GROUP_LIMIT {")
+                && swift.contains("self.endFastLink(reason: \"failed\")"),
+            "ios/WifiDirectManager.swift: a join that never reaches the group must end \
+             `failed` after a bounded number of looks, not wait out its offer"
         );
     }
     /// An Android host records its fast link's group name once it sees the
