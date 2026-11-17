@@ -1481,10 +1481,22 @@ class WifiDirectManager(
             } catch (e: Exception) {
                 null
             } ?: return
-            when (directive.kind) {
-                "host" -> hostFastLink(directive)
-                "join" -> joinFastLink(directive)
-                "close" -> closeFastLink(directive.linkId)
+            // One directive never takes the process down: everything below
+            // runs on the transport looper, where an exception is a crash.
+            try {
+                when (directive.kind) {
+                    "host" -> hostFastLink(directive)
+                    "join" -> joinFastLink(directive)
+                    "close" -> closeFastLink(directive.linkId)
+                }
+            } catch (e: Exception) {
+                emitDiagnostic("warning", "Fast link: a directive failed", mapOf(
+                    "kind" to directive.kind,
+                    "error" to (e.javaClass.simpleName),
+                ))
+                if (fastLinkHosted?.linkId == directive.linkId) fastLinkHosted = null
+                if (fastLinkJoined?.linkId == directive.linkId) fastLinkJoined = null
+                if (directive.kind != "close") fastLinkEnded(directive.linkId, "failed")
             }
         }
     }
@@ -1497,14 +1509,9 @@ class WifiDirectManager(
         }
     }
 
-    private fun fastLinkConfig(ssid: String, passphrase: String): WifiP2pConfig? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
-        return WifiP2pConfig.Builder()
-            .setNetworkName(ssid)
-            .setPassphrase(passphrase)
-            .enablePersistentMode(false)
-            .build()
-    }
+    private fun fastLinkConfig(ssid: String, passphrase: String): WifiP2pConfig? =
+        FastLinkGroupConfig.build(ssid, passphrase)
+
 
     /**
      * Brings up a group with the engine's credentials. Reported to the engine
@@ -1554,6 +1561,11 @@ class WifiDirectManager(
         val p2p = wifiP2pManager
         val ch = channel
         val config = if (ssid != null && passphrase != null) fastLinkConfig(ssid, passphrase) else null
+        if (config == null && ssid != null && passphrase != null && fastLinkSupported) {
+            // An offer whose network Android cannot join by name.
+            fastLinkEnded(directive.linkId, "invalid")
+            return
+        }
         if (config == null || host == null || port == null || p2p == null || ch == null || inGroup ||
             fastLinkHosted != null || fastLinkJoined != null
         ) {
@@ -2151,5 +2163,28 @@ internal object WifiDirectFormationProgress {
         val passed = REPORT_AT_MS.count { elapsed >= it }
         if (passed <= state.reported) return state to null
         return State(startedAt, passed) to Report(elapsed, passed)
+    }
+}
+
+/**
+ * The Wi-Fi Direct group a fast link names (ADR 0038), or null where Android
+ * cannot make one: below Android 10, or for a name or passphrase it refuses.
+ * `WifiP2pConfig.Builder` throws for a name that does not start `DIRECT-` and
+ * two characters, which the engine allows (an iPhone joins any name), so an
+ * offer from another implementation must never reach the builder unguarded:
+ * on the transport looper the throw is a crash.
+ */
+internal object FastLinkGroupConfig {
+    fun build(ssid: String, passphrase: String): WifiP2pConfig? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        return try {
+            WifiP2pConfig.Builder()
+                .setNetworkName(ssid)
+                .setPassphrase(passphrase)
+                .enablePersistentMode(false)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            null
+        }
     }
 }
