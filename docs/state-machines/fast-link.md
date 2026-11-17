@@ -80,7 +80,8 @@ for go ahead and no join prompt or group appears that it did not want.
 **A `request` arrives.** A device that cannot host answers `close`
 (`cannot_host`); one holding a link with another peer answers `close` (`busy`).
 One that already offered this peer a link sends the same offer again, since
-the request means the first one was lost. Otherwise it starts hosting under
+the request means the first one was lost, with only the lifetime it has left:
+the joiner counts an offer's lifetime from its arrival. Otherwise it starts hosting under
 the request's link id, unless two links it hosted in a row for that peer's
 requests carried nothing (no body of 16 KiB or more, no transfer) and ended by
 expiring, going idle, losing their stream, or at the peer's hand, whatever

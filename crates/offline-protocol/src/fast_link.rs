@@ -776,7 +776,14 @@ impl FastLinks {
             }
             match (link.role, link.state, link.offer) {
                 // The request means our offer was lost: send it again.
-                (FastLinkRole::Host, FastLinkState::Offered, Some(offer)) => {
+                (FastLinkRole::Host, FastLinkState::Offered, Some(mut offer)) => {
+                    // With the lifetime the host has left: the joiner counts
+                    // it from arrival, and a resent offer's full lifetime
+                    // kept a joiner, and an iPhone's prompt, on a network
+                    // already gone.
+                    if let Some(deadline) = link.deadline {
+                        offer.ttl_ms = deadline.saturating_duration_since(now).as_millis() as u64;
+                    }
                     let frame = Frame::new(&link.id, FrameBody::Offer(offer));
                     self.frames.push_back((peer.to_string(), frame));
                 }
@@ -1876,6 +1883,24 @@ mod tests {
         );
         let second = android.take_frames();
         assert_eq!(first, second);
+        // Later, it carries only the lifetime the host has left.
+        let later = t0 + Duration::from_secs(100);
+        android.on_frame(
+            HIGH,
+            LOW,
+            Frame::new(&id, FrameBody::Request),
+            fresh(4),
+            later,
+            0,
+        );
+        let third = android.take_frames();
+        let FrameBody::Offer(resent) = &third[0].1.body else {
+            panic!("an offer");
+        };
+        assert_eq!(
+            resent.ttl_ms,
+            (OFFER_TTL - Duration::from_secs(100)).as_millis() as u64
+        );
         assert_eq!(
             android.next_directive(t0).unwrap().kind,
             FastLinkDirectiveKind::Host
