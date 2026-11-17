@@ -25502,4 +25502,65 @@ mod tests {
             "react-native-integration.md must mention parseProtocolEvent"
         );
     }
+
+    /// Friction #25: browser integrators get a Vite starter and integrator-map
+    /// pointers with explicit experimental boundaries.
+    #[test]
+    fn web_vite_quickstart_is_documented() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repository root");
+        let starter = repo.join("bindings/web/starter");
+        let readme = std::fs::read_to_string(starter.join("README.md")).expect("starter README");
+        let pkg =
+            std::fs::read_to_string(starter.join("package.json")).expect("starter package.json");
+        let vite_cfg = std::fs::read_to_string(starter.join("vite.config.js"))
+            .expect("starter vite.config.js");
+        let map =
+            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
+        for needle in [
+            "bash bindings/web/scripts/build.sh",
+            "wasm-bindgen-cli",
+            "wasm32-unknown-unknown",
+            "npm run dev",
+            "Go / no-go",
+            "not a published npm package",
+        ] {
+            assert!(
+                readme.contains(needle),
+                "bindings/web/starter/README.md must mention `{needle}`"
+            );
+        }
+        assert!(
+            pkg.contains("\"vite\"") && pkg.contains("\"dev\": \"vite\""),
+            "starter package.json must define a Vite dev script"
+        );
+        assert!(
+            vite_cfg.contains("@offline-protocol/web"),
+            "starter vite.config.js must alias the browser binding"
+        );
+        let main_js =
+            std::fs::read_to_string(starter.join("src/main.js")).expect("starter main.js");
+        assert!(
+            main_js.contains("?worker&url"),
+            "starter must import the engine worker through Vite's worker pipeline"
+        );
+        // Only a build proves the worker and the module are bundled.
+        let ci = std::fs::read_to_string(repo.join(".github/workflows/ci.yml")).expect("ci.yml");
+        assert!(
+            ci.contains("working-directory: bindings/web/starter")
+                && ci.contains("npm run build")
+                && ci.contains("dist/assets/*.wasm"),
+            "ci.yml must build the Vite starter and check its bundled module"
+        );
+        assert!(
+            map.contains("bindings/web/starter/README.md"),
+            "integrator-map must link bindings/web/starter/README.md"
+        );
+        assert!(
+            map.contains("go/no-go"),
+            "integrator-map Web row must mention the starter go/no-go section"
+        );
+    }
 }

@@ -1217,6 +1217,17 @@ jobs:
       - name: Build the module
         run: bash bindings/web/scripts/build.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # The Vite starter is a template people clone, so it must keep
+      # building. Its production build bundles the worker and the module
+      # through Vite's worker pipeline. A `new URL` worker once built a page
+      # without them, which a build shows and a read of the sources does not.
+      - name: Build the Vite starter
+        working-directory: bindings/web/starter
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          ls dist/assets/*.wasm dist/assets/engine-worker-*.js
+
       # `--with-deps` apt-installs about 190 packages (112 MB, mostly WebKit's
       # media and GTK libraries) from the runner's Ubuntu mirror, which now and
       # then serves them at tens of kB/s: a step that takes under a minute took
