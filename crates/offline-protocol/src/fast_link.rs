@@ -47,8 +47,8 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// in flight, before it ends. It costs the joiner its own Wi-Fi.
 pub const IDLE_LIMIT: Duration = Duration::from_secs(60);
 
-/// The smallest body that counts as activity for [`IDLE_LIMIT`]: half a media
-/// chunk on the slot. Presence, receipts and chat are smaller and go over
+/// The smallest body that counts as activity for [`IDLE_LIMIT`]: 16 KiB, well
+/// under a media chunk on the slot and well over any control frame. Presence, receipts and chat are smaller and go over
 /// Bluetooth LE perfectly well, and counting them kept a link up for as long
 /// as an application sent presence every 15 s (two phones, ADR 0038).
 pub const ACTIVITY_MIN_BYTES: usize = 16 * 1024;
