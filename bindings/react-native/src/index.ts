@@ -4619,9 +4619,8 @@ export class OfflineProtocol {
    * changes once when the host answers with a network it already had. On iOS the join shows a system
    * prompt and takes the phone off its own Wi-Fi while the link lasts, and
    * the link ends when the app leaves the foreground, so ask for it when a
-   * transfer is worth that. Needs the Hotspot Configuration and Access Wi-Fi
-   * Information entitlements on iOS 14 or later, and `NEARBY_WIFI_DEVICES`
-   * (fine location below Android 13) on Android.
+   * transfer is worth that. Needs the Hotspot Configuration entitlement on iOS,
+   * and `NEARBY_WIFI_DEVICES` (fine location below Android 13) on Android.
    *
    * Rejects when the peer has not advertised support, there is no confirmed
    * session or live Bluetooth link to it, a peer stream already reaches it,

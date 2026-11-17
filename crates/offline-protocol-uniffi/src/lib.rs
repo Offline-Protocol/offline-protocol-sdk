@@ -20415,6 +20415,28 @@ mod tests {
         }
     }
 
+    /// An iPhone confirms it is on a fast link's network by the Wi-Fi path's
+    /// gateway, never by `NEHotspotNetwork.fetchCurrent`. A `joinOnce`
+    /// network is not one the app configured as iOS counts it, so without
+    /// location permission `fetchCurrent` names no network at all: on an
+    /// iPhone 16 every join was given up `failed` five seconds after the
+    /// phone was on the group. The Android host names the group's owner
+    /// address in its offer, and that address is the gateway of the path.
+    #[test]
+    fn an_iphone_confirms_the_fast_link_network_by_its_gateway() {
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        assert!(
+            !swift.contains("fetchCurrent"),
+            "ios/WifiDirectManager.swift: NEHotspotNetwork.fetchCurrent names no joinOnce \
+             network without location permission; confirm the network by the gateway"
+        );
+        assert!(
+            swift.contains("if Self.isGateway(link.host, of: path) { self.openFastLinkStream(link, port: port) }"),
+            "ios/WifiDirectManager.swift: a fast-link dial must wait for the offered host to \
+             be the Wi-Fi path's gateway"
+        );
+    }
+
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code =

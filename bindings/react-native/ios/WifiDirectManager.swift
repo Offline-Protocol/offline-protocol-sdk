@@ -14,7 +14,6 @@ import Network
 // every use of Network's ambiguous in this file.
 import class NetworkExtension.NEHotspotConfiguration
 import class NetworkExtension.NEHotspotConfigurationManager
-import class NetworkExtension.NEHotspotNetwork
 import enum NetworkExtension.NEHotspotConfigurationError
 import let NetworkExtension.NEHotspotConfigurationErrorDomain
 
@@ -298,14 +297,10 @@ public class WifiDirectManager: NSObject, TransportManager {
         try? protocolInstance.wifiDirectStatusChanged(isConnected: true)
         emitDiagnostic("info", "Peer-stream transport started")
         // An iPhone joins a fast link and cannot host one (ADR 0038), as far
-        // as the application's `wifiDirect.fastLink` allows. Only from iOS
-        // 14, which can say what network the phone is on: a join is dialed
-        // only once it is on the offered one (`dialFastLink`).
-        let canConfirmNetwork: Bool
-        if #available(iOS 14.0, *) { canConfirmNetwork = true } else { canConfirmNetwork = false }
+        // as the application's `wifiDirect.fastLink` allows.
         try? protocolInstance.wifiDirectSetFastLinkRoles(
             canHost: false,
-            canJoin: fastLinkMode != .off && canConfirmNetwork,
+            canJoin: fastLinkMode != .off,
             acceptUnrequested: fastLinkMode == .any
         )
     }
@@ -880,8 +875,6 @@ private final class FastLinkJoin {
     let deadline: TimeInterval
     /// iOS reported the join.
     var joined = false
-    /// Checks in a row in which iOS named no current network at all.
-    var networkUnknown = 0
     /// The stream dialed toward the host for this link.
     weak var stream: AnyObject?
 
@@ -905,13 +898,6 @@ private final class FastLinkJoin {
 extension WifiDirectManager {
     /// Gives a dial this long to become ready before it is tried again.
     private static let FAST_LINK_REDIAL: TimeInterval = 2.0
-    /// Checks in a row, one per redial, in which iOS names no current
-    /// network before the join is given up as `failed`. It names none while
-    /// the phone is on a network this app did not configure, so a join that
-    /// never happened, and none at all without the Access Wi-Fi Information
-    /// entitlement; either way the link would otherwise wait out its offer,
-    /// two minutes, with nothing said.
-    private static let FAST_LINK_NETWORK_UNKNOWN_LIMIT = 5
 
     /// Whether `error` is the hotspot error `code`. The domain is checked:
     /// another framework's error that shares the number would otherwise read
@@ -1033,31 +1019,41 @@ extension WifiDirectManager {
         // error while the phone stays on its own Wi-Fi (a wrong passphrase,
         // a group already gone), and `.wifi` alone would then send the dial,
         // and the preamble, to whatever the offer named on the user's home
-        // network. Until the phone is on it, the dial waits; the engine's
-        // deadline bounds the wait.
-        guard #available(iOS 14.0, *) else { return }
-        NEHotspotNetwork.fetchCurrent { [weak self] network in
-            guard let self = self else { return }
-            self.linkQueue.async {
-                guard self.fastLink === link else { return }
-                guard let network = network else {
-                    link.networkUnknown += 1
-                    if link.networkUnknown >= Self.FAST_LINK_NETWORK_UNKNOWN_LIMIT {
-                        self.emitDiagnostic("error", "Fast link: the phone is not on the offered network, or the app lacks the Access Wi-Fi Information entitlement (com.apple.developer.networking.wifi-info)", context: [
-                            "linkId": link.linkId,
-                        ])
-                        self.endFastLink(reason: "failed")
-                    } else {
-                        self.scheduleFastLinkRedial(link)
-                    }
-                    return
-                }
-                link.networkUnknown = 0
-                if network.ssid == link.ssid {
-                    self.openFastLinkStream(link, port: port)
-                } else {
-                    self.scheduleFastLinkRedial(link)
-                }
+        // network. The host is the group's owner, so the phone is on the
+        // group exactly when its Wi-Fi path's gateway is the offered host.
+        // Not `NEHotspotNetwork.fetchCurrent`: a `joinOnce` network is not
+        // one the app configured as iOS counts it, so without location
+        // permission that names no network at all, and every join failed.
+        // Until the phone is on it, the dial waits; the engine's deadline
+        // bounds the wait.
+        let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        monitor.pathUpdateHandler = { [weak self] path in
+            // One look per dial. The handler holds the monitor, so it is
+            // dropped here or each redial would keep one alive.
+            monitor.pathUpdateHandler = nil
+            monitor.cancel()
+            guard let self = self, self.fastLink === link else { return }
+            if Self.isGateway(link.host, of: path) {
+                self.openFastLinkStream(link, port: port)
+            } else {
+                self.scheduleFastLinkRedial(link)
+            }
+        }
+        monitor.start(queue: linkQueue)
+    }
+
+    /// Whether `host`, an IP literal, is a gateway of `path`.
+    private static func isGateway(_ host: String, of path: NWPath) -> Bool {
+        let v4 = IPv4Address(host)
+        let v6 = IPv6Address(host)
+        return path.gateways.contains { gateway in
+            switch gateway {
+            case let .hostPort(host: .ipv4(address), port: _):
+                return address.rawValue == v4?.rawValue
+            case let .hostPort(host: .ipv6(address), port: _):
+                return address.rawValue == v6?.rawValue
+            default:
+                return false
             }
         }
     }

@@ -132,23 +132,16 @@ only when you are ready to show that flow.
 
 `requestFastLink` ([ADR 0038](adr/0038-a-fast-link-is-offered-inside-the-session.md))
 brings up a Wi-Fi network between this device and a peer it meets over
-Bluetooth. An iPhone joins the network the peer hosts, which needs two
-capabilities in the app's entitlements (Xcode adds each to the App ID with
-automatic signing):
-
-- **Hotspot Configuration**
-  (`com.apple.developer.networking.HotspotConfiguration`), to join the
-  network.
-- **Access Wi-Fi Information** (`com.apple.developer.networking.wifi-info`),
-  to confirm the phone is on that network before it dials. iOS can finish a
-  join with no error while the phone stays on its own Wi-Fi, and the dial
-  would then go to an address on the user's home network.
+Bluetooth. An iPhone joins the network the peer hosts, which needs the
+**Hotspot Configuration** capability
+(`com.apple.developer.networking.HotspotConfiguration`) in the app's
+entitlements (Xcode adds it to the App ID with automatic signing). Without it
+every join ends `failed`.
 
 Keep the local-network keys above too, since the stream is a local-network
-connection. Without either entitlement every join ends `failed`, the second
-with a diagnostic that names it. An iPhone joins from iOS 14, which can say
-what network the phone is on; below it a request is refused and a peer's
-offer answered `cannot_join`.
+connection. No location permission and no Access Wi-Fi Information
+entitlement are needed: the iPhone confirms it is on the offered network by
+its Wi-Fi gateway, which is the host, not by the network's name.
 
 iOS shows "“App” Wants to Join Wi‑Fi Network “DIRECT-…”?" on every join, and
 the phone leaves its own Wi-Fi while the link lasts. By default a peer's app

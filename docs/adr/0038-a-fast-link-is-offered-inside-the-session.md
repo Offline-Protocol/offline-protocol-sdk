@@ -152,13 +152,15 @@ session, and only uses it.
   application should ask for a link when a transfer is worth that, and expect
   it to end when the user leaves.
 - An iOS application that uses it needs the Hotspot Configuration entitlement
-  (`com.apple.developer.networking.HotspotConfiguration`), the Access Wi-Fi
-  Information entitlement (`com.apple.developer.networking.wifi-info`), and
-  local-network permission. The second is what lets
-  `NEHotspotNetwork.fetchCurrent` name the network the phone is on, which the
-  iPhone checks before it dials: a join can finish with no error while the
-  phone stays on its own Wi-Fi. An Android application needs `NEARBY_WIFI_DEVICES` on Android 13
-  and later, and fine location below it.
+  (`com.apple.developer.networking.HotspotConfiguration`) and local-network
+  permission. A join can finish with no error while the phone stays on its
+  own Wi-Fi, so the iPhone dials only once its Wi-Fi path's gateway is the
+  offered host, the group's owner. Not by the network's name:
+  `NEHotspotNetwork.fetchCurrent` names no `joinOnce` network without
+  location permission, since iOS does not count it as one the application
+  configured, and on an iPhone 16 every join failed that way. An Android
+  application needs `NEARBY_WIFI_DEVICES` on Android 13 and later, and fine
+  location below it.
 - A fast link and Wi-Fi Direct group formation (`wifiDirect.autoAccept`) share
   the one group an Android device can own: while either holds it, the other
   is refused.
