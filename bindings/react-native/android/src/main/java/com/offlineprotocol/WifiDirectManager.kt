@@ -1445,6 +1445,12 @@ class WifiDirectManager(
     // admission check, the dial).
     @Volatile private var fastLinkHosted: FastLinkHosted? = null
     @Volatile private var fastLinkJoined: FastLinkJoined? = null
+    // A fast link's group is being removed (transport thread). Removal is
+    // asynchronous, so a join that follows a close in one drain finds the
+    // device still in that group.
+    private var fastLinkLeaving = false
+    // A join waiting for [fastLinkLeaving] to clear (transport thread).
+    private var parkedFastLinkJoin: FastLinkDirective? = null
 
     /** A group by name and passphrase, for creating or joining: Android 10. */
     private val fastLinkSupported: Boolean
@@ -1573,6 +1579,20 @@ class WifiDirectManager(
             fastLinkEnded(directive.linkId, "invalid")
             return
         }
+        if (config != null && inGroup && fastLinkLeaving && parkedFastLinkJoin == null) {
+            // Both devices hosted for each other, and this one, the higher
+            // address, closed its group to join the other's (ADR 0038). The
+            // close and the join arrive in one drain, before the removal
+            // lands: the join waits for the group to go, within its lifetime.
+            parkedFastLinkJoin = directive
+            transportHandler.postDelayed({
+                if (parkedFastLinkJoin === directive) {
+                    parkedFastLinkJoin = null
+                    fastLinkEnded(directive.linkId, "failed")
+                }
+            }, directive.expiresInMs.toLong())
+            return
+        }
         if (config == null || host == null || port == null || p2p == null || ch == null || inGroup ||
             fastLinkHosted != null || fastLinkJoined != null
         ) {
@@ -1602,12 +1622,15 @@ class WifiDirectManager(
         val ch = channel ?: return
         val hosted = fastLinkHosted
         val joined = fastLinkJoined
+        if (parkedFastLinkJoin?.linkId == linkId) parkedFastLinkJoin = null
         if (hosted?.linkId == linkId) {
             fastLinkHosted = null
+            fastLinkLeaving = inGroup
             p2p.removeGroup(ch, quietListener("remove fast-link group"))
         }
         if (joined?.linkId == linkId) {
             fastLinkJoined = null
+            fastLinkLeaving = inGroup
             if (!joined.connected) p2p.cancelConnect(ch, quietListener("cancel fast-link join"))
             p2p.removeGroup(ch, quietListener("leave fast-link group"))
         }
@@ -1651,6 +1674,15 @@ class WifiDirectManager(
 
     /** This device left whatever group it was in. */
     private fun fastLinkGroupGone() {
+        fastLinkLeaving = false
+        parkedFastLinkJoin?.let { parked ->
+            parkedFastLinkJoin = null
+            try {
+                joinFastLink(parked)
+            } catch (e: Exception) {
+                fastLinkEnded(parked.linkId, "failed")
+            }
+        }
         val hosted = fastLinkHosted
         if (hosted != null && hosted.reported) {
             fastLinkHosted = null
@@ -1668,8 +1700,12 @@ class WifiDirectManager(
     private fun endFastLinkOnStop() {
         val hosted = fastLinkHosted
         val joined = fastLinkJoined
+        val parked = parkedFastLinkJoin
         fastLinkHosted = null
         fastLinkJoined = null
+        parkedFastLinkJoin = null
+        fastLinkLeaving = false
+        parked?.let { fastLinkEnded(it.linkId, "failed") }
         val ch = channel
         if ((hosted != null || joined != null) && ch != null) {
             wifiP2pManager?.removeGroup(ch, quietListener("end fast link on stop"))
