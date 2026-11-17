@@ -108,7 +108,8 @@ prompt, and without the pause a peer could put up another the moment one was
 refused. Two offers in a row that the peer made unasked and that ended
 having carried nothing, up or not, start the same pause, whatever the peer's reason or
 the offer's expiry, unless this device ended them itself (its application
-closing the link, leaving the foreground): a prompt the user ignores is never
+closing the link, leaving the foreground, another stream reaching the peer
+first): a prompt the user ignores is never
 declined, and without this the peer could prompt again once per offer
 lifetime. One is forgiven, a link that carries something clears the count, and the
 user's own request to that peer ends the pause. A second offer
@@ -238,7 +239,13 @@ passphrase.
   had just joined, and leaving the home network for it lost both 40 s later.
   Hence a platform that sees a stream other than the link's own prove the
   link's peer first ends the link `superseded` before announcing the stream,
-  and answers a directive for a peer a stream already reaches the same way.
+  and answers a directive for a peer a stream already reaches the same way;
+  the engine answers a `request` or `offer` from such a peer `superseded`
+  itself, with no link, since the peer's own `superseded` can overtake this
+  device's report and would count against the peer. A stream over the
+  group itself is the link's own however it was dialled: an Android below 13
+  advertises on the group's interface, and an iPhone's general dial can
+  prove the host there before the link's own dial.
   Such an end is the platform's own and never counts against the peer, and
   the transfers on the slot are the other stream's, so none is failed.
 - **A joiner that falls silent** when iOS takes the network away leaves the

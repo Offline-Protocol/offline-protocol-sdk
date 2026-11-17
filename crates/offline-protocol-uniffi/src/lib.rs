@@ -20482,7 +20482,8 @@ mod tests {
     /// network for it lost both 40 s later. The announcement pins (in
     /// `react_native_wifi_direct_announces_only_proved_addresses`) hold the
     /// order, the end before the announcement; this holds the conditions
-    /// and the directive-time refusals.
+    /// and the directive-time refusals. A stream over the group itself is
+    /// the link's own however it was dialled.
     #[test]
     fn a_pending_fast_link_gives_way_to_a_stream_that_reached_the_peer_first() {
         let kotlin =
@@ -20491,10 +20492,14 @@ mod tests {
         assert!(
             swift.contains(
                 "if let pending = fastLink, pending.peer == address, \
-                 peers.handle(for: address) !== (pending.stream as? Stream) {"
+                 let held = peers.handle(for: address), held !== (pending.stream as? Stream) { \
+                 if pending.joined, let path = held.connection.currentPath, \
+                 Self.isGateway(pending.host, of: path) { pending.stream = held } else {"
             ),
             "ios/WifiDirectManager.swift: a stream that is not the link's own must end a \
-             pending link for its peer"
+             pending link for its peer, and one over the group itself (its path's gateway \
+             the offered host) is the link's own: an Android below 13 advertises on the \
+             group's interface, and superseding that stream tore down the group it ran on"
         );
         assert!(
             swift.contains(
@@ -21740,7 +21745,7 @@ mod tests {
                 [
                     (
                         "wifiDirectPeerConnected(",
-                        "endFastLink(reason: \"superseded\") } do { \
+                        "endFastLink(reason: \"superseded\") } } do { \
                          try protocolInstance.wifiDirectPeerConnected(peerId: address)",
                     ),
                     (

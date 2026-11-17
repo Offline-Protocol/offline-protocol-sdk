@@ -826,13 +826,24 @@ extension WifiDirectManager: PeerStreamHost {
         // `superseded` before the stream is announced. Announced first, the
         // engine took it for the link's and marked the link up, the join
         // never dialled the network the user had just joined, and leaving
-        // the home network for it then lost both.
+        // the home network for it then lost both. Only a first announcement
+        // for the address reaches here, so an up link, whose own stream
+        // holds the address, never does.
         if let pending = fastLink, pending.peer == address,
-           peers.handle(for: address) !== (pending.stream as? Stream) {
-            emitDiagnostic("info", "Fast link: another stream reached the peer first", context: [
-                "linkId": pending.linkId,
-            ])
-            endFastLink(reason: "superseded")
+           let held = peers.handle(for: address), held !== (pending.stream as? Stream) {
+            if pending.joined, let path = held.connection.currentPath,
+               Self.isGateway(pending.host, of: path) {
+                // Over the group itself, from the general Bonjour dial: an
+                // Android below 13 advertises on the group's interface too,
+                // and that dial needs no DHCP address, so it can prove the
+                // host before the link's own. It is the link's stream.
+                pending.stream = held
+            } else {
+                emitDiagnostic("info", "Fast link: another stream reached the peer first", context: [
+                    "linkId": pending.linkId,
+                ])
+                endFastLink(reason: "superseded")
+            }
         }
         do {
             try protocolInstance.wifiDirectPeerConnected(peerId: address)

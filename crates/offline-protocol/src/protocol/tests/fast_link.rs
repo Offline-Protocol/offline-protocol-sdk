@@ -356,6 +356,44 @@ fn fast_link_frames_prefer_bluetooth_over_the_peer_stream() {
     assert!(bob.protocol.next_fast_link_directive().is_some());
 }
 
+/// An offer from a peer another stream already reaches is answered
+/// `superseded` by the engine itself: no join prompt, and the host's link
+/// ends with that reason. Left to the platform, the offer made a link that
+/// the host's own `superseded` then ended, counted against the host.
+#[test]
+fn an_offer_to_a_peer_a_stream_already_reaches_is_answered_superseded() {
+    use offline_protocol_transport::PeerLink;
+
+    let (mut alice, mut bob) = pair();
+    let link_id = alice.protocol.request_fast_link(&bob.address).unwrap();
+    alice.protocol.next_fast_link_directive().unwrap();
+    alice
+        .protocol
+        .fast_link_hosting(&link_id, "192.168.49.1", 8988)
+        .unwrap();
+    let offer = alice.take_sent();
+
+    // The two meet over a shared LAN while the offer is in flight.
+    let stream = MockTransport::new(TransportType::WiFiDirect);
+    stream.start().unwrap();
+    stream.set_connected_peers(vec![PeerLink::new(alice.address.clone())]);
+    bob.protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(stream.clone()));
+
+    bob.deliver(offer);
+    assert!(
+        bob.protocol.next_fast_link_directive().is_none(),
+        "no join, so no prompt"
+    );
+    assert!(bob.link_states().is_empty(), "no link was made");
+    alice.deliver(bob.take_sent());
+    assert_eq!(
+        alice.link_states().last(),
+        Some(&("closed".to_string(), Some("superseded".to_string())))
+    );
+}
+
 /// Blocking a peer ends its fast link at once: the platform takes the network
 /// down, and nothing is sent to the blocked peer.
 #[test]

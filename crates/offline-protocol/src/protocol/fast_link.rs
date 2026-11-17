@@ -20,7 +20,7 @@ use tracing::{debug, warn};
 use super::prefixes::internal_prefixes;
 use super::OfflineProtocol;
 use crate::fast_link::{
-    CloseReason, FastLinkDirective, FastLinkRefusal, FastLinkRoles, Frame, FreshLink,
+    CloseReason, FastLinkDirective, FastLinkRefusal, FastLinkRoles, Frame, FrameBody, FreshLink,
 };
 use crate::{Error, Event, Result};
 
@@ -180,6 +180,18 @@ impl OfflineProtocol {
         let Some(local) = self.local_address().map(str::to_string) else {
             return;
         };
+        // A peer another stream already reaches gets no new link: that stream
+        // carries what the link would (`answer_superseded`). A link already
+        // held with it takes the frame as usual; its platform gives way.
+        if !matches!(frame.body, FrameBody::Close { .. })
+            && self.fast_links.peer() != Some(sender)
+            && self.peer_stream_proves(sender)
+        {
+            self.fast_links
+                .answer_superseded(sender, &frame.link, Instant::now());
+            self.flush_fast_link();
+            return;
+        }
         self.fast_links.on_frame(
             sender,
             &local,

@@ -791,6 +791,20 @@ impl FastLinks {
         }
     }
 
+    /// A `request` or `offer` from `peer` arrived while another peer stream
+    /// already reaches it, and this device holds no link with it: answered
+    /// `superseded` as this device's own end, with no link and no directive.
+    /// Left to the platform, the link was made, then ended by the peer's own
+    /// `superseded` that overtook this device's report, and counted against
+    /// the peer, whose next offers were paused for nothing.
+    pub(crate) fn answer_superseded(&mut self, peer: &str, link_id: &str, now: Instant) {
+        if self.peer() == Some(peer) {
+            return;
+        }
+        self.remember_ended(link_id, now);
+        self.reply_close(peer, link_id, CloseReason::Superseded);
+    }
+
     fn reply_close(&mut self, peer: &str, link: &str, reason: CloseReason) {
         self.frames.push_back((
             peer.to_string(),
@@ -2741,6 +2755,48 @@ mod tests {
             android.take_changes();
             iphone.take_changes();
         }
+    }
+
+    #[test]
+    fn a_frame_from_a_peer_another_stream_reaches_is_answered_superseded() {
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let now = Instant::now();
+        // The home-network stream proved both ends while the Android's offer
+        // was in flight, and the Android then superseded its own link. Twice:
+        // with the offer made into a link and ended by the Android's close,
+        // the second paused the Android's offers for ten minutes.
+        for seed in [1, 2] {
+            let id = android.request(HIGH, fresh(seed), now).unwrap();
+            android.next_directive(now);
+            assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+            let offer = android.take_frames().remove(0).1;
+            assert!(matches!(offer.body, FrameBody::Offer(_)));
+            iphone.answer_superseded(LOW, &offer.link, now);
+            assert!(
+                iphone.next_directive(now).is_none(),
+                "no prompt for a reached peer"
+            );
+            assert_eq!(
+                iphone.take_frames()[0].1.body,
+                FrameBody::Close {
+                    reason: "superseded".to_string()
+                }
+            );
+            assert!(android.platform_ended(&id, CloseReason::Superseded, now));
+            deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+            android.take_changes();
+            iphone.take_changes();
+        }
+        // The next unasked offer, with no other stream, is still joined.
+        let id = android.request(HIGH, fresh(3), now).unwrap();
+        android.next_directive(now);
+        assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+        deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+        assert_eq!(
+            iphone.next_directive(now).unwrap().kind,
+            FastLinkDirectiveKind::Join
+        );
     }
 
     #[test]
