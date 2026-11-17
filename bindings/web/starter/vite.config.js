@@ -4,15 +4,14 @@ import { defineConfig } from "vite";
 
 const starterRoot = path.dirname(fileURLToPath(import.meta.url));
 const webBinding = path.resolve(starterRoot, "..");
-const repoRoot = path.resolve(webBinding, "../..");
 
 export default defineConfig({
   root: starterRoot,
   server: {
-    port: 5173,
-    strictPort: true,
+    // The page, the worker and the module all live under bindings/web
+    // (the starter included); the dev server serves nothing above it.
     fs: {
-      allow: [starterRoot, webBinding, repoRoot],
+      allow: [webBinding],
     },
   },
   resolve: {

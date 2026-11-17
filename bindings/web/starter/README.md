@@ -1,12 +1,13 @@
 # Web Vite quickstart
 
-Opinionated dev template for the **experimental** browser binding (friction
-#25). Cloneable tab-to-tab mesh with Vite — not a published npm package.
+Opinionated dev template for the **experimental** browser binding. A
+cloneable tab-to-tab mesh with Vite, not a published npm package.
 
 ## Prerequisites
 
 1. **Rust toolchain** and this repository checkout.
-2. **wasm-bindgen CLI** pinned to `Cargo.lock` (currently `0.2.105`):
+2. **wasm-bindgen CLI** at the version in `Cargo.lock` (a test holds this
+   line to it):
 
    ```bash
    cargo install wasm-bindgen-cli --version 0.2.105 --locked
@@ -28,7 +29,7 @@ npm ci
 npm run dev
 ```
 
-Open the printed local URL (default `http://127.0.0.1:5173/`) in **two tabs**.
+Open the printed local URL (default `http://localhost:5173/`) in **two tabs**.
 Each tab shows its `off1…` address, discovers the other, establishes an MLS
 session, and can send encrypted messages. Storage is **memory**: every tab is a
 separate device (same model as [web-two-tabs](../../../examples/web-two-tabs/README.md)).
@@ -50,7 +51,7 @@ OPFS durable storage, Nostr, or Bluetooth.
 |-------------------------------|--------------------------------------------|
 | You need a **full mesh node in the browser** (tabs, LAN WebRTC, optional Nostr) | You want **`npm install` + one native module** with minimal WASM/worker setup |
 | Your team can own **worker lifecycle, carriers, and secure context** (HTTPS) | You need **background mesh on iOS/Android** with system transports |
-| You accept **experimental** API and manual WASM builds in CI | You need **telemetry pipe, file-store, and release wheels** out of the box |
+| You accept **experimental** API and manual WASM builds in CI | You need **published packages, the telemetry pipe, and file storage** out of the box |
 
 This starter intentionally does **not** hide the worker or the WASM build step.
 If the table's right column matches your timeline, start from the

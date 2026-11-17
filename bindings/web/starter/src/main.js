@@ -54,7 +54,8 @@ async function main() {
     note(`${short(detail.sender)}: ${detail.content}${detail.encrypted ? "  🔒" : ""}`);
   });
   node.addEventListener("fatal", ({ detail }) => {
-    note(`fatal: ${detail?.message ?? "worker ended"}`);
+    // `detail` is the reason, a string (OfflineNode#fail).
+    note(`fatal: ${detail ?? "worker ended"}`);
   });
 
   $("send").addEventListener("submit", async (event) => {
@@ -62,7 +63,12 @@ async function main() {
     const to = $("to").value;
     const text = $("text").value;
     if (!to) return;
-    await node.sendMessage(to, text);
+    try {
+      await node.sendMessage(to, text);
+    } catch (error) {
+      note(`not sent to ${short(to)}: ${error.message}`);
+      return;
+    }
     note(`you → ${short(to)}: ${text}`);
     $("text").value = "";
   });
@@ -73,5 +79,5 @@ async function main() {
 main().catch((error) => {
   console.error(error);
   $("me").textContent =
-    "failed to start — run bash bindings/web/scripts/build.sh from the repo root";
+    "failed to start: run bash bindings/web/scripts/build.sh from the repo root";
 });

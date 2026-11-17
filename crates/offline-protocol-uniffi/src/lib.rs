@@ -25546,6 +25546,14 @@ mod tests {
             main_js.contains("?worker&url"),
             "starter must import the engine worker through Vite's worker pipeline"
         );
+        // Only a build proves the worker and the module are bundled.
+        let ci = std::fs::read_to_string(repo.join(".github/workflows/ci.yml")).expect("ci.yml");
+        assert!(
+            ci.contains("working-directory: bindings/web/starter")
+                && ci.contains("npm run build")
+                && ci.contains("dist/assets/*.wasm"),
+            "ci.yml must build the Vite starter and check its bundled module"
+        );
         assert!(
             map.contains("bindings/web/starter/README.md"),
             "integrator-map must link bindings/web/starter/README.md"
