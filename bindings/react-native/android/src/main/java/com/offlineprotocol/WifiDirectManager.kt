@@ -1601,6 +1601,12 @@ class WifiDirectManager(
             fastLinkEnded(directive.linkId, "superseded")
             return
         }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            // A named group needs Android 10, and [fastLinkSupported] declares
+            // no host role below it; this says so where the call is made.
+            fastLinkEnded(directive.linkId, "host_failed")
+            return
+        }
         val ssid = directive.ssid
         val passphrase = directive.passphrase
         val p2p = wifiP2pManager
