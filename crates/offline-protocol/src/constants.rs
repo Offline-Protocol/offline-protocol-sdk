@@ -128,6 +128,17 @@ pub const MEDIA_WINDOW_SIZE_INTERNET: usize = 8;
 /// Default maximum chunks in flight for media transfers.
 pub const DEFAULT_MEDIA_WINDOW_SIZE: usize = 4;
 
+/// Maximum chunks in flight for media transfers on the peer-stream slot (a
+/// Wi-Fi Direct group, a LAN, AWDL or a fast link).
+///
+/// Sixteen 32 KiB chunks, 512 KiB in flight. At the default of four a 1 MiB
+/// file over a fast link took 8.0 to 8.7 s on two phones (ADR 0038): about
+/// 128 KiB per acknowledgement round, with receipts coalesced for up to
+/// 500 ms, so the transfer waited on acknowledgements rather than on the link.
+/// The platform managers queue up to 4 MiB per stream before dropping, so
+/// the window stays well inside what a stream holds.
+pub const MEDIA_WINDOW_SIZE_PEER_STREAM: usize = 16;
+
 /// Maximum entries in the dedicated media outbox.
 /// Smaller than the main outbox since the sliding window limits in-flight chunks.
 pub const MAX_MEDIA_OUTBOX_ENTRIES: usize = 100;

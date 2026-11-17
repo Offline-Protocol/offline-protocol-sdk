@@ -270,3 +270,39 @@ fn a_peer_that_cannot_host_says_so() {
         &("closed".to_string(), Some("cannot_host".to_string()))
     );
 }
+
+/// A transfer pinned to the peer-stream slot leaves sixteen chunks before it
+/// waits for an acknowledgement, not four: at four, a fast link spent its
+/// time waiting on receipts rather than on the link (ADR 0038, decision 9).
+#[test]
+fn a_transfer_on_the_peer_stream_slot_fills_a_window_of_sixteen() {
+    use offline_protocol_core::ContentType;
+    use offline_protocol_transport::PeerLink;
+
+    use crate::constants::{DEFAULT_CHUNK_SIZE, MEDIA_WINDOW_SIZE_PEER_STREAM};
+
+    let (mut alice, bob) = pair();
+    let stream = MockTransport::new(TransportType::WiFiDirect);
+    stream.start().unwrap();
+    stream.set_connected_peers(vec![PeerLink::new(bob.address.clone())]);
+    alice
+        .protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(stream.clone()));
+    alice.take_sent();
+
+    let file = vec![0x5a; DEFAULT_CHUNK_SIZE * 20];
+    alice
+        .protocol
+        .send_media(&bob.address, file, "big.bin", ContentType::File, None)
+        .unwrap();
+
+    let chunks = stream
+        .sent_messages()
+        .into_iter()
+        .chain(stream.peer_sends().into_iter().map(|(_, message)| message))
+        .filter(|message| message.content_type == ContentType::FileChunk)
+        .count();
+    assert_eq!(chunks, MEDIA_WINDOW_SIZE_PEER_STREAM);
+    assert_eq!(MEDIA_WINDOW_SIZE_PEER_STREAM, 16);
+}
