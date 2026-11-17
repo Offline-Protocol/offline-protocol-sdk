@@ -1630,22 +1630,27 @@ class WifiDirectManager(
     /** Ends what this device holds for the link: leaves or removes the group. */
     @SuppressLint("MissingPermission")
     private fun closeFastLink(linkId: String) {
-        val p2p = wifiP2pManager ?: return
-        val ch = channel ?: return
+        // The link's fields are cleared even with no manager or channel to
+        // act through: left set, every later host or join would be refused
+        // as if this link still held the radio, until the manager restarted.
+        val p2p = wifiP2pManager
+        val ch = channel
         val hosted = fastLinkHosted
         val joined = fastLinkJoined
         if (parkedFastLinkJoin?.linkId == linkId) parkedFastLinkJoin = null
         if (hosted?.linkId == linkId) {
             fastLinkHosted = null
-            fastLinkLeaving = inGroup
+            fastLinkLeaving = inGroup && p2p != null && ch != null
             if (!hosted.reported) orphanedFastLinkSsid = hosted.ssid
-            p2p.removeGroup(ch, quietListener("remove fast-link group"))
+            if (p2p != null && ch != null) p2p.removeGroup(ch, quietListener("remove fast-link group"))
         }
         if (joined?.linkId == linkId) {
             fastLinkJoined = null
-            fastLinkLeaving = inGroup
-            if (!joined.connected) p2p.cancelConnect(ch, quietListener("cancel fast-link join"))
-            p2p.removeGroup(ch, quietListener("leave fast-link group"))
+            fastLinkLeaving = inGroup && p2p != null && ch != null
+            if (p2p != null && ch != null) {
+                if (!joined.connected) p2p.cancelConnect(ch, quietListener("cancel fast-link join"))
+                p2p.removeGroup(ch, quietListener("leave fast-link group"))
+            }
         }
     }
 
