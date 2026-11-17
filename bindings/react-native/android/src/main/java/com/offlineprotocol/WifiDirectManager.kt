@@ -1452,6 +1452,10 @@ class WifiDirectManager(
     private var fastLinkLeaving = false
     // A join waiting for [fastLinkLeaving] to clear (transport thread).
     private var parkedFastLinkJoin: FastLinkDirective? = null
+    // The name of a fast-link group closed before it came up (transport
+    // thread). Its removeGroup can lose to the negotiation, answered BUSY, and
+    // the group then appears with nothing tracking it; seen, it is removed.
+    private var orphanedFastLinkSsid: String? = null
 
     /** A group by name and passphrase, for creating or joining: Android 10. */
     private val fastLinkSupported: Boolean
@@ -1627,6 +1631,7 @@ class WifiDirectManager(
         if (hosted?.linkId == linkId) {
             fastLinkHosted = null
             fastLinkLeaving = inGroup
+            if (!hosted.reported) orphanedFastLinkSsid = hosted.ssid
             p2p.removeGroup(ch, quietListener("remove fast-link group"))
         }
         if (joined?.linkId == linkId) {
@@ -1646,7 +1651,11 @@ class WifiDirectManager(
      */
     @SuppressLint("MissingPermission")
     private fun fastLinkGroupChanged() {
-        val hosted = fastLinkHosted ?: return
+        val hosted = fastLinkHosted
+        if (hosted == null) {
+            removeOrphanedFastLinkGroup()
+            return
+        }
         wifiP2pManager?.requestGroupInfo(channel) { group ->
             if (fastLinkHosted !== hosted || group == null || !group.isGroupOwner ||
                 group.networkName != hosted.ssid
@@ -1670,6 +1679,18 @@ class WifiDirectManager(
             } else if (hosted.sawClient && clients == 0) {
                 sockets.closeCarrier(PeerStreamSockets.Carrier.P2P)
             }
+        }
+    }
+
+    /** Removes the group a closed link brought up after it was closed. */
+    @SuppressLint("MissingPermission")
+    private fun removeOrphanedFastLinkGroup() {
+        val orphan = orphanedFastLinkSsid ?: return
+        wifiP2pManager?.requestGroupInfo(channel) { group ->
+            if (group == null || !group.isGroupOwner || group.networkName != orphan) return@requestGroupInfo
+            orphanedFastLinkSsid = null
+            emitDiagnostic("info", "Fast link: removing a group that came up after its link closed")
+            wifiP2pManager?.removeGroup(channel, quietListener("remove orphaned fast-link group"))
         }
     }
 
@@ -1706,6 +1727,7 @@ class WifiDirectManager(
         fastLinkJoined = null
         parkedFastLinkJoin = null
         fastLinkLeaving = false
+        orphanedFastLinkSsid = null
         parked?.let { fastLinkEnded(it.linkId, "failed") }
         val ch = channel
         if ((hosted != null || joined != null) && ch != null) {
