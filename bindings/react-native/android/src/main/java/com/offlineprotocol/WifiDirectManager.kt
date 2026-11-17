@@ -2297,9 +2297,10 @@ internal object WifiDirectFormationProgress {
  * The Wi-Fi Direct group a fast link names (ADR 0038), or null where Android
  * cannot make one: below Android 10, or for a name or passphrase it refuses.
  * `WifiP2pConfig.Builder` throws for a name that does not start `DIRECT-` and
- * two characters, which the engine allows (an iPhone joins any name), so an
- * offer from another implementation must never reach the builder unguarded:
- * on the transport looper the throw is a crash.
+ * two characters, and for other names and passphrases it will not take. The
+ * engine refuses an offer without the prefix, but the builder's rules are
+ * Android's and may be stricter than the engine's, so nothing reaches it
+ * unguarded: on the transport looper the throw is a crash.
  */
 internal object FastLinkGroupConfig {
     fun build(ssid: String, passphrase: String): WifiP2pConfig? {
