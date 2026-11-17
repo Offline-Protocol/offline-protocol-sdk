@@ -245,9 +245,18 @@ passphrase.
   device's report and would count against the peer. A stream over the
   group itself is the link's own however it was dialled: an Android below 13
   advertises on the group's interface, and an iPhone's general dial can
-  prove the host there before the link's own dial.
-  Such an end is the platform's own and never counts against the peer, and
-  the transfers on the slot are the other stream's, so none is failed.
+  prove the host there before the link's own dial, over a link-local
+  address before DHCP, so once the iPhone has joined only a stream whose path
+  has a gateway that is not the host gives way.
+  Such an end is the platform's own and never counts against the peer, nor
+  does the peer's own `superseded` for a link not yet up here while another
+  stream reaches the peer (its close can overtake this device's report;
+  counted, two meetings on a home network paused the peer). A peer's
+  `superseded` for a link up here is any close: the link's own stream
+  carried it. The engine also ends a join its platform has not yet taken
+  `superseded` when a stream proves the peer, since such a link has no
+  stream of its own. A link this device superseded fails no transfer on the
+  slot: the transfers there are the other stream's.
 - **A joiner that falls silent** when iOS takes the network away leaves the
   host's stream half open until keepalive ends it. Hence the platform's
   report.

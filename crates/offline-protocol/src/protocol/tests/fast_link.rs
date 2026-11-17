@@ -394,6 +394,51 @@ fn an_offer_to_a_peer_a_stream_already_reaches_is_answered_superseded() {
     );
 }
 
+/// Two phones that meet over a shared LAN while a link they both hold is
+/// pending each end it `superseded`. The joiner's close reaching the host
+/// before the host's own report is not a miss: two such meetings left the
+/// host in backoff against the joiner.
+#[test]
+fn a_peers_superseded_with_a_stream_reaching_it_is_not_counted() {
+    use offline_protocol_transport::PeerLink;
+
+    let (mut alice, mut bob) = pair();
+    let stream = MockTransport::new(TransportType::WiFiDirect);
+    stream.start().unwrap();
+    alice
+        .protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(stream.clone()));
+    for _ in 0..2 {
+        let link_id = bob.protocol.request_fast_link(&alice.address).unwrap();
+        alice.deliver(bob.take_sent());
+        while let Some(directive) = alice.protocol.next_fast_link_directive() {
+            if directive.kind == FastLinkDirectiveKind::Host {
+                alice
+                    .protocol
+                    .fast_link_hosting(&link_id, "192.168.49.1", 8988)
+                    .unwrap();
+            }
+        }
+        bob.deliver(alice.take_sent());
+        bob.protocol.next_fast_link_directive().unwrap();
+        // The LAN stream comes up; bob's platform reports first.
+        stream.set_connected_peers(vec![PeerLink::new(bob.address.clone())]);
+        bob.protocol.fast_link_ended(&link_id, "superseded");
+        alice.deliver(bob.take_sent());
+        assert_eq!(
+            alice.link_states().last(),
+            Some(&("closed".to_string(), Some("superseded".to_string())))
+        );
+        stream.set_connected_peers(vec![]);
+    }
+    bob.protocol.request_fast_link(&alice.address).unwrap();
+    alice.deliver(bob.take_sent());
+    let hosted = std::iter::from_fn(|| alice.protocol.next_fast_link_directive())
+        .any(|directive| directive.kind == FastLinkDirectiveKind::Host);
+    assert!(hosted, "the third request is hosted, not answered busy");
+}
+
 /// Blocking a peer ends its fast link at once: the platform takes the network
 /// down, and nothing is sent to the blocked peer.
 #[test]

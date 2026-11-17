@@ -831,12 +831,14 @@ extension WifiDirectManager: PeerStreamHost {
         // holds the address, never does.
         if let pending = fastLink, pending.peer == address,
            let held = peers.handle(for: address), held !== (pending.stream as? Stream) {
-            if pending.joined, let path = held.connection.currentPath,
-               Self.isGateway(pending.host, of: path) {
+            if pending.joined && !Self.runsOffTheGroup(held, host: pending.host) {
                 // Over the group itself, from the general Bonjour dial: an
                 // Android below 13 advertises on the group's interface too,
                 // and that dial needs no DHCP address, so it can prove the
-                // host before the link's own. It is the link's stream.
+                // host before the link's own, over a link-local address with
+                // no gateway on its path yet. It is the link's stream, and
+                // the link's own dial, if any, is let go.
+                if let own = pending.stream as? Stream { own.connection.cancel() }
                 pending.stream = held
             } else {
                 emitDiagnostic("info", "Fast link: another stream reached the peer first", context: [
@@ -1137,6 +1139,17 @@ extension WifiDirectManager {
                 self.scheduleFastLinkRedial(link)
             }
         }
+    }
+
+    /// Whether `stream` positively runs over a network other than the
+    /// group: its path has a gateway, and none is the offered host. That is
+    /// a phone the join left on its own Wi-Fi. A path with no gateway yet is
+    /// a link-local one on the group before DHCP, and counts as on it.
+    private static func runsOffTheGroup(_ stream: Stream, host: String) -> Bool {
+        guard let path = stream.connection.currentPath, !path.gateways.isEmpty else {
+            return false
+        }
+        return !isGateway(host, of: path)
     }
 
     /// Whether `host`, an IP literal, is a gateway of `path`.

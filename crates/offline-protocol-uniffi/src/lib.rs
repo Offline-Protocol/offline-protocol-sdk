@@ -20483,7 +20483,10 @@ mod tests {
     /// `react_native_wifi_direct_announces_only_proved_addresses`) hold the
     /// order, the end before the announcement; this holds the conditions
     /// and the directive-time refusals. A stream over the group itself is
-    /// the link's own however it was dialled.
+    /// the link's own however it was dialled, including one proved over a
+    /// link-local address before DHCP, whose path has no gateway yet: only a
+    /// path whose gateway is positively not the host supersedes after the
+    /// join.
     #[test]
     fn a_pending_fast_link_gives_way_to_a_stream_that_reached_the_peer_first() {
         let kotlin =
@@ -20493,9 +20496,12 @@ mod tests {
             swift.contains(
                 "if let pending = fastLink, pending.peer == address, \
                  let held = peers.handle(for: address), held !== (pending.stream as? Stream) { \
-                 if pending.joined, let path = held.connection.currentPath, \
-                 Self.isGateway(pending.host, of: path) { pending.stream = held } else {"
-            ),
+                 if pending.joined && !Self.runsOffTheGroup(held, host: pending.host) {"
+            ) && swift.contains("pending.stream = held } else {")
+                && swift.contains(
+                    "guard let path = stream.connection.currentPath, !path.gateways.isEmpty else { \
+                     return false } return !isGateway(host, of: path)"
+                ),
             "ios/WifiDirectManager.swift: a stream that is not the link's own must end a \
              pending link for its peer, and one over the group itself (its path's gateway \
              the offered host) is the link's own: an Android below 13 advertises on the \
@@ -20517,6 +20523,12 @@ mod tests {
             ),
             "WifiDirectManager.kt: only a LAN stream supersedes a pending link; a P2P one is \
              the link's own"
+        );
+        assert!(
+            kotlin.contains(
+                "?: parkedFastLinkJoin?.takeIf { it.peerId == address }?.linkId ?: return"
+            ),
+            "WifiDirectManager.kt: a parked tie-break join gives way like any pending link"
         );
         for directive in ["hostFastLink", "joinFastLink"] {
             assert!(

@@ -791,6 +791,26 @@ impl FastLinks {
         }
     }
 
+    /// The peer ended a link not up here `superseded`, and another stream
+    /// does reach it: this device would have said the same, and its own
+    /// report lost the race to the peer's close. Ended as this device's own,
+    /// so it is not counted against the peer. False when no such link is
+    /// held, or it is up here (then the peer's close is taken as any other).
+    pub(crate) fn peer_superseded_while_reached(
+        &mut self,
+        peer: &str,
+        link_id: &str,
+        now: Instant,
+    ) -> bool {
+        if !self.link.as_ref().is_some_and(|link| {
+            link.peer == peer && link.id == link_id && link.state != FastLinkState::Up
+        }) {
+            return false;
+        }
+        self.end_as(CloseReason::Superseded, false, false, now);
+        true
+    }
+
     /// A `request` or `offer` from `peer` arrived while another peer stream
     /// already reaches it, and this device holds no link with it: answered
     /// `superseded` as this device's own end, with no link and no directive.
@@ -1058,9 +1078,18 @@ impl FastLinks {
         let Some(link) = self.link.as_mut() else {
             return;
         };
-        if link.peer == peer
-            && matches!(link.state, FastLinkState::Offered | FastLinkState::Joining)
-        {
+        if link.peer != peer {
+            return;
+        }
+        // A join the platform has not taken yet has no stream of its own, so
+        // this one is another's (both devices on one home network): the
+        // link gives way, as the platform's own report would have it, rather
+        // than going up on a stream that is not its own.
+        if link.state == FastLinkState::Joining && !link.platform_engaged {
+            self.end(CloseReason::Superseded, true, now);
+            return;
+        }
+        if matches!(link.state, FastLinkState::Offered | FastLinkState::Joining) {
             link.state = FastLinkState::Up;
             link.deadline = None;
             link.last_activity = now;
@@ -1277,6 +1306,13 @@ impl FastLinks {
     /// a `close` frame when the peer knows of it and `tell_peer`, and one
     /// change (invariant 4).
     fn end(&mut self, reason: CloseReason, tell_peer: bool, now: Instant) {
+        self.end_as(reason, tell_peer, !tell_peer, now);
+    }
+
+    /// [`Self::end`], with whose end it is for counting given apart from
+    /// whether the peer is told: a peer's `superseded` that this device would
+    /// have reported itself is not the peer's to answer for.
+    fn end_as(&mut self, reason: CloseReason, tell_peer: bool, by_peer: bool, now: Instant) {
         let Some(link) = self.link.take() else {
             return;
         };
@@ -1286,13 +1322,14 @@ impl FastLinks {
         self.directives
             .retain(|pending| pending.directive.link_id != link.id);
         self.remember_ended(&link.id, now);
-        // A superseded link's peer is still reached, over the other stream,
-        // and a transfer there is that stream's, not the link's.
-        if link.state == FastLinkState::Up && reason != CloseReason::Superseded {
+        // A link this device superseded is still reached over the other
+        // stream, and a transfer there is that stream's. One the peer ended
+        // `superseded` while it was up here ran over its own stream.
+        if link.state == FastLinkState::Up && !(reason == CloseReason::Superseded && !by_peer) {
             self.released.push_back(link.peer.clone());
         }
         if link.role == FastLinkRole::Host && link.requested_by_peer {
-            self.count_hosting(&link.peer, link.carried, !tell_peer, reason, now);
+            self.count_hosting(&link.peer, link.carried, by_peer, reason, now);
         }
         if link.role == FastLinkRole::Join {
             if self.ended_joins.len() >= MAX_ENDED_REMEMBERED {
@@ -1309,7 +1346,7 @@ impl FastLinks {
                 self.record_decline(link.peer.clone(), now);
             }
             if link.requested_by_peer {
-                self.count_offer(&link.peer, link.carried, !tell_peer, reason, now);
+                self.count_offer(&link.peer, link.carried, by_peer, reason, now);
             }
         }
         if link.platform_engaged {
@@ -2797,6 +2834,88 @@ mod tests {
             iphone.next_directive(now).unwrap().kind,
             FastLinkDirectiveKind::Join
         );
+    }
+
+    #[test]
+    fn a_stream_proving_a_join_the_platform_has_not_taken_supersedes_it() {
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let now = Instant::now();
+        let id = android.request(HIGH, fresh(1), now).unwrap();
+        android.next_directive(now);
+        assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+        deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+        iphone.take_changes();
+        // The join directive waits for the platform's drain when a home
+        // network stream proves the host: that stream cannot be the link's.
+        iphone.stream_proved(LOW, now);
+        assert_eq!(states(&mut iphone), [FastLinkState::Closed]);
+        assert!(
+            iphone.next_directive(now).is_none(),
+            "the join was withdrawn"
+        );
+        assert_eq!(
+            iphone.take_frames()[0].1.body,
+            FrameBody::Close {
+                reason: "superseded".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_peers_superseded_that_overtook_this_devices_report_is_not_counted() {
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let now = Instant::now();
+        // The iPhone asks; both platforms then see a home-network stream and
+        // each ends the link `superseded`, the iPhone's close reaching the
+        // Android before its own platform's report.
+        let ask = |android: &mut FastLinks, iphone: &mut FastLinks, seed| {
+            // The last link's close for each platform, which drops its group.
+            while android.next_directive(now).is_some() {}
+            while iphone.next_directive(now).is_some() {}
+            let id = iphone.request(LOW, fresh(seed), now).unwrap();
+            deliver(iphone, HIGH, android, LOW, now, 0);
+            let host = android.next_directive(now)?;
+            assert!(android.hosting(&host.link_id, "192.168.49.1", 8988, now, 0));
+            deliver(android, LOW, iphone, HIGH, now, 0);
+            iphone.next_directive(now);
+            assert!(iphone.platform_ended(&id, CloseReason::Superseded, now));
+            Some(id)
+        };
+        for seed in [1, 2] {
+            let id = ask(&mut android, &mut iphone, seed).unwrap();
+            iphone.take_frames();
+            assert!(android.peer_superseded_while_reached(HIGH, &id, now));
+            // The Android's own report then finds the link gone.
+            assert!(!android.platform_ended(&id, CloseReason::Superseded, now));
+        }
+        assert!(
+            ask(&mut android, &mut iphone, 3).is_some(),
+            "two meetings over the home network are not two misses"
+        );
+        iphone.take_frames();
+        android.take_frames();
+
+        // Taken as an ordinary close, the same two put the Android in backoff.
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        for seed in [1, 2] {
+            ask(&mut android, &mut iphone, seed).unwrap();
+            deliver(&mut iphone, HIGH, &mut android, LOW, now, 0);
+        }
+        assert!(ask(&mut android, &mut iphone, 3).is_none());
+
+        // Up here, the peer's `superseded` is any close: the link's own
+        // stream carried it, and its transfers are released.
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let id = android.request(HIGH, fresh(9), now).unwrap();
+        android.next_directive(now);
+        assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+        android.stream_proved(HIGH, now);
+        assert!(!android.peer_superseded_while_reached(HIGH, &id, now));
+        let _ = &mut iphone;
     }
 
     #[test]

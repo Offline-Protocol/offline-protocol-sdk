@@ -1483,8 +1483,9 @@ class WifiDirectManager(
     // asynchronous, so a join that follows a close in one drain finds the
     // device still in that group.
     private var fastLinkLeaving = false
-    // A join waiting for [fastLinkLeaving] to clear (transport thread).
-    private var parkedFastLinkJoin: FastLinkDirective? = null
+    // A join waiting for [fastLinkLeaving] to clear (written on the transport
+    // thread; read on a socket thread by [supersedeFastLinkFor]).
+    @Volatile private var parkedFastLinkJoin: FastLinkDirective? = null
     // The name of a fast-link group closed before it came up (transport
     // thread). Its removeGroup can lose to the negotiation, answered BUSY, and
     // the group then appears with nothing tracking it; seen, it is removed.
@@ -1566,6 +1567,7 @@ class WifiDirectManager(
         if (sockets.carrierOf(address) != PeerStreamSockets.Carrier.LAN) return
         val linkId = fastLinkHosted?.takeIf { it.peer == address }?.linkId
             ?: fastLinkJoined?.takeIf { it.peer == address }?.linkId
+            ?: parkedFastLinkJoin?.takeIf { it.peerId == address }?.linkId
             ?: return
         emitDiagnostic("info", "Fast link: another stream reached the peer first", mapOf(
             "linkId" to linkId,

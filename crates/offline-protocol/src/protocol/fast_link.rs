@@ -180,6 +180,21 @@ impl OfflineProtocol {
         let Some(local) = self.local_address().map(str::to_string) else {
             return;
         };
+        // The peer's `superseded` for a link not up here, with another stream
+        // reaching it, is the end this device would have reported itself.
+        if let FrameBody::Close { reason } = &frame.body {
+            if CloseReason::parse(reason) == CloseReason::Superseded
+                && self.peer_stream_proves(sender)
+                && self.fast_links.peer_superseded_while_reached(
+                    sender,
+                    &frame.link,
+                    Instant::now(),
+                )
+            {
+                self.flush_fast_link();
+                return;
+            }
+        }
         // A peer another stream already reaches gets no new link: that stream
         // carries what the link would (`answer_superseded`). A link already
         // held with it takes the frame as usual; its platform gives way.
