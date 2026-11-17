@@ -179,6 +179,9 @@ internal class PeerStreamSockets(
     /** Whether a stream holds [address] now. */
     fun holds(address: String): Boolean = links.handleFor(address) != null
 
+    /** The carrier of the stream holding [address] now, if any. */
+    fun carrierOf(address: String): Carrier? = links.handleFor(address)?.carrier
+
     /** Whether an outbound socket would find a free slot now. */
     fun hasRoom(): Boolean = synchronized(admission) { reserved < limits.maxStreams }
 

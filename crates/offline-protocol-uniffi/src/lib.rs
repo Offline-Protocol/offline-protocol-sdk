@@ -20474,6 +20474,58 @@ mod tests {
              alone dials the user's own router when the join silently does not happen"
         );
     }
+    /// A pending fast link is ended `superseded` when another peer stream
+    /// reaches its peer first, never taken for the link's own. Both phones
+    /// back on one home network met over the LAN while an offer was pending:
+    /// the engine marked the link up from that stream, the iPhone never
+    /// dialled the group the user had just joined, and leaving the home
+    /// network for it lost both 40 s later. The announcement pins (in
+    /// `react_native_wifi_direct_announces_only_proved_addresses`) hold the
+    /// order, the end before the announcement; this holds the conditions
+    /// and the directive-time refusals.
+    #[test]
+    fn a_pending_fast_link_gives_way_to_a_stream_that_reached_the_peer_first() {
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        assert!(
+            swift.contains(
+                "if let pending = fastLink, pending.peer == address, \
+                 peers.handle(for: address) !== (pending.stream as? Stream) {"
+            ),
+            "ios/WifiDirectManager.swift: a stream that is not the link's own must end a \
+             pending link for its peer"
+        );
+        assert!(
+            swift.contains(
+                "if let held = peers.handle(for: link.peer), streams.contains(held) { \
+                 protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: \"superseded\") \
+                 return } fastLink = link"
+            ),
+            "ios/WifiDirectManager.swift: a join for a peer a stream already reaches must end \
+             `superseded` before any prompt"
+        );
+        assert!(
+            kotlin.contains(
+                "private fun supersedeFastLinkFor(address: String) { \
+                 if (sockets.carrierOf(address) != PeerStreamSockets.Carrier.LAN) return"
+            ),
+            "WifiDirectManager.kt: only a LAN stream supersedes a pending link; a P2P one is \
+             the link's own"
+        );
+        for directive in ["hostFastLink", "joinFastLink"] {
+            assert!(
+                kotlin.contains(&format!(
+                    "private fun {directive}(directive: FastLinkDirective) {{ \
+                     if (sockets.holds(directive.peerId)) {{ \
+                     fastLinkEnded(directive.linkId, \"superseded\") return }}"
+                )),
+                "WifiDirectManager.kt: {directive} for a peer a stream already reaches must end \
+                 `superseded` first"
+            );
+        }
+    }
+
     /// An Android host records its fast link's group name once it sees the
     /// group, not only before `createGroup`. Android reports the device out of
     /// any group while the group is still forming, which clears the first
@@ -21688,7 +21740,7 @@ mod tests {
                 [
                     (
                         "wifiDirectPeerConnected(",
-                        "func peerStreamConnected(_ address: String) { do { \
+                        "endFastLink(reason: \"superseded\") } do { \
                          try protocolInstance.wifiDirectPeerConnected(peerId: address)",
                     ),
                     (
@@ -21740,8 +21792,8 @@ mod tests {
                 [
                     (
                         "wifiDirectPeerConnected(",
-                        "override fun peerConnected(address: String) = \
-                         protocol.wifiDirectPeerConnected(address)",
+                        "override fun peerConnected(address: String) { \
+                         supersedeFastLinkFor(address) protocol.wifiDirectPeerConnected(address) }",
                     ),
                     (
                         "wifiDirectMessageReceived(",

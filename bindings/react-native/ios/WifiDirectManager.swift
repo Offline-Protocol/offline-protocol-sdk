@@ -821,6 +821,19 @@ extension WifiDirectManager: PeerStreamHost {
     }
 
     func peerStreamConnected(_ address: String) {
+        // A stream that is not the fast link's own reached the link's peer
+        // first (both phones back on one home network): the link is ended
+        // `superseded` before the stream is announced. Announced first, the
+        // engine took it for the link's and marked the link up, the join
+        // never dialled the network the user had just joined, and leaving
+        // the home network for it then lost both.
+        if let pending = fastLink, pending.peer == address,
+           peers.handle(for: address) !== (pending.stream as? Stream) {
+            emitDiagnostic("info", "Fast link: another stream reached the peer first", context: [
+                "linkId": pending.linkId,
+            ])
+            endFastLink(reason: "superseded")
+        }
         do {
             try protocolInstance.wifiDirectPeerConnected(peerId: address)
         } catch {
@@ -964,6 +977,13 @@ extension WifiDirectManager {
             port: port,
             deadline: ProcessInfo.processInfo.systemUptime + TimeInterval(directive.expiresInMs) / 1000
         )
+        // A stream already reaches the peer: it carries what the link would,
+        // and the prompt would take the phone off the network that stream
+        // runs on.
+        if let held = peers.handle(for: link.peer), streams.contains(held) {
+            protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "superseded")
+            return
+        }
         fastLink = link
         checkBeforeJoin(link, passphrase: passphrase, looks: 0)
     }

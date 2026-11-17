@@ -514,7 +514,9 @@ Four rules hold for every frame of the family:
 
 `reason` is one of `declined`, `failed`, `host_failed`, `cannot_host`,
 `cannot_join`, `busy`, `invalid`, `expired`, `no_offer`, `lost`, `idle`,
-`background` or `closed`. A receiver treats an unknown reason as `failed`.
+`background`, `closed` or `superseded` (another peer stream reached the peer
+before the link came up, and carries its traffic instead). A receiver treats
+an unknown reason as `failed`.
 
 ## The control-plane signature gate
 

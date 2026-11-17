@@ -64,7 +64,7 @@ for go ahead and no join prompt or group appears that it did not want.
 | State | Entered when | Leaves to |
 |-------|--------------|-----------|
 | `hosting` | The application asked and this device can host, or a peer's `request` arrived and it can | `offered` on the platform's report; `closed` (`host_failed`) after 20 s without one, or on the platform's `ended` |
-| `offered` | The platform reported the network up; the `offer` is sent | `up` when a stream proves the peer; `closed` (`expired`) 120 s after the offer was made |
+| `offered` | The platform reported the network up; the `offer` is sent | `up` when a stream proves the peer; `closed` (`expired`) 120 s after the offer was made, or (`superseded`) when the platform reports a stream other than the link's proved the peer first |
 | `up` | A stream proved the peer while the link was `offered` | `closed` on the stream's loss (`lost`), after 60 s idle (`idle`), on `close` from either side |
 
 ## The joiner
@@ -72,7 +72,7 @@ for go ahead and no join prompt or group appears that it did not want.
 | State | Entered when | Leaves to |
 |-------|--------------|-----------|
 | `requested` | The application asked and this device can only join; the `request` is sent | `joining` on the peer's `offer`; `closed` (`no_offer`) after 30 s, or on the peer's `close` |
-| `joining` | An `offer` arrived, by request or not, and this device can join | `up` when a stream proves the host; `closed` (`expired`) at the offer's lifetime, measured from its arrival, or on the platform's `ended` |
+| `joining` | An `offer` arrived, by request or not, and this device can join | `up` when a stream proves the host; `closed` (`expired`) at the offer's lifetime, measured from its arrival, or on the platform's `ended` (`superseded` when a stream other than the link's proved the host first) |
 | `up` | A stream proved the host while the link was `joining` | as for the host |
 
 ## Frames that cross a link
@@ -232,6 +232,15 @@ passphrase.
   formation. Hence the admitted peer, and a passphrase only the two hold.
 - **Two links at once** are two networks on a phone that can join one, and the
   second join drops the first without either side being told.
+- **Another stream taken for the link's own.** Two phones back on one home
+  network meet over it while an offer is pending. Counted as the link's
+  stream, it marked the link `up`, the iPhone never dialled the group its user
+  had just joined, and leaving the home network for it lost both 40 s later.
+  Hence a platform that sees a stream other than the link's own prove the
+  link's peer first ends the link `superseded` before announcing the stream,
+  and answers a directive for a peer a stream already reaches the same way.
+  Such an end is the platform's own and never counts against the peer, and
+  the transfers on the slot are the other stream's, so none is failed.
 - **A joiner that falls silent** when iOS takes the network away leaves the
   host's stream half open until keepalive ends it. Hence the platform's
   report.

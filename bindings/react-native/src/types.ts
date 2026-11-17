@@ -1505,7 +1505,8 @@ export interface FastLinkChangedEvent extends BaseEvent {
   /**
    * Why it closed, only on `closed`: `declined` (the joiner's user said no),
    * `idle`, `lost`, `expired`, `background`, `busy`, `cannot_host`,
-   * `cannot_join`, and others; an unknown value means it failed.
+   * `cannot_join`, `superseded` (another connection reached the peer first
+   * and carries its traffic), and others; an unknown value means it failed.
    */
   reason: string | null;
 }

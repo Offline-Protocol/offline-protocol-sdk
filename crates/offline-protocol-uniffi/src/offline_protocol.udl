@@ -1515,8 +1515,10 @@ interface OfflineProtocol {
     // link: `declined` (the user refused the join), `failed`, `host_failed`,
     // `background` (iOS drops a joined network 15 s after the app leaves
     // the foreground), `lost` (the network went away), `invalid` (the offer
-    // named a network the device is already on) or `closed` (the platform
-    // stopped). Any other token reads as `failed`; the full list is the
+    // named a network the device is already on), `closed` (the platform
+    // stopped) or `superseded` (a stream other than the link's own proved
+    // the peer first; report it before announcing that stream). Any other
+    // token reads as `failed`; the full list is the
     // `close` reasons in docs/spec/control-messages.md. The peer is told.
     void wifi_direct_fast_link_ended(string link_id, string reason);
 

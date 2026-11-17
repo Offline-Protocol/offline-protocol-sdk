@@ -213,8 +213,10 @@ class WifiDirectManager(
         override fun verify(assertion: ByteArray): String =
             verifyIdentityAssertion(assertion.map { it.toUByte() })
 
-        override fun peerConnected(address: String) =
+        override fun peerConnected(address: String) {
+            supersedeFastLinkFor(address)
             protocol.wifiDirectPeerConnected(address)
+        }
 
         override fun messageReceived(address: String, body: ByteArray) =
             protocol.wifiDirectMessageReceived(address, body.map { it.toUByte() })
@@ -1550,6 +1552,28 @@ class WifiDirectManager(
         }
     }
 
+    /**
+     * A stream that is not the fast link's own, one over the shared LAN,
+     * proved the peer of a link not yet up (both devices back on one home
+     * network): the link is ended `superseded` before the stream is
+     * announced. Announced first, the engine took it for the link's and
+     * marked the link up, the joiner never dialled the group, and leaving the
+     * home network for it then lost both. Called on a socket thread, before
+     * the announcement: the link's fields are read once, and the group is
+     * let go on the transport looper.
+     */
+    private fun supersedeFastLinkFor(address: String) {
+        if (sockets.carrierOf(address) != PeerStreamSockets.Carrier.LAN) return
+        val linkId = fastLinkHosted?.takeIf { it.peer == address }?.linkId
+            ?: fastLinkJoined?.takeIf { it.peer == address }?.linkId
+            ?: return
+        emitDiagnostic("info", "Fast link: another stream reached the peer first", mapOf(
+            "linkId" to linkId,
+        ))
+        fastLinkEnded(linkId, "superseded")
+        transportHandler.post { closeFastLink(linkId) }
+    }
+
     private fun fastLinkEnded(linkId: String, reason: String) {
         try {
             protocol.wifiDirectFastLinkEnded(linkId, reason)
@@ -1569,6 +1593,12 @@ class WifiDirectManager(
      */
     @SuppressLint("MissingPermission")
     private fun hostFastLink(directive: FastLinkDirective) {
+        if (sockets.holds(directive.peerId)) {
+            // A stream already reaches the peer and carries what the link
+            // would; a group now would only lock out formation for nothing.
+            fastLinkEnded(directive.linkId, "superseded")
+            return
+        }
         val ssid = directive.ssid
         val passphrase = directive.passphrase
         val p2p = wifiP2pManager
@@ -1605,6 +1635,12 @@ class WifiDirectManager(
      */
     @SuppressLint("MissingPermission")
     private fun joinFastLink(directive: FastLinkDirective) {
+        if (sockets.holds(directive.peerId)) {
+            // A stream already reaches the peer and carries what the link
+            // would.
+            fastLinkEnded(directive.linkId, "superseded")
+            return
+        }
         val ssid = directive.ssid
         val passphrase = directive.passphrase
         val host = directive.host

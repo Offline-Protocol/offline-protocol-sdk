@@ -28,7 +28,9 @@ Questions about a release, or about upgrading to one? Ask in the
   it on their own: a 1 MiB file that took 197.7 s over Bluetooth took about
   2.5 s on two phones. Progress arrives as `fast_link_changed` events; the
   link ends after 60 s with nothing large to carry, when the iPhone app leaves
-  the foreground, or on `closeFastLink`. An iOS app needs the Hotspot
+  the foreground, or on `closeFastLink`, and ends `superseded` when another
+  connection, a shared home network say, reaches the peer before it comes up
+  and carries the traffic instead. An iOS app needs the Hotspot
   Configuration entitlement, and an Android app `NEARBY_WIFI_DEVICES` (fine
   location below Android 13); see [mobile permissions](docs/mobile-permissions.md#fast-link).
   `wifiDirect.fastLink` decides how far an app takes part: `any` (the

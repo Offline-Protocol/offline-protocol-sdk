@@ -185,6 +185,13 @@ pub enum CloseReason {
     Background,
     /// The application closed it.
     Closed,
+    /// Another peer stream, not the link's own, reached the peer before the
+    /// link came up (two devices back on one home network, say). That stream
+    /// already carries what the link would, so the link ends rather than
+    /// count the other stream as its own: taken for the link, it marked the
+    /// link up, the joiner never dialled the network the user had just
+    /// joined, and leaving the home network then lost both.
+    Superseded,
 }
 
 impl CloseReason {
@@ -204,6 +211,7 @@ impl CloseReason {
             Self::Idle => "idle",
             Self::Background => "background",
             Self::Closed => "closed",
+            Self::Superseded => "superseded",
         }
     }
 
@@ -223,6 +231,7 @@ impl CloseReason {
             "idle" => Self::Idle,
             "background" => Self::Background,
             "closed" => Self::Closed,
+            "superseded" => Self::Superseded,
             _ => Self::Failed,
         }
     }
@@ -1186,7 +1195,10 @@ impl FastLinks {
         if !by_peer
             && matches!(
                 reason,
-                CloseReason::Declined | CloseReason::Closed | CloseReason::Background
+                CloseReason::Declined
+                    | CloseReason::Closed
+                    | CloseReason::Background
+                    | CloseReason::Superseded
             )
         {
             return;
@@ -1260,7 +1272,9 @@ impl FastLinks {
         self.directives
             .retain(|pending| pending.directive.link_id != link.id);
         self.remember_ended(&link.id, now);
-        if link.state == FastLinkState::Up {
+        // A superseded link's peer is still reached, over the other stream,
+        // and a transfer there is that stream's, not the link's.
+        if link.state == FastLinkState::Up && reason != CloseReason::Superseded {
             self.released.push_back(link.peer.clone());
         }
         if link.role == FastLinkRole::Host && link.requested_by_peer {
@@ -2702,6 +2716,57 @@ mod tests {
             iphone.next_directive(now).unwrap().kind,
             FastLinkDirectiveKind::Join
         );
+    }
+
+    #[test]
+    fn a_link_another_stream_superseded_never_counts_against_the_peer() {
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let now = Instant::now();
+        // Each unasked offer is ended by the iPhone's platform because a
+        // home-network stream reached the Android first. Counted like an
+        // ignored offer, two of them paused the Android's next offer for ten
+        // minutes, though nothing the Android did went unanswered.
+        for seed in [1, 2, 3] {
+            let id = android.request(HIGH, fresh(seed), now).unwrap();
+            android.next_directive(now);
+            assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+            deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+            let join = iphone
+                .next_directive(now)
+                .expect("the offer is joined, not paused");
+            assert_eq!(join.kind, FastLinkDirectiveKind::Join);
+            assert!(iphone.platform_ended(&join.link_id, CloseReason::Superseded, now));
+            deliver(&mut iphone, HIGH, &mut android, LOW, now, 0);
+            android.take_changes();
+            iphone.take_changes();
+        }
+    }
+
+    #[test]
+    fn a_superseded_link_leaves_the_other_streams_transfers_alone() {
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let now = Instant::now();
+        let id = android.request(HIGH, fresh(1), now).unwrap();
+        android.next_directive(now);
+        assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+        deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+        iphone.next_directive(now);
+        // A stream proves the peer and the platform then says it was not the
+        // link's: the peer is still reached over that stream, so a transfer
+        // on the slot is that stream's and must not be failed.
+        iphone.take_changes();
+        iphone.stream_proved(LOW, now);
+        assert_eq!(states(&mut iphone), [FastLinkState::Up]);
+        assert!(iphone.platform_ended(&id, CloseReason::Superseded, now));
+        assert!(iphone.take_released().is_empty());
+        // The same link lost, by contrast, releases its peer.
+        android.stream_proved(HIGH, now);
+        assert!(android.platform_ended(&id, CloseReason::Lost, now));
+        assert_eq!(android.take_released(), [HIGH.to_string()]);
+        assert_eq!(CloseReason::parse("superseded"), CloseReason::Superseded);
+        assert_eq!(CloseReason::Superseded.as_str(), "superseded");
     }
 
     #[test]
