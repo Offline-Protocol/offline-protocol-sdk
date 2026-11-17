@@ -68,6 +68,18 @@ fun bleGetPeerCount(module: OfflineProtocolModule, promise: Promise) {
     }
 }
 
+fun requestFastLink(module: OfflineProtocolModule, peerId: String, promise: Promise) {
+    run(module, promise, "ERROR_FAST_LINK", "Failed to request a fast link", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.requestFastLink(host, context, mapOf("peerId" to peerId))
+    }
+}
+
+fun closeFastLink(module: OfflineProtocolModule, peerId: String, promise: Promise) {
+    run(module, promise, "ERROR_FAST_LINK", "Failed to close the fast link") { host, context ->
+        ProtocolEngineHostBridge.closeFastLink(host, context, mapOf("peerId" to peerId))
+    }
+}
+
 fun blockUser(module: OfflineProtocolModule, userId: String, promise: Promise) {
     run(module, promise, "ERROR_BLOCK_USER", "Failed to block user") { host, context ->
         ProtocolEngineHostBridge.blockUser(host, context, mapOf("userId" to userId))

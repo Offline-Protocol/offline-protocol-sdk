@@ -40,6 +40,10 @@
     "mapProtocolErrors": true,
     "message": "Failed to clear service topic"
   },
+  "closeFastLink": {
+    "code": "ERROR_FAST_LINK",
+    "message": "Failed to close the fast link"
+  },
   "createInvite": {
     "code": "ERROR_NOT_INITIALIZED",
     "message": "Protocol not initialized"
@@ -332,6 +336,11 @@
   "requestEnableBluetooth": {
     "code": "ERROR_BLUETOOTH",
     "message": "Bluetooth not available on this device"
+  },
+  "requestFastLink": {
+    "code": "ERROR_FAST_LINK",
+    "mapProtocolErrors": true,
+    "message": "Failed to request a fast link"
   },
   "resolveUsername": {
     "code": "ERROR_INVALID_ARGUMENT",

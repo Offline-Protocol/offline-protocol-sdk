@@ -16,6 +16,7 @@ import android.util.Log
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import androidx.core.content.ContextCompat
+import uniffi.offline_protocol.FastLinkDirective
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.verifyIdentityAssertion
 import java.io.*
@@ -143,6 +144,9 @@ class WifiDirectManager(
         // about six seconds before it associates, and the supplicant retries a
         // rejected association; an eight-second window cut that retry off.
         private const val JOIN_WINDOW_MS = 15_000L
+        // Fast-link directives one drain pass runs; the engine queues at most
+        // a few per link.
+        private const val MAX_FAST_LINK_DIRECTIVES = 8
     }
 
     /**
@@ -187,8 +191,6 @@ class WifiDirectManager(
     // Whether the listener holds the port a group's clients dial. Written at
     // start, read by formation on the transport thread.
     private var ownsGroupPort = false
-    // SPIKE(fast-link)
-    private var spike: FastLinkSpike? = null
     
     // Every socket from its first byte to its end: the preamble, the framing,
     // one announced stream per address, the writers. This manager owns the
@@ -515,15 +517,12 @@ class WifiDirectManager(
         // Start server socket on the port bound above.
         startServerSocket(listener)
 
-        // SPIKE(fast-link): adb-driven group and hotspot hosting.
-        spike = FastLinkSpike(context) {
-            transportHandler.post {
-                lan?.stop()
-                lan = null
-                sockets.closeCarrier(PeerStreamSockets.Carrier.LAN)
-                Log.i(FastLinkSpike.TAG, "LAN carrier stopped")
-            }
-        }.also { it.register() }
+        // A fast-link host admits only its invitee on the network it made.
+        sockets.admitsInbound = { address, carrier ->
+            val hosted = fastLinkHosted
+            carrier != PeerStreamSockets.Carrier.P2P || hosted == null || hosted.peer == address
+        }
+        declareFastLinkRoles(p2p)
 
         updateState(TransportState.RUNNING)
 
@@ -607,8 +606,7 @@ class WifiDirectManager(
         // Stop server socket
         stopServerSocket()
 
-        spike?.unregister()
-        spike = null
+        endFastLinkOnStop()
 
         lan?.stop()
         lan = null
@@ -921,7 +919,9 @@ class WifiDirectManager(
                         "groupOwnerAddress" to (groupOwnerAddress ?: "null")
                     ))
 
+                    if (isGroupOwner) fastLinkGroupChanged()
                     if (!isGroupOwner && groupOwnerAddress != null) {
+                        fastLinkJoined?.connected = true
                         // Connect to group owner
                         connectToGroupOwner(groupOwnerAddress!!)
                     }
@@ -939,6 +939,8 @@ class WifiDirectManager(
             appGroupOwnerDevice = null
             unprovedAtCeiling.set(0)
             ownerIdleSinceMs = 0L
+            // Posted for the reason the stream close below is: an FFI call.
+            transportHandler.post { fastLinkGroupGone() }
             // Posted: this is the broadcast receiver's onReceive, and ending
             // an announced stream is an FFI call. Same reasoning as the post
             // in [handleWifiP2pStateChanged]. Leaving the group ends only the
@@ -1418,6 +1420,248 @@ class WifiDirectManager(
         }
     }
 
+    // MARK: - Fast link (ADR 0038)
+
+    /** A network this device brought up for one peer. Transport thread. */
+    private class FastLinkHosted(val linkId: String, val peer: String, val ssid: String) {
+        var reported = false
+        var sawClient = false
+    }
+
+    /** A network this device joins for one peer. */
+    private class FastLinkJoined(
+        val linkId: String,
+        val peer: String,
+        val host: String,
+        val port: Int,
+    ) {
+        @Volatile var connected = false
+    }
+
+    // Written on the transport thread; read by the socket threads (the
+    // admission check, the dial).
+    @Volatile private var fastLinkHosted: FastLinkHosted? = null
+    @Volatile private var fastLinkJoined: FastLinkJoined? = null
+
+    /** A group by name and passphrase, for creating or joining: Android 10. */
+    private val fastLinkSupported: Boolean
+        get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+    /**
+     * Tells the engine what this device can do: with Wi-Fi P2P permitted on
+     * Android 10 and later, both host and join.
+     */
+    private fun declareFastLinkRoles(p2p: Boolean) {
+        val able = p2p && fastLinkSupported
+        try {
+            protocol.wifiDirectSetFastLinkRoles(able, able)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not declare fast-link roles", e)
+        }
+    }
+
+    /**
+     * The engine's wake-up, for its fast-link directives: posted like the
+     * body drain, and paused with it. Separate from [onMessagesAvailable],
+     * whose drain stops at "no stream yet", because a directive is what
+     * brings the first stream up. A paused transport answers when the poll
+     * resumes, and the engine's timers cover the wait.
+     */
+    fun onFastLinkWake() {
+        if (isPaused) return
+        transportHandler.post { drainFastLinkDirectives() }
+    }
+
+    /** Runs what the engine asked for. Transport thread. */
+    private fun drainFastLinkDirectives() {
+        if (state != TransportState.RUNNING) return
+        repeat(MAX_FAST_LINK_DIRECTIVES) {
+            val directive = try {
+                protocol.wifiDirectNextFastLinkDirective()
+            } catch (e: Exception) {
+                null
+            } ?: return
+            when (directive.kind) {
+                "host" -> hostFastLink(directive)
+                "join" -> joinFastLink(directive)
+                "close" -> closeFastLink(directive.linkId)
+            }
+        }
+    }
+
+    private fun fastLinkEnded(linkId: String, reason: String) {
+        try {
+            protocol.wifiDirectFastLinkEnded(linkId, reason)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not report a fast-link end", e)
+        }
+    }
+
+    private fun fastLinkConfig(ssid: String, passphrase: String): WifiP2pConfig? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        return WifiP2pConfig.Builder()
+            .setNetworkName(ssid)
+            .setPassphrase(passphrase)
+            .enablePersistentMode(false)
+            .build()
+    }
+
+    /**
+     * Brings up a group with the engine's credentials. Reported to the engine
+     * from [fastLinkGroupChanged], once the group exists and has an address.
+     * Never while another group is held: a device owns at most one.
+     */
+    @SuppressLint("MissingPermission")
+    private fun hostFastLink(directive: FastLinkDirective) {
+        val ssid = directive.ssid
+        val passphrase = directive.passphrase
+        val p2p = wifiP2pManager
+        val ch = channel
+        val config = if (ssid != null && passphrase != null) fastLinkConfig(ssid, passphrase) else null
+        if (config == null || ssid == null || p2p == null || ch == null || inGroup ||
+            fastLinkHosted != null || fastLinkJoined != null
+        ) {
+            fastLinkEnded(directive.linkId, "host_failed")
+            return
+        }
+        val hosted = FastLinkHosted(directive.linkId, directive.peerId, ssid)
+        fastLinkHosted = hosted
+        emitDiagnostic("info", "Fast link: bringing up a network", mapOf("linkId" to directive.linkId))
+        p2p.createGroup(ch, config, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {}
+            override fun onFailure(reason: Int) {
+                if (fastLinkHosted !== hosted) return
+                fastLinkHosted = null
+                emitDiagnostic("warning", "Fast link: the network did not come up", mapOf(
+                    "reason" to reasonToString(reason),
+                ))
+                fastLinkEnded(hosted.linkId, "host_failed")
+            }
+        })
+    }
+
+    /**
+     * Joins the offered group by name and passphrase. Once in it,
+     * [connectToGroupOwner] dials the offered address and port, claiming the
+     * host.
+     */
+    @SuppressLint("MissingPermission")
+    private fun joinFastLink(directive: FastLinkDirective) {
+        val ssid = directive.ssid
+        val passphrase = directive.passphrase
+        val host = directive.host
+        val port = directive.port?.toInt()
+        val p2p = wifiP2pManager
+        val ch = channel
+        val config = if (ssid != null && passphrase != null) fastLinkConfig(ssid, passphrase) else null
+        if (config == null || host == null || port == null || p2p == null || ch == null || inGroup ||
+            fastLinkHosted != null || fastLinkJoined != null
+        ) {
+            fastLinkEnded(directive.linkId, "failed")
+            return
+        }
+        val joined = FastLinkJoined(directive.linkId, directive.peerId, host, port)
+        fastLinkJoined = joined
+        emitDiagnostic("info", "Fast link: joining a network", mapOf("linkId" to directive.linkId))
+        p2p.connect(ch, config, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {}
+            override fun onFailure(reason: Int) {
+                if (fastLinkJoined !== joined) return
+                fastLinkJoined = null
+                emitDiagnostic("warning", "Fast link: the join was refused", mapOf(
+                    "reason" to reasonToString(reason),
+                ))
+                fastLinkEnded(joined.linkId, "failed")
+            }
+        })
+    }
+
+    /** Ends what this device holds for the link: leaves or removes the group. */
+    @SuppressLint("MissingPermission")
+    private fun closeFastLink(linkId: String) {
+        val p2p = wifiP2pManager ?: return
+        val ch = channel ?: return
+        val hosted = fastLinkHosted
+        val joined = fastLinkJoined
+        if (hosted?.linkId == linkId) {
+            fastLinkHosted = null
+            p2p.removeGroup(ch, quietListener("remove fast-link group"))
+        }
+        if (joined?.linkId == linkId) {
+            fastLinkJoined = null
+            if (!joined.connected) p2p.cancelConnect(ch, quietListener("cancel fast-link join"))
+            p2p.removeGroup(ch, quietListener("leave fast-link group"))
+        }
+    }
+
+    /**
+     * The group this device owns changed. The first time the fast link's
+     * group is seen with an address, the engine is told and the offer goes
+     * out; after that a group whose client has gone means the joiner left the
+     * network, so its stream is ended now rather than when keepalive notices,
+     * about 40 s later.
+     */
+    @SuppressLint("MissingPermission")
+    private fun fastLinkGroupChanged() {
+        val hosted = fastLinkHosted ?: return
+        wifiP2pManager?.requestGroupInfo(channel) { group ->
+            if (fastLinkHosted !== hosted || group == null || !group.isGroupOwner ||
+                group.networkName != hosted.ssid
+            ) {
+                return@requestGroupInfo
+            }
+            val clients = group.clientList.size
+            if (clients > 0) hosted.sawClient = true
+            if (!hosted.reported) {
+                val port = serverSocket?.localPort
+                val host = groupOwnerAddress
+                if (port == null || host == null) return@requestGroupInfo
+                hosted.reported = true
+                try {
+                    protocol.wifiDirectFastLinkHosting(hosted.linkId, host, port.toUShort())
+                } catch (e: Exception) {
+                    emitDiagnostic("warning", "Fast link: the engine refused the network", mapOf(
+                        "error" to (e.message ?: "unknown"),
+                    ))
+                }
+            } else if (hosted.sawClient && clients == 0) {
+                sockets.closeCarrier(PeerStreamSockets.Carrier.P2P)
+            }
+        }
+    }
+
+    /** This device left whatever group it was in. */
+    private fun fastLinkGroupGone() {
+        val hosted = fastLinkHosted
+        if (hosted != null && hosted.reported) {
+            fastLinkHosted = null
+            fastLinkEnded(hosted.linkId, "lost")
+        }
+        val joined = fastLinkJoined
+        if (joined != null && joined.connected) {
+            fastLinkJoined = null
+            fastLinkEnded(joined.linkId, "lost")
+        }
+    }
+
+    /** The transport is stopping: anything held for a link goes with it. */
+    @SuppressLint("MissingPermission")
+    private fun endFastLinkOnStop() {
+        val hosted = fastLinkHosted
+        val joined = fastLinkJoined
+        fastLinkHosted = null
+        fastLinkJoined = null
+        val ch = channel
+        if ((hosted != null || joined != null) && ch != null) {
+            wifiP2pManager?.removeGroup(ch, quietListener("end fast link on stop"))
+        }
+        hosted?.let { fastLinkEnded(it.linkId, "failed") }
+        joined?.let { fastLinkEnded(it.linkId, "failed") }
+        try {
+            protocol.wifiDirectSetFastLinkRoles(false, false)
+        } catch (_: Exception) {}
+    }
+
     // MARK: - Socket Operations
 
     private fun startServerSocket(listener: PeerStreamListener.Bound) {
@@ -1498,10 +1742,17 @@ class WifiDirectManager(
         socketExecutor.execute {
             var ran = PeerStreamSockets.Ran(proved = null, heard = false)
             try {
+                // A fast link names the owner's address, port and identity in
+                // its offer; any other group's owner is dialled on the group
+                // port and proves whoever it is.
+                val joined = fastLinkJoined
                 val socket = Socket()
                 try {
                     socket.connect(
-                        InetSocketAddress(address, PeerStreamListener.GROUP_OWNER_PORT),
+                        InetSocketAddress(
+                            joined?.host ?: address,
+                            joined?.port ?: PeerStreamListener.GROUP_OWNER_PORT,
+                        ),
                         CONNECTION_TIMEOUT_MS.toInt(),
                     )
                 } catch (e: Exception) {
@@ -1515,10 +1766,14 @@ class WifiDirectManager(
                 emitDiagnostic("info", "Connected to group owner", mapOf(
                     "address" to address
                 ))
-                // No claim to compare against: the owner's IP says nothing
-                // about who it is, so the address its preamble derives is its
-                // id (stream-framing.md, "The preamble").
-                ran = sockets.run(socket, outbound = true) { state == TransportState.RUNNING }
+                // Outside a fast link there is no claim to compare against:
+                // the owner's IP says nothing about who it is, so the address
+                // its preamble derives is its id (stream-framing.md, "The
+                // preamble"). A fast link's offer names the host, and a
+                // preamble proving anyone else closes the stream.
+                ran = sockets.run(socket, outbound = true, expected = joined?.peer) {
+                    state == TransportState.RUNNING
+                }
             } finally {
                 outboundOpen.set(false)
                 scheduleReconnect(address, ran)
@@ -1742,6 +1997,7 @@ class WifiDirectManager(
     }
 
     private fun pollAndSendMessages() {
+        drainFastLinkDirectives()
         if (state != TransportState.RUNNING || sockets.isEmpty()) return
 
         try {

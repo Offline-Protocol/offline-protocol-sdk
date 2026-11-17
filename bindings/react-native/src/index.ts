@@ -4600,6 +4600,42 @@ export class OfflineProtocol {
     );
   }
 
+  // ─── Fast link ──────────────────────────────────────────────
+
+  /**
+   * Brings up a Wi-Fi network between this device and `peerId`, a peer with
+   * a confirmed session that is reachable over Bluetooth LE (ADR 0038). One
+   * device hosts (an Android phone) and the other joins, with credentials
+   * sealed in the session, and traffic moves onto the link by ordinary
+   * transport selection: a 1 MiB file that takes minutes over Bluetooth takes
+   * seconds over it.
+   *
+   * Resolves with the link id as soon as the first step is taken; the outcome
+   * arrives as `fast_link_changed` events. On iOS the join shows a system
+   * prompt and takes the phone off its own Wi-Fi while the link lasts, and
+   * the link ends when the app leaves the foreground, so ask for it when a
+   * transfer is worth that. Needs the Hotspot Configuration entitlement on
+   * iOS and `NEARBY_WIFI_DEVICES` (fine location below Android 13) on Android.
+   *
+   * Rejects when the peer has not advertised support, there is no confirmed
+   * session or live Bluetooth link to it, a peer stream already reaches it,
+   * this device can neither host nor join, or a link with another peer is
+   * held.
+   */
+  async requestFastLink(peerId: string): Promise<string> {
+    warnPeerIdIfMisshapen(peerId, 'requestFastLink');
+    return await OfflineProtocolNativeModule.requestFastLink(peerId);
+  }
+
+  /**
+   * Ends the fast link with `peerId`, telling the peer. Resolves with whether
+   * there was one.
+   */
+  async closeFastLink(peerId: string): Promise<boolean> {
+    warnPeerIdIfMisshapen(peerId, 'closeFastLink');
+    return await OfflineProtocolNativeModule.closeFastLink(peerId);
+  }
+
   // ─── User Blocking ──────────────────────────────────────────
 
   /**

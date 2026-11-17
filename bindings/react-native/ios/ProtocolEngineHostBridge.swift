@@ -118,6 +118,18 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Blocking, files, presence
 
+    /// Asks for a fast link to `peerId` (ADR 0038); returns the link id.
+    static func requestFastLink(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "requestFastLink")
+        return try host.requireProtocol().requestFastLink(peerId: try A.requireString(m, "peerId"))
+    }
+
+    /// Ends the fast link with `peerId`; returns whether there was one.
+    static func closeFastLink(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
+        let m = try A.map(arguments, for: "closeFastLink")
+        return try host.requireProtocol().closeFastLink(peerId: try A.requireString(m, "peerId"))
+    }
+
     static func blockUser(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "blockUser")
         try host.requireProtocol().blockUser(userId: try A.requireString(m, "userId"))

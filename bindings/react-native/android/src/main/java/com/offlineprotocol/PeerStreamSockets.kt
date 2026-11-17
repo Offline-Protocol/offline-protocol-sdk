@@ -168,6 +168,14 @@ internal class PeerStreamSockets(
      */
     @Volatile var onLost: ((String) -> Unit)? = null
 
+    /**
+     * Whether an inbound stream that proved `address` on `carrier` may be
+     * announced. Null admits everything, as before. A fast-link host sets it
+     * while its network is up, so a device that got onto that network proves
+     * the invitee's address or is closed (ADR 0038).
+     */
+    @Volatile var admitsInbound: ((address: String, carrier: Carrier) -> Boolean)? = null
+
     /** Whether a stream holds [address] now. */
     fun holds(address: String): Boolean = links.handleFor(address) != null
 
@@ -276,6 +284,10 @@ internal class PeerStreamSockets(
             // Proved even if the held stream wins below: the peer is who it
             // said, and the dial that found it needs no ladder.
             proved = address
+            if (!outbound && admitsInbound?.invoke(address, carrier) == false) {
+                why = "not invited onto this network"
+                return ran()
+            }
             if (!announce(stream, address, outbound)) {
                 why = "ended or refused before the announcement"
                 return ran()

@@ -37,6 +37,8 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.checkInternetPresence(host: host, env: env, arguments: arguments)
         case "clearServiceTopic":
             return try ProtocolEngineHostBridge.clearServiceTopic(host: host, env: env, arguments: arguments)
+        case "closeFastLink":
+            return try ProtocolEngineHostBridge.closeFastLink(host: host, env: env, arguments: arguments)
         case "create":
             return try ProtocolEngineHostBridge.create(host: host, env: env, arguments: arguments)
         case "createInvite":
@@ -297,6 +299,8 @@ enum FlutterEngineChannel {
             return try ProtocolEngineHostBridge.replayEvents(host: host, env: env, arguments: arguments)
         case "requestEnableBluetooth":
             return try ProtocolEngineHostBridge.requestEnableBluetooth(host: host, env: env, arguments: arguments)
+        case "requestFastLink":
+            return try ProtocolEngineHostBridge.requestFastLink(host: host, env: env, arguments: arguments)
         case "resolveUsername":
             return try ProtocolEngineHostBridge.resolveUsername(host: host, env: env, arguments: arguments)
         case "respondToServiceRequest":

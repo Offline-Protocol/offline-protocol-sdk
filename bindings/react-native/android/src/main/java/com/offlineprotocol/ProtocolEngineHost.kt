@@ -410,6 +410,8 @@ class ProtocolEngineHost(
                 proto.setWifiDirectTransportCallback(object : uniffi.offline_protocol.WifiDirectTransportCallback {
                     override fun onMessagesAvailable() {
                         wifiDirectManager?.onMessagesAvailable()
+                        // The same wake carries fast-link directives (ADR 0038).
+                        wifiDirectManager?.onFastLinkWake()
                     }
                 })
                 onDiagnostic("info", "WiFi Direct transport callback registered", emptyMap())

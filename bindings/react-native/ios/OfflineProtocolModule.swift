@@ -2185,6 +2185,20 @@ class OfflineProtocolModule: RCTEventEmitter {
         ProtocolEngineHostBridgeReactNative.serviceSubscribers(self, serviceId, resolver: resolver, rejecter: rejecter)
     }
 
+    // MARK: - Fast link (ADR 0038)
+
+    @objc func requestFastLink(_ peerId: String,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.requestFastLink(self, peerId, resolver: resolver, rejecter: rejecter)
+    }
+
+    @objc func closeFastLink(_ peerId: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        ProtocolEngineHostBridgeReactNative.closeFastLink(self, peerId, resolver: resolver, rejecter: rejecter)
+    }
+
     // MARK: - User Blocking
 
     @objc func blockUser(_ userId: String,

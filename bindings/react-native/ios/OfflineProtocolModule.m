@@ -445,6 +445,15 @@ RCT_EXTERN_METHOD(mlsProcessWelcome:(NSString *)welcomeJson
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Fast link (ADR 0038)
+RCT_EXTERN_METHOD(requestFastLink:(NSString *)peerId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(closeFastLink:(NSString *)peerId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // User Blocking
 RCT_EXTERN_METHOD(blockUser:(NSString *)userId
                   resolver:(RCTPromiseResolveBlock)resolve

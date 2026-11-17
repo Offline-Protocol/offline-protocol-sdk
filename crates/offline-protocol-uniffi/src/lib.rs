@@ -19893,7 +19893,9 @@ mod tests {
         // Joined since, each by decision. The subscription calls (ADR 0035)
         // map like the request and response they sit beside: an app tells a
         // provider that does not route subscriptions (`ServiceError`) from a
-        // generic failure by the typed code.
+        // generic failure by the typed code. A fast-link request (ADR 0038)
+        // maps for the same reason: its refusals (no session, no capability,
+        // busy) are what an app shows its user.
         const JOINED_SINCE: &[&str] = &[
             "acceptServiceSubscription",
             "clearServiceTopic",
@@ -19907,6 +19909,7 @@ mod tests {
             "setServiceTopicCheckpoint",
             "subscribeService",
             "unsubscribeService",
+            "requestFastLink",
         ];
         let mut expected: Vec<&str> = MAPPED_BEFORE_THE_SHARED_BRIDGE
             .iter()
@@ -20233,12 +20236,17 @@ mod tests {
         let code =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt");
         for (what, pinned) in [
+            // The same wake carries the fast link's directives (ADR 0038). Both
+            // calls only post to the manager's thread, so the callback still
+            // returns at once; the second exists because the body drain stops
+            // at "no stream yet", and a directive is what brings one up.
             (
                 "the registration, gated on the slot",
                 "if (currentConfig?.wifiDirectEnabled == true) { try { \
                  proto.setWifiDirectTransportCallback(object : \
                  uniffi.offline_protocol.WifiDirectTransportCallback { override fun \
-                 onMessagesAvailable() { wifiDirectManager?.onMessagesAvailable() } })",
+                 onMessagesAvailable() { wifiDirectManager?.onMessagesAvailable() \
+                 wifiDirectManager?.onFastLinkWake() } })",
             ),
             (
                 "the field the callback reads",
