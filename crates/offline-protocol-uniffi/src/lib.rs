@@ -21344,7 +21344,10 @@ mod tests {
     /// queued then finds nothing; forgotten after `endAll()`, a stream that
     /// became ready in between was announced into the emptied table, and the
     /// core held a link to a stream that was about to be cancelled. The
-    /// Multipeer manager this replaced lost a remote exactly that way.
+    /// Multipeer manager this replaced lost a remote exactly that way. The
+    /// fast link ends `closed` between the two: after `endAll()` the engine
+    /// has seen its stream drop and ended it `lost`, which counts as a miss
+    /// against a peer that offered it unasked.
     ///
     /// Android resets the redial delay on a new connection after a
     /// disconnect (group owners nearly always share one address, so the
@@ -21360,9 +21363,12 @@ mod tests {
                  let old = (listener: listener, browser: browser, streams: streams) \
                  listener = nil browser = nil streams = [] adverts = [:] unprovable = [] \
                  dialPolicy.reset() \
+                 try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: false, acceptUnrequested: false) \
+                 endFastLink(reason: \"closed\") \
                  peers.endAll() old.listener?.cancel()"
             ),
-            "ios/WifiDirectManager.swift: stop() must forget every stream before endAll()"
+            "ios/WifiDirectManager.swift: stop() must forget every stream, then end the fast \
+             link `closed`, before endAll()"
         );
         let kotlin =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");

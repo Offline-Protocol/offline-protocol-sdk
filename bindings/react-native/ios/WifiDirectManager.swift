@@ -332,6 +332,13 @@ public class WifiDirectManager: NSObject, TransportManager {
             unprovable = []
             dialPolicy.reset()
 
+            // The fast link ends as this device's own end, which never counts
+            // against the peer, before any stream is reported lost: after
+            // endAll() the engine has already seen the link's stream drop and
+            // ended it `lost`, a miss charged to a peer that offered it.
+            try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: false, acceptUnrequested: false)
+            endFastLink(reason: "closed")
+
             // Report every proved peer lost while the core still holds its
             // link, before the layer goes down, on linkQueue so no delivery
             // lands after a loss report.
@@ -343,9 +350,6 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
 
         try? protocolInstance.wifiDirectStatusChanged(isConnected: false)
-        try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: false, acceptUnrequested: false)
-        // This device's own end, which never counts against the peer.
-        onLinkQueueSync { endFastLink(reason: "closed") }
 
         updateState(.stopped)
         emitDiagnostic("info", "Peer-stream transport stopped")

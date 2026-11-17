@@ -191,7 +191,10 @@ Pausing the engine ends a link with `background`: a paused engine runs none
 of these timers, and a host's group would otherwise stay on the air until the
 application returned, with nothing bounding it. Stopping it ends a link with
 `closed`, for the same reason and one more: an engine started again would
-find the old link still held and answer every request `busy`.
+find the old link still held and answer every request `busy`. A platform
+whose transport stops reports the link ended `closed` before it reports its
+streams lost: reported after, the engine has already seen the link's stream
+drop and ended it `lost`, a miss charged to a peer that offered it.
 
 A host whose process dies ends nothing: an Android group belongs to the
 system, not the process, and stays on the air. The host's platform keeps the
