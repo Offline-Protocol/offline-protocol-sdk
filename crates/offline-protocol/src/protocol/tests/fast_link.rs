@@ -350,3 +350,31 @@ fn fast_link_frames_prefer_bluetooth_over_the_peer_stream() {
     bob.deliver(over_bluetooth);
     assert!(bob.protocol.next_fast_link_directive().is_some());
 }
+
+/// Blocking a peer ends its fast link at once: the platform takes the network
+/// down, and nothing is sent to the blocked peer.
+#[test]
+fn blocking_a_peer_ends_its_fast_link() {
+    let (mut alice, bob) = pair();
+    let link_id = alice.protocol.request_fast_link(&bob.address).unwrap();
+    alice.protocol.next_fast_link_directive();
+    alice
+        .protocol
+        .fast_link_hosting(&link_id, "192.168.49.1", 8988)
+        .unwrap();
+    alice.protocol.fast_link_stream_proved(&bob.address);
+    alice.take_sent();
+
+    alice.protocol.block_user(&bob.address).unwrap();
+    let close = alice.protocol.next_fast_link_directive().unwrap();
+    assert_eq!(close.kind, FastLinkDirectiveKind::Close);
+    assert_eq!(close.link_id, link_id);
+    assert!(
+        alice.take_sent().is_empty(),
+        "nothing goes to a blocked peer"
+    );
+    assert_eq!(
+        alice.link_states().last().unwrap(),
+        &("closed".to_string(), Some("closed".to_string()))
+    );
+}

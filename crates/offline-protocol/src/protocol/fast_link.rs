@@ -83,6 +83,14 @@ impl OfflineProtocol {
         closed
     }
 
+    /// The user blocked `peer`: its link ends here and on this platform,
+    /// with nothing sent to it.
+    pub(crate) fn end_fast_link_with_blocked(&mut self, peer: &str) {
+        if self.fast_links.forget(peer, Instant::now()) {
+            self.flush_fast_link();
+        }
+    }
+
     /// The next instruction for the platform. Drained whenever the peer-stream
     /// callback fires.
     pub fn next_fast_link_directive(&mut self) -> Option<FastLinkDirective> {

@@ -64,6 +64,10 @@ impl OfflineProtocol {
         // the end of a lease the blocked peer can no longer renew.
         self.end_subscriptions_with(user_id);
 
+        // So does a fast link with the user: its network stays up for the
+        // peer otherwise, and an iPhone joiner stays off its own Wi-Fi.
+        self.end_fast_link_with_blocked(user_id);
+
         info!(user_id = %user_id, "User blocked");
 
         if let Ok(state) = lock_shared_state(&self.shared_state) {

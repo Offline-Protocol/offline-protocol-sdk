@@ -826,6 +826,16 @@ impl FastLinks {
         true
     }
 
+    /// Ends the link with `peer` without telling the peer: this device's user
+    /// blocked it, and nothing more is sent to a blocked peer.
+    pub(crate) fn forget(&mut self, peer: &str, now: Instant) -> bool {
+        if self.peer() != Some(peer) {
+            return false;
+        }
+        self.end(CloseReason::Closed, false, now);
+        true
+    }
+
     /// A stream proved `peer`.
     pub(crate) fn stream_proved(&mut self, peer: &str, now: Instant) {
         let Some(link) = self.link.as_mut() else {
