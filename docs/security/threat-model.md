@@ -1513,7 +1513,11 @@ nothing, each an offer lifetime and, if joined, the idle limit after it
 (about six minutes in all), before the host stops answering that peer's
 requests for ten minutes. A link that came up counts toward this unless it
 carried a body of 16 KiB or a transfer, so joining and idling does not reset
-it.
+it. A peer that does use each link, sending that much over it every time,
+can ask again and again: the device then serves links a session peer is
+really using, each ended by the idle limit a minute after the last of it, and
+the user's own way out is to block that peer or set `wifiDirect.fastLink` to
+`requestedOnly`.
 
 **Why it stands:** a network that does not broadcast its existence cannot be
 joined by an iPhone that was handed its name, and the session is the only
