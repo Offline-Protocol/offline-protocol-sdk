@@ -16,6 +16,7 @@ ble_undersized_mtu_reports
 block_user
 cancel_connection_request
 cancel_file_transfer
+close_fast_link
 close_file_stores
 create_group
 create_invite
@@ -146,6 +147,7 @@ release_transport_lock
 remove_from_group
 remove_transport
 rename_group
+request_fast_link
 request_group_relay_registration
 resolve_username
 resume
@@ -209,8 +211,12 @@ update_transport_metrics
 verify_identity_assertion
 verify_signature
 verify_signature_bytes
+wifi_direct_fast_link_ended
+wifi_direct_fast_link_hosting
 wifi_direct_get_next_message
 wifi_direct_message_received
+wifi_direct_next_fast_link_directive
 wifi_direct_peer_connected
 wifi_direct_peer_disconnected
+wifi_direct_set_fast_link_roles
 wifi_direct_status_changed

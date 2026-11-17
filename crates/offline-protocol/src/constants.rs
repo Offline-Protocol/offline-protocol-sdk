@@ -128,6 +128,29 @@ pub const MEDIA_WINDOW_SIZE_INTERNET: usize = 8;
 /// Default maximum chunks in flight for media transfers.
 pub const DEFAULT_MEDIA_WINDOW_SIZE: usize = 4;
 
+/// Chunk size for media transfers on the peer-stream slot (a Wi-Fi Direct
+/// group, a LAN, AWDL or a fast link): 64 KiB.
+///
+/// Larger than the default so that the bytes in flight grow without the
+/// chunks in flight growing: each chunk is a generation of the 1:1 session
+/// ratchet, and the receiver keeps only
+/// `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` (32) of them for late arrivals
+/// (see [`MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER`]).
+pub const CHUNK_SIZE_PEER_STREAM: usize = 64 * 1024;
+
+/// Maximum chunks in flight for media transfers on the peer-stream slot.
+///
+/// Eight 64 KiB chunks, 512 KiB in flight. At four 32 KiB chunks a 1 MiB file
+/// over a fast link took 8.0 to 8.7 s on two phones (ADR 0038): about 128 KiB
+/// per acknowledgement round, with receipts coalesced for up to 500 ms, so
+/// the transfer waited on acknowledgements rather than on the link. The
+/// window is eight and not more because it counts ratchet generations: two
+/// transfers to one peer at eight leave half the receiver's out-of-order
+/// tolerance for everything else on the session, which a window of sixteen
+/// used up entirely. The platform managers queue up to 4 MiB per stream
+/// before dropping, so 512 KiB stays well inside what a stream holds.
+pub const MEDIA_WINDOW_SIZE_PEER_STREAM: usize = 8;
+
 /// Maximum entries in the dedicated media outbox.
 /// Smaller than the main outbox since the sliding window limits in-flight chunks.
 pub const MAX_MEDIA_OUTBOX_ENTRIES: usize = 100;
@@ -153,7 +176,28 @@ pub const MAX_MEDIA_DESCRIPTORS: usize = 16;
 /// receiver surfaces this as `MessageDecryptionFailed`). Without this cap,
 /// concurrent transfers alone could push a delayed chunk beyond the
 /// tolerance and permanently stall its transfer.
+///
+/// The bound holds for every carrier's window, and a compile-time check below
+/// keeps it: a window raised past half the tolerance, divided across the
+/// concurrent transfers, fails the build rather than a transfer.
 pub const MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER: usize = 2;
+
+// Two concurrent transfers at the largest window must leave at least half the
+// receiver's out-of-order tolerance free for interleaved messages.
+const _: () = {
+    let tolerance = offline_protocol_sealed::SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE as usize;
+    let windows = [
+        MEDIA_WINDOW_SIZE_BLE,
+        MEDIA_WINDOW_SIZE_INTERNET,
+        DEFAULT_MEDIA_WINDOW_SIZE,
+        MEDIA_WINDOW_SIZE_PEER_STREAM,
+    ];
+    let mut i = 0;
+    while i < windows.len() {
+        assert!(MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER * windows[i] * 2 <= tolerance);
+        i += 1;
+    }
+};
 
 /// The receiver's forward window has to sit well above the number of
 /// messages this engine keeps in flight to one peer.

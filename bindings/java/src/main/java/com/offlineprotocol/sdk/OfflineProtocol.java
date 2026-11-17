@@ -691,6 +691,37 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public boolean closeFastLink(java.lang.String peerId)  {
+            try {
+                return FfiConverterBoolean.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(peerId), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public void closeFileStores() throws ProtocolException {
             try {
                 
@@ -4195,6 +4226,40 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public java.lang.String requestFastLink(java.lang.String peerId) throws ProtocolException {
+            try {
+                return FfiConverterString.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link(_allocator, _uniffiHandle,
+            FfiConverterString.INSTANCE.lower(peerId), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public boolean requestGroupRelayRegistration(java.lang.String groupId) throws ProtocolException {
             try {
                 return FfiConverterBoolean.INSTANCE.lift(
@@ -5879,6 +5944,69 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public void wifiDirectFastLinkEnded(java.lang.String linkId, java.lang.String reason)  {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(linkId), FfiConverterString.INSTANCE.lower(reason), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void wifiDirectFastLinkHosting(java.lang.String linkId, java.lang.String host, short port) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(linkId), FfiConverterString.INSTANCE.lower(host), port, _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public WifiDirectMessage wifiDirectGetNextMessage()  {
             try {
                 return FfiConverterOptionalTypeWifiDirectMessage.INSTANCE.lift(
@@ -5932,6 +6060,37 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
                 if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
                     throw (ProtocolException)_uniffi_ex.getCause();
                 }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public FastLinkDirective wifiDirectNextFastLinkDirective()  {
+            try {
+                return FfiConverterOptionalTypeFastLinkDirective.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive(_allocator, _uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
                 
                 if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
                     throw (InternalException)_uniffi_ex.getCause();
@@ -5998,6 +6157,36 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
                 if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
                     throw (ProtocolException)_uniffi_ex.getCause();
                 }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void wifiDirectSetFastLinkRoles(boolean canHost, boolean canJoin, boolean acceptUnrequested)  {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(_uniffiHandle,
+            FfiConverterBoolean.INSTANCE.lower(canHost), FfiConverterBoolean.INSTANCE.lower(canJoin), FfiConverterBoolean.INSTANCE.lower(acceptUnrequested), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
                 
                 if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
                     throw (InternalException)_uniffi_ex.getCause();

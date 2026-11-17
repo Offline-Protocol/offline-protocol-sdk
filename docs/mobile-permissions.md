@@ -128,6 +128,33 @@ iOS expects:
 The system may prompt on first use. Enable the Wi‑Fi / peer-stream slot in config
 only when you are ready to show that flow.
 
+### Fast link
+
+`requestFastLink` ([ADR 0038](adr/0038-a-fast-link-is-offered-inside-the-session.md))
+brings up a Wi-Fi network between this device and a peer it meets over
+Bluetooth. An iPhone joins the network the peer hosts, which needs the
+**Hotspot Configuration** capability
+(`com.apple.developer.networking.HotspotConfiguration`) in the app's
+entitlements (Xcode adds it to the App ID with automatic signing). Without it
+every join ends `failed`.
+
+Keep the local-network keys above too, since the stream is a local-network
+connection. No location permission and no Access Wi-Fi Information
+entitlement are needed: the iPhone confirms it is on the offered network by
+its Wi-Fi gateway, which is the host, not by the network's name.
+
+iOS shows "“App” Wants to Join Wi‑Fi Network “DIRECT-…”?" on every join, and
+the phone leaves its own Wi-Fi while the link lasts. By default a peer's app
+can start a link too, which shows that prompt without your app asking; set
+`wifiDirect.fastLink` to `'requestedOnly'` to take part only in links your
+app requests, or `'off'` to never join one. Ask for a link when a
+transfer is worth that to your user. The link ends when the app leaves the
+foreground.
+
+On Android the fast link uses the Wi-Fi Direct permissions below
+(`NEARBY_WIFI_DEVICES` on 13+, fine location on 12 and lower) and needs
+Android 10 or later; no prompt is shown.
+
 ### iOS native (Swift package / XCFramework)
 
 The same `Info.plist` rules apply. Native hosts do not get permission prompts from

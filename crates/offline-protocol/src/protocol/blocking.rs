@@ -64,6 +64,10 @@ impl OfflineProtocol {
         // the end of a lease the blocked peer can no longer renew.
         self.end_subscriptions_with(user_id);
 
+        // So does a fast link with the user: its network stays up for the
+        // peer otherwise, and an iPhone joiner stays off its own Wi-Fi.
+        self.end_fast_link_with_blocked(user_id);
+
         info!(user_id = %user_id, "User blocked");
 
         if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -150,6 +154,7 @@ impl OfflineProtocol {
         self.peer_ctrl_freshness.remove(user_id);
         self.peer_undecryptable_ack.remove(user_id);
         self.peer_coalesced_ack.remove(user_id);
+        self.peer_fast_link.remove(user_id);
         self.peer_rich_payload.remove(user_id);
         self.peer_rich_attested.remove(user_id);
         // Advertised half only, as above: `svc_sealed_proved_peers` is a
@@ -1506,6 +1511,7 @@ mod tests {
             svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
+            link_versions: Vec::new(),
         };
         let content = serde_json::to_string(&reset_payload).unwrap();
 

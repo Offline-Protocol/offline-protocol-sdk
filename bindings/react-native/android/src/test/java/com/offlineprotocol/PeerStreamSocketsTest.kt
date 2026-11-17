@@ -213,6 +213,36 @@ class PeerStreamSocketsTest {
     }
 
     @Test
+    fun `a fast-link host admits only its invitee on the network it made`() {
+        val host = Host("peer-a")
+        val sockets = PeerStreamSockets(host, fast)
+        sockets.admitsInbound = { address, carrier ->
+            carrier != PeerStreamSockets.Carrier.P2P || address == "peer-invited"
+        }
+        val group = listen(sockets, PeerStreamSockets.Carrier.P2P)
+        val lan = listen(sockets, PeerStreamSockets.Carrier.LAN)
+
+        // A device that got onto the network proves someone else: closed,
+        // never announced.
+        val stranger = raw(group)
+        stranger.readBody()
+        stranger.send(assertion("peer-stranger"))
+        assertTrue(stranger.closedByPeer())
+        assertNull(host.quiet())
+
+        // The same address on another carrier is not the host's to judge.
+        val neighbour = raw(lan)
+        neighbour.readBody()
+        neighbour.send(assertion("peer-stranger"))
+        assertEquals("connected:peer-stranger", host.next())
+
+        val invited = raw(group)
+        invited.readBody()
+        invited.send(assertion("peer-invited"))
+        assertEquals("connected:peer-invited", host.next())
+    }
+
+    @Test
     fun `a message before any preamble is refused`() {
         // The chapter's vector: a well-formed message frame as the first frame.
         val host = Host("peer-a")

@@ -92,6 +92,15 @@ internal object EngineMethodHandlers {
     }
 
     @JvmStatic
+    fun closeFastLink(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.closeFastLink(host, env.context, arguments)
+    }
+
+    @JvmStatic
     fun create(
         host: ProtocolEngineHost,
         env: FlutterEngineChannel.Environment,
@@ -1336,6 +1345,15 @@ internal object EngineMethodHandlers {
         val activity = env.activityProvider()
             ?: throw IllegalStateException("No activity available to show Bluetooth enable dialog")
         return com.offlineprotocol.ProtocolEngineHostBridge.requestEnableBluetooth(host, activity, arguments)
+    }
+
+    @JvmStatic
+    fun requestFastLink(
+        host: ProtocolEngineHost,
+        env: FlutterEngineChannel.Environment,
+        arguments: Any?,
+    ): Any? {
+        return com.offlineprotocol.ProtocolEngineHostBridge.requestFastLink(host, env.context, arguments)
     }
 
     @JvmStatic

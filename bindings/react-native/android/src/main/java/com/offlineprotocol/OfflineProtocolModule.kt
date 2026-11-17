@@ -1598,6 +1598,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         ProtocolEngineHostBridgeReactNative.cancelConnectionRequest(this, recipient, promise)
     }
 
+    // Fast link (ADR 0038)
+
+    @ReactMethod
+    fun requestFastLink(peerId: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.requestFastLink(this, peerId, promise)
+    }
+
+    @ReactMethod
+    fun closeFastLink(peerId: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.closeFastLink(this, peerId, promise)
+    }
+
     // User Blocking
 
     @ReactMethod

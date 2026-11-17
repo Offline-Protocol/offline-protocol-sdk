@@ -313,6 +313,12 @@ object ProtocolEngineHostBridge {
         return null
     }
 
+    /** Ends the fast link with `peerId`; returns whether there was one. */
+    fun closeFastLink(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        return host.requireProtocolBridge().closeFastLink(requireString(map, "peerId"))
+    }
+
     fun createInvite(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val map = mapFromAny(arguments)
@@ -961,6 +967,12 @@ object ProtocolEngineHostBridge {
         activity.startActivityForResult(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), 1001)
         return false
 
+    }
+
+    /** Asks for a fast link to `peerId` (ADR 0038); returns the link id. */
+    fun requestFastLink(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        return host.requireProtocolBridge().requestFastLink(requireString(map, "peerId"))
     }
 
     fun resolveUsername(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {

@@ -20,6 +20,7 @@ METHODS = [
     "cancelFileTransfer",
     "checkInternetPresence",
     "clearServiceTopic",
+    "closeFastLink",
     "createInvite",
     "deriveAddress",
     "deriveUserIdFromPublicKey",
@@ -91,6 +92,7 @@ METHODS = [
     "rekeySession",
     "releaseTransportLock",
     "requestEnableBluetooth",
+    "requestFastLink",
     "resolveUsername",
     "respondToServiceRequest",
     "resyncServiceSubscription",
@@ -445,6 +447,22 @@ IMPL["rejectConnectionRequest"] = """
     fun rejectConnectionRequest(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
         return host.requireProtocolBridge().rejectConnectionRequest(requireString(map, "recipient"))
+    }
+"""
+
+IMPL["requestFastLink"] = """
+    /** Asks for a fast link to `peerId` (ADR 0038); returns the link id. */
+    fun requestFastLink(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        return host.requireProtocolBridge().requestFastLink(requireString(map, "peerId"))
+    }
+"""
+
+IMPL["closeFastLink"] = """
+    /** Ends the fast link with `peerId`; returns whether there was one. */
+    fun closeFastLink(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
+        val map = mapFromAny(arguments)
+        return host.requireProtocolBridge().closeFastLink(requireString(map, "peerId"))
     }
 """
 

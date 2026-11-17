@@ -10,6 +10,7 @@ pub(crate) mod data;
 mod data_sync;
 mod decryption_queue;
 mod ephemeral;
+mod fast_link;
 pub(crate) mod mesh_relay;
 mod message_dispatch;
 mod nostr_discovery;
@@ -437,6 +438,32 @@ pub struct OfflineProtocol {
     ///
     /// [`ACK_COALESCED_V1`]: offline_protocol_sealed::ACK_COALESCED_V1
     pub(crate) peer_coalesced_ack: std::collections::HashSet<String>,
+
+    /// Peers that route fast-link frames ([`FAST_LINK_V1`] in
+    /// `link_versions`, ADR 0038), so a request, offer or close may be sealed
+    /// to them. Same lifecycle as `peer_undecryptable_ack` above: recorded
+    /// from each key package, persisted in `PeerCapabilities`, restored at
+    /// startup. A peer missing here is never sent one, and the only cost of
+    /// forgetting it is that no fast link is offered until its next key
+    /// package.
+    ///
+    /// [`FAST_LINK_V1`]: offline_protocol_sealed::FAST_LINK_V1
+    pub(crate) peer_fast_link: std::collections::HashSet<String>,
+
+    /// The fast link in progress, if any, and what it has queued for the
+    /// peer, the platform and the application (ADR 0038). Memory only: a
+    /// restart ends every link, and the platform's networks with the
+    /// process.
+    pub(crate) fast_links: crate::fast_link::FastLinks,
+
+    /// Set while the pending-decryption queue is drained. A fast-link frame
+    /// decrypted then is consumed and never acted on: it is only ever acted
+    /// on from a live decrypt (invariant 1 of
+    /// `docs/state-machines/fast-link.md`). The queue keeps entries for a
+    /// day, so a drained request would bring up a group for a requester that
+    /// gave up long ago, and a drained offer would prompt for a network
+    /// already gone.
+    pub(crate) draining_pending_decryption: bool,
 
     /// Delivery ACKs waiting to be coalesced, per peer: the carrier the
     /// answered frames arrived on, when the first was held, and the answered
@@ -1319,6 +1346,9 @@ impl OfflineProtocol {
             peer_ctrl_freshness: std::collections::HashSet::new(),
             peer_undecryptable_ack: std::collections::HashSet::new(),
             peer_coalesced_ack: std::collections::HashSet::new(),
+            peer_fast_link: std::collections::HashSet::new(),
+            fast_links: crate::fast_link::FastLinks::default(),
+            draining_pending_decryption: false,
             coalesced_acks_out: HashMap::new(),
             answered_deliveries: HashMap::new(),
             mesh_resend_generations: HashMap::new(),
@@ -1537,6 +1567,7 @@ impl OfflineProtocol {
         let previous_peer_ctrl_freshness = self.peer_ctrl_freshness.clone();
         let previous_peer_undecryptable_ack = self.peer_undecryptable_ack.clone();
         let previous_peer_coalesced_ack = self.peer_coalesced_ack.clone();
+        let previous_peer_fast_link = self.peer_fast_link.clone();
         // Snapshotted with its siblings so a failed re-initialize restores it
         // too. It is a ratchet, so the direction that matters is that a
         // rollback must not *lose* it: a peer we hold to the newer payload has
@@ -1710,6 +1741,7 @@ impl OfflineProtocol {
             self.peer_ctrl_freshness = previous_peer_ctrl_freshness;
             self.peer_undecryptable_ack = previous_peer_undecryptable_ack;
             self.peer_coalesced_ack = previous_peer_coalesced_ack;
+            self.peer_fast_link = previous_peer_fast_link;
             self.control_freshness_peers = previous_control_freshness_peers;
             self.control_reset_watermark = previous_control_reset_watermark;
             self.peer_rich_payload = previous_peer_rich_payload;
@@ -2380,6 +2412,11 @@ impl OfflineProtocol {
         // take the cancellations. Nothing pumps relays or sweeps deadlines once
         // stopped, so a resolution left here is an event that never comes.
         self.flush_username_resolutions_for_stop();
+        // A stopped engine runs no timers either, and a platform that starts
+        // it again would find a link from before still held, answering every
+        // request `busy`. It ends while the transport can still carry the
+        // peer's `close`.
+        self.end_fast_link_for(crate::fast_link::CloseReason::Closed);
 
         // Clear event callbacks to release shared_state references.
         // NOTE: the routing-decision callback is deliberately NOT cleared
@@ -2413,6 +2450,11 @@ impl OfflineProtocol {
         }
 
         state.state = ProtocolState::Paused;
+        drop(state);
+        // A paused engine runs no timers, so a fast link would outlive every
+        // bound its state machine promises while the host's group stays on
+        // the air. It ends here, as the iPhone's side already does.
+        self.end_fast_link_for(crate::fast_link::CloseReason::Background);
         Ok(())
     }
 
@@ -3735,6 +3777,15 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // A fast-link frame (ADR 0038) is routed only from the decrypted
+        // plaintext of a 1:1 session. One that arrived bare crossed every hop
+        // readable, offer passphrase and all, so it is consumed and never
+        // acted on: acting on it would teach a sender that a plaintext offer
+        // works. Never surfaced either, since it is not application text.
+        if content.starts_with(internal_prefixes::FAST_LINK) {
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // --- Group (mesh/MLS) messages ---
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_MSG) {
@@ -3865,6 +3916,7 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         self.send_due_data_settle_offers(Instant::now());
         self.tick_service_subscriptions();
+        self.tick_fast_link();
         self.refresh_nostr_key_package_slots();
         self.refresh_nostr_discovery_claim();
         // A relay is free never to send end-of-stored-events, and that is the

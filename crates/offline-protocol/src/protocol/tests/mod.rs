@@ -6,6 +6,7 @@ mod data_layer;
 mod data_sync;
 mod data_sync_group;
 mod ephemeral;
+mod fast_link;
 #[cfg(feature = "file-store")]
 mod file_stores;
 mod leaf_pairing;
@@ -1888,6 +1889,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -1971,6 +1973,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -2170,6 +2173,7 @@ pub(crate) fn feed_key_package_with_capabilities(
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -2292,6 +2296,7 @@ fn feed_key_package_with_caps(
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -2437,6 +2442,7 @@ fn key_package_message_with_nostr_pubkey(
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: nostr_pubkey.map(str::to_string),
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -2775,6 +2781,7 @@ fn feed_key_package_with_data(
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -3141,6 +3148,70 @@ fn peer_capability_unblock_clears_record() {
     );
 }
 
+/// `link_versions` is learned from a key package, dropped by one that stops
+/// advertising it, and survives a restart like the other capabilities; and
+/// this device advertises entry 1 in its own (ADR 0038).
+#[test]
+fn peer_fast_link_capability_is_learned_and_survives_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    let feed = |protocol: &mut OfflineProtocol, sender: &str, link_versions: Vec<u8>| {
+        let payload = KeyPackagePayload {
+            user_id: sender.to_string(),
+            key_package_data: vec![1, 2, 3, 4],
+            remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+            timestamp_ms: 0,
+            session_reset: false,
+            no_session: false,
+            wire_versions: Vec::new(),
+            env_versions: Vec::new(),
+            rich_versions: Vec::new(),
+            data_versions: Vec::new(),
+            ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
+            ack_versions: Vec::new(),
+            nostr_pubkey: None,
+            link_versions,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::KEY_PACKAGE,
+            serde_json::to_string(&payload).unwrap()
+        );
+        protocol.process_internal_message(&signed_frame(sender, &id("user123"), &content));
+    };
+    feed(
+        &mut protocol,
+        &id("peer"),
+        vec![offline_protocol_sealed::FAST_LINK_V1],
+    );
+    feed(&mut protocol, &id("legacy"), Vec::new());
+    assert!(protocol.peer_fast_link.contains(&id("peer")));
+    assert!(!protocol.peer_fast_link.contains(&id("legacy")));
+    let bundle = {
+        let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    assert_eq!(
+        protocol
+            .build_key_package_payload(&bundle, false)
+            .link_versions,
+        vec![offline_protocol_sealed::FAST_LINK_V1],
+        "this device routes fast-link frames, and says so"
+    );
+
+    let mut restarted = protocol_with_mls_storage(storage.clone());
+    assert!(restarted.peer_fast_link.contains(&id("peer")));
+    assert!(!restarted.peer_fast_link.contains(&id("legacy")));
+
+    // A downgrade drops it in memory and on disk.
+    feed(&mut restarted, &id("peer"), Vec::new());
+    assert!(!restarted.peer_fast_link.contains(&id("peer")));
+    assert!(!protocol_with_mls_storage(storage)
+        .peer_fast_link
+        .contains(&id("peer")));
+}
+
 /// `ack_versions` is learned from a key package, dropped by one that stops
 /// advertising it, and survives a restart like the other capabilities.
 #[test]
@@ -3163,6 +3234,7 @@ fn peer_undecryptable_ack_capability_is_learned_and_survives_restart() {
             svc_versions: Vec::new(),
             ack_versions,
             nostr_pubkey: None,
+            link_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",
@@ -3207,6 +3279,7 @@ fn peer_capability_restore_prunes_overflow() {
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
+        link_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -3350,6 +3423,7 @@ fn peer_capability_restore_prefers_session_peers() {
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
+        link_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -3961,6 +4035,7 @@ fn test_process_internal_message_key_package() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -15983,6 +16058,7 @@ fn feed_session_reset_key_package(
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -21156,6 +21232,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -21370,6 +21447,7 @@ fn test_key_package_remaining_lifetime_ms() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -21458,6 +21536,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
+            link_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",
@@ -21549,6 +21628,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -21603,6 +21683,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -23160,6 +23241,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
+            link_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",
@@ -23719,6 +23801,41 @@ fn a_membership_frame_is_consumed_and_never_answered() {
         sent.sent_messages().len(),
         before,
         "a membership frame is never answered"
+    );
+}
+
+/// A fast-link frame that arrives bare, outside any session, is consumed:
+/// never delivered as application text, never answered and never acted on.
+/// An offer carries a passphrase, so one that crossed the air readable is
+/// exactly the frame the receiver must not reward (ADR 0038).
+#[test]
+fn a_bare_fast_link_frame_is_consumed_and_never_answered() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let sent = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+    let before = sent.sent_messages().len();
+
+    let content = format!(
+        "{}{{\"v\":1,\"kind\":\"offer\",\"link\":\"{}\",\"ssid\":\"DIRECT-ab-0123456789ab\",\
+         \"passphrase\":\"{}\",\"host\":\"192.168.49.1\",\"port\":8988,\
+         \"issued_at_ms\":0,\"ttl_ms\":120000}}",
+        internal_prefixes::FAST_LINK,
+        "a".repeat(32),
+        "b".repeat(32),
+    );
+    let message = signed_frame(&id("alice"), "user123", &content);
+
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    assert_eq!(
+        sent.sent_messages().len(),
+        before,
+        "a bare fast-link frame is never answered"
     );
 }
 
@@ -41448,6 +41565,7 @@ fn key_package_frame_body(sender: &str, session_reset: bool, ctrl_versions: Vec<
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     format!(
         "{}{}",
@@ -43308,6 +43426,7 @@ fn the_ordinary_handshake_starts_a_latency_without_any_session_missing() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",

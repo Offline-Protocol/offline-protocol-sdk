@@ -382,6 +382,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
             if manager.state == .running {
                 manager.stop()
             }
+            manager.fastLinkMode = FastLinkMode.parse(config?["fastLink"], current: manager.fastLinkMode)
             wireTransportCallbacks(proto)
             try manager.start()
             onDiagnostic("info", "WiFi Direct transport enabled", [:])

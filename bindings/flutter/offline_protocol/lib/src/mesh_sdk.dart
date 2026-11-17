@@ -48,6 +48,10 @@ static Future<dynamic> checkInternetPresence([Map<String, dynamic>? args]) =>
 static Future<dynamic> clearServiceTopic([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('clearServiceTopic', args);
 
+/// Native `closeFastLink` (see React Native `OfflineProtocolNativeModule.closeFastLink`).
+static Future<dynamic> closeFastLink([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('closeFastLink', args);
+
 /// Native `createInvite` (see React Native `OfflineProtocolNativeModule.createInvite`).
 static Future<dynamic> createInvite([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('createInvite', args);
@@ -535,6 +539,10 @@ static Future<dynamic> releaseTransportLock([Map<String, dynamic>? args]) =>
 /// Native `requestEnableBluetooth` (see React Native `OfflineProtocolNativeModule.requestEnableBluetooth`).
 static Future<dynamic> requestEnableBluetooth([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('requestEnableBluetooth', args);
+
+/// Native `requestFastLink` (see React Native `OfflineProtocolNativeModule.requestFastLink`).
+static Future<dynamic> requestFastLink([Map<String, dynamic>? args]) =>
+    _invoke<dynamic>('requestFastLink', args);
 
 /// Native `resolveUsername` (see React Native `OfflineProtocolNativeModule.resolveUsername`).
 static Future<dynamic> resolveUsername([Map<String, dynamic>? args]) =>

@@ -512,6 +512,7 @@ fn a_key_package_that_claims_another_owner_is_refused() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
 
     let frame = phone_control_frame(
@@ -1144,6 +1145,7 @@ fn a_peer_that_already_has_a_key_package_is_not_sent_another() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let frame = phone_control_frame(
         &phone,
@@ -1730,6 +1732,7 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let reset_frame = phone_control_frame(
         &phone,
@@ -1831,6 +1834,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let frame = phone_control_frame(
         &phone,
@@ -1865,6 +1869,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
             svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
+            link_versions: Vec::new(),
         };
         let frame = phone_control_frame(
             &stranger,
@@ -2293,6 +2298,7 @@ fn advertisement_body(user_id: &str) -> String {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     format!(
         "{}{}",
@@ -3224,6 +3230,7 @@ fn a_reset_older_than_the_last_one_acted_on_is_refused() {
             svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
+            link_versions: Vec::new(),
         };
         phone_control_frame_at(
             &phone,
@@ -3287,6 +3294,7 @@ fn a_spent_reset_stays_spent_across_a_power_cycle() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let reset_frame = phone_control_frame_at(
         &phone,
@@ -3440,6 +3448,7 @@ fn a_session_reset_that_states_no_time_is_refused_its_teardown() {
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        link_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",

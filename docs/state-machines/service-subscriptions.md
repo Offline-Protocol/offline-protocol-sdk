@@ -32,7 +32,7 @@ what each shape prevents.
 
 Invariant 5 is the one place this state machine gives up custody of an
 undelivered message before the receiver confirms it, which the
-[one invariant that spans all seven](README.md#the-one-invariant-that-spans-all-seven)
+[one invariant that spans all eight](README.md#the-one-invariant-that-spans-all-eight)
 otherwise forbids. It does so only for a value that a newer value for the same
 key replaces, and the newer value takes custody in its place.
 

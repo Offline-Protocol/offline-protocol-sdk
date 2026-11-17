@@ -686,6 +686,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static byte uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link(long ptr, java.lang.foreign.MemorySegment peerId, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (byte) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link.invokeExact(ptr, peerId, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -1667,6 +1676,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment peerId, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link.invokeExact(_allocator, ptr, peerId, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -2135,6 +2153,24 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended(long ptr, java.lang.foreign.MemorySegment linkId, java.lang.foreign.MemorySegment reason, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended.invokeExact(ptr, linkId, reason, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_SHORT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting(long ptr, java.lang.foreign.MemorySegment linkId, java.lang.foreign.MemorySegment host, short port, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting.invokeExact(ptr, linkId, host, port, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -2153,6 +2189,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive.invokeExact(_allocator, ptr, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -2168,6 +2213,15 @@ final class UniffiLib {
     static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(long ptr, java.lang.foreign.MemorySegment peerId, java.lang.foreign.MemorySegment _uniffiOutErr) {
         try {
             MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected.invokeExact(ptr, peerId, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(long ptr, byte canHost, byte canJoin, byte acceptUnrequested, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles.invokeExact(ptr, canHost, canJoin, acceptUnrequested, _uniffiOutErr);
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -3359,6 +3413,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
@@ -4340,6 +4403,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
@@ -4808,6 +4880,24 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
@@ -4826,6 +4916,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
@@ -4841,6 +4940,15 @@ final class UniffiLib {
     static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 

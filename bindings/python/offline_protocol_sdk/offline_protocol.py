@@ -697,6 +697,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 44634:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link() != 32622:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 57369:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 13199:
@@ -915,6 +917,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 36114:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link() != 19701:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 3982:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() != 56081:
@@ -1019,13 +1023,21 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 24438:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended() != 54290:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting() != 47337:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 50868:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 59107:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive() != 7498:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 38596:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 15986:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() != 62518:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 12337:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1273,6 +1285,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores.restype = ctypes.c_uint16
@@ -1600,6 +1615,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.restype = ctypes.c_uint16
@@ -1756,18 +1774,30 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed.restype = ctypes.c_uint16
@@ -2263,6 +2293,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2902,6 +2938,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -3245,6 +3287,21 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signa
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes.restype = ctypes.c_int8
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.c_uint16,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -3257,6 +3314,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -3269,6 +3331,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_int8,
+    ctypes.c_int8,
+    ctypes.c_int8,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed.argtypes = (
     ctypes.c_uint64,
     ctypes.c_int8,
@@ -4365,6 +4435,147 @@ class _UniffiFfiConverterTypeEncryptionConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.require_encryption, buf)
         _UniffiFfiConverterTypePendingQueueConfig.write(value.pending_queue, buf)
 
+class _UniffiFfiConverterOptionalString(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterString.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterString.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterString.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterUInt16(_UniffiConverterPrimitiveInt):
+    CLASS_NAME = "u16"
+    VALUE_MIN = 0
+    VALUE_MAX = 2**16
+
+    @staticmethod
+    def read(buf):
+        return buf.read_u16()
+
+    @staticmethod
+    def write(value, buf):
+        buf.write_u16(value)
+
+class _UniffiFfiConverterOptionalUInt16(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterUInt16.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterUInt16.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterUInt16.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class FastLinkDirective:
+    def __init__(self, *, kind:str, link_id:str, peer_id:str, ssid:typing.Optional[str], passphrase:typing.Optional[str], host:typing.Optional[str], port:typing.Optional[int], expires_in_ms:int, reason:typing.Optional[str]):
+        self.kind = kind
+        self.link_id = link_id
+        self.peer_id = peer_id
+        self.ssid = ssid
+        self.passphrase = passphrase
+        self.host = host
+        self.port = port
+        self.expires_in_ms = expires_in_ms
+        self.reason = reason
+        
+        
+
+    
+    def __str__(self):
+        return "FastLinkDirective(kind={}, link_id={}, peer_id={}, ssid={}, passphrase={}, host={}, port={}, expires_in_ms={}, reason={})".format(self.kind, self.link_id, self.peer_id, self.ssid, self.passphrase, self.host, self.port, self.expires_in_ms, self.reason)
+    def __eq__(self, other):
+        if self.kind != other.kind:
+            return False
+        if self.link_id != other.link_id:
+            return False
+        if self.peer_id != other.peer_id:
+            return False
+        if self.ssid != other.ssid:
+            return False
+        if self.passphrase != other.passphrase:
+            return False
+        if self.host != other.host:
+            return False
+        if self.port != other.port:
+            return False
+        if self.expires_in_ms != other.expires_in_ms:
+            return False
+        if self.reason != other.reason:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeFastLinkDirective(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return FastLinkDirective(
+            kind=_UniffiFfiConverterString.read(buf),
+            link_id=_UniffiFfiConverterString.read(buf),
+            peer_id=_UniffiFfiConverterString.read(buf),
+            ssid=_UniffiFfiConverterOptionalString.read(buf),
+            passphrase=_UniffiFfiConverterOptionalString.read(buf),
+            host=_UniffiFfiConverterOptionalString.read(buf),
+            port=_UniffiFfiConverterOptionalUInt16.read(buf),
+            expires_in_ms=_UniffiFfiConverterUInt64.read(buf),
+            reason=_UniffiFfiConverterOptionalString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.kind)
+        _UniffiFfiConverterString.check_lower(value.link_id)
+        _UniffiFfiConverterString.check_lower(value.peer_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.ssid)
+        _UniffiFfiConverterOptionalString.check_lower(value.passphrase)
+        _UniffiFfiConverterOptionalString.check_lower(value.host)
+        _UniffiFfiConverterOptionalUInt16.check_lower(value.port)
+        _UniffiFfiConverterUInt64.check_lower(value.expires_in_ms)
+        _UniffiFfiConverterOptionalString.check_lower(value.reason)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.kind, buf)
+        _UniffiFfiConverterString.write(value.link_id, buf)
+        _UniffiFfiConverterString.write(value.peer_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.ssid, buf)
+        _UniffiFfiConverterOptionalString.write(value.passphrase, buf)
+        _UniffiFfiConverterOptionalString.write(value.host, buf)
+        _UniffiFfiConverterOptionalUInt16.write(value.port, buf)
+        _UniffiFfiConverterUInt64.write(value.expires_in_ms, buf)
+        _UniffiFfiConverterOptionalString.write(value.reason, buf)
+
 @dataclass
 class FileProgress:
     def __init__(self, *, file_id:str, chunks_sent:int, total_chunks:int, percentage:int):
@@ -4574,31 +4785,6 @@ class _UniffiFfiConverterTypeGroupRichReadiness(_UniffiConverterRustBuffer):
     def write(value, buf):
         _UniffiFfiConverterBoolean.write(value.ready, buf)
         _UniffiFfiConverterSequenceString.write(value.unknown_members, buf)
-
-class _UniffiFfiConverterOptionalString(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterString.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterString.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterString.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
 
 @dataclass
 class InternetMessage:
@@ -7644,19 +7830,6 @@ class _UniffiFfiConverterTypeTelemetryOs(_UniffiConverterRustBuffer):
             buf.write_i32(6)
 
 
-
-class _UniffiFfiConverterUInt16(_UniffiConverterPrimitiveInt):
-    CLASS_NAME = "u16"
-    VALUE_MIN = 0
-    VALUE_MAX = 2**16
-
-    @staticmethod
-    def read(buf):
-        return buf.read_u16()
-
-    @staticmethod
-    def write(value, buf):
-        buf.write_u16(value)
 
 
 
@@ -10999,6 +11172,31 @@ class _UniffiFfiConverterOptionalTypeWifiDirectMessage(_UniffiConverterRustBuffe
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
+class _UniffiFfiConverterOptionalTypeFastLinkDirective(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeFastLinkDirective.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeFastLinkDirective.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeFastLinkDirective.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 
 class OfflineProtocolProtocol(typing.Protocol):
     
@@ -11037,6 +11235,8 @@ class OfflineProtocolProtocol(typing.Protocol):
     def cancel_connection_request(self, recipient: str) -> str:
         raise NotImplementedError
     def cancel_file_transfer(self, file_id: str) -> None:
+        raise NotImplementedError
+    def close_fast_link(self, peer_id: str) -> bool:
         raise NotImplementedError
     def close_file_stores(self, ) -> None:
         raise NotImplementedError
@@ -11256,6 +11456,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def rename_group(self, group_id: str,new_name: str) -> None:
         raise NotImplementedError
+    def request_fast_link(self, peer_id: str) -> str:
+        raise NotImplementedError
     def request_group_relay_registration(self, group_id: str) -> bool:
         raise NotImplementedError
     def resolve_username(self, username: str) -> bool:
@@ -11360,13 +11562,21 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def verify_signature_bytes(self, public_key: bytes,data: bytes,signature: bytes) -> bool:
         raise NotImplementedError
+    def wifi_direct_fast_link_ended(self, link_id: str,reason: str) -> None:
+        raise NotImplementedError
+    def wifi_direct_fast_link_hosting(self, link_id: str,host: str,port: int) -> None:
+        raise NotImplementedError
     def wifi_direct_get_next_message(self, ) -> typing.Optional[WifiDirectMessage]:
         raise NotImplementedError
     def wifi_direct_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         raise NotImplementedError
+    def wifi_direct_next_fast_link_directive(self, ) -> typing.Optional[FastLinkDirective]:
+        raise NotImplementedError
     def wifi_direct_peer_connected(self, peer_id: str) -> None:
         raise NotImplementedError
     def wifi_direct_peer_disconnected(self, peer_id: str) -> None:
+        raise NotImplementedError
+    def wifi_direct_set_fast_link_roles(self, can_host: bool,can_join: bool,accept_unrequested: bool) -> None:
         raise NotImplementedError
     def wifi_direct_status_changed(self, is_connected: bool) -> None:
         raise NotImplementedError
@@ -11673,6 +11883,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def close_fast_link(self, peer_id: str) -> bool:
+        
+        _UniffiFfiConverterString.check_lower(peer_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(peer_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -13266,6 +13491,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def request_fast_link(self, peer_id: str) -> str:
+        
+        _UniffiFfiConverterString.check_lower(peer_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(peer_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def request_group_relay_registration(self, group_id: str) -> bool:
         
         _UniffiFfiConverterString.check_lower(group_id)
@@ -14139,6 +14379,45 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def wifi_direct_fast_link_ended(self, link_id: str,reason: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(link_id)
+
+        _UniffiFfiConverterString.check_lower(reason)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(link_id),
+            _UniffiFfiConverterString.lower(reason),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def wifi_direct_fast_link_hosting(self, link_id: str,host: str,port: int) -> None:
+        
+        _UniffiFfiConverterString.check_lower(link_id)
+
+        _UniffiFfiConverterString.check_lower(host)
+
+        _UniffiFfiConverterUInt16.check_lower(port)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(link_id),
+            _UniffiFfiConverterString.lower(host),
+            _UniffiFfiConverterUInt16.lower(port),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def wifi_direct_get_next_message(self, ) -> typing.Optional[WifiDirectMessage]:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -14169,6 +14448,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def wifi_direct_next_fast_link_directive(self, ) -> typing.Optional[FastLinkDirective]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalTypeFastLinkDirective.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def wifi_direct_peer_connected(self, peer_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(peer_id)
@@ -14196,6 +14487,27 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def wifi_direct_set_fast_link_roles(self, can_host: bool,can_join: bool,accept_unrequested: bool) -> None:
+        
+        _UniffiFfiConverterBoolean.check_lower(can_host)
+
+        _UniffiFfiConverterBoolean.check_lower(can_join)
+
+        _UniffiFfiConverterBoolean.check_lower(accept_unrequested)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterBoolean.lower(can_host),
+            _UniffiFfiConverterBoolean.lower(can_join),
+            _UniffiFfiConverterBoolean.lower(accept_unrequested),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -14329,6 +14641,7 @@ __all__ = [
     "DorsConfig",
     "PendingQueueConfig",
     "EncryptionConfig",
+    "FastLinkDirective",
     "FileProgress",
     "ForwardInfo",
     "GatewayAddressDeclaration",

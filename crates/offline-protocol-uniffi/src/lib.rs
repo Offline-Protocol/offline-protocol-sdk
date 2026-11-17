@@ -2579,6 +2579,57 @@ pub struct WifiDirectMessage {
     pub data: Vec<u8>,
 }
 
+/// One fast-link instruction for the platform (ADR 0038). See the UDL.
+#[derive(Clone)]
+pub struct FastLinkDirective {
+    pub kind: String,
+    pub link_id: String,
+    pub peer_id: String,
+    pub ssid: Option<String>,
+    pub passphrase: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub expires_in_ms: u64,
+    pub reason: Option<String>,
+}
+
+impl std::fmt::Debug for FastLinkDirective {
+    // Never the passphrase: it is a network credential (invariant 5 of the
+    // fast link state machine).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FastLinkDirective")
+            .field("kind", &self.kind)
+            .field("link_id", &self.link_id)
+            .field("peer_id", &"[REDACTED]")
+            .field("ssid", &self.ssid)
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("expires_in_ms", &self.expires_in_ms)
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+impl From<offline_protocol::fast_link::FastLinkDirective> for FastLinkDirective {
+    fn from(directive: offline_protocol::fast_link::FastLinkDirective) -> Self {
+        Self {
+            kind: directive.kind.as_str().to_string(),
+            link_id: directive.link_id,
+            peer_id: directive.peer_id,
+            ssid: directive.ssid,
+            passphrase: directive.passphrase,
+            host: directive.host,
+            port: directive.port,
+            expires_in_ms: directive.expires_in_ms,
+            reason: directive.reason.map(|reason| reason.as_str().to_string()),
+        }
+    }
+}
+
 /// Reticulum message for outgoing data
 #[derive(Debug, Clone)]
 pub struct ReticulumMessage {
@@ -5293,6 +5344,8 @@ impl OfflineProtocol {
         // then finds no link and adds nothing (wifi_direct_peer_disconnected).
         if after == 0 {
             for link in before {
+                // The layer's end is the stream's end for a fast link too.
+                self.lock_inner()?.fast_link_stream_lost(&link.peer_id);
                 if self.peer_linked_elsewhere(&link.peer_id, CoreTransportType::WiFiDirect) {
                     continue;
                 }
@@ -5365,6 +5418,8 @@ impl OfflineProtocol {
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let mut protocol = self.lock_inner()?;
+        // Traffic on the slot keeps a fast link off its idle limit.
+        protocol.fast_link_activity(&sender_id, data.len());
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)
@@ -5438,6 +5493,8 @@ impl OfflineProtocol {
             })?
             .unwrap_or_default();
         self.emit_wifi_direct_switch(before, after);
+        // A fast link waiting for this peer's stream is up.
+        self.lock_inner()?.fast_link_stream_proved(&peer_id);
 
         self.notify_neighbor_reachable(&peer_id, "WiFiDirect", None)
     }
@@ -5466,6 +5523,11 @@ impl OfflineProtocol {
             })?
             .unwrap_or_default();
         self.emit_wifi_direct_switch(before, after);
+        // A fast link carried by this stream is over, whether or not the
+        // peer is still reachable some other way.
+        if held {
+            self.lock_inner()?.fast_link_stream_lost(&peer_id);
+        }
 
         // Reported once, and only when the peer is out of reach. A link the
         // layer already ended was reported by wifi_direct_status_changed, and
@@ -7908,6 +7970,62 @@ impl OfflineProtocol {
     pub fn block_user(&self, user_id: String) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
         guard.block_user(&user_id).map_err(ProtocolError::from)
+    }
+
+    /// Asks for a fast link to `peer_id` (ADR 0038). See the UDL.
+    pub fn request_fast_link(&self, peer_id: String) -> Result<String, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .request_fast_link(&peer_id)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Ends the fast link with `peer_id`. Returns whether there was one.
+    pub fn close_fast_link(&self, peer_id: String) -> bool {
+        self.lock_inner()
+            .map(|mut guard| guard.close_fast_link(&peer_id))
+            .unwrap_or(false)
+    }
+
+    /// The platform says what it can do for a fast link.
+    pub fn wifi_direct_set_fast_link_roles(
+        &self,
+        can_host: bool,
+        can_join: bool,
+        accept_unrequested: bool,
+    ) {
+        if let Ok(mut guard) = self.lock_inner() {
+            guard.set_fast_link_roles(can_host, can_join, accept_unrequested);
+        }
+    }
+
+    /// The next fast-link instruction for the platform.
+    pub fn wifi_direct_next_fast_link_directive(&self) -> Option<FastLinkDirective> {
+        self.lock_inner()
+            .ok()?
+            .next_fast_link_directive()
+            .map(FastLinkDirective::from)
+    }
+
+    /// The host's network is up, its listener on `host:port`.
+    pub fn wifi_direct_fast_link_hosting(
+        &self,
+        link_id: String,
+        host: String,
+        port: u16,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .fast_link_hosting(&link_id, &host, port)
+            .map_err(ProtocolError::from)
+    }
+
+    /// The platform could not do what it was told, or can no longer hold the
+    /// link.
+    pub fn wifi_direct_fast_link_ended(&self, link_id: String, reason: String) {
+        if let Ok(mut guard) = self.lock_inner() {
+            guard.fast_link_ended(&link_id, &reason);
+        }
     }
 
     /// Unblock a previously blocked user.
@@ -19780,7 +19898,9 @@ mod tests {
         // Joined since, each by decision. The subscription calls (ADR 0035)
         // map like the request and response they sit beside: an app tells a
         // provider that does not route subscriptions (`ServiceError`) from a
-        // generic failure by the typed code.
+        // generic failure by the typed code. A fast-link request (ADR 0038)
+        // maps for the same reason: its refusals (no session, no capability,
+        // busy) are what an app shows its user.
         const JOINED_SINCE: &[&str] = &[
             "acceptServiceSubscription",
             "clearServiceTopic",
@@ -19794,6 +19914,7 @@ mod tests {
             "setServiceTopicCheckpoint",
             "subscribeService",
             "unsubscribeService",
+            "requestFastLink",
         ];
         let mut expected: Vec<&str> = MAPPED_BEFORE_THE_SHARED_BRIDGE
             .iter()
@@ -20115,17 +20236,358 @@ mod tests {
         }
     }
 
+    /// No bridge manager logs a fast-link directive whole (invariant 5 of
+    /// `docs/state-machines/fast-link.md`). The generated records are a Kotlin
+    /// data class and a Swift struct whose `toString` and description print
+    /// every field, the passphrase among them; only the Rust `Debug` is
+    /// redacted. Each value is named, the link id and the kind, never the
+    /// record.
+    #[test]
+    fn no_bridge_logs_a_fast_link_directive_whole() {
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        for name in ["directive", "parked", "parkedFastLinkJoin"] {
+            for (bridge, code, forms) in [
+                (
+                    "WifiDirectManager.kt",
+                    &kotlin,
+                    vec![
+                        format!("${name}\""),
+                        format!("${name} "),
+                        format!("${name}."),
+                        format!("${{{name}}}"),
+                        format!("{name}.toString()"),
+                        format!("to {name})"),
+                        format!("to {name},"),
+                    ],
+                ),
+                (
+                    "WifiDirectManager.swift",
+                    &swift,
+                    vec![
+                        format!("\\({name})"),
+                        format!("String(describing: {name}"),
+                        format!(": {name}]"),
+                        format!(": {name},"),
+                        format!("print({name}"),
+                        format!("dump({name}"),
+                    ],
+                ),
+            ] {
+                for form in forms {
+                    assert!(
+                        !code.contains(&form),
+                        "{bridge} logs or stringifies a whole fast-link directive ({form:?}): \
+                         its generated description prints the passphrase. Name the link id \
+                         and kind instead."
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fast-link tokens the bridges hand the engine, and the directive
+    /// kinds they branch on, are the engine's own (C5). Both cross the FFI as
+    /// strings, and the engine reads an unknown reason as `failed` without a
+    /// word: a typo in a bridge's `declined` would switch off the decline
+    /// pause that threat model R34 bounds iOS join prompts with, and a typo
+    /// in a kind would ignore that directive.
+    #[test]
+    fn fast_link_tokens_in_the_bridges_are_the_engines() {
+        use offline_protocol::fast_link::{CloseReason, FastLinkDirectiveKind};
+
+        /// Every string literal inside the parentheses that follow `call`.
+        fn literals_in_calls(code: &str, call: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            for (at, _) in code.match_indices(call) {
+                let rest = &code[at + call.len()..];
+                let end = rest.find(')').unwrap_or(rest.len());
+                found.extend(literals(&rest[..end]));
+            }
+            found
+        }
+        /// Every string literal in `text`.
+        fn literals(text: &str) -> Vec<String> {
+            text.split('"')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        }
+        /// The literal right after each `marker`.
+        fn literal_after(code: &str, marker: &str) -> Vec<String> {
+            code.match_indices(marker)
+                .filter_map(|(at, _)| {
+                    let rest = &code[at + marker.len()..];
+                    rest.split('"').nth(1).map(str::to_string)
+                })
+                .collect()
+        }
+
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+
+        let mut kotlin_reasons = literals_in_calls(&kotlin, "fastLinkEnded(");
+        kotlin_reasons.sort();
+        kotlin_reasons.dedup();
+        let mut swift_reasons = literals_in_calls(&swift, "FastLinkEnded(");
+        swift_reasons.extend(literals_in_calls(&swift, "endFastLink("));
+        for line in swift
+            .lines()
+            .filter(|l| l.trim_start().starts_with("let reason ="))
+        {
+            swift_reasons.extend(literals(line));
+        }
+        swift_reasons.sort();
+        swift_reasons.dedup();
+
+        for (bridge, reasons, must) in [
+            (
+                "WifiDirectManager.kt",
+                &kotlin_reasons,
+                &["background", "failed", "host_failed", "invalid", "lost"][..],
+            ),
+            (
+                "WifiDirectManager.swift",
+                &swift_reasons,
+                &["background", "declined", "failed", "host_failed"][..],
+            ),
+        ] {
+            for reason in reasons.iter() {
+                assert_eq!(
+                    CloseReason::parse(reason).as_str(),
+                    reason,
+                    "{bridge} reports the fast-link reason {reason:?}, which the engine does not \
+                     know and reads as `failed`"
+                );
+            }
+            for expected in must {
+                assert!(
+                    reasons.iter().any(|r| r == expected),
+                    "{bridge}: the scan found no {expected:?} among {reasons:?}, so it is no \
+                     longer reading the reasons the bridge sends"
+                );
+            }
+        }
+
+        let kinds = [
+            FastLinkDirectiveKind::Host.as_str(),
+            FastLinkDirectiveKind::Join.as_str(),
+            FastLinkDirectiveKind::Close.as_str(),
+        ];
+        let mut kotlin_kinds = literal_after(&kotlin, "directive.kind == ");
+        kotlin_kinds.extend(literal_after(&kotlin, "directive.kind != "));
+        let drain_start = swift
+            .find("func drainFastLinkDirectives")
+            .expect("the iOS manager drains fast-link directives");
+        let drain_end = swift[drain_start..]
+            .find("private func joinFastLink")
+            .map_or(swift.len(), |end| drain_start + end);
+        let swift_drain = &swift[drain_start..drain_end];
+        let mut swift_kinds = literal_after(swift_drain, "case ");
+        swift_kinds.extend(literal_after(swift_drain, "directive.kind != "));
+        for (bridge, found, must) in [
+            (
+                "WifiDirectManager.kt",
+                &kotlin_kinds,
+                &["close", "host", "join"][..],
+            ),
+            (
+                "WifiDirectManager.swift",
+                &swift_kinds,
+                &["close", "join"][..],
+            ),
+        ] {
+            for kind in found.iter() {
+                assert!(
+                    kinds.contains(&kind.as_str()),
+                    "{bridge} branches on the directive kind {kind:?}, which the engine never sends"
+                );
+            }
+            for expected in must {
+                assert!(
+                    found.iter().any(|k| k == expected),
+                    "{bridge}: the scan found no {expected:?} among {found:?}"
+                );
+            }
+        }
+    }
+
+    /// An iPhone confirms it is on a fast link's network by the Wi-Fi path's
+    /// gateway, never by `NEHotspotNetwork.fetchCurrent`. A `joinOnce`
+    /// network is not one the app configured as iOS counts it, so without
+    /// location permission `fetchCurrent` names no network at all: on an
+    /// iPhone 16 every join was given up `failed` five seconds after the
+    /// phone was on the group. The Android host names the group's owner
+    /// address in its offer, and that address is the gateway of the path.
+    /// Before the prompt the host must not already be the gateway of the
+    /// network the phone is on: otherwise an offer naming the user's own
+    /// router, with a join that silently did not happen, was dialled there on
+    /// every redial.
+    /// The wait for it is bounded: `apply` can finish with no error while the
+    /// phone stays on its own Wi-Fi, and an unbounded wait held the host's
+    /// group for the offer's two minutes with nothing said.
+    #[test]
+    fn an_iphone_confirms_the_fast_link_network_by_its_gateway() {
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        assert!(
+            !swift.contains("fetchCurrent"),
+            "ios/WifiDirectManager.swift: NEHotspotNetwork.fetchCurrent names no joinOnce \
+             network without location permission; confirm the network by the gateway"
+        );
+        assert!(
+            swift.contains(
+                "if Self.isGateway(link.host, of: path) { link.offGroup = 0 \
+                 self.openFastLinkStream(link, port: port) }"
+            ),
+            "ios/WifiDirectManager.swift: a fast-link dial must wait for the offered host to \
+             be the Wi-Fi path's gateway"
+        );
+        assert!(
+            swift.contains(
+                "} else if link.offGroup + 1 >= Self.FAST_LINK_OFF_GROUP_LIMIT { \
+                 self.emitDiagnostic(\"error\", \"Fast link: the phone is not on the offered network\", \
+                 context: [ \"linkId\": link.linkId, ]) self.endFastLink(reason: \"failed\") }"
+            ),
+            "ios/WifiDirectManager.swift: a join that never reaches the group must end \
+             `failed` after a bounded number of looks, not wait out its offer"
+        );
+        assert_eq!(
+            swift
+                .matches("guard streams.count < Self.MAX_STREAMS else { scheduleFastLinkRedial(link) return }")
+                .count(),
+            2,
+            "ios/WifiDirectManager.swift: a fast-link dial that finds the stream table full \
+             must try again, not end the redial chain"
+        );
+        assert!(
+            swift.contains(
+                "fastLink = link checkBeforeJoin(link, passphrase: passphrase, looks: 0) }"
+            ) && swift.contains(
+                "if !Self.isGateway(link.host, of: path) { \
+                 self.applyFastLinkJoin(link, passphrase: passphrase) }"
+            ),
+            "ios/WifiDirectManager.swift: a join must refuse an offered host that is already \
+             the gateway of the network the phone is on, before the prompt; the gateway check \
+             alone dials the user's own router when the join silently does not happen"
+        );
+    }
+    /// A pending fast link is ended `superseded` when another peer stream
+    /// reaches its peer first, never taken for the link's own. Both phones
+    /// back on one home network met over the LAN while an offer was pending:
+    /// the engine marked the link up from that stream, the iPhone never
+    /// dialled the group the user had just joined, and leaving the home
+    /// network for it lost both 40 s later. The announcement pins (in
+    /// `react_native_wifi_direct_announces_only_proved_addresses`) hold the
+    /// order, the end before the announcement; this holds the conditions
+    /// and the directive-time refusals. A stream over the group itself is
+    /// the link's own however it was dialled, including one proved over a
+    /// link-local address before DHCP, whose path has no gateway yet: only a
+    /// path whose gateway is positively not the host supersedes after the
+    /// join.
+    #[test]
+    fn a_pending_fast_link_gives_way_to_a_stream_that_reached_the_peer_first() {
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        assert!(
+            swift.contains(
+                "if let pending = fastLink, pending.peer == address, \
+                 let held = peers.handle(for: address), held !== (pending.stream as? Stream) { \
+                 if pending.joined && !Self.runsOffTheGroup(held, host: pending.host) {"
+            ) && swift.contains("pending.stream = held } else {")
+                && swift.contains(
+                    "guard let path = stream.connection.currentPath, !path.gateways.isEmpty else { \
+                     return false } return !isGateway(host, of: path)"
+                ),
+            "ios/WifiDirectManager.swift: a stream that is not the link's own must end a \
+             pending link for its peer, and one over the group itself (its path's gateway \
+             the offered host) is the link's own: an Android below 13 advertises on the \
+             group's interface, and superseding that stream tore down the group it ran on"
+        );
+        assert!(
+            swift.contains(
+                "if let held = peers.handle(for: link.peer), streams.contains(held) { \
+                 protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: \"superseded\") \
+                 return } fastLink = link"
+            ),
+            "ios/WifiDirectManager.swift: a join for a peer a stream already reaches must end \
+             `superseded` before any prompt"
+        );
+        assert!(
+            kotlin.contains(
+                "private fun supersedeFastLinkFor(address: String) { \
+                 if (sockets.carrierOf(address) != PeerStreamSockets.Carrier.LAN) return"
+            ),
+            "WifiDirectManager.kt: only a LAN stream supersedes a pending link; a P2P one is \
+             the link's own"
+        );
+        assert!(
+            kotlin.contains(
+                "?: parkedFastLinkJoin?.takeIf { it.peerId == address }?.linkId ?: return"
+            ),
+            "WifiDirectManager.kt: a parked tie-break join gives way like any pending link"
+        );
+        for directive in ["hostFastLink", "joinFastLink"] {
+            assert!(
+                kotlin.contains(&format!(
+                    "private fun {directive}(directive: FastLinkDirective) {{ \
+                     if (sockets.holds(directive.peerId)) {{ \
+                     fastLinkEnded(directive.linkId, \"superseded\") return }}"
+                )),
+                "WifiDirectManager.kt: {directive} for a peer a stream already reaches must end \
+                 `superseded` first"
+            );
+        }
+    }
+
+    /// An Android host records its fast link's group name once it sees the
+    /// group, not only before `createGroup`. Android reports the device out of
+    /// any group while the group is still forming, which clears the first
+    /// record, so a host killed while hosting left the group on the air with
+    /// no name on disk and its next start adopted it as an ordinary group.
+    /// That broadcast also leaves the record alone while the hosted group is
+    /// unseen, which closes the window before the group is first seen.
+    #[test]
+    fn an_android_host_records_its_group_once_it_sees_it() {
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        assert!(
+            kotlin.contains(
+                "if (port == null || host == null) return@requestGroupInfo \
+                 hosted.reported = true recordHostedFastLinkGroup(hosted.ssid)"
+            ),
+            "WifiDirectManager.kt: fastLinkGroupChanged must record the hosted group's name \
+             when it first sees the group"
+        );
+        assert!(
+            kotlin.contains(
+                "private fun fastLinkGroupGone() { fastLinkLeaving = false \
+                 if (fastLinkHosted?.reported != false) recordHostedFastLinkGroup(null)"
+            ),
+            "WifiDirectManager.kt: the out-of-group broadcast during createGroup must not clear \
+             the name of a hosted group not yet seen"
+        );
+    }
+
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt");
         for (what, pinned) in [
+            // The same wake carries the fast link's directives (ADR 0038). Both
+            // calls only post to the manager's thread, so the callback still
+            // returns at once; the second exists because the body drain stops
+            // at "no stream yet", and a directive is what brings one up.
             (
                 "the registration, gated on the slot",
                 "if (currentConfig?.wifiDirectEnabled == true) { try { \
                  proto.setWifiDirectTransportCallback(object : \
                  uniffi.offline_protocol.WifiDirectTransportCallback { override fun \
-                 onMessagesAvailable() { wifiDirectManager?.onMessagesAvailable() } })",
+                 onMessagesAvailable() { wifiDirectManager?.onMessagesAvailable() \
+                 wifiDirectManager?.onFastLinkWake() } })",
             ),
             (
                 "the field the callback reads",
@@ -21039,7 +21501,10 @@ mod tests {
     /// queued then finds nothing; forgotten after `endAll()`, a stream that
     /// became ready in between was announced into the emptied table, and the
     /// core held a link to a stream that was about to be cancelled. The
-    /// Multipeer manager this replaced lost a remote exactly that way.
+    /// Multipeer manager this replaced lost a remote exactly that way. The
+    /// fast link ends `closed` between the two: after `endAll()` the engine
+    /// has seen its stream drop and ended it `lost`, which counts as a miss
+    /// against a peer that offered it unasked.
     ///
     /// Android resets the redial delay on a new connection after a
     /// disconnect (group owners nearly always share one address, so the
@@ -21055,9 +21520,12 @@ mod tests {
                  let old = (listener: listener, browser: browser, streams: streams) \
                  listener = nil browser = nil streams = [] adverts = [:] unprovable = [] \
                  dialPolicy.reset() \
+                 try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: false, acceptUnrequested: false) \
+                 endFastLink(reason: \"closed\") \
                  peers.endAll() old.listener?.cancel()"
             ),
-            "ios/WifiDirectManager.swift: stop() must forget every stream before endAll()"
+            "ios/WifiDirectManager.swift: stop() must forget every stream, then end the fast \
+             link `closed`, before endAll()"
         );
         let kotlin =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
@@ -21289,7 +21757,7 @@ mod tests {
                 [
                     (
                         "wifiDirectPeerConnected(",
-                        "func peerStreamConnected(_ address: String) { do { \
+                        "endFastLink(reason: \"superseded\") } } do { \
                          try protocolInstance.wifiDirectPeerConnected(peerId: address)",
                     ),
                     (
@@ -21341,8 +21809,8 @@ mod tests {
                 [
                     (
                         "wifiDirectPeerConnected(",
-                        "override fun peerConnected(address: String) = \
-                         protocol.wifiDirectPeerConnected(address)",
+                        "override fun peerConnected(address: String) { \
+                         supersedeFastLinkFor(address) protocol.wifiDirectPeerConnected(address) }",
                     ),
                     (
                         "wifiDirectMessageReceived(",

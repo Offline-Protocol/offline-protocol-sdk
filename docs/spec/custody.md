@@ -32,7 +32,7 @@ a protocol break rather than a refactor.
   retry ladder and park state are untouched by a deposit and untouched by a
   receipt. The failure this prevents is the one the sender-holds-custody
   invariant exists for
-  ([state machines](../state-machines/README.md#the-one-invariant-that-spans-all-seven)):
+  ([state machines](../state-machines/README.md#the-one-invariant-that-spans-all-eight)):
   a sender that released a message to a carrier which then walked away would
   have lost it silently. Under this chapter that case costs latency and nothing
   else.

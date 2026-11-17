@@ -220,6 +220,22 @@ impl OfflineProtocol {
             } else {
                 self.peer_coalesced_ack.remove(sender);
             }
+            // Record whether this peer routes fast-link frames (ADR 0038).
+            // Same shape again, and like the ACK lists not gated on our
+            // config: it says what the peer parses.
+            if payload
+                .link_versions
+                .contains(&offline_protocol_sealed::FAST_LINK_V1)
+            {
+                if !self.peer_fast_link.contains(sender)
+                    && self.peer_fast_link.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_fast_link.clear();
+                }
+                self.peer_fast_link.insert(sender.to_string());
+            } else {
+                self.peer_fast_link.remove(sender);
+            }
 
             // Record whether this peer replicates documents, so the data
             // layer may push `__DATA_V1__` frames to them. Same shape again:
@@ -409,12 +425,8 @@ impl OfflineProtocol {
                 .mark_peer_nostr_pubkey(sender, advertised_nostr_pubkey.as_deref());
 
             let caps = PeerCapabilities::from_advertised(
-                &payload.env_versions,
-                &payload.rich_versions,
-                &payload.data_versions,
-                &payload.ctrl_versions,
+                &payload,
                 if signed { &payload.svc_versions } else { &[] },
-                &payload.ack_versions,
                 advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {
@@ -1623,9 +1635,19 @@ impl OfflineProtocol {
                             "Dropping a sealed service frame that is not a request or response"
                         );
                     }
+                    // A fast-link frame from a group plaintext never reaches
+                    // here; from this session it is routed below, after the
+                    // confirm, and never surfaced.
+                    let fast_link_frame = (in_session
+                        && text.starts_with(internal_prefixes::FAST_LINK))
+                    .then(|| std::mem::take(&mut text));
+                    let stray_fast_link_frame =
+                        !in_session && text.starts_with(internal_prefixes::FAST_LINK);
                     let surfaced = if is_session_confirm
                         || sealed_service_frame.is_some()
                         || unroutable_service_frame
+                        || fast_link_frame.is_some()
+                        || stray_fast_link_frame
                     {
                         Some(InternalMessageResult::Consumed)
                     } else if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
@@ -1655,6 +1677,16 @@ impl OfflineProtocol {
                     self.confirm_session_from_successful_decrypt(&sender_owned, &group_id);
                     if let Some(frame) = sealed_service_frame {
                         self.handle_sealed_service_frame(&sender_owned, &frame, message);
+                    }
+                    if let Some(frame) = fast_link_frame {
+                        if self.draining_pending_decryption {
+                            debug!(
+                                sender = %sender_owned,
+                                "Dropping a fast-link frame that waited for the session"
+                            );
+                        } else {
+                            self.handle_fast_link_frame(&sender_owned, &frame);
+                        }
                     }
                     surfaced
                 }

@@ -1301,6 +1301,12 @@ impl OfflineProtocol {
                     self.handle_group_data_sync_frame(&payload.group_id, sender, &body);
                     return InternalMessageResult::Consumed;
                 }
+                // A fast-link frame belongs to a 1:1 session (ADR 0038): in a
+                // group every member would read the passphrase. Consumed, not
+                // acted on and not shown, on all three arms.
+                if text.starts_with(internal_prefixes::FAST_LINK) {
+                    return InternalMessageResult::Consumed;
+                }
                 let msg_id = logical_key.unwrap_or_else(|| message.id.as_str().to_string());
                 if msg_id != message.id.as_str() {
                     self.group_mesh
@@ -2852,6 +2858,15 @@ impl OfflineProtocol {
                             self.ack_drained_group_message(
                                 &ack_sender,
                                 &ack_message_id,
+                                entry.received_via,
+                            );
+                            continue;
+                        }
+                        if text.starts_with(internal_prefixes::FAST_LINK) {
+                            delivered_here.insert(entry.message_id.clone());
+                            self.ack_drained_group_message(
+                                &entry.sender,
+                                &entry.message_id,
                                 entry.received_via,
                             );
                             continue;
@@ -6541,6 +6556,9 @@ impl OfflineProtocol {
                     if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
                         let body = body.to_string();
                         self.handle_group_data_sync_frame(group_id, sender, &body);
+                        return;
+                    }
+                    if text.starts_with(internal_prefixes::FAST_LINK) {
                         return;
                     }
                     let (content, media_metadata, content_type, forward_info_event) =

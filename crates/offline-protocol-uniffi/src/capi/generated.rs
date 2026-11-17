@@ -2188,6 +2188,47 @@ impl Codec for Vec<crate::WifiDirectMessage> {
     }
 }
 
+impl Codec for crate::FastLinkDirective {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "FastLinkDirective")?;
+        let out = Self {
+            kind: f.take("kind")?,
+            link_id: f.take("link_id")?,
+            peer_id: f.take("peer_id")?,
+            ssid: f.take("ssid")?,
+            passphrase: f.take("passphrase")?,
+            host: f.take("host")?,
+            port: f.take("port")?,
+            expires_in_ms: f.take("expires_in_ms")?,
+            reason: f.take("reason")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("kind", self.kind.encode()),
+            ("link_id", self.link_id.encode()),
+            ("peer_id", self.peer_id.encode()),
+            ("ssid", self.ssid.encode()),
+            ("passphrase", self.passphrase.encode()),
+            ("host", self.host.encode()),
+            ("port", self.port.encode()),
+            ("expires_in_ms", self.expires_in_ms.encode()),
+            ("reason", self.reason.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::FastLinkDirective> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
 impl Codec for crate::GatewayAddressDeclaration {
     fn decode(value: &Value, at: &str) -> Decoded<Self> {
         let mut f = Fields::new(value, at, "GatewayAddressDeclaration")?;
@@ -2653,6 +2694,18 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             target.internet_address_declaration_refused(arg_reason);
             Ok(Value::Null)
         }
+        "request_fast_link" => {
+            let arg_peer_id = args.take("peer_id")?;
+            args.finish()?;
+            let result = target.request_fast_link(arg_peer_id)?;
+            Ok(result.encode())
+        }
+        "close_fast_link" => {
+            let arg_peer_id = args.take("peer_id")?;
+            args.finish()?;
+            let result = target.close_fast_link(arg_peer_id);
+            Ok(result.encode())
+        }
         "wifi_direct_status_changed" => {
             let arg_is_connected = args.take("is_connected")?;
             args.finish()?;
@@ -2681,6 +2734,34 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             let arg_peer_id = args.take("peer_id")?;
             args.finish()?;
             target.wifi_direct_peer_disconnected(arg_peer_id)?;
+            Ok(Value::Null)
+        }
+        "wifi_direct_set_fast_link_roles" => {
+            let arg_can_host = args.take("can_host")?;
+            let arg_can_join = args.take("can_join")?;
+            let arg_accept_unrequested = args.take("accept_unrequested")?;
+            args.finish()?;
+            target.wifi_direct_set_fast_link_roles(arg_can_host, arg_can_join, arg_accept_unrequested);
+            Ok(Value::Null)
+        }
+        "wifi_direct_next_fast_link_directive" => {
+            args.finish()?;
+            let result = target.wifi_direct_next_fast_link_directive();
+            Ok(result.encode())
+        }
+        "wifi_direct_fast_link_hosting" => {
+            let arg_link_id = args.take("link_id")?;
+            let arg_host = args.take("host")?;
+            let arg_port = args.take("port")?;
+            args.finish()?;
+            target.wifi_direct_fast_link_hosting(arg_link_id, arg_host, arg_port)?;
+            Ok(Value::Null)
+        }
+        "wifi_direct_fast_link_ended" => {
+            let arg_link_id = args.take("link_id")?;
+            let arg_reason = args.take("reason")?;
+            args.finish()?;
+            target.wifi_direct_fast_link_ended(arg_link_id, arg_reason);
             Ok(Value::Null)
         }
         "reticulum_status_changed" => {

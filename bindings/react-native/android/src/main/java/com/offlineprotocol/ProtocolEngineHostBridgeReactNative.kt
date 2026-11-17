@@ -98,6 +98,12 @@ fun clearServiceTopic(module: OfflineProtocolModule, serviceId: String, topic: S
     }
 }
 
+fun closeFastLink(module: OfflineProtocolModule, peerId: String, promise: Promise) {
+    run(module, promise, "ERROR_FAST_LINK", "Failed to close the fast link") { host, context ->
+        ProtocolEngineHostBridge.closeFastLink(host, context, mapOf("peerId" to peerId))
+    }
+}
+
 fun createInvite(module: OfflineProtocolModule, petname: String?, signed: Boolean, promise: Promise) {
     run(module, promise, "ERROR_NOT_INITIALIZED", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.createInvite(host, context, mapOf("petname" to petname, "signed" to signed))
@@ -521,6 +527,12 @@ fun releaseTransportLock(module: OfflineProtocolModule, promise: Promise) {
 fun requestEnableBluetooth(module: OfflineProtocolModule, promise: Promise) {
     run(module, promise, "ERROR_BLUETOOTH", "Bluetooth not available on this device") { host, context ->
         ProtocolEngineHostBridge.requestEnableBluetooth(host, context, null)
+    }
+}
+
+fun requestFastLink(module: OfflineProtocolModule, peerId: String, promise: Promise) {
+    run(module, promise, "ERROR_FAST_LINK", "Failed to request a fast link", mapProtocolErrors = true) { host, context ->
+        ProtocolEngineHostBridge.requestFastLink(host, context, mapOf("peerId" to peerId))
     }
 }
 

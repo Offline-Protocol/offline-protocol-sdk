@@ -443,6 +443,20 @@ export interface WifiDirectTransportConfig {
    */
   autoAccept?: boolean;
   /**
+   * How far this app takes part in fast links (ADR 0038), the Wi-Fi network
+   * two devices bring up for each other over their session:
+   * - `'any'` (default): host for a peer's request (Android) and join an
+   *   offer this app did not ask for, which shows the iOS join prompt
+   *   unprompted and moves an Android device onto the peer's group silently.
+   * - `'requestedOnly'`: take part only in links this app asked for with
+   *   `requestFastLink`; a peer's request or unasked-for offer is answered
+   *   `declined`. Two apps both set to this never link.
+   * - `'off'`: never host or join one.
+   * An enable that leaves it out keeps the current setting; an unknown value
+   * is `'off'`.
+   */
+  fastLink?: 'off' | 'requestedOnly' | 'any';
+  /**
    * @deprecated Not used. The device with the lowest address owns a group
    * the SDK forms.
    */
@@ -1467,6 +1481,34 @@ export interface TransportSwitchedEvent extends BaseEvent {
   from: string | null;
   to: string;
   reason: string;
+}
+
+/**
+ * A fast link changed state (ADR 0038): a Wi-Fi network this device hosts
+ * for a peer, or joins from it, brought up through their session.
+ *
+ * `requestFastLink` returns as soon as the first step is taken; this event is
+ * how the outcome arrives. It never carries a network name or a passphrase.
+ * Traffic moves onto the link by ordinary transport selection, which
+ * `transport_switched` reports.
+ */
+export interface FastLinkChangedEvent extends BaseEvent {
+  type: 'fast_link_changed';
+  /** The peer's canonical address (`off1…`). */
+  peer_id: string;
+  /** The link, 32 lowercase hex digits. */
+  link_id: string;
+  /** This device's side. */
+  role: 'host' | 'join';
+  /** Where the link is now. */
+  state: 'requested' | 'hosting' | 'offered' | 'joining' | 'up' | 'closed';
+  /**
+   * Why it closed, only on `closed`: `declined` (the joiner's user said no),
+   * `idle`, `lost`, `expired`, `background`, `busy`, `cannot_host`,
+   * `cannot_join`, `superseded` (another connection reached the peer first
+   * and carries its traffic), and others; an unknown value means it failed.
+   */
+  reason: string | null;
 }
 
 /**
@@ -3156,6 +3198,7 @@ export type ProtocolEvent =
   | MessageFailedEvent
   | MessageDecryptionFailedEvent
   | TransportSwitchedEvent
+  | FastLinkChangedEvent
   | RelayPromotedEvent
   | RelayDemotedEvent
   | RelayDemotedBatteryEvent

@@ -134,5 +134,8 @@ pub(crate) fn payload(
         svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
+        // No fast link: a leaf has no Wi-Fi network to host or join through
+        // this crate, and saying nothing keeps its key package what it was.
+        link_versions: Vec::new(),
     }
 }

@@ -38,6 +38,7 @@ export const PROTOCOL_EVENT_TYPES = [
   'dors_score_updated',
   'dors_transport_selected',
   'dors_transport_switched',
+  'fast_link_changed',
   'file_progress',
   'file_receive_failed',
   'file_received',

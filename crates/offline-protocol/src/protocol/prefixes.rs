@@ -1,6 +1,6 @@
 //! Internal message prefix definitions and base64 utilities.
 //!
-//! Seven of the prefixes below are defined in `offline-protocol-sealed` and
+//! Eight of the prefixes below are defined in `offline-protocol-sealed` and
 //! named here rather than spelled out: the ones a leaf node also emits and
 //! parses, with a different MLS implementation. Reservation still happens
 //! here, because `INTERNAL_PREFIXES` is what refuses application content that
@@ -92,6 +92,13 @@ define_internal_prefixes! {
     /// Consumed on receipt until the exchange is implemented. Defined in
     /// `offline-protocol-sealed`.
     MEMBER = offline_protocol_sealed::prefixes::MEMBER,
+    /// Prefix for a fast-link frame (ADR 0038) inside a decrypted 1:1 MLS
+    /// plaintext: a request, an offer of a Wi-Fi network's credentials, or a
+    /// close. Never an outer wire prefix, so not in `DATA_PLANE_PREFIXES`: a
+    /// bare one on the wire is signature-gated and then consumed, never
+    /// routed, because an offer's passphrase must have arrived sealed.
+    /// Defined in `offline-protocol-sealed`.
+    FAST_LINK = offline_protocol_sealed::prefixes::FAST_LINK,
     /// Prefix for the sealed rich payload (`RichPayloadV1` JSON) inside a
     /// decrypted MLS plaintext. Only ever travels INSIDE an `ENCRYPTED`
     /// envelope, negotiated via `rich_versions` in the key package; listed

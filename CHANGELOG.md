@@ -18,6 +18,28 @@ Questions about a release, or about upgrading to one? Ask in the
 
 ### Added
 
+- **Two devices that meet only over Bluetooth can bring up Wi-Fi between
+  them: the fast link** ([ADR 0038](docs/adr/0038-a-fast-link-is-offered-inside-the-session.md)).
+  `requestFastLink(peer)` (React Native and Flutter; `request_fast_link` over
+  the FFI) asks a peer with a confirmed session for a Wi-Fi network: an
+  Android device hosts a Wi-Fi Direct group with fresh random credentials,
+  sealed to the peer in the session, and an iPhone joins it after a system
+  prompt. The stream over it fills the peer-stream slot, so transfers move to
+  it on their own: a 1 MiB file that took 197.7 s over Bluetooth took about
+  2.5 s on two phones. Progress arrives as `fast_link_changed` events; the
+  link ends after 60 s with nothing large to carry, when the iPhone app leaves
+  the foreground, or on `closeFastLink`, and ends `superseded` when another
+  connection, a shared home network say, reaches the peer before it comes up
+  and carries the traffic instead. An iOS app needs the Hotspot
+  Configuration entitlement, and an Android app `NEARBY_WIFI_DEVICES` (fine
+  location below Android 13); see [mobile permissions](docs/mobile-permissions.md#fast-link).
+  `wifiDirect.fastLink` decides how far an app takes part: `any` (the
+  default) also hosts for a peer's request and joins an offer it did not ask
+  for, `requestedOnly` takes part only in links the app asked for, `off`
+  never. Platforms declare what they can do through four new peer-stream
+  driver calls, `wifi_direct_set_fast_link_roles` and its siblings; a custom
+  platform that declares nothing is never asked to host or join.
+
 - **Native iOS and Android applications get the SDK's built-in storage.**
   `OfflineProtocolReferenceStorage` opens the Keychain or Keystore MLS store and
   the app-container protocol-state store for one `(appId, profile)` account,
@@ -75,6 +97,15 @@ Questions about a release, or about upgrading to one? Ask in the
   `FLUTTER_PUBLISH` on, a pushed release tag publishes it through pub.dev
   automated publishing. The first version is uploaded by hand
   ([docs/flutter-distribution.md](docs/flutter-distribution.md)).
+
+### Changed
+
+- **A file transfer over a peer stream keeps 512 KiB in flight, not 128 KiB:**
+  eight 64 KiB chunks instead of four of 32 KiB. Every peer-stream carrier
+  gets it (a fast link, a Wi-Fi Direct group, a LAN, AWDL): with the old
+  window, a 1 MiB file over a fast link took 8 s waiting on acknowledgements
+  rather than on the link. Bluetooth, internet and Nostr windows are
+  unchanged.
 
 ### Fixed
 

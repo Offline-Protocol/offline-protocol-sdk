@@ -48,6 +48,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0035](0035-a-service-can-be-subscribed-to.md) | A service can be subscribed to: sealed, leased, `latest` or `log`, recoverable | Accepted |
 | [0036](0036-a-topic-can-be-backed-by-a-group.md) | A topic can be backed by a group: one encryption per publish, revocation by commit | Proposed |
 | [0037](0037-an-applications-users-are-visible-only-to-that-application.md) | An application's users are visible only to that application | Proposed |
+| [0038](0038-a-fast-link-is-offered-inside-the-session.md) | Two devices that meet over Bluetooth bring up Wi-Fi through their session | Accepted |
 
 ## Format
 

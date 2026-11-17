@@ -439,6 +439,33 @@ private_constant :UniffiHandleMap
     end
   end
 
+  # The Record type FastLinkDirective.
+
+  def self.check_lower_TypeFastLinkDirective(v)
+    
+    
+    
+    RustBuffer.check_lower_Optionalstring(v.ssid)
+    RustBuffer.check_lower_Optionalstring(v.passphrase)
+    RustBuffer.check_lower_Optionalstring(v.host)
+    RustBuffer.check_lower_Optionalu16(v.port)
+    
+    RustBuffer.check_lower_Optionalstring(v.reason)
+  end
+
+  def self.alloc_from_TypeFastLinkDirective(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_TypeFastLinkDirective(v)
+      return builder.finalize
+    end
+  end
+
+  def consume_into_TypeFastLinkDirective
+    consumeWithStream do |stream|
+      return stream.read_TypeFastLinkDirective
+    end
+  end
+
   # The Record type FileProgress.
 
   def self.check_lower_TypeFileProgress(v)
@@ -1824,6 +1851,27 @@ private_constant :UniffiHandleMap
     end
   end
 
+  # The Optional<T> type for u16.
+
+  def self.check_lower_Optionalu16(v)
+    if !v.nil?
+      
+    end
+  end
+
+  def self.alloc_from_Optionalu16(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_Optionalu16(v)
+      return builder.finalize()
+    end
+  end
+
+  def consume_into_Optionalu16
+    consumeWithStream do |stream|
+      return stream.read_Optionalu16
+    end
+  end
+
   # The Optional<T> type for i16.
 
   def self.check_lower_Optionali16(v)
@@ -2031,6 +2079,27 @@ private_constant :UniffiHandleMap
   def consume_into_OptionalTypeCustodyConfig
     consumeWithStream do |stream|
       return stream.read_OptionalTypeCustodyConfig
+    end
+  end
+
+  # The Optional<T> type for TypeFastLinkDirective.
+
+  def self.check_lower_OptionalTypeFastLinkDirective(v)
+    if !v.nil?
+      RustBuffer.check_lower_TypeFastLinkDirective(v)
+    end
+  end
+
+  def self.alloc_from_OptionalTypeFastLinkDirective(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_OptionalTypeFastLinkDirective(v)
+      return builder.finalize()
+    end
+  end
+
+  def consume_into_OptionalTypeFastLinkDirective
+    consumeWithStream do |stream|
+      return stream.read_OptionalTypeFastLinkDirective
     end
   end
 
@@ -2863,6 +2932,22 @@ class RustBufferStream
       store_pending: read_bool,
       require_encryption: read_bool,
       pending_queue: read_TypePendingQueueConfig
+    )
+  end
+
+  # The Record type FastLinkDirective.
+
+  def read_TypeFastLinkDirective
+    FastLinkDirective.new(
+      kind: read_string,
+      link_id: read_string,
+      peer_id: read_string,
+      ssid: read_Optionalstring,
+      passphrase: read_Optionalstring,
+      host: read_Optionalstring,
+      port: read_Optionalu16,
+      expires_in_ms: read_u64,
+      reason: read_Optionalstring
     )
   end
 
@@ -4050,6 +4135,21 @@ class RustBufferStream
   end
 
   
+  # The Optional<T> type for u16.
+
+  def read_Optionalu16
+    flag = unpack_from 1, 'c'
+
+    if flag == 0
+      return nil
+    elsif flag == 1
+      return read_u16
+    else
+      raise InternalError, 'Unexpected flag byte for Optionalu16'
+    end
+  end
+
+  
   # The Optional<T> type for i16.
 
   def read_Optionali16
@@ -4196,6 +4296,21 @@ class RustBufferStream
       return read_TypeCustodyConfig
     else
       raise InternalError, 'Unexpected flag byte for OptionalTypeCustodyConfig'
+    end
+  end
+
+  
+  # The Optional<T> type for TypeFastLinkDirective.
+
+  def read_OptionalTypeFastLinkDirective
+    flag = unpack_from 1, 'c'
+
+    if flag == 0
+      return nil
+    elsif flag == 1
+      return read_TypeFastLinkDirective
+    else
+      raise InternalError, 'Unexpected flag byte for OptionalTypeFastLinkDirective'
     end
   end
 
@@ -4850,6 +4965,20 @@ class RustBufferBuilder
     self.write_bool(v.store_pending)
     self.write_bool(v.require_encryption)
     self.write_TypePendingQueueConfig(v.pending_queue)
+  end
+
+  # The Record type FastLinkDirective.
+
+  def write_TypeFastLinkDirective(v)
+    self.write_string(v.kind)
+    self.write_string(v.link_id)
+    self.write_string(v.peer_id)
+    self.write_Optionalstring(v.ssid)
+    self.write_Optionalstring(v.passphrase)
+    self.write_Optionalstring(v.host)
+    self.write_Optionalu16(v.port)
+    self.write_u64(v.expires_in_ms)
+    self.write_Optionalstring(v.reason)
   end
 
   # The Record type FileProgress.
@@ -5791,6 +5920,17 @@ class RustBufferBuilder
     end
   end
 
+  # The Optional<T> type for u16.
+
+  def write_Optionalu16(v)
+    if v.nil?
+      pack_into(1, 'c', 0)
+    else
+      pack_into(1, 'c', 1)
+      self.write_u16(v)
+    end
+  end
+
   # The Optional<T> type for i16.
 
   def write_Optionali16(v)
@@ -5898,6 +6038,17 @@ class RustBufferBuilder
     else
       pack_into(1, 'c', 1)
       self.write_TypeCustodyConfig(v)
+    end
+  end
+
+  # The Optional<T> type for TypeFastLinkDirective.
+
+  def write_OptionalTypeFastLinkDirective(v)
+    if v.nil?
+      pack_into(1, 'c', 0)
+    else
+      pack_into(1, 'c', 1)
+      self.write_TypeFastLinkDirective(v)
     end
   end
 
@@ -6945,6 +7096,10 @@ module UniFFILib
     [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link,
+    [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
+    :int8
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores,
     [:uint64, RustCallStatus.by_ref],
     :void
@@ -7381,6 +7536,10 @@ module UniFFILib
     [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link,
+    [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration,
     [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
     :int8
@@ -7589,6 +7748,14 @@ module UniFFILib
     [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
     :int8
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended,
+    [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
+    :void
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting,
+    [:uint64, RustBuffer.by_value, RustBuffer.by_value, :uint16, RustCallStatus.by_ref],
+    :void
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message,
     [:uint64, RustCallStatus.by_ref],
     RustBuffer.by_value
@@ -7597,12 +7764,20 @@ module UniFFILib
     [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive,
+    [:uint64, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected,
     [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
   
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected,
     [:uint64, RustBuffer.by_value, RustCallStatus.by_ref],
+    :void
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles,
+    [:uint64, :int8, :int8, :int8, RustCallStatus.by_ref],
     :void
   
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed,
@@ -8133,6 +8308,10 @@ module UniFFILib
     [],
     :uint16
   
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link,
+    [],
+    :uint16
+  
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores,
     [],
     :uint16
@@ -8569,6 +8748,10 @@ module UniFFILib
     [],
     :uint16
   
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link,
+    [],
+    :uint16
+  
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration,
     [],
     :uint16
@@ -8777,6 +8960,14 @@ module UniFFILib
     [],
     :uint16
   
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting,
+    [],
+    :uint16
+  
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message,
     [],
     :uint16
@@ -8785,11 +8976,19 @@ module UniFFILib
     [],
     :uint16
   
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive,
+    [],
+    :uint16
+  
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected,
     [],
     :uint16
   
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles,
     [],
     :uint16
   
@@ -9461,6 +9660,56 @@ class EncryptionConfig
       return false
     end
     if @pending_queue != other.pending_queue
+      return false
+    end
+
+    true
+  end
+  
+end
+  
+  # Record type FastLinkDirective
+class FastLinkDirective
+  attr_reader :kind, :link_id, :peer_id, :ssid, :passphrase, :host, :port, :expires_in_ms, :reason
+
+  def initialize(kind:, link_id:, peer_id:, ssid:, passphrase:, host:, port:, expires_in_ms:, reason:)
+    @kind = kind
+    @link_id = link_id
+    @peer_id = peer_id
+    @ssid = ssid
+    @passphrase = passphrase
+    @host = host
+    @port = port
+    @expires_in_ms = expires_in_ms
+    @reason = reason
+  end
+
+  def ==(other)
+    if @kind != other.kind
+      return false
+    end
+    if @link_id != other.link_id
+      return false
+    end
+    if @peer_id != other.peer_id
+      return false
+    end
+    if @ssid != other.ssid
+      return false
+    end
+    if @passphrase != other.passphrase
+      return false
+    end
+    if @host != other.host
+      return false
+    end
+    if @port != other.port
+      return false
+    end
+    if @expires_in_ms != other.expires_in_ms
+      return false
+    end
+    if @reason != other.reason
       return false
     end
 
@@ -11959,6 +12208,12 @@ end
       ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer,uniffi_clone_handle(),RustBuffer.alloc_from_string(file_id))
   end
   
+  def close_fast_link(peer_id)
+        peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
+        
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link,uniffi_clone_handle(),RustBuffer.alloc_from_string(peer_id))
+    return 1 == result
+  end
   def close_file_stores()
       ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores,uniffi_clone_handle(),)
   end
@@ -12583,6 +12838,12 @@ end
       ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group,uniffi_clone_handle(),RustBuffer.alloc_from_string(group_id),RustBuffer.alloc_from_string(new_name))
   end
   
+  def request_fast_link(peer_id)
+        peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
+        
+    result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link,uniffi_clone_handle(),RustBuffer.alloc_from_string(peer_id))
+    return result.consume_into_string
+  end
   def request_group_relay_registration(group_id)
         group_id = ::OfflineProtocol::uniffi_utf8(group_id)
         
@@ -12957,6 +13218,24 @@ end
     result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes,uniffi_clone_handle(),RustBuffer.alloc_from_bytes(public_key),RustBuffer.alloc_from_bytes(data),RustBuffer.alloc_from_bytes(signature))
     return 1 == result
   end
+  def wifi_direct_fast_link_ended(link_id, reason)
+        link_id = ::OfflineProtocol::uniffi_utf8(link_id)
+        
+        reason = ::OfflineProtocol::uniffi_utf8(reason)
+        
+      ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended,uniffi_clone_handle(),RustBuffer.alloc_from_string(link_id),RustBuffer.alloc_from_string(reason))
+  end
+  
+  def wifi_direct_fast_link_hosting(link_id, host, port)
+        link_id = ::OfflineProtocol::uniffi_utf8(link_id)
+        
+        host = ::OfflineProtocol::uniffi_utf8(host)
+        
+        port = ::OfflineProtocol::uniffi_in_range(port, "u16", 0, 2**16)
+        
+      ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting,uniffi_clone_handle(),RustBuffer.alloc_from_string(link_id),RustBuffer.alloc_from_string(host),port)
+  end
+  
   def wifi_direct_get_next_message()
     result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message,uniffi_clone_handle(),)
     return result.consume_into_OptionalTypeWifiDirectMessage
@@ -12969,6 +13248,10 @@ end
       ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received,uniffi_clone_handle(),RustBuffer.alloc_from_string(sender_id),RustBuffer.alloc_from_Sequenceu8(data))
   end
   
+  def wifi_direct_next_fast_link_directive()
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive,uniffi_clone_handle(),)
+    return result.consume_into_OptionalTypeFastLinkDirective
+  end
   def wifi_direct_peer_connected(peer_id)
         peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
         
@@ -12979,6 +13262,16 @@ end
         peer_id = ::OfflineProtocol::uniffi_utf8(peer_id)
         
       ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected,uniffi_clone_handle(),RustBuffer.alloc_from_string(peer_id))
+  end
+  
+  def wifi_direct_set_fast_link_roles(can_host, can_join, accept_unrequested)
+        can_host = can_host ? true : false
+        
+        can_join = can_join ? true : false
+        
+        accept_unrequested = accept_unrequested ? true : false
+        
+      ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles,uniffi_clone_handle(),(can_host ? 1 : 0),(can_join ? 1 : 0),(accept_unrequested ? 1 : 0))
   end
   
   def wifi_direct_status_changed(is_connected)

@@ -169,6 +169,14 @@ impl WifiDirectTransport {
         }
     }
 
+    /// Wakes the platform as a queued body would, so it drains the engine's
+    /// fast-link directives (ADR 0038) on the same callback it already
+    /// drains bodies on. The platform reads both queues every time it is
+    /// woken, so a wake with no body waiting costs one empty drain.
+    pub fn wake_platform(&self) {
+        self.notify_messages_available();
+    }
+
     /// Gets the local device ID.
     pub fn device_id(&self) -> &str {
         &self.device_id

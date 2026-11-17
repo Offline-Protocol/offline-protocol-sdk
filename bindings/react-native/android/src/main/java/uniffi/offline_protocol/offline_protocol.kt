@@ -1001,6 +1001,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group(
@@ -1219,6 +1221,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username(
@@ -1323,13 +1327,21 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed(
     ): Int
@@ -1542,6 +1554,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1760,6 +1774,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`newName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_username(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1864,13 +1880,21 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes(`ptr`: Long,`publicKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended(`ptr`: Long,`linkId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting(`ptr`: Long,`linkId`: RustBuffer.ByValue,`host`: RustBuffer.ByValue,`port`: Short,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(`ptr`: Long,`canHost`: Byte,`canJoin`: Byte,`acceptUnrequested`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2219,6 +2243,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() and 0xFFFF) != 44634) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link() and 0xFFFF) != 32622) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() and 0xFFFF) != 57369) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2546,6 +2573,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() and 0xFFFF) != 36114) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link() and 0xFFFF) != 19701) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() and 0xFFFF) != 3982) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2702,16 +2732,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() and 0xFFFF) != 24438) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended() and 0xFFFF) != 54290) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting() and 0xFFFF) != 47337) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() and 0xFFFF) != 50868) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() and 0xFFFF) != 59107) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive() and 0xFFFF) != 7498) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() and 0xFFFF) != 38596) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() and 0xFFFF) != 15986) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() and 0xFFFF) != 62518) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() and 0xFFFF) != 12337) {
@@ -4714,6 +4756,8 @@ public interface OfflineProtocolInterface {
     
     fun `cancelFileTransfer`(`fileId`: kotlin.String)
     
+    fun `closeFastLink`(`peerId`: kotlin.String): kotlin.Boolean
+    
     fun `closeFileStores`()
     
     fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo
@@ -4932,6 +4976,8 @@ public interface OfflineProtocolInterface {
     
     fun `renameGroup`(`groupId`: kotlin.String, `newName`: kotlin.String)
     
+    fun `requestFastLink`(`peerId`: kotlin.String): kotlin.String
+    
     fun `requestGroupRelayRegistration`(`groupId`: kotlin.String): kotlin.Boolean
     
     fun `resolveUsername`(`username`: kotlin.String): kotlin.Boolean
@@ -5036,13 +5082,21 @@ public interface OfflineProtocolInterface {
     
     fun `verifySignatureBytes`(`publicKey`: kotlin.ByteArray, `data`: kotlin.ByteArray, `signature`: kotlin.ByteArray): kotlin.Boolean
     
+    fun `wifiDirectFastLinkEnded`(`linkId`: kotlin.String, `reason`: kotlin.String)
+    
+    fun `wifiDirectFastLinkHosting`(`linkId`: kotlin.String, `host`: kotlin.String, `port`: kotlin.UShort)
+    
     fun `wifiDirectGetNextMessage`(): WifiDirectMessage?
     
     fun `wifiDirectMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
     
+    fun `wifiDirectNextFastLinkDirective`(): FastLinkDirective?
+    
     fun `wifiDirectPeerConnected`(`peerId`: kotlin.String)
     
     fun `wifiDirectPeerDisconnected`(`peerId`: kotlin.String)
+    
+    fun `wifiDirectSetFastLinkRoles`(`canHost`: kotlin.Boolean, `canJoin`: kotlin.Boolean, `acceptUnrequested`: kotlin.Boolean)
     
     fun `wifiDirectStatusChanged`(`isConnected`: kotlin.Boolean)
     
@@ -5409,6 +5463,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    override fun `closeFastLink`(`peerId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link(
+        it,
+        
+        FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -6936,6 +7004,21 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `requestFastLink`(`peerId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link(
+        it,
+        
+        FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `requestGroupRelayRegistration`(`groupId`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithHandle {
@@ -7698,6 +7781,36 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `wifiDirectFastLinkEnded`(`linkId`: kotlin.String, `reason`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended(
+        it,
+        
+        FfiConverterString.lower(`linkId`),
+        FfiConverterString.lower(`reason`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `wifiDirectFastLinkHosting`(`linkId`: kotlin.String, `host`: kotlin.String, `port`: kotlin.UShort)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting(
+        it,
+        
+        FfiConverterString.lower(`linkId`),
+        FfiConverterString.lower(`host`),
+        FfiConverterUShort.lower(`port`),_status)
+}
+    }
+    
+    
+
     override fun `wifiDirectGetNextMessage`(): WifiDirectMessage? {
             return FfiConverterOptionalTypeWifiDirectMessage.lift(
     callWithHandle {
@@ -7726,6 +7839,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    override fun `wifiDirectNextFastLinkDirective`(): FastLinkDirective? {
+            return FfiConverterOptionalTypeFastLinkDirective.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
     
     @Throws(ProtocolException::class)override fun `wifiDirectPeerConnected`(`peerId`: kotlin.String)
         = 
@@ -7749,6 +7875,21 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         it,
         
         FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    
+    
+
+    override fun `wifiDirectSetFastLinkRoles`(`canHost`: kotlin.Boolean, `canJoin`: kotlin.Boolean, `acceptUnrequested`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(
+        it,
+        
+        FfiConverterBoolean.lower(`canHost`),
+        FfiConverterBoolean.lower(`canJoin`),
+        FfiConverterBoolean.lower(`acceptUnrequested`),_status)
 }
     }
     
@@ -8347,6 +8488,79 @@ public object FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer<Encryptio
             FfiConverterBoolean.write(value.`storePending`, buf)
             FfiConverterBoolean.write(value.`requireEncryption`, buf)
             FfiConverterTypePendingQueueConfig.write(value.`pendingQueue`, buf)
+    }
+}
+
+
+
+data class FastLinkDirective (
+    var `kind`: kotlin.String
+    , 
+    var `linkId`: kotlin.String
+    , 
+    var `peerId`: kotlin.String
+    , 
+    var `ssid`: kotlin.String?
+    , 
+    var `passphrase`: kotlin.String?
+    , 
+    var `host`: kotlin.String?
+    , 
+    var `port`: kotlin.UShort?
+    , 
+    var `expiresInMs`: kotlin.ULong
+    , 
+    var `reason`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFastLinkDirective: FfiConverterRustBuffer<FastLinkDirective> {
+    override fun read(buf: ByteBuffer): FastLinkDirective {
+        return FastLinkDirective(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUShort.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FastLinkDirective) = (
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`linkId`) +
+            FfiConverterString.allocationSize(value.`peerId`) +
+            FfiConverterOptionalString.allocationSize(value.`ssid`) +
+            FfiConverterOptionalString.allocationSize(value.`passphrase`) +
+            FfiConverterOptionalString.allocationSize(value.`host`) +
+            FfiConverterOptionalUShort.allocationSize(value.`port`) +
+            FfiConverterULong.allocationSize(value.`expiresInMs`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: FastLinkDirective, buf: ByteBuffer) {
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterString.write(value.`linkId`, buf)
+            FfiConverterString.write(value.`peerId`, buf)
+            FfiConverterOptionalString.write(value.`ssid`, buf)
+            FfiConverterOptionalString.write(value.`passphrase`, buf)
+            FfiConverterOptionalString.write(value.`host`, buf)
+            FfiConverterOptionalUShort.write(value.`port`, buf)
+            FfiConverterULong.write(value.`expiresInMs`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
     }
 }
 
@@ -12391,6 +12605,38 @@ public object FfiConverterOptionalUByte: FfiConverterRustBuffer<kotlin.UByte?> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalUShort: FfiConverterRustBuffer<kotlin.UShort?> {
+    override fun read(buf: ByteBuffer): kotlin.UShort? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUShort.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UShort?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUShort.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UShort?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUShort.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalShort: FfiConverterRustBuffer<kotlin.Short?> {
     override fun read(buf: ByteBuffer): kotlin.Short? {
         if (buf.get().toInt() == 0) {
@@ -12701,6 +12947,38 @@ public object FfiConverterOptionalTypeCustodyConfig: FfiConverterRustBuffer<Cust
         } else {
             buf.put(1)
             FfiConverterTypeCustodyConfig.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeFastLinkDirective: FfiConverterRustBuffer<FastLinkDirective?> {
+    override fun read(buf: ByteBuffer): FastLinkDirective? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFastLinkDirective.read(buf)
+    }
+
+    override fun allocationSize(value: FastLinkDirective?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFastLinkDirective.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FastLinkDirective?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFastLinkDirective.write(value, buf)
         }
     }
 }

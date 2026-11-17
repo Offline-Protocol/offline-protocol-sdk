@@ -52,7 +52,8 @@ the other closes, and the pair reconnects forever with no error on either side.
 
 - An Android phone reaches an iPhone or a Python host on the same Wi-Fi
   network. With no shared network they still do not meet; that needs Wi-Fi
-  Aware on both.
+  Aware on both. (Since [ADR 0038](0038-a-fast-link-is-offered-inside-the-session.md),
+  two that share a session can bring up a network for it on request.)
 - A group client that is the higher address can no longer supersede its own
   half-open stream. Its reconnect is refused until keepalive ends the stale
   one, about thirty seconds, where "newer supersedes" reconnected at once.

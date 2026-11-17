@@ -2896,8 +2896,8 @@ impl OfflineProtocol {
                 (CHUNK_SIZE_INTERNET, MEDIA_WINDOW_SIZE_INTERNET)
             }
             TransportType::WiFiDirect => {
-                use crate::constants::{DEFAULT_CHUNK_SIZE, DEFAULT_MEDIA_WINDOW_SIZE};
-                (DEFAULT_CHUNK_SIZE, DEFAULT_MEDIA_WINDOW_SIZE)
+                use crate::constants::{CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM};
+                (CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM)
             }
             TransportType::Reticulum => {
                 // Reticulum is low-bandwidth (LoRa); use BLE-like chunk sizes.
@@ -4265,6 +4265,17 @@ impl OfflineProtocol {
         transport: Option<TransportType>,
     ) -> Result<()> {
         self.mark_message_sent(message, transport, Some(1));
+        // Traffic on the peer-stream slot keeps a fast link off its idle
+        // limit (ADR 0038). Inbound traffic is noted where the platform hands
+        // a body up.
+        if transport == Some(TransportType::WiFiDirect) {
+            let bytes = message.content.len()
+                + message
+                    .binary_content
+                    .as_ref()
+                    .map_or(0, |bytes| bytes.len());
+            self.fast_link_activity(message.recipient.as_str(), bytes);
+        }
         // Never `?`: the frame is already on the wire, so an error here would
         // report a transmitted message as failed. Every transmit path asks
         // `defer_for_ack_capacity` first, so this is only reachable through a
@@ -7042,6 +7053,10 @@ impl OfflineProtocol {
                 offline_protocol_sealed::ACK_COALESCED_V1,
             ],
             nostr_pubkey: self.transport_manager.nostr_public_key(),
+            // Read unconditionally (rule 1 of capability negotiation): whether
+            // this device can host or join a network is its platform's to
+            // say, at runtime, and the frames answer that (ADR 0038).
+            link_versions: vec![offline_protocol_sealed::FAST_LINK_V1],
         }
     }
 

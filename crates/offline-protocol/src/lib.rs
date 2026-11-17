@@ -12,6 +12,7 @@ pub mod config;
 pub mod constants;
 pub mod error;
 pub mod events;
+pub mod fast_link;
 #[cfg(feature = "file-store")]
 pub mod file_store;
 pub mod file_transfer;

@@ -10,6 +10,12 @@
 
 import Foundation
 import Network
+// Scoped: NetworkExtension also exports a legacy `NWEndpoint`, which would make
+// every use of Network's ambiguous in this file.
+import class NetworkExtension.NEHotspotConfiguration
+import class NetworkExtension.NEHotspotConfigurationManager
+import enum NetworkExtension.NEHotspotConfigurationError
+import let NetworkExtension.NEHotspotConfigurationErrorDomain
 
 /// The engine's peer-stream slot on iOS, over `NWListener`, `NWBrowser` and
 /// `NWConnection`.
@@ -165,6 +171,11 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// Bumped by every start() and stop(), so a timer armed for one run finds
     /// nothing to act on in the next.
     private var generation = 0
+    /// The fast link this device is joining or has joined, if any.
+    private var fastLink: FastLinkJoin?
+    /// `wifiDirect.fastLink` (ADR 0038). Set before `start()`, which
+    /// declares it with the roles.
+    var fastLinkMode: FastLinkMode = .any
 
     /// Guards [_state] and [_isPaused], which the lifecycle writes from the
     /// bridge queue and the send path reads from any thread. Everything
@@ -285,6 +296,13 @@ public class WifiDirectManager: NSObject, TransportManager {
         updateState(.running)
         try? protocolInstance.wifiDirectStatusChanged(isConnected: true)
         emitDiagnostic("info", "Peer-stream transport started")
+        // An iPhone joins a fast link and cannot host one (ADR 0038), as far
+        // as the application's `wifiDirect.fastLink` allows.
+        try? protocolInstance.wifiDirectSetFastLinkRoles(
+            canHost: false,
+            canJoin: fastLinkMode != .off,
+            acceptUnrequested: fastLinkMode == .any
+        )
     }
 
     public func stop() {
@@ -309,6 +327,13 @@ public class WifiDirectManager: NSObject, TransportManager {
             unprovable = []
             dialPolicy.reset()
 
+            // The fast link ends as this device's own end, which never counts
+            // against the peer, before any stream is reported lost: after
+            // endAll() the engine has already seen the link's stream drop and
+            // ended it `lost`, a miss charged to a peer that offered it.
+            try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: false, acceptUnrequested: false)
+            endFastLink(reason: "closed")
+
             // Report every proved peer lost while the core still holds its
             // link, before the layer goes down, on linkQueue so no delivery
             // lands after a loss report.
@@ -330,7 +355,14 @@ public class WifiDirectManager: NSObject, TransportManager {
         // path, see `isPaused`; stopping the browser only stops finding new
         // peers. The listener stays up, so a peer can still reach us.
         isPaused = true
-        onLinkQueueSync { stopBrowsing() }
+        onLinkQueueSync {
+            stopBrowsing()
+            // iOS drops a joined network 15 s after the app leaves the
+            // foreground and deletes its passphrase. Leaving now, and saying
+            // so, lets the host end its half at once rather than when
+            // keepalive notices, about 40 s later.
+            endFastLink(reason: "background")
+        }
     }
 
     public func resume() {
@@ -351,6 +383,9 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// available. Goes straight to the drain: `state` and the proved peers are
     /// both readable from any thread.
     public func onMessagesAvailable() {
+        // The same wake carries fast-link directives (ADR 0038). Async: the
+        // core calls this holding its mutex, and draining a directive takes it.
+        linkQueue.async { [weak self] in self?.drainFastLinkDirectives() }
         drainAndSendMessages()
     }
 
@@ -786,6 +821,32 @@ extension WifiDirectManager: PeerStreamHost {
     }
 
     func peerStreamConnected(_ address: String) {
+        // A stream that is not the fast link's own reached the link's peer
+        // first (both phones back on one home network): the link is ended
+        // `superseded` before the stream is announced. Announced first, the
+        // engine took it for the link's and marked the link up, the join
+        // never dialled the network the user had just joined, and leaving
+        // the home network for it then lost both. Only a first announcement
+        // for the address reaches here, so an up link, whose own stream
+        // holds the address, never does.
+        if let pending = fastLink, pending.peer == address,
+           let held = peers.handle(for: address), held !== (pending.stream as? Stream) {
+            if pending.joined && !Self.runsOffTheGroup(held, host: pending.host) {
+                // Over the group itself, from the general Bonjour dial: an
+                // Android below 13 advertises on the group's interface too,
+                // and that dial needs no DHCP address, so it can prove the
+                // host before the link's own, over a link-local address with
+                // no gateway on its path yet. It is the link's stream, and
+                // the link's own dial, if any, is let go.
+                if let own = pending.stream as? Stream { own.connection.cancel() }
+                pending.stream = held
+            } else {
+                emitDiagnostic("info", "Fast link: another stream reached the peer first", context: [
+                    "linkId": pending.linkId,
+                ])
+                endFastLink(reason: "superseded")
+            }
+        }
         do {
             try protocolInstance.wifiDirectPeerConnected(peerId: address)
         } catch {
@@ -825,3 +886,355 @@ extension WifiDirectManager: PeerStreamHost {
 }
 
 extension WifiDirectManager: @unchecked Sendable {}
+
+// MARK: - Fast link (ADR 0038)
+
+/// A network this device joins for one peer, from an offer that arrived
+/// sealed in their session. linkQueue only.
+private final class FastLinkJoin {
+    let linkId: String
+    let peer: String
+    let ssid: String
+    let host: String
+    let port: UInt16
+    /// When the engine gives up on it; no dial after this.
+    let deadline: TimeInterval
+    /// iOS reported the join.
+    var joined = false
+    /// Looks in a row, one per redial, that found the phone off the group.
+    var offGroup = 0
+    /// The stream dialed toward the host for this link.
+    weak var stream: AnyObject?
+
+    init(linkId: String, peer: String, ssid: String, host: String, port: UInt16, deadline: TimeInterval) {
+        self.linkId = linkId
+        self.peer = peer
+        self.ssid = ssid
+        self.host = host
+        self.port = port
+        self.deadline = deadline
+    }
+}
+
+/// An iPhone joins a fast link (ADR 0038) and never hosts one: iOS cannot
+/// open an access point from code. The network is joined with
+/// `NEHotspotConfiguration` and `joinOnce`, which shows the user a prompt
+/// every time and leaves the network when the app leaves the foreground; the
+/// stream is dialed to the address and port the offer named, claiming the
+/// host, so a preamble proving anyone else closes it. The passphrase is
+/// never logged.
+extension WifiDirectManager {
+    /// Gives a dial this long to become ready before it is tried again.
+    private static let FAST_LINK_REDIAL: TimeInterval = 2.0
+    /// Looks in a row, one per redial, in which the Wi-Fi path's gateway is
+    /// not the offered host, before the join is given up as `failed`. `apply`
+    /// can finish with no error while the phone stays on its own Wi-Fi (a
+    /// wrong passphrase, a group already gone), and the link would otherwise
+    /// wait out its offer, two minutes, with nothing said and the host's
+    /// group refusing every other link. Twenty seconds: on an iPhone 16 the
+    /// group's address arrived about 3 s after the join.
+    private static let FAST_LINK_OFF_GROUP_LIMIT = 10
+    /// Looks before the prompt, 2 s apart, that find the offered host already
+    /// the gateway before the offer is refused `invalid`. Eight seconds: a
+    /// phone leaving a fast link's group was back on its own Wi-Fi in about 4.
+    private static let FAST_LINK_PRE_JOIN_LOOKS = 4
+
+    /// Whether `error` is the hotspot error `code`. The domain is checked:
+    /// another framework's error that shares the number would otherwise read
+    /// as the user's refusal, starting the peer's decline pause, or as an
+    /// offer that named the network the phone is already on.
+    private static func isHotspotError(
+        _ error: NSError?, _ code: NEHotspotConfigurationError
+    ) -> Bool {
+        guard let error = error else { return false }
+        return error.domain == NEHotspotConfigurationErrorDomain
+            && error.code == code.rawValue
+    }
+
+    /// Runs what the engine asked for. linkQueue only.
+    fileprivate func drainFastLinkDirectives() {
+        guard state == .running else { return }
+        while let directive = protocolInstance.wifiDirectNextFastLinkDirective() {
+            // From the background a join would prompt a user who is not
+            // looking, and iOS would drop the network 15 s later anyway.
+            if isPaused, directive.kind != "close" {
+                protocolInstance.wifiDirectFastLinkEnded(linkId: directive.linkId, reason: "background")
+                continue
+            }
+            switch directive.kind {
+            case "join":
+                joinFastLink(directive)
+            case "close":
+                if fastLink?.linkId == directive.linkId { endFastLink(reason: nil) }
+            default:
+                // "host": this device declared it cannot.
+                protocolInstance.wifiDirectFastLinkEnded(linkId: directive.linkId, reason: "host_failed")
+            }
+        }
+    }
+
+    private func joinFastLink(_ directive: FastLinkDirective) {
+        guard fastLink == nil,
+              let ssid = directive.ssid,
+              let passphrase = directive.passphrase,
+              let host = directive.host,
+              let port = directive.port else {
+            protocolInstance.wifiDirectFastLinkEnded(linkId: directive.linkId, reason: "failed")
+            return
+        }
+        let link = FastLinkJoin(
+            linkId: directive.linkId,
+            peer: directive.peerId,
+            ssid: ssid,
+            host: host,
+            port: port,
+            deadline: ProcessInfo.processInfo.systemUptime + TimeInterval(directive.expiresInMs) / 1000
+        )
+        // A stream already reaches the peer: it carries what the link would,
+        // and the prompt would take the phone off the network that stream
+        // runs on.
+        if let held = peers.handle(for: link.peer), streams.contains(held) {
+            protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "superseded")
+            return
+        }
+        fastLink = link
+        checkBeforeJoin(link, passphrase: passphrase, looks: 0)
+    }
+
+    /// Before the prompt, the offered host must not already be the gateway of
+    /// the network the phone is on. The dial goes out once the Wi-Fi gateway
+    /// is the host (`dialFastLink`), and `apply` can finish with no error
+    /// while the phone stays on its own Wi-Fi, so an offer naming the user's
+    /// own router would otherwise be dialled there, again on every redial
+    /// until the offer expired. A match is looked at again before it is
+    /// refused: right after a link ends the phone is still leaving that
+    /// group, whose owner has the same address as every Android group's.
+    private func checkBeforeJoin(_ link: FastLinkJoin, passphrase: String, looks: Int) {
+        lookAtWifiPath { [weak self] path in
+            guard let self = self, self.fastLink === link else { return }
+            if !Self.isGateway(link.host, of: path) {
+                self.applyFastLinkJoin(link, passphrase: passphrase)
+            } else if looks + 1 < Self.FAST_LINK_PRE_JOIN_LOOKS {
+                self.linkQueue.asyncAfter(deadline: .now() + Self.FAST_LINK_REDIAL) { [weak self] in
+                    self?.checkBeforeJoin(link, passphrase: passphrase, looks: looks + 1)
+                }
+            } else {
+                self.emitDiagnostic("warning", "Fast link: the offered host is the gateway of the network the phone is already on", context: [
+                    "linkId": link.linkId,
+                ])
+                self.fastLink = nil
+                self.protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "invalid")
+            }
+        }
+    }
+
+    private func applyFastLinkJoin(_ link: FastLinkJoin, passphrase: String) {
+        emitDiagnostic("info", "Fast link: joining a network", context: ["linkId": link.linkId])
+        let configuration = NEHotspotConfiguration(ssid: link.ssid, passphrase: passphrase, isWEP: false)
+        configuration.joinOnce = true
+        NEHotspotConfigurationManager.shared.apply(configuration) { [weak self] error in
+            self?.linkQueue.async { self?.fastLinkJoinFinished(link, error: error as NSError?) }
+        }
+    }
+
+    /// One look at the Wi-Fi path, on linkQueue. The handler holds the
+    /// monitor, so it is dropped on the first update or each look would keep
+    /// one alive.
+    private func lookAtWifiPath(_ body: @escaping (NWPath) -> Void) {
+        let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        monitor.pathUpdateHandler = { path in
+            monitor.pathUpdateHandler = nil
+            monitor.cancel()
+            body(path)
+        }
+        monitor.start(queue: linkQueue)
+    }
+
+    private func fastLinkJoinFinished(_ link: FastLinkJoin, error: NSError?) {
+        guard fastLink === link else {
+            // Closed while the user read the prompt: leave what was joined.
+            NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: link.ssid)
+            // A refusal still counts against the peer, which may have closed
+            // its link on purpose to keep the user's Cancel from registering.
+            if Self.isHotspotError(error, .userDenied) {
+                protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "declined")
+            }
+            return
+        }
+        if Self.isHotspotError(error, .alreadyAssociated) {
+            // A fast link's network is new and its name random, so a phone
+            // already on it was never on a fast link: the peer named the
+            // network the phone was on, and a dial would go to the offer's
+            // address on the user's own network. Nothing was configured, so
+            // nothing is removed; the user's network stays as it was.
+            emitDiagnostic("warning", "Fast link: the offer named the network the phone is already on", context: [
+                "linkId": link.linkId,
+            ])
+            fastLink = nil
+            protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "invalid")
+            return
+        }
+        if let error = error {
+            let reason = Self.isHotspotError(error, .userDenied) ? "declined" : "failed"
+            emitDiagnostic("warning", "Fast link: the join did not happen", context: [
+                "linkId": link.linkId,
+                "reason": reason,
+                "code": error.code,
+            ])
+            fastLink = nil
+            NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: link.ssid)
+            protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: reason)
+            return
+        }
+        link.joined = true
+        dialFastLink(link)
+    }
+
+    /// Dials the host's listener, bound to Wi-Fi, claiming the host. There is
+    /// no discovery record on the network: the offer named the address. A
+    /// dial that ends without proving the host is tried again until the
+    /// engine's deadline, since the first one often races the address
+    /// arriving over DHCP.
+    private func dialFastLink(_ link: FastLinkJoin) {
+        guard fastLink === link, link.joined, state == .running,
+              ProcessInfo.processInfo.systemUptime < link.deadline else { return }
+        if let held = peers.handle(for: link.peer), streams.contains(held) { return }
+        if let current = link.stream as? Stream, streams.contains(current) {
+            // Still connecting (waiting on the path, or mid-preamble).
+            scheduleFastLinkRedial(link)
+            return
+        }
+        guard let port = NWEndpoint.Port(rawValue: link.port) else { return }
+        // A full stream table is a "not yet" like any other: returning ended
+        // the redial chain, and the join sat out its offer with the host's
+        // group on the air. The deadline above still bounds it.
+        guard streams.count < Self.MAX_STREAMS else {
+            scheduleFastLinkRedial(link)
+            return
+        }
+        // Dialed only from the offered network. `apply` can finish with no
+        // error while the phone stays on its own Wi-Fi (a wrong passphrase,
+        // a group already gone), and `.wifi` alone would then send the dial,
+        // and the preamble, to whatever the offer named on the user's home
+        // network. The host is the group's owner, so the phone is on the
+        // group exactly when its Wi-Fi path's gateway is the offered host;
+        // `checkBeforeJoin` refused a host that was already the gateway of
+        // the network the phone was on. Not `NEHotspotNetwork.fetchCurrent`: a `joinOnce` network is not
+        // one the app configured as iOS counts it, so without location
+        // permission that names no network at all, and every join failed.
+        // Until the phone is on it, the dial waits, for at most
+        // FAST_LINK_OFF_GROUP_LIMIT looks.
+        lookAtWifiPath { [weak self] path in
+            guard let self = self, self.fastLink === link else { return }
+            if Self.isGateway(link.host, of: path) {
+                link.offGroup = 0
+                self.openFastLinkStream(link, port: port)
+            } else if link.offGroup + 1 >= Self.FAST_LINK_OFF_GROUP_LIMIT {
+                self.emitDiagnostic("error", "Fast link: the phone is not on the offered network", context: [
+                    "linkId": link.linkId,
+                ])
+                self.endFastLink(reason: "failed")
+            } else {
+                link.offGroup += 1
+                self.scheduleFastLinkRedial(link)
+            }
+        }
+    }
+
+    /// Whether `stream` positively runs over a network other than the
+    /// group: its path has a gateway, and none is the offered host. That is
+    /// a phone the join left on its own Wi-Fi. A path with no gateway yet is
+    /// a link-local one on the group before DHCP, and counts as on it.
+    private static func runsOffTheGroup(_ stream: Stream, host: String) -> Bool {
+        guard let path = stream.connection.currentPath, !path.gateways.isEmpty else {
+            return false
+        }
+        return !isGateway(host, of: path)
+    }
+
+    /// Whether `host`, an IP literal, is a gateway of `path`.
+    private static func isGateway(_ host: String, of path: NWPath) -> Bool {
+        let v4 = IPv4Address(host)
+        let v6 = IPv6Address(host)
+        return path.gateways.contains { gateway in
+            switch gateway {
+            case let .hostPort(host: .ipv4(address), port: _):
+                return address.rawValue == v4?.rawValue
+            case let .hostPort(host: .ipv6(address), port: _):
+                return address.rawValue == v6?.rawValue
+            default:
+                return false
+            }
+        }
+    }
+
+    /// Opens the link's stream, bound to Wi-Fi, claiming the host. linkQueue
+    /// only, and only once the phone is on the link's network.
+    private func openFastLinkStream(_ link: FastLinkJoin, port: NWEndpoint.Port) {
+        guard link.joined, state == .running,
+              ProcessInfo.processInfo.systemUptime < link.deadline else { return }
+        guard streams.count < Self.MAX_STREAMS else {
+            scheduleFastLinkRedial(link)
+            return
+        }
+        if let held = peers.handle(for: link.peer), streams.contains(held) { return }
+        if let current = link.stream as? Stream, streams.contains(current) {
+            scheduleFastLinkRedial(link)
+            return
+        }
+        let parameters = Self.makeParameters()
+        parameters.requiredInterfaceType = .wifi
+        let stream = Stream(
+            connection: NWConnection(
+                to: .hostPort(host: NWEndpoint.Host(link.host), port: port),
+                using: parameters
+            ),
+            outbound: true,
+            dialed: nil
+        )
+        peers.claim(link.peer, for: stream)
+        link.stream = stream
+        open(stream)
+        scheduleFastLinkRedial(link)
+    }
+
+    private func scheduleFastLinkRedial(_ link: FastLinkJoin) {
+        linkQueue.asyncAfter(deadline: .now() + Self.FAST_LINK_REDIAL) { [weak self] in
+            self?.dialFastLink(link)
+        }
+    }
+
+    /// Leaves the link's network and ends its stream. With a reason, the
+    /// engine is told (the platform's own end); without one, the engine
+    /// asked. linkQueue only.
+    fileprivate func endFastLink(reason: String?) {
+        guard let link = fastLink else { return }
+        fastLink = nil
+        (link.stream as? Stream)?.connection.cancel()
+        NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: link.ssid)
+        if let reason = reason {
+            protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: reason)
+        }
+    }
+}
+
+/// `wifiDirect.fastLink`: how far this application takes part in fast links
+/// (ADR 0038). `.any` joins an offer it did not ask for; `.requestedOnly`
+/// takes part only in links it asked for and answers the peer's initiative
+/// `declined`; `.off` declares no role.
+public enum FastLinkMode: Equatable {
+    case off, requestedOnly, any
+
+    /// The mode a config value names, or `current` when it names none: an
+    /// enable that does not mention `fastLink` keeps the setting. An unknown
+    /// value is `.off`, so a typo never widens what the application allowed.
+    static func parse(_ value: Any?, current: FastLinkMode) -> FastLinkMode {
+        // An explicit JavaScript null keeps the setting too, as on Android.
+        guard let value = value, !(value is NSNull) else { return current }
+        switch value as? String {
+        case "any": return .any
+        case "requestedOnly": return .requestedOnly
+        default: return .off
+        }
+    }
+}

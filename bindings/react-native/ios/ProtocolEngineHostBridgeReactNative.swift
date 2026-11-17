@@ -93,6 +93,12 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
+    static func closeFastLink(_ module: OfflineProtocolModule, _ peerId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FAST_LINK", errorMessage: "Failed to close the fast link") { host, env in
+            try ProtocolEngineHostBridge.closeFastLink(host: host, env: env, arguments: ["peerId": peerId])
+        }
+    }
+
     static func createInvite(_ module: OfflineProtocolModule, _ petname: String?, sign signed: NSNumber, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.createInvite(host: host, env: env, arguments: ["petname": petname, "signed": signed])
@@ -516,6 +522,12 @@ enum ProtocolEngineHostBridgeReactNative {
     static func requestEnableBluetooth(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BLUETOOTH", errorMessage: "Bluetooth not available on this device") { host, env in
             try ProtocolEngineHostBridge.requestEnableBluetooth(host: host, env: env, arguments: nil)
+        }
+    }
+
+    static func requestFastLink(_ module: OfflineProtocolModule, _ peerId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_FAST_LINK", errorMessage: "Failed to request a fast link", mapProtocolErrors: true) { host, env in
+            try ProtocolEngineHostBridge.requestFastLink(host: host, env: env, arguments: ["peerId": peerId])
         }
     }
 
