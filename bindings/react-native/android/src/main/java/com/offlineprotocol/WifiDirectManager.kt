@@ -1706,6 +1706,12 @@ class WifiDirectManager(
                 val host = groupOwnerAddress
                 if (port == null || host == null) return@requestGroupInfo
                 hosted.reported = true
+                // Recorded again now the group is seen: Android reports the
+                // device out of any group while createGroup is still forming
+                // one, and [fastLinkGroupGone] clears the record written
+                // before it, so a process that died while hosting left the
+                // group with no name on disk and the next start adopted it.
+                recordHostedFastLinkGroup(hosted.ssid)
                 try {
                     protocol.wifiDirectFastLinkHosting(hosted.linkId, host, port.toUShort())
                 } catch (e: Exception) {

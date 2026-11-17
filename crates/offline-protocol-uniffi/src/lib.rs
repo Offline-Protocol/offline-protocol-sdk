@@ -20436,6 +20436,24 @@ mod tests {
              be the Wi-Fi path's gateway"
         );
     }
+    /// An Android host records its fast link's group name once it sees the
+    /// group, not only before `createGroup`. Android reports the device out of
+    /// any group while the group is still forming, which clears the first
+    /// record, so a host killed while hosting left the group on the air with
+    /// no name on disk and its next start adopted it as an ordinary group.
+    #[test]
+    fn an_android_host_records_its_group_once_it_sees_it() {
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        assert!(
+            kotlin.contains(
+                "if (port == null || host == null) return@requestGroupInfo \
+                 hosted.reported = true recordHostedFastLinkGroup(hosted.ssid)"
+            ),
+            "WifiDirectManager.kt: fastLinkGroupChanged must record the hosted group's name \
+             when it first sees the group"
+        );
+    }
 
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
