@@ -965,14 +965,25 @@ impl FastLinks {
     }
 
     /// Counts a link hosted for `peer`'s request that ended: one its stream
-    /// used resets the count, one that expired unused adds to it, and
-    /// [`MAX_UNANSWERED_HOSTINGS`] in a row start [`HOST_BACKOFF`].
-    fn count_hosting(&mut self, peer: &str, used: bool, reason: CloseReason, now: Instant) {
+    /// used resets the count; one that went unused adds to it when it expired
+    /// or the peer ended it, whatever reason the peer gave; and
+    /// [`MAX_UNANSWERED_HOSTINGS`] in a row start [`HOST_BACKOFF`]. Ends this
+    /// device caused (its platform failing, its tie-break, its user) are not
+    /// the peer's to answer for. Counting only `expired` let a peer close
+    /// each link just before it expired and ask again, forever.
+    fn count_hosting(
+        &mut self,
+        peer: &str,
+        used: bool,
+        by_peer: bool,
+        reason: CloseReason,
+        now: Instant,
+    ) {
         if used {
             self.unanswered.retain(|(unanswered, _)| unanswered != peer);
             return;
         }
-        if reason != CloseReason::Expired {
+        if !by_peer && reason != CloseReason::Expired {
             return;
         }
         let count = match self.unanswered.iter_mut().find(|(p, _)| p == peer) {
@@ -1036,7 +1047,13 @@ impl FastLinks {
             .retain(|pending| pending.directive.link_id != link.id);
         self.remember_ended(&link.id, now);
         if link.role == FastLinkRole::Host && link.requested_by_peer {
-            self.count_hosting(&link.peer, link.state == FastLinkState::Up, reason, now);
+            self.count_hosting(
+                &link.peer,
+                link.state == FastLinkState::Up,
+                !tell_peer,
+                reason,
+                now,
+            );
         }
         if link.role == FastLinkRole::Join {
             if self.ended_joins.len() >= MAX_ENDED_REMEMBERED {
@@ -2065,6 +2082,51 @@ mod tests {
         assert_eq!(
             host_once(&mut android, 11, t0),
             Some(FastLinkDirectiveKind::Host)
+        );
+    }
+
+    #[test]
+    fn a_peer_cannot_dodge_the_host_backoff_by_closing_first() {
+        let t0 = Instant::now();
+        let mut android = machine(host_roles());
+        let round = |android: &mut FastLinks, seed: u8| {
+            let id = fresh(seed).link_id;
+            android.on_frame(
+                HIGH,
+                LOW,
+                Frame::new(&id, FrameBody::Request),
+                fresh(seed + 1),
+                t0,
+                0,
+            );
+            let hosted = android.next_directive(t0).map(|d| d.kind);
+            if hosted.is_some() {
+                android.hosting(&id, "192.168.49.1", 8988, t0, 0);
+                // The peer closes just before the offer would expire.
+                android.on_frame(
+                    HIGH,
+                    LOW,
+                    Frame::new(
+                        &id,
+                        FrameBody::Close {
+                            reason: "closed".to_string(),
+                        },
+                    ),
+                    fresh(seed + 2),
+                    t0,
+                    0,
+                );
+                android.next_directive(t0);
+            }
+            android.take_frames();
+            hosted
+        };
+        assert!(round(&mut android, 1).is_some());
+        assert!(round(&mut android, 4).is_some());
+        assert_eq!(
+            round(&mut android, 7),
+            None,
+            "two unused links the peer ended: refused"
         );
     }
 
