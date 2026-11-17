@@ -474,6 +474,21 @@ struct PendingDirective {
     deadline: Option<Instant>,
 }
 
+/// A network name and passphrase held by a link. Its `Debug` never prints
+/// the passphrase, so neither does the derived `Debug` of [`Link`] or
+/// [`FastLinks`] (invariant 5).
+#[derive(Clone)]
+struct Credentials(String, String);
+
+impl fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Credentials")
+            .field(&self.0)
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Link {
     id: String,
@@ -484,7 +499,7 @@ struct Link {
     deadline: Option<Instant>,
     last_activity: Instant,
     /// The host's credentials, until the offer is made.
-    credentials: Option<(String, String)>,
+    credentials: Option<Credentials>,
     /// The host's offer, kept to answer a repeated request.
     offer: Option<Offer>,
     /// The platform drained a directive for this link, so its end needs a
@@ -607,7 +622,7 @@ impl FastLinks {
             state: FastLinkState::Hosting,
             deadline: Some(now + HOSTING_TIMEOUT),
             last_activity: now,
-            credentials: Some((fresh.ssid, fresh.passphrase)),
+            credentials: Some(Credentials(fresh.ssid, fresh.passphrase)),
             offer: None,
             platform_engaged: false,
             peer_engaged,
@@ -641,7 +656,7 @@ impl FastLinks {
         let Some(link) = self.link.as_mut() else {
             return false;
         };
-        let Some((ssid, passphrase)) = link.credentials.take() else {
+        let Some(Credentials(ssid, passphrase)) = link.credentials.take() else {
             return false;
         };
         let offer = Offer {
@@ -1225,6 +1240,12 @@ mod tests {
         assert!(link.ssid.len() <= 32);
         assert_ne!(fresh(7).passphrase, fresh(8).passphrase);
         let shown = format!("{link:?}");
+        assert!(!shown.contains(&link.passphrase), "{shown}");
+
+        // Nor the machine holding a link that has not offered yet.
+        let mut host = machine(host_roles());
+        host.request(HIGH, link.clone(), Instant::now()).unwrap();
+        let shown = format!("{host:?}");
         assert!(!shown.contains(&link.passphrase), "{shown}");
     }
 
