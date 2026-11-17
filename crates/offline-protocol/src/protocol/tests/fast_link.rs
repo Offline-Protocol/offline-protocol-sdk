@@ -378,3 +378,35 @@ fn blocking_a_peer_ends_its_fast_link() {
         &("closed".to_string(), Some("closed".to_string()))
     );
 }
+
+/// A transfer started over Bluetooth before the link came up stays on
+/// Bluetooth, so it does not hold the link off its idle limit; one pinned to
+/// the peer-stream slot does.
+#[test]
+fn only_a_transfer_on_the_peer_stream_holds_the_link() {
+    use offline_protocol_core::ContentType;
+
+    let (mut alice, bob) = pair();
+    alice
+        .protocol
+        .send_media(
+            &bob.address,
+            vec![0x5a; 64 * 1024],
+            "slow.bin",
+            ContentType::File,
+            None,
+        )
+        .unwrap();
+    let on_bluetooth = alice
+        .protocol
+        .outbound_media_transfers
+        .values()
+        .next()
+        .unwrap();
+    assert_eq!(on_bluetooth.pinned_transport, TransportType::BLE);
+    assert!(!OfflineProtocol::holds_fast_link(on_bluetooth));
+
+    let mut on_stream = on_bluetooth.clone();
+    on_stream.pinned_transport = TransportType::WiFiDirect;
+    assert!(OfflineProtocol::holds_fast_link(&on_stream));
+}

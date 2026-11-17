@@ -131,7 +131,9 @@ the reason.
 
 The idle limit counts a body of at least 16 KiB carried by the slot in either
 direction for this peer as activity, and does not run while a file transfer
-to the peer is in flight. Smaller bodies (presence, receipts, chat) do not
+to the peer is in flight over the link. A transfer's carrier is fixed when it
+starts, so one begun over Bluetooth before the link came up stays there and
+does not hold the link. Smaller bodies (presence, receipts, chat) do not
 count: Bluetooth LE carries them well, and on two phones an application's
 presence update every 15 s held a link up indefinitely when they did. A link
 that carries nothing large for 60 s is costing the user their own Wi-Fi for

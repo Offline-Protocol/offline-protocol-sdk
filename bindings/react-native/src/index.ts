@@ -4608,7 +4608,9 @@ export class OfflineProtocol {
    * device hosts (an Android phone) and the other joins, with credentials
    * sealed in the session, and traffic moves onto the link by ordinary
    * transport selection: a 1 MiB file that takes minutes over Bluetooth takes
-   * seconds over it.
+   * seconds over it. A file transfer keeps the carrier it started on, so send
+   * after the `fast_link_changed` event with state `up` for it to use the
+   * link.
    *
    * Resolves with the link id as soon as the first step is taken; the outcome
    * arrives as `fast_link_changed` events. On iOS the join shows a system

@@ -176,11 +176,24 @@ impl OfflineProtocol {
         if self.fast_links.peer().is_none() {
             return;
         }
-        let outbound = &self.outbound_media_transfers;
-        self.fast_links.tick(Instant::now(), |peer| {
-            outbound.values().any(|transfer| transfer.recipient == peer)
-        });
+        let busy: std::collections::HashSet<String> = self
+            .outbound_media_transfers
+            .values()
+            .filter(|transfer| Self::holds_fast_link(transfer))
+            .map(|transfer| transfer.recipient.clone())
+            .collect();
+        self.fast_links
+            .tick(Instant::now(), |peer| busy.contains(peer));
         self.flush_fast_link();
+    }
+
+    /// Whether an outbound transfer holds its recipient's fast link off the
+    /// idle limit: only one pinned to the peer-stream slot. A transfer's
+    /// carrier is fixed when it starts, so one begun over Bluetooth before
+    /// the link came up never moves to it, and holding the link for it kept
+    /// an iPhone off its own Wi-Fi for nothing.
+    pub(crate) fn holds_fast_link(transfer: &super::types::OutboundMediaTransfer) -> bool {
+        transfer.pinned_transport == TransportType::WiFiDirect
     }
 
     /// Whether a peer stream holds `peer` now.
