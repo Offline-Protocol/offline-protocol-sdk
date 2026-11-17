@@ -20236,6 +20236,57 @@ mod tests {
         }
     }
 
+    /// No bridge manager logs a fast-link directive whole (invariant 5 of
+    /// `docs/state-machines/fast-link.md`). The generated records are a Kotlin
+    /// data class and a Swift struct whose `toString` and description print
+    /// every field, the passphrase among them; only the Rust `Debug` is
+    /// redacted. Each value is named, the link id and the kind, never the
+    /// record.
+    #[test]
+    fn no_bridge_logs_a_fast_link_directive_whole() {
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        for name in ["directive", "parked", "parkedFastLinkJoin"] {
+            for (bridge, code, forms) in [
+                (
+                    "WifiDirectManager.kt",
+                    &kotlin,
+                    vec![
+                        format!("${name}\""),
+                        format!("${name} "),
+                        format!("${name}."),
+                        format!("${{{name}}}"),
+                        format!("{name}.toString()"),
+                        format!("to {name})"),
+                        format!("to {name},"),
+                    ],
+                ),
+                (
+                    "WifiDirectManager.swift",
+                    &swift,
+                    vec![
+                        format!("\\({name})"),
+                        format!("String(describing: {name}"),
+                        format!(": {name}]"),
+                        format!(": {name},"),
+                        format!("print({name}"),
+                        format!("dump({name}"),
+                    ],
+                ),
+            ] {
+                for form in forms {
+                    assert!(
+                        !code.contains(&form),
+                        "{bridge} logs or stringifies a whole fast-link directive ({form:?}): \
+                         its generated description prints the passphrase. Name the link id \
+                         and kind instead."
+                    );
+                }
+            }
+        }
+    }
+
     /// The fast-link tokens the bridges hand the engine, and the directive
     /// kinds they branch on, are the engine's own (C5). Both cross the FFI as
     /// strings, and the engine reads an unknown reason as `failed` without a

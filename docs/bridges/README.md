@@ -170,7 +170,12 @@ reports through `wifi_direct_fast_link_ended` and the directive kinds it
 branches on cross the FFI as strings, and the engine reads an unknown reason
 as `failed`, so a misspelt `declined` silently switches off the decline pause
 the threat model counts on. `fast_link_tokens_in_the_bridges_are_the_engines`
-reads both managers and holds each token to the engine's own.
+reads both managers and holds each token to the engine's own. The directive
+itself carries the passphrase, and its generated record (a Kotlin data class,
+a Swift struct, a Python record) prints every field when stringified, unlike
+the redacted Rust `Debug`: `no_bridge_logs_a_fast_link_directive_whole`
+refuses a whole directive interpolated or passed to a log in either manager,
+so a diagnostic names the link id and kind and never the record.
 
 The per-send application id is pinned the same way, by
 `react_native_rich_sends_carry_the_app_id_end_to_end`. It is optional at every
