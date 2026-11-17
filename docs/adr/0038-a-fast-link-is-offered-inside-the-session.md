@@ -85,7 +85,11 @@ the foreground and deleted the passphrase.
    (step four of the preamble). The host refuses, on the network it made, any
    proved address other than the one it invited. The offered address must be
    a private or link-local IP literal: never a name to resolve, never a route
-   off the network just joined.
+   off the network just joined. An iPhone dials it bound to Wi-Fi, having
+   left its own network for the group. An Android joiner stays on its own
+   Wi-Fi while in a group, so an offered private address could name a host on
+   the user's home network: it dials the group owner's address as the group
+   reports it, with the offer's port, and never the offer's host.
 
 7. **The engine ends a link** when its offer expires unused (120 s), when the
    proved stream is lost, after 60 s with nothing large carried (a body of
@@ -125,8 +129,9 @@ session, and only uses it.
 
 ## Consequences
 
-- An iPhone and an Android phone with no shared network move a file about 20
-  times faster than over Bluetooth, after one prompt on the iPhone. A message
+- An iPhone and an Android phone with no shared network move a 1 MiB file in
+  about 2.5 s instead of 197.7 s over Bluetooth, after one prompt on the
+  iPhone (8 s before decision 9). A message
   too large for Bluetooth fits the slot's 1 MiB ceiling.
 - The join takes the iPhone off its own Wi-Fi for as long as the link lasts,
   and the link lasts only while the application is in the foreground. An

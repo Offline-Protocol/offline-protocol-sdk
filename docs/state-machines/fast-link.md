@@ -45,7 +45,7 @@ wake-up that drains outbound stream bodies:
 | Directive | The platform | Then reports |
 |-----------|--------------|--------------|
 | `host` | Brings up a network with the given name and passphrase, admitting the given peer only | `wifi_direct_fast_link_hosting(link, host, port)`, or `wifi_direct_fast_link_ended(link, reason)` |
-| `join` | Joins the given network and dials `host:port`, claiming the given peer | the stream's preamble, through `wifi_direct_peer_connected`, or `wifi_direct_fast_link_ended(link, reason)` |
+| `join` | Joins the given network and dials `host:port` (Android dials the group owner's own address with that port, since it stays on its own Wi-Fi), claiming the given peer | the stream's preamble, through `wifi_direct_peer_connected`, or `wifi_direct_fast_link_ended(link, reason)` |
 | `close` | Ends the stream it opened for the link and leaves or removes the network | nothing |
 
 A platform declares what it can do with
