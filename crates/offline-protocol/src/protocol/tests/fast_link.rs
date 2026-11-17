@@ -306,3 +306,47 @@ fn a_transfer_on_the_peer_stream_slot_fills_a_window_of_sixteen() {
     assert_eq!(chunks, MEDIA_WINDOW_SIZE_PEER_STREAM);
     assert_eq!(MEDIA_WINDOW_SIZE_PEER_STREAM, 16);
 }
+
+/// A fast-link frame goes over Bluetooth LE when the peer is linked there,
+/// even though the engine prefers a peer stream for a direct link: the frame
+/// may be ending that very stream, and on two phones a close sent down it
+/// arrived 22 s late.
+#[test]
+fn fast_link_frames_prefer_bluetooth_over_the_peer_stream() {
+    use offline_protocol_transport::PeerLink;
+
+    let (mut alice, mut bob) = pair();
+    let link_id = alice.protocol.request_fast_link(&bob.address).unwrap();
+    // A peer stream to bob comes up before the offer leaves: a LAN one, say,
+    // or the engine's own preference would carry the frame down it.
+    let stream = MockTransport::new(TransportType::WiFiDirect);
+    stream.start().unwrap();
+    stream.set_connected_peers(vec![PeerLink::new(bob.address.clone())]);
+    alice
+        .protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(stream.clone()));
+    assert_eq!(
+        alice
+            .protocol
+            .transport_manager()
+            .mesh_transport_for(&bob.address),
+        Some(TransportType::WiFiDirect),
+        "the engine prefers the stream for a direct link"
+    );
+
+    alice
+        .protocol
+        .fast_link_hosting(&link_id, "192.168.49.1", 8988)
+        .unwrap();
+    let over_bluetooth = alice.take_sent();
+    assert_eq!(over_bluetooth.len(), 1, "the offer went over Bluetooth");
+    let over_stream = stream
+        .sent_messages()
+        .into_iter()
+        .chain(stream.peer_sends().into_iter().map(|(_, message)| message))
+        .count();
+    assert_eq!(over_stream, 0, "nothing went down the peer stream");
+    bob.deliver(over_bluetooth);
+    assert!(bob.protocol.next_fast_link_directive().is_some());
+}

@@ -493,8 +493,9 @@ Four rules hold for every frame of the family:
   Found anywhere else (a bare frame on the wire, a group plaintext) it is
   consumed and never surfaced. The body carries a passphrase, and that is the
   only way it reaches nobody else.
-- **Ephemeral.** It is sent once, over a live direct link, with
-  `requires_ack` false ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
+- **Ephemeral.** It is sent once, over a live direct link (Bluetooth LE
+  whenever the peer is linked there, since the frame may be ending the peer
+  stream itself), with `requires_ack` false ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
   A frame that cannot leave now is not sent. Nothing in the family is ever
   answered by an acknowledgement, queued, relayed or deposited with a
   custodian.

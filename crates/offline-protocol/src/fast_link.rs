@@ -59,6 +59,14 @@ pub const LINK_ID_HEX_LEN: usize = 32;
 /// Hex digits in a passphrase the engine makes, 128 bits.
 pub const PASSPHRASE_HEX_LEN: usize = 32;
 
+/// How long an ended link's id is remembered, so a frame for it that arrives
+/// late is refused rather than acted on: the longest an offer lives, plus
+/// the clock slack.
+pub const ENDED_MEMORY: Duration = Duration::from_millis(MAX_OFFER_TTL_MS + 300_000);
+
+/// How many ended link ids are remembered. One link at a time, so a few.
+pub const MAX_ENDED_REMEMBERED: usize = 16;
+
 /// The largest body after the prefix a receiver parses. An offer is about
 /// 250 bytes.
 pub const MAX_FRAME_BODY_BYTES: usize = 2048;
@@ -476,6 +484,12 @@ pub(crate) struct FastLinks {
     directives: VecDeque<PendingDirective>,
     frames: VecDeque<(String, Frame)>,
     changes: VecDeque<FastLinkChange>,
+    /// Links this device ended, and when. A request or offer for one that
+    /// arrives afterwards is late, and acting on it would bring up or join a
+    /// network nobody is waiting for: on two phones a request delayed 63 s
+    /// reached the host after the requester had given up, and its offer then
+    /// prompted the requester's user to join a network already removed.
+    ended: VecDeque<(String, Instant)>,
 }
 
 impl FastLinks {
@@ -578,7 +592,7 @@ impl FastLinks {
             return false;
         }
         if !is_local_host(host) || port == 0 {
-            self.end(CloseReason::HostFailed, true);
+            self.end(CloseReason::HostFailed, true, now);
             return false;
         }
         let Some(link) = self.link.as_mut() else {
@@ -616,6 +630,14 @@ impl FastLinks {
         now: Instant,
         now_ms: i64,
     ) {
+        if self.ended_recently(&frame.link, now) {
+            // A late request needs no answer: its sender has given up on it.
+            // A late offer gets one, so the host takes its network down.
+            if matches!(frame.body, FrameBody::Offer(_)) {
+                self.reply_close(peer, &frame.link, CloseReason::Expired);
+            }
+            return;
+        }
         match frame.body {
             FrameBody::Request => self.on_request(peer, &frame.link, fresh, now),
             FrameBody::Offer(offer) => self.on_offer(peer, local, &frame.link, offer, now, now_ms),
@@ -625,7 +647,7 @@ impl FastLinks {
                     .as_ref()
                     .is_some_and(|link| link.id == frame.link && link.peer == peer)
                 {
-                    self.end(CloseReason::parse(&reason), false);
+                    self.end(CloseReason::parse(&reason), false, now);
                 }
             }
         }
@@ -701,7 +723,7 @@ impl FastLinks {
                     if local.as_bytes() < peer.as_bytes() {
                         return;
                     }
-                    self.end(CloseReason::Busy, true);
+                    self.end(CloseReason::Busy, true, now);
                 }
                 FastLinkRole::Join => {
                     if link.id == link_id && link.state != FastLinkState::Requested {
@@ -711,7 +733,7 @@ impl FastLinks {
                     if link.state != FastLinkState::Requested {
                         // A new offer replaces the one before it: the host
                         // brought up a new network. Nothing to tell it.
-                        self.end(CloseReason::Failed, false);
+                        self.end(CloseReason::Failed, false, now);
                     } else {
                         // The offer answers our request; it supersedes the
                         // request's link quietly, whatever id the host chose.
@@ -756,11 +778,16 @@ impl FastLinks {
 
     /// The platform could not do what it was told, or can no longer hold the
     /// link. It already let go, so no `close` directive follows.
-    pub(crate) fn platform_ended(&mut self, link_id: &str, reason: CloseReason) -> bool {
+    pub(crate) fn platform_ended(
+        &mut self,
+        link_id: &str,
+        reason: CloseReason,
+        now: Instant,
+    ) -> bool {
         match self.link.as_mut() {
             Some(link) if link.id == link_id => {
                 link.platform_engaged = false;
-                self.end(reason, true);
+                self.end(reason, true, now);
                 true
             }
             _ => false,
@@ -768,11 +795,11 @@ impl FastLinks {
     }
 
     /// The application ends the link with `peer`.
-    pub(crate) fn close(&mut self, peer: &str) -> bool {
+    pub(crate) fn close(&mut self, peer: &str, now: Instant) -> bool {
         if self.peer() != Some(peer) {
             return false;
         }
-        self.end(CloseReason::Closed, true);
+        self.end(CloseReason::Closed, true, now);
         true
     }
 
@@ -792,13 +819,13 @@ impl FastLinks {
     }
 
     /// The stream that proved `peer` ended.
-    pub(crate) fn stream_lost(&mut self, peer: &str) {
+    pub(crate) fn stream_lost(&mut self, peer: &str, now: Instant) {
         if self
             .link
             .as_ref()
             .is_some_and(|link| link.peer == peer && link.state == FastLinkState::Up)
         {
-            self.end(CloseReason::Lost, true);
+            self.end(CloseReason::Lost, true, now);
         }
     }
 
@@ -839,17 +866,32 @@ impl FastLinks {
             _ => None,
         };
         if let Some(reason) = reason {
-            self.end(reason, true);
+            self.end(reason, true, now);
         }
+    }
+
+    fn ended_recently(&mut self, link_id: &str, now: Instant) -> bool {
+        while self
+            .ended
+            .front()
+            .is_some_and(|(_, at)| now.saturating_duration_since(*at) >= ENDED_MEMORY)
+        {
+            self.ended.pop_front();
+        }
+        self.ended.iter().any(|(id, _)| id == link_id)
     }
 
     /// Ends the link: a `close` directive when the platform holds something,
     /// a `close` frame when the peer knows of it and `tell_peer`, and one
     /// change (invariant 4).
-    fn end(&mut self, reason: CloseReason, tell_peer: bool) {
+    fn end(&mut self, reason: CloseReason, tell_peer: bool, now: Instant) {
         let Some(link) = self.link.take() else {
             return;
         };
+        if self.ended.len() >= MAX_ENDED_REMEMBERED {
+            self.ended.pop_front();
+        }
+        self.ended.push_back((link.id.clone(), now));
         if link.platform_engaged {
             self.directives.push_back(PendingDirective {
                 directive: FastLinkDirective {
@@ -1276,7 +1318,7 @@ mod tests {
         android.stream_proved(HIGH, t0);
         android.take_changes();
 
-        android.stream_lost(HIGH);
+        android.stream_lost(HIGH, t0);
         let close = android.next_directive(t0).unwrap();
         assert_eq!(close.kind, FastLinkDirectiveKind::Close);
         assert_eq!(close.reason, Some(CloseReason::Lost));
@@ -1349,7 +1391,7 @@ mod tests {
             0,
         );
         iphone.next_directive(t0);
-        assert!(iphone.platform_ended(&id, CloseReason::Declined));
+        assert!(iphone.platform_ended(&id, CloseReason::Declined, t0));
         assert!(!iphone.has_directives());
         let frames = iphone.take_frames();
         assert_eq!(
@@ -1458,6 +1500,87 @@ mod tests {
             FastLinkDirectiveKind::Host
         );
         assert!(android.next_directive(t0).is_none(), "one network, not two");
+    }
+
+    #[test]
+    fn a_late_offer_for_a_link_given_up_on_is_refused_not_joined() {
+        let t0 = Instant::now();
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let id = iphone.request(LOW, fresh(1), t0).unwrap();
+        let request = iphone.take_frames();
+        iphone.tick(t0 + REQUEST_TIMEOUT, |_| false);
+        iphone.take_frames();
+        iphone.take_changes();
+
+        // The request arrives after the requester gave up, and is hosted.
+        for (_, frame) in request {
+            android.on_frame(HIGH, LOW, frame, fresh(2), t0 + REQUEST_TIMEOUT, 0);
+        }
+        android.next_directive(t0);
+        assert!(android.hosting(&id, "192.168.49.1", 8988, t0 + REQUEST_TIMEOUT, 0));
+        let late = REQUEST_TIMEOUT + Duration::from_secs(1);
+        deliver(&mut android, LOW, &mut iphone, HIGH, t0 + late, 0);
+
+        assert!(
+            !iphone.has_directives(),
+            "the user was prompted for a link nobody waits on"
+        );
+        assert!(iphone.take_changes().is_empty());
+        let answer = iphone.take_frames();
+        assert_eq!(answer.len(), 1);
+        assert_eq!(
+            answer[0].1.body,
+            FrameBody::Close {
+                reason: "expired".to_string()
+            }
+        );
+        // The answer takes the host's network down.
+        for (_, frame) in answer {
+            android.on_frame(HIGH, LOW, frame, fresh(3), t0 + late, 0);
+        }
+        assert_eq!(
+            android.next_directive(t0).unwrap().kind,
+            FastLinkDirectiveKind::Close
+        );
+
+        // Remembered for a while, then forgotten.
+        assert!(iphone.ended_recently(
+            &id,
+            t0 + REQUEST_TIMEOUT + ENDED_MEMORY - Duration::from_secs(1)
+        ));
+        assert!(!iphone.ended_recently(&id, t0 + REQUEST_TIMEOUT + ENDED_MEMORY));
+    }
+
+    #[test]
+    fn a_late_request_for_an_ended_link_is_not_hosted_again() {
+        let t0 = Instant::now();
+        let mut android = machine(host_roles());
+        let id = fresh(1).link_id;
+        android.on_frame(
+            HIGH,
+            LOW,
+            Frame::new(&id, FrameBody::Request),
+            fresh(2),
+            t0,
+            0,
+        );
+        android.next_directive(t0);
+        android.tick(t0 + HOSTING_TIMEOUT, |_| false);
+        android.next_directive(t0);
+        android.take_frames();
+
+        android.on_frame(
+            HIGH,
+            LOW,
+            Frame::new(&id, FrameBody::Request),
+            fresh(3),
+            t0 + HOSTING_TIMEOUT,
+            0,
+        );
+        assert!(!android.has_directives());
+        assert!(android.take_frames().is_empty());
+        assert!(android.peer().is_none());
     }
 
     #[test]

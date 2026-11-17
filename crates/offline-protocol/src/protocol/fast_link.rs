@@ -78,7 +78,7 @@ impl OfflineProtocol {
     /// Ends the fast link with `peer`, if there is one. Returns whether there
     /// was.
     pub fn close_fast_link(&mut self, peer: &str) -> bool {
-        let closed = self.fast_links.close(peer);
+        let closed = self.fast_links.close(peer, Instant::now());
         self.flush_fast_link();
         closed
     }
@@ -114,7 +114,7 @@ impl OfflineProtocol {
     /// link (`reason`: `declined`, `failed`, `host_failed`, `background`, ...).
     pub fn fast_link_ended(&mut self, link_id: &str, reason: &str) {
         self.fast_links
-            .platform_ended(link_id, CloseReason::parse(reason));
+            .platform_ended(link_id, CloseReason::parse(reason), Instant::now());
         self.flush_fast_link();
     }
 
@@ -126,7 +126,7 @@ impl OfflineProtocol {
 
     /// The peer stream that proved `peer` ended.
     pub fn fast_link_stream_lost(&mut self, peer: &str) {
-        self.fast_links.stream_lost(peer);
+        self.fast_links.stream_lost(peer, Instant::now());
         self.flush_fast_link();
     }
 
@@ -206,12 +206,24 @@ impl OfflineProtocol {
         }
     }
 
-    /// Sealed with the strict encryptor and sent once over the live direct
-    /// link, with no acknowledgement, outbox or retry (ADR 0032). Fails
+    /// Sealed with the strict encryptor and sent once over a live direct
+    /// link, Bluetooth LE first, with no acknowledgement, outbox or retry (ADR 0032). Fails
     /// before encrypting when there is no link, so no ratchet generation is
     /// spent on a frame that cannot leave.
     fn send_fast_link_frame(&mut self, peer: &str, content: &str) -> Result<()> {
-        let transport = self.direct_link_to(peer)?;
+        // Bluetooth when the peer is linked there: the link this frame
+        // starts, stops or replaces may be the peer stream itself, and a
+        // close sent down a stream being torn down, or a request down a LAN
+        // stream the peer has just left, arrived 22 to 63 s late on two
+        // phones, or not at all.
+        let transport = if self
+            .transport_manager
+            .holds_mesh_link(TransportType::BLE, peer)
+        {
+            TransportType::BLE
+        } else {
+            self.direct_link_to(peer)?
+        };
         let sealed = self.encrypt_content_for_recipient_strict(peer, content)?;
         let mut message = self.create_message(peer, sealed, Some(MessagePriority::High), None)?;
         message.requires_ack = false;

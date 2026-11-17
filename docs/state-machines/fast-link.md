@@ -12,7 +12,8 @@ what each shape prevents.
 
 1. **Credentials leave a device only inside the confirmed 1:1 session with the
    peer they are for.** A fast-link frame is sealed or not sent, travels once
-   over a live direct link, and never enters the outbox, a relay or a
+   over a live direct link (Bluetooth LE whenever the peer is linked there,
+   never down the stream the frame may be ending), and never enters the outbox, a relay or a
    neighbour's custody. A frame that arrives in plaintext is never routed here.
 2. **A link never announces a peer.** Only a stream's preamble does, exactly as
    on every other network. The joiner's stream is opened with the host's
@@ -84,6 +85,14 @@ ignores the higher one's offer, which its owner is about to withdraw.
 
 **A `close` arrives.** It ends the link with that id, if there is one, and is
 never answered.
+
+**A frame arrives for a link this device ended** within the last ten
+minutes (the longest an offer lives, plus the clock slack). It is late. A
+request is dropped; an offer is answered `close` (`expired`), so the host
+takes its network down, and is never joined. On two phones a request
+delayed 63 s reached the host after the requester had given up, and before
+this rule its offer prompted the requester's user to join a network that had
+already been removed.
 
 An offer is valid when its name is 1 to 32 bytes, its passphrase 8 to 63
 printable ASCII characters, its host a private or link-local IP literal, its
