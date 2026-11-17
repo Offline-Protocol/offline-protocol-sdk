@@ -25225,48 +25225,153 @@ mod tests {
         );
     }
 
-    /// Friction #21: Python integrators get an honest wheel matrix and Docker
-    /// fallback, pinned to the four platforms build-wheel.sh ships.
+    /// The Python distribution page names every wheel a release builds, the
+    /// glibc floor the Python README states, and the service image the
+    /// container README points at. Each comes from a source the page does not
+    /// own: the platform list is the release matrix and the cases in
+    /// build-wheel.sh, so a fifth platform fails here until the page names it,
+    /// and the image tag is bumped in the container README at each release,
+    /// so a bump that misses this page fails here instead of sending readers
+    /// to the previous release's image.
     #[test]
     fn python_wheel_distribution_path_is_documented() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
             .expect("repository root");
-        let doc = std::fs::read_to_string(repo.join("docs/python-distribution.md"))
-            .expect("python-distribution.md");
+        let read = |path: &str| {
+            std::fs::read_to_string(repo.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+        };
+        let doc = read("docs/python-distribution.md");
+
+        // The platforms build-wheel.sh can tag: its two-space-indented case
+        // arms, not the names in its comments, which survive a deleted arm.
+        let script = read("bindings/python/scripts/build-wheel.sh");
+        let mut script_platforms: Vec<&str> = script
+            .lines()
+            .filter_map(|line| line.strip_prefix("  ")?.strip_suffix(')'))
+            .filter(|arm| {
+                !arm.is_empty()
+                    && arm.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+                    })
+            })
+            .collect();
+        script_platforms.sort_unstable();
+
+        // The platforms a release builds: the python-package job's matrix.
+        let release = read(".github/workflows/release.yml");
+        let job = release
+            .split("\n  python-package:\n")
+            .nth(1)
+            .expect("release.yml has a python-package job");
+        let job = job
+            .lines()
+            .take_while(|line| {
+                !(line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':'))
+            })
+            .collect::<Vec<_>>();
+        let mut release_platforms: Vec<&str> = job
+            .iter()
+            .filter_map(|line| line.trim().strip_prefix("- platform: "))
+            .collect();
+        release_platforms.sort_unstable();
+
+        assert_eq!(
+            script_platforms,
+            [
+                "linux-aarch64",
+                "linux-x86_64",
+                "macos-arm64",
+                "windows-x86_64"
+            ],
+            "build-wheel.sh's platform cases changed: update python-distribution.md and this list"
+        );
+        assert_eq!(
+            release_platforms, script_platforms,
+            "release.yml's python-package matrix and build-wheel.sh's cases disagree"
+        );
+
+        // Each platform as the page shows it to a reader: its wheel tag.
+        for tag in [
+            "macosx_14_0_arm64",
+            "manylinux_2_34_x86_64",
+            "manylinux_2_34_aarch64",
+            "win_amd64",
+        ] {
+            assert!(
+                doc.contains(tag),
+                "python-distribution.md must list the `{tag}` wheel"
+            );
+        }
+
+        // The glibc floor: every manylinux tag the Python README (the PyPI
+        // page) states is one this page states.
+        let readme = read("bindings/python/README.md");
+        let readme_tags: Vec<&str> = readme
+            .match_indices("manylinux_2_")
+            .map(|(at, _)| {
+                let rest = &readme[at..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .filter(|tag| tag.ends_with("_x86_64") || tag.ends_with("_aarch64"))
+            .collect();
+        assert!(
+            !readme_tags.is_empty(),
+            "the Python README states no manylinux tag"
+        );
+        for tag in readme_tags {
+            assert!(
+                doc.contains(tag),
+                "the Python README states `{tag}` and python-distribution.md does not"
+            );
+        }
+
+        // The image: every tag the page pulls is the one the container README,
+        // which each release bumps, points at.
+        const IMAGE: &str = "ghcr.io/offline-protocol/offline-protocol-service:";
+        let image_tags = |text: &str| -> Vec<String> {
+            text.match_indices(IMAGE)
+                .map(|(at, _)| {
+                    text[at + IMAGE.len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect()
+                })
+                .collect()
+        };
+        let docker_readme = read("bindings/python/docker/README.md");
+        let current = image_tags(&docker_readme)
+            .into_iter()
+            .next()
+            .expect("the container README pulls the published image");
+        let page_tags = image_tags(&doc);
+        assert!(
+            !page_tags.is_empty(),
+            "python-distribution.md must pull the published image"
+        );
+        for tag in page_tags {
+            assert_eq!(
+                tag, current,
+                "python-distribution.md pulls {IMAGE}{tag}; the container README is on {current}"
+            );
+        }
+
         for needle in [
             "pip install offline-protocol-sdk",
-            "ghcr.io/offline-protocol/offline-protocol-service",
-            "musl",
-            "Intel",
-            "no sdist",
-            "macos-arm64",
-            "linux-x86_64",
+            "state_root",
+            "no source distribution",
         ] {
             assert!(
                 doc.contains(needle),
                 "python-distribution.md must mention `{needle}`"
             );
         }
-        let wheel_script =
-            std::fs::read_to_string(repo.join("bindings/python/scripts/build-wheel.sh"))
-                .expect("build-wheel.sh");
-        for platform in [
-            "macos-arm64",
-            "linux-x86_64",
-            "linux-aarch64",
-            "windows-x86_64",
-        ] {
-            assert!(
-                wheel_script.contains(platform),
-                "build-wheel.sh must still name {platform}"
-            );
-        }
-        let map =
-            std::fs::read_to_string(repo.join("docs/integrator-map.md")).expect("integrator-map");
         assert!(
-            map.contains("python-distribution.md"),
+            read("docs/integrator-map.md").contains("python-distribution.md"),
             "integrator-map must link python-distribution.md"
         );
     }

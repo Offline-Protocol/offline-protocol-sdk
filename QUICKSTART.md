@@ -201,7 +201,9 @@ distribution guides above; that path is for maintainers, not the default app flo
 pip install 'offline-protocol-sdk[lan,http]'
 ```
 
-Supported wheels and fallbacks (Alpine, Intel Mac, old glibc): [python-distribution.md](docs/python-distribution.md).
+Set `state_root` explicitly when you construct `ProtocolManager`. Supported
+hosts, and what to run on Alpine, an older glibc or an Intel Mac:
+[python-distribution.md](docs/python-distribution.md).
 
 ---
 
