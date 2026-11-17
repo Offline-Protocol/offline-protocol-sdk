@@ -1482,8 +1482,12 @@ is bound to the Wi-Fi interface, and the stream must prove the offerer's own
 address, so a link that proves nothing ends when its offer expires, at most
 300 s later. It can also put the iOS join prompt in front of a user who did
 not ask: an offer needs no request. Once the user declines, that peer's
-offers are refused for ten minutes, so the most it gets is one prompt per ten
-minutes per session. While a joiner is on the host's network the host is its access
+offers are refused for ten minutes, and a second offer while one is on screen
+is refused, so the most it gets is one prompt per ten minutes per session. An
+Android joiner shows no prompt at all: Wi-Fi Direct joins a group by name and
+passphrase silently, so a session peer can move an Android device onto its
+group whenever it is in range, bounded by the same lifetime and by the
+stream's proof. While a joiner is on the host's network the host is its access
 point, and sees whatever else the joiner's device sends there, as any access
 point does: name lookups and connection attempts of other applications, with
 no route onward.

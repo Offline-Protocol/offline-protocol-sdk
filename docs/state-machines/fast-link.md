@@ -81,7 +81,11 @@ the request's link id.
 ten minutes after this device's user declined a peer's network, that peer's
 offers are answered `declined` and never shown: each join on iOS is a system
 prompt, and without the pause a peer could put up another the moment one was
-refused. The user's own request to that peer ends the pause. An
+refused. The user's own request to that peer ends the pause. A second offer
+from the peer while one is being joined or is up is answered `busy` and the
+first stands: an honest host's new network follows its own `close`, and a
+swap would let a peer re-offer while each prompt is on screen, so that no
+decline is ever reported and the pause never begins. An
 offer that fails validation (below) is answered `close` (`invalid`) and nothing
 else happens. When both devices are hosting for each other, the lower address
 keeps hosting: the higher one closes its own link and joins, and the lower one

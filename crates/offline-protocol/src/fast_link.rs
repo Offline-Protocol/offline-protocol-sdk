@@ -754,9 +754,14 @@ impl FastLinks {
                         return;
                     }
                     if link.state != FastLinkState::Requested {
-                        // A new offer replaces the one before it: the host
-                        // brought up a new network. Nothing to tell it.
-                        self.end(CloseReason::Failed, false, now);
+                        // A second offer while one is being joined or is up
+                        // is refused, never swapped in. An honest host's new
+                        // network follows its own close, which ends this
+                        // link first. Swapping let a peer re-offer while each
+                        // prompt was on screen, so the user's decline was
+                        // never reported and the decline pause never began.
+                        self.reply_close(peer, link_id, CloseReason::Busy);
+                        return;
                     } else {
                         // The offer answers our request; it supersedes the
                         // request's link quietly, whatever id the host chose.
@@ -1785,6 +1790,64 @@ mod tests {
             HIGH,
             Frame::new(&id, FrameBody::Offer(offer)),
             fresh(3),
+            t0,
+            0,
+        );
+        assert!(!iphone.has_directives());
+    }
+
+    #[test]
+    fn a_second_offer_while_joining_is_refused_not_swapped_in() {
+        let t0 = Instant::now();
+        let offer = || Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+        };
+        let mut iphone = machine(join_roles());
+        let first = fresh(1).link_id;
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&first, FrameBody::Offer(offer())),
+            fresh(2),
+            t0,
+            0,
+        );
+        iphone.next_directive(t0);
+        iphone.take_changes();
+
+        let second = fresh(3).link_id;
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&second, FrameBody::Offer(offer())),
+            fresh(4),
+            t0,
+            0,
+        );
+        assert!(!iphone.has_directives(), "no second prompt");
+        assert!(iphone.take_changes().is_empty(), "the first link stands");
+        let answer = iphone.take_frames();
+        assert_eq!(answer[0].1.link, second);
+        assert_eq!(
+            answer[0].1.body,
+            FrameBody::Close {
+                reason: "busy".to_string()
+            }
+        );
+
+        // So the user's decline of the first reaches the engine, and holds.
+        assert!(iphone.platform_ended(&first, CloseReason::Declined, t0));
+        let third = fresh(5).link_id;
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&third, FrameBody::Offer(offer())),
+            fresh(6),
             t0,
             0,
         );
