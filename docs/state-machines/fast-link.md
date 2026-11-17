@@ -132,8 +132,11 @@ on unasked offers.
 **A `close` arrives.** It ends the link with that id, if there is one, and is
 never answered.
 
-**A frame arrives for a link this device ended** within the last ten
-minutes (the longest an offer lives, plus the clock slack). It is late. A
+**A request or offer arrives for a link this device ended** within the last
+ten minutes (the longest an offer lives, plus the clock slack). It is late. A
+`close` never is: it ends only the link held under its id, and treated as
+late it was dropped for a link adopted through `re` (below), whose id this
+device had ended once, so the host's close never stopped the join. A
 request is dropped; an offer is answered `close` (`expired`), so the host
 takes its network down, and is never joined. On two phones a request
 delayed 63 s reached the host after the requester had given up, and before

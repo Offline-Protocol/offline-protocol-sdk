@@ -750,7 +750,12 @@ impl FastLinks {
             }),
             _ => false,
         };
-        if !answers_request && self.ended_recently(&frame.link, now) {
+        // A close is never late: it acts only on the link held under its id,
+        // and gated here it was dropped for a link adopted through `re`,
+        // whose id this device had ended once, so the host's close never
+        // stopped the join.
+        let is_close = matches!(frame.body, FrameBody::Close { .. });
+        if !is_close && !answers_request && self.ended_recently(&frame.link, now) {
             // A late request needs no answer: its sender has given up on it.
             // A late offer gets one, so the host takes its network down.
             if matches!(frame.body, FrameBody::Offer(_)) {
@@ -1996,6 +2001,17 @@ mod tests {
         iphone.stream_proved(LOW, later);
         android.stream_proved(HIGH, later);
         assert_eq!(states(&mut android).last(), Some(&FastLinkState::Up));
+
+        // The host's close ends it, although its id was given up once.
+        iphone.take_changes();
+        assert!(android.close(HIGH, later));
+        deliver(&mut android, LOW, &mut iphone, HIGH, later, 0);
+        assert!(iphone.peer().is_none());
+        assert_eq!(states(&mut iphone), [FastLinkState::Closed]);
+        assert_eq!(
+            iphone.next_directive(later).unwrap().kind,
+            FastLinkDirectiveKind::Close
+        );
     }
 
     #[test]
