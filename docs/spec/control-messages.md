@@ -482,7 +482,7 @@ random:
 | `kind` | Further fields | Meaning |
 |--------|----------------|---------|
 | `request` | none | The sender can join a network and asks the recipient to host one |
-| `offer` | `ssid`, `passphrase`, `host`, `port`, `issued_at_ms`, `ttl_ms`, and `re` when it is sent again for a request under another id | The sender is hosting a network for the recipient: join `ssid` with `passphrase` and dial `host:port`, within `ttl_ms` of arrival. `re` names the request it answers; left out otherwise |
+| `offer` | `ssid`, `passphrase`, `host`, `port`, `issued_at_ms`, `ttl_ms`, and `re` when it is sent again for a request under another id | The sender is hosting a network for the recipient: join `ssid` with `passphrase` and dial `host:port`, within `ttl_ms` of arrival. `host` is the sender's own address on that network, which is the network's gateway (the group's owner): an iPhone confirms it has joined by its Wi-Fi gateway being `host`, since iOS names no network the application joined for one session, and ends the join `failed` after about 20 s otherwise. `re` names the request it answers; left out otherwise |
 | `close` | `reason` | The link with this id is over |
 
 Four rules hold for every frame of the family:
