@@ -792,10 +792,15 @@ impl FastLinks {
     }
 
     /// The peer ended a link not up here `superseded`, and another stream
-    /// does reach it: this device would have said the same, and its own
-    /// report lost the race to the peer's close. Ended as this device's own,
-    /// so it is not counted against the peer. False when no such link is
-    /// held, or it is up here (then the peer's close is taken as any other).
+    /// already reaches it here: this device would have said the same, but
+    /// its platform did not recognise that stream as another's (it was
+    /// announced before the link was published to the platform, say). Ended
+    /// as this device's own, so it is not counted against the peer. False
+    /// when no such link is held, or it is up here (then the peer's close is
+    /// taken as any other). A peer's `superseded` that arrives before this
+    /// device has proved the stream at all is counted: telling it from a
+    /// peer dodging the limits would need a wait, and it needs a Bluetooth
+    /// frame to beat the stream's own preamble.
     pub(crate) fn peer_superseded_while_reached(
         &mut self,
         peer: &str,
@@ -1085,7 +1090,10 @@ impl FastLinks {
         // this one is another's (both devices on one home network): the
         // link gives way, as the platform's own report would have it, rather
         // than going up on a stream that is not its own.
-        if link.state == FastLinkState::Joining && !link.platform_engaged {
+        // Nor has a host whose offer is not out yet.
+        if link.state == FastLinkState::Hosting
+            || (link.state == FastLinkState::Joining && !link.platform_engaged)
+        {
             self.end(CloseReason::Superseded, true, now);
             return;
         }
@@ -2863,13 +2871,38 @@ mod tests {
     }
 
     #[test]
-    fn a_peers_superseded_that_overtook_this_devices_report_is_not_counted() {
+    fn a_stream_proving_the_peer_before_the_offer_is_out_supersedes_the_link() {
+        let mut android = machine(host_roles());
+        let now = Instant::now();
+        let id = android.request(HIGH, fresh(1), now).unwrap();
+        assert_eq!(
+            android.next_directive(now).unwrap().kind,
+            FastLinkDirectiveKind::Host
+        );
+        android.take_changes();
+        // The group is still coming up when a home-network stream proves the
+        // peer: no offer, and the platform is told to drop the group.
+        android.stream_proved(HIGH, now);
+        assert_eq!(states(&mut android), [FastLinkState::Closed]);
+        assert_eq!(
+            android.next_directive(now).unwrap().kind,
+            FastLinkDirectiveKind::Close
+        );
+        assert!(!android.hosting(&id, "192.168.49.1", 8988, now, 0));
+        assert!(android
+            .take_frames()
+            .iter()
+            .all(|(_, frame)| !matches!(frame.body, FrameBody::Offer(_))));
+    }
+
+    #[test]
+    fn a_peers_superseded_for_a_link_a_stream_already_reaches_is_not_counted() {
         let mut android = machine(host_roles());
         let mut iphone = machine(join_roles());
         let now = Instant::now();
-        // The iPhone asks; both platforms then see a home-network stream and
-        // each ends the link `superseded`, the iPhone's close reaching the
-        // Android before its own platform's report.
+        // The iPhone asks; a home-network stream reaches both, the iPhone's
+        // platform ends the link `superseded`, and the Android's platform
+        // announced the stream without recognising it as another's.
         let ask = |android: &mut FastLinks, iphone: &mut FastLinks, seed| {
             // The last link's close for each platform, which drops its group.
             while android.next_directive(now).is_some() {}
@@ -2907,15 +2940,28 @@ mod tests {
         assert!(ask(&mut android, &mut iphone, 3).is_none());
 
         // Up here, the peer's `superseded` is any close: the link's own
-        // stream carried it, and its transfers are released.
+        // stream carried it, so its transfers are released and, carrying
+        // nothing, it is counted.
         let mut android = machine(host_roles());
         let mut iphone = machine(join_roles());
-        let id = android.request(HIGH, fresh(9), now).unwrap();
-        android.next_directive(now);
-        assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
-        android.stream_proved(HIGH, now);
-        assert!(!android.peer_superseded_while_reached(HIGH, &id, now));
-        let _ = &mut iphone;
+        for seed in [7, 8] {
+            while android.next_directive(now).is_some() {}
+            let id = iphone.request(LOW, fresh(seed), now).unwrap();
+            deliver(&mut iphone, HIGH, &mut android, LOW, now, 0);
+            android.next_directive(now);
+            assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+            deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+            iphone.next_directive(now);
+            android.stream_proved(HIGH, now);
+            assert!(!android.peer_superseded_while_reached(HIGH, &id, now));
+            assert!(iphone.platform_ended(&id, CloseReason::Superseded, now));
+            deliver(&mut iphone, HIGH, &mut android, LOW, now, 0);
+            assert_eq!(android.take_released(), [HIGH.to_string()]);
+        }
+        while android.next_directive(now).is_some() {}
+        iphone.request(LOW, fresh(9), now).unwrap();
+        deliver(&mut iphone, HIGH, &mut android, LOW, now, 0);
+        assert!(android.next_directive(now).is_none(), "two misses: busy");
     }
 
     #[test]

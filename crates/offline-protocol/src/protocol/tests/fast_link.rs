@@ -395,9 +395,10 @@ fn an_offer_to_a_peer_a_stream_already_reaches_is_answered_superseded() {
 }
 
 /// Two phones that meet over a shared LAN while a link they both hold is
-/// pending each end it `superseded`. The joiner's close reaching the host
-/// before the host's own report is not a miss: two such meetings left the
-/// host in backoff against the joiner.
+/// pending: the joiner ends it `superseded`, and the host already knows the
+/// stream but its platform did not recognise it as another's. The joiner's
+/// close is then the host's own end, not a miss: counted, two such meetings
+/// left the host in backoff against the joiner.
 #[test]
 fn a_peers_superseded_with_a_stream_reaching_it_is_not_counted() {
     use offline_protocol_transport::PeerLink;

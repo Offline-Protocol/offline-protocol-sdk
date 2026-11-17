@@ -249,13 +249,17 @@ passphrase.
   address before DHCP, so once the iPhone has joined only a stream whose path
   has a gateway that is not the host gives way.
   Such an end is the platform's own and never counts against the peer, nor
-  does the peer's own `superseded` for a link not yet up here while another
-  stream reaches the peer (its close can overtake this device's report;
-  counted, two meetings on a home network paused the peer). A peer's
-  `superseded` for a link up here is any close: the link's own stream
-  carried it. The engine also ends a join its platform has not yet taken
-  `superseded` when a stream proves the peer, since such a link has no
-  stream of its own. A link this device superseded fails no transfer on the
+  does the peer's own `superseded` for a link not yet up here while a stream
+  this device already proved reaches the peer (its platform did not
+  recognise that stream as another's; counted, two meetings on a home
+  network paused the peer). A peer's `superseded` that arrives before this
+  device has proved the stream at all is counted: telling it from a peer
+  dodging the limits would need a wait, and it needs a Bluetooth frame to
+  beat the stream's own preamble. A peer's `superseded` for a link up here
+  is any close: the link's own stream carried it. The engine also ends a
+  join its platform has not yet taken, or a link whose host has not yet sent
+  its offer, `superseded` when a stream proves the peer, since such a link
+  has no stream of its own. A link this device superseded fails no transfer on the
   slot: the transfers there are the other stream's.
 - **A joiner that falls silent** when iOS takes the network away leaves the
   host's stream half open until keepalive ends it. Hence the platform's
