@@ -1771,7 +1771,11 @@ class WifiDirectManager(
         }
     }
 
-    /** The transport is stopping: anything held for a link goes with it. */
+    /**
+     * The transport is stopping: anything held for a link goes with it,
+     * reported `closed`, this device's own end, which never counts against
+     * the peer the way a failure might.
+     */
     @SuppressLint("MissingPermission")
     private fun endFastLinkOnStop() {
         val hosted = fastLinkHosted
@@ -1782,13 +1786,13 @@ class WifiDirectManager(
         parkedFastLinkJoin = null
         fastLinkLeaving = false
         orphanedFastLinkSsid = null
-        parked?.let { fastLinkEnded(it.linkId, "failed") }
+        parked?.let { fastLinkEnded(it.linkId, "closed") }
         val ch = channel
         if ((hosted != null || joined != null) && ch != null) {
             wifiP2pManager?.removeGroup(ch, quietListener("end fast link on stop"))
         }
-        hosted?.let { fastLinkEnded(it.linkId, "failed") }
-        joined?.let { fastLinkEnded(it.linkId, "failed") }
+        hosted?.let { fastLinkEnded(it.linkId, "closed") }
+        joined?.let { fastLinkEnded(it.linkId, "closed") }
         try {
             protocol.wifiDirectSetFastLinkRoles(false, false, false)
         } catch (_: Exception) {}

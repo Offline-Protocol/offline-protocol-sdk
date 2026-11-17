@@ -344,7 +344,8 @@ public class WifiDirectManager: NSObject, TransportManager {
 
         try? protocolInstance.wifiDirectStatusChanged(isConnected: false)
         try? protocolInstance.wifiDirectSetFastLinkRoles(canHost: false, canJoin: false, acceptUnrequested: false)
-        onLinkQueueSync { endFastLink(reason: "failed") }
+        // This device's own end, which never counts against the peer.
+        onLinkQueueSync { endFastLink(reason: "closed") }
 
         updateState(.stopped)
         emitDiagnostic("info", "Peer-stream transport stopped")
