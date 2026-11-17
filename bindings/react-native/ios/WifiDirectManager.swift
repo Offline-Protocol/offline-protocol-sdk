@@ -901,9 +901,11 @@ extension WifiDirectManager {
     /// Gives a dial this long to become ready before it is tried again.
     private static let FAST_LINK_REDIAL: TimeInterval = 2.0
     /// Checks in a row, one per redial, in which iOS names no current
-    /// network before the join is given up as `failed`. Without the Access
-    /// Wi-Fi Information entitlement it never names one, and the link would
-    /// otherwise wait out its offer, two minutes, with nothing said.
+    /// network before the join is given up as `failed`. It names none while
+    /// the phone is on a network this app did not configure, so a join that
+    /// never happened, and none at all without the Access Wi-Fi Information
+    /// entitlement; either way the link would otherwise wait out its offer,
+    /// two minutes, with nothing said.
     private static let FAST_LINK_NETWORK_UNKNOWN_LIMIT = 5
 
     /// Whether `error` is the hotspot error `code`. The domain is checked:
@@ -1023,7 +1025,7 @@ extension WifiDirectManager {
                 guard let network = network else {
                     link.networkUnknown += 1
                     if link.networkUnknown >= Self.FAST_LINK_NETWORK_UNKNOWN_LIMIT {
-                        self.emitDiagnostic("error", "Fast link: iOS does not say what network the phone is on; the app needs the Access Wi-Fi Information entitlement (com.apple.developer.networking.wifi-info)", context: [
+                        self.emitDiagnostic("error", "Fast link: the phone is not on the offered network, or the app lacks the Access Wi-Fi Information entitlement (com.apple.developer.networking.wifi-info)", context: [
                             "linkId": link.linkId,
                         ])
                         self.endFastLink(reason: "failed")
