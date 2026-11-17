@@ -4610,7 +4610,8 @@ export class OfflineProtocol {
    * transport selection: a 1 MiB file that takes minutes over Bluetooth takes
    * seconds over it. A file transfer keeps the carrier it started on, so send
    * after the `fast_link_changed` event with state `up` for it to use the
-   * link.
+   * link. A transfer on the link when it ends fails at once with
+   * `media_send_failed`; send it again and it goes over what remains.
    *
    * Resolves with the link id as soon as the first step is taken; the outcome
    * arrives as `fast_link_changed` events. On iOS the join shows a system

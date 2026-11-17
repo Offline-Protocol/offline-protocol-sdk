@@ -416,6 +416,80 @@ fn only_a_transfer_on_the_peer_stream_holds_the_link() {
     assert!(OfflineProtocol::holds_fast_link(&on_stream));
 }
 
+/// A link that was up ends: a transfer pinned to the slot fails at once with
+/// its chunks withdrawn, rather than retrying on a slot that no longer
+/// reaches the peer until its retries run out. One on Bluetooth carries on.
+#[test]
+fn a_transfer_on_the_link_fails_when_the_link_ends() {
+    use offline_protocol_core::ContentType;
+
+    let (mut alice, mut bob) = pair();
+    let link_id = alice.protocol.request_fast_link(&bob.address).unwrap();
+    alice.protocol.next_fast_link_directive();
+    alice
+        .protocol
+        .fast_link_hosting(&link_id, "192.168.49.1", 8988)
+        .unwrap();
+    bob.deliver(alice.take_sent());
+    alice.protocol.fast_link_stream_proved(&bob.address);
+
+    let mut send = |name: &str| {
+        alice
+            .protocol
+            .send_media(
+                &bob.address,
+                vec![0x5a; 64 * 1024],
+                name,
+                ContentType::File,
+                None,
+            )
+            .unwrap()
+    };
+    let on_link = send("fast.bin");
+    let on_bluetooth = send("slow.bin");
+    // The mock has no stream, so pin the first the way a proved one would.
+    alice
+        .protocol
+        .outbound_media_transfers
+        .get_mut(&on_link)
+        .unwrap()
+        .pinned_transport = TransportType::WiFiDirect;
+    let link_chunks: Vec<_> = alice
+        .protocol
+        .outbound_media_chunks
+        .iter()
+        .filter(|(_, (file, _))| *file == on_link)
+        .map(|(message, _)| message.clone())
+        .collect();
+    assert!(!link_chunks.is_empty());
+
+    alice.protocol.fast_link_stream_lost(&bob.address);
+
+    assert!(!alice
+        .protocol
+        .outbound_media_transfers
+        .contains_key(&on_link));
+    assert!(alice
+        .protocol
+        .outbound_media_transfers
+        .contains_key(&on_bluetooth));
+    for message in &link_chunks {
+        assert!(!alice.protocol.media_outbox.contains_key(message));
+        assert!(!alice.protocol.outbound_media_chunks.contains_key(message));
+    }
+    let failed: Vec<String> = alice
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MediaSendFailed { file_id, .. } => Some(file_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, [on_link]);
+}
+
 /// Pausing the engine ends a link: a paused engine runs no timers, so an
 /// Android host's group would otherwise stay up until the app returned.
 #[test]

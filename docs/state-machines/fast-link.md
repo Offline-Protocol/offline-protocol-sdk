@@ -143,6 +143,13 @@ presence update every 15 s held a link up indefinitely when they did. A link
 that carries nothing large for 60 s is costing the user their own Wi-Fi for
 no reason.
 
+A link that was up and ends fails every file transfer to the peer that was
+pinned to the slot, at once, with `media_send_failed`, and withdraws its
+chunks. A transfer's carrier is fixed when it starts, so it would otherwise
+retry on a slot that no longer reaches the peer until its retries ran out,
+and its chunks are sized for the stream, larger than Bluetooth carries. The
+application sends it again over what remains.
+
 Pausing the engine ends a link with `background`: a paused engine runs none
 of these timers, and a host's group would otherwise stay on the air until the
 application returned, with nothing bounding it.

@@ -15,8 +15,11 @@ The engine already has a slot for a faster link, the peer stream
 the peer's address, everything above the slot works: the transport selector
 weights the slot by bandwidth, a file transfer pins to it once a stream proves
 the recipient, and outboxes and acknowledgements make falling back to
-Bluetooth lossless. What two phones without a shared network lack is a network
-to open the stream over.
+Bluetooth lossless for messages. A file transfer keeps the carrier it started
+on, so one in flight when a link ends fails at once
+([ending a link](../state-machines/fast-link.md#ending-a-link)) and the
+application sends it again. What two phones without a shared network lack is
+a network to open the stream over.
 
 Neither platform lets an application make one silently, but each lets it make
 one with credentials:

@@ -215,6 +215,33 @@ impl OfflineProtocol {
         transfer.pinned_transport == TransportType::WiFiDirect
     }
 
+    /// A link to `peer` that was up has ended: each transfer to it pinned to
+    /// the slot fails now, with its chunks withdrawn. Its carrier is fixed
+    /// when it starts, so it would otherwise retry on a slot that no longer
+    /// reaches the peer until its retries ran out, and its chunks are sized
+    /// for the stream, larger than Bluetooth carries. The application hears
+    /// `media_send_failed` and can send again over what remains.
+    fn fail_transfers_on_ended_link(&mut self, peer: &str) {
+        let files: Vec<String> = self
+            .outbound_media_transfers
+            .iter()
+            .filter(|(_, transfer)| transfer.recipient == peer && Self::holds_fast_link(transfer))
+            .map(|(file_id, _)| file_id.clone())
+            .collect();
+        for file_id in files {
+            let chunks: Vec<_> = self
+                .outbound_media_chunks
+                .iter()
+                .filter(|(_, (chunk_file, _))| *chunk_file == file_id)
+                .map(|(message_id, _)| message_id.clone())
+                .collect();
+            for message_id in &chunks {
+                self.forget_outbound_message(message_id);
+            }
+            self.abort_outbound_media_transfer(&file_id, "the fast link carrying it closed");
+        }
+    }
+
     /// Whether a peer stream holds `peer` now.
     fn peer_stream_proves(&self, peer: &str) -> bool {
         self.transport_manager
@@ -240,6 +267,9 @@ impl OfflineProtocol {
         }
         for change in self.fast_links.take_changes() {
             self.emit_event(Event::fast_link_changed(change));
+        }
+        for peer in self.fast_links.take_released() {
+            self.fail_transfers_on_ended_link(&peer);
         }
         if self.fast_links.has_directives() {
             self.wake_peer_stream_platform();

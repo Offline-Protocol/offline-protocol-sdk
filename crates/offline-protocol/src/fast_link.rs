@@ -547,6 +547,10 @@ pub(crate) struct FastLinks {
     unanswered: VecDeque<(String, u8)>,
     /// Peers whose requests are refused, and since when ([`HOST_BACKOFF`]).
     host_backoff: VecDeque<(String, Instant)>,
+    /// Peers whose link ended after it was up. A transfer pinned to the
+    /// slot for one of them can no longer reach it: its carrier is fixed when
+    /// it starts, so it would retry on a dead slot until its retries ran out.
+    released: VecDeque<String>,
 }
 
 impl FastLinks {
@@ -1090,6 +1094,9 @@ impl FastLinks {
         self.directives
             .retain(|pending| pending.directive.link_id != link.id);
         self.remember_ended(&link.id, now);
+        if link.state == FastLinkState::Up {
+            self.released.push_back(link.peer.clone());
+        }
         if link.role == FastLinkRole::Host && link.requested_by_peer {
             self.count_hosting(
                 &link.peer,
@@ -1189,6 +1196,11 @@ impl FastLinks {
 
     pub(crate) fn take_changes(&mut self) -> Vec<FastLinkChange> {
         self.changes.drain(..).collect()
+    }
+
+    /// Peers whose link ended after it was up, since the last call.
+    pub(crate) fn take_released(&mut self) -> Vec<String> {
+        self.released.drain(..).collect()
     }
 }
 
