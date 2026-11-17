@@ -875,6 +875,8 @@ private final class FastLinkJoin {
     let deadline: TimeInterval
     /// iOS reported the join.
     var joined = false
+    /// Checks in a row in which iOS named no current network at all.
+    var networkUnknown = 0
     /// The stream dialed toward the host for this link.
     weak var stream: AnyObject?
 
@@ -898,6 +900,11 @@ private final class FastLinkJoin {
 extension WifiDirectManager {
     /// Gives a dial this long to become ready before it is tried again.
     private static let FAST_LINK_REDIAL: TimeInterval = 2.0
+    /// Checks in a row, one per redial, in which iOS names no current
+    /// network before the join is given up as `failed`. Without the Access
+    /// Wi-Fi Information entitlement it never names one, and the link would
+    /// otherwise wait out its offer, two minutes, with nothing said.
+    private static let FAST_LINK_NETWORK_UNKNOWN_LIMIT = 5
 
     /// Whether `error` is the hotspot error `code`. The domain is checked:
     /// another framework's error that shares the number would otherwise read
@@ -1013,7 +1020,20 @@ extension WifiDirectManager {
             guard let self = self else { return }
             self.linkQueue.async {
                 guard self.fastLink === link else { return }
-                if network?.ssid == link.ssid {
+                guard let network = network else {
+                    link.networkUnknown += 1
+                    if link.networkUnknown >= Self.FAST_LINK_NETWORK_UNKNOWN_LIMIT {
+                        self.emitDiagnostic("error", "Fast link: iOS does not say what network the phone is on; the app needs the Access Wi-Fi Information entitlement (com.apple.developer.networking.wifi-info)", context: [
+                            "linkId": link.linkId,
+                        ])
+                        self.endFastLink(reason: "failed")
+                    } else {
+                        self.scheduleFastLinkRedial(link)
+                    }
+                    return
+                }
+                link.networkUnknown = 0
+                if network.ssid == link.ssid {
                     self.openFastLinkStream(link, port: port)
                 } else {
                     self.scheduleFastLinkRedial(link)
