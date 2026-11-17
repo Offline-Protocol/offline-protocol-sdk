@@ -4269,7 +4269,12 @@ impl OfflineProtocol {
         // limit (ADR 0038). Inbound traffic is noted where the platform hands
         // a body up.
         if transport == Some(TransportType::WiFiDirect) {
-            self.fast_link_activity(message.recipient.as_str());
+            let bytes = message.content.len()
+                + message
+                    .binary_content
+                    .as_ref()
+                    .map_or(0, |bytes| bytes.len());
+            self.fast_link_activity(message.recipient.as_str(), bytes);
         }
         // Never `?`: the frame is already on the wire, so an error here would
         // report a transmitted message as failed. Every transmit path asks

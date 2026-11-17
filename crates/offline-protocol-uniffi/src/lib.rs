@@ -5419,7 +5419,7 @@ impl OfflineProtocol {
     ) -> Result<(), ProtocolError> {
         let mut protocol = self.lock_inner()?;
         // Traffic on the slot keeps a fast link off its idle limit.
-        protocol.fast_link_activity(&sender_id);
+        protocol.fast_link_activity(&sender_id, data.len());
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)

@@ -130,9 +130,9 @@ impl OfflineProtocol {
         self.flush_fast_link();
     }
 
-    /// The peer-stream slot carried a body for `peer`.
-    pub fn fast_link_activity(&mut self, peer: &str) {
-        self.fast_links.activity(peer, Instant::now());
+    /// The peer-stream slot carried a body of `bytes` for `peer`.
+    pub fn fast_link_activity(&mut self, peer: &str, bytes: usize) {
+        self.fast_links.activity(peer, bytes, Instant::now());
     }
 
     /// A fast-link frame decrypted in the 1:1 session with `sender`, who is

@@ -43,9 +43,15 @@ pub const HOSTING_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a requester waits for an offer.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long an up link may carry nothing, with no transfer to the peer in
-/// flight, before it ends. It costs the joiner its own Wi-Fi.
+/// How long an up link may carry nothing large, with no transfer to the peer
+/// in flight, before it ends. It costs the joiner its own Wi-Fi.
 pub const IDLE_LIMIT: Duration = Duration::from_secs(60);
+
+/// The smallest body that counts as activity for [`IDLE_LIMIT`]: half a media
+/// chunk on the slot. Presence, receipts and chat are smaller and go over
+/// Bluetooth LE perfectly well, and counting them kept a link up for as long
+/// as an application sent presence every 15 s (two phones, ADR 0038).
+pub const ACTIVITY_MIN_BYTES: usize = 16 * 1024;
 
 /// Hex digits in a link id, 128 bits.
 pub const LINK_ID_HEX_LEN: usize = 32;
@@ -796,8 +802,12 @@ impl FastLinks {
         }
     }
 
-    /// The slot carried a body for `peer`.
-    pub(crate) fn activity(&mut self, peer: &str, now: Instant) {
+    /// The slot carried a body of `bytes` for `peer`. Only a large one moves
+    /// the idle clock ([`ACTIVITY_MIN_BYTES`]).
+    pub(crate) fn activity(&mut self, peer: &str, bytes: usize, now: Instant) {
+        if bytes < ACTIVITY_MIN_BYTES {
+            return;
+        }
         if let Some(link) = self.link.as_mut() {
             if link.peer == peer {
                 link.last_activity = now;
@@ -1391,9 +1401,22 @@ mod tests {
         host.stream_proved(HIGH, t0);
         host.take_changes();
 
-        host.activity(HIGH, t0 + Duration::from_secs(30));
+        host.activity(HIGH, ACTIVITY_MIN_BYTES - 1, t0 + Duration::from_secs(20));
+        host.activity(HIGH, ACTIVITY_MIN_BYTES, t0 + Duration::from_secs(30));
+        host.activity(HIGH, 300, t0 + Duration::from_secs(80));
         host.tick(t0 + IDLE_LIMIT, |_| false);
-        assert!(host.peer().is_some(), "activity moved the idle clock");
+        assert!(host.peer().is_some(), "a large body moved the idle clock");
+        host.tick(t0 + Duration::from_secs(30) + IDLE_LIMIT, |_| false);
+        assert_eq!(
+            host.take_changes().last().unwrap().reason,
+            Some(CloseReason::Idle),
+            "presence-sized chatter does not hold a link up"
+        );
+
+        let id = host.request(HIGH, fresh(2), t0).unwrap();
+        host.hosting(&id, "192.168.49.1", 8988, t0, 0);
+        host.stream_proved(HIGH, t0);
+        host.take_changes();
 
         host.tick(t0 + Duration::from_secs(200), |peer| peer == HIGH);
         assert!(host.peer().is_some(), "a transfer in flight is not idle");

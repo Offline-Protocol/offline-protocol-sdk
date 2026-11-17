@@ -101,10 +101,13 @@ for this device's platform when the platform holds anything for the link, a
 come from the peer, and one `fast_link_changed` event with state `closed` and
 the reason.
 
-The idle limit counts a body carried by the slot in either direction for this
-peer as activity, and does not run while a file transfer to the peer is in
-flight. A link that carries nothing for 60 s is costing the user their own
-Wi-Fi for no reason.
+The idle limit counts a body of at least 16 KiB carried by the slot in either
+direction for this peer as activity, and does not run while a file transfer
+to the peer is in flight. Smaller bodies (presence, receipts, chat) do not
+count: Bluetooth LE carries them well, and on two phones an application's
+presence update every 15 s held a link up indefinitely when they did. A link
+that carries nothing large for 60 s is costing the user their own Wi-Fi for
+no reason.
 
 A joiner's platform that is about to lose the network reports it as `ended`
 first: on iOS, leaving the foreground, after which iOS disconnects at 15 s

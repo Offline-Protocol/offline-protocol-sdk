@@ -88,8 +88,8 @@ the foreground and deleted the passphrase.
    off the network just joined.
 
 7. **The engine ends a link** when its offer expires unused (120 s), when the
-   proved stream is lost, after 60 s with nothing carried and no transfer to
-   the peer under way, on either side's `close`, and on the application's
+   proved stream is lost, after 60 s with nothing large carried (a body of
+   16 KiB or more) and no transfer to the peer under way, on either side's `close`, and on the application's
    `close_fast_link`. A joiner's platform reports its own end when it can no
    longer hold the network: iOS does when the application leaves the
    foreground, because iOS disconnects 15 s later anyway and the host would
