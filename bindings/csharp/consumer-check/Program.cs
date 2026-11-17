@@ -160,7 +160,8 @@ try
         return 1;
     }
 
-    // C12: desktop hosts must forward foreground/background for telemetry sessions.
+    // The lifecycle calls are accepted with telemetry off. A UI host (WinUI, WPF, MAUI)
+    // forwards its own foreground and background edges through these (CS5).
     await engine.NotifyAppStateAsync(AppState.Background);
     await engine.NotifyAppStateAsync(AppState.Active);
 

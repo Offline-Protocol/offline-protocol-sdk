@@ -7,8 +7,8 @@ break, this stops compiling or R8 stops on a missing class.
 
 | Path | Role |
 |------|------|
-| `app/src/main/java/consumer/Use.kt` | Canonical engine vs bridge imports, storage, and C12 telemetry lifecycle stubs |
-| `app/build.gradle.kts` | `checkJniLibraryNames` if you add manual `jniLibs/` |
+| `app/src/main/java/consumer/Use.kt` | Canonical engine vs bridge imports, storage, and the C12 telemetry lifecycle (`TelemetryLifecycleForwarder`) |
+| `jniNamesForDocs()` in `Use.kt` | The native library names, for an application that copies the `.so` files into `jniLibs/` itself |
 
 `Use.kt` imports the engine from `uniffi.offline_protocol` and hand-written
 bridge types from `com.offlineprotocol`.
