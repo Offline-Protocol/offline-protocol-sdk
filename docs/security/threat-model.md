@@ -1480,8 +1480,9 @@ and so take the joiner off its own Wi-Fi, after the system prompt on iOS. The
 offered address must be a private or link-local IP literal, the joiner's dial
 stays on the group (an iPhone dials only once its Wi-Fi path's gateway is
 the offered address, the group's owner, since a join can finish with no error
-while the phone stays on its own Wi-Fi; an offer naming the user's own
-router's address would reach the router, which proves nothing and is closed;
+while the phone stays on its own Wi-Fi; an offer whose address is already
+the gateway of the network the iPhone is on, the user's own router, ends
+`invalid` before the prompt and is never dialled;
 the offered name must be a Wi-Fi Direct group's, and an
 offer naming the network the iPhone is already on, which iOS reports as
 already joined, ends `invalid` and is never dialled; an Android, which keeps its own Wi-Fi, dials the group

@@ -20422,6 +20422,10 @@ mod tests {
     /// iPhone 16 every join was given up `failed` five seconds after the
     /// phone was on the group. The Android host names the group's owner
     /// address in its offer, and that address is the gateway of the path.
+    /// Before the prompt the host must not already be the gateway of the
+    /// network the phone is on: otherwise an offer naming the user's own
+    /// router, with a join that silently did not happen, was dialled there on
+    /// every redial.
     /// The wait for it is bounded: `apply` can finish with no error while the
     /// phone stays on its own Wi-Fi, and an unbounded wait held the host's
     /// group for the offer's two minutes with nothing said.
@@ -20442,8 +20446,11 @@ mod tests {
              be the Wi-Fi path's gateway"
         );
         assert!(
-            swift.contains("} else if link.offGroup + 1 >= Self.FAST_LINK_OFF_GROUP_LIMIT {")
-                && swift.contains("self.endFastLink(reason: \"failed\")"),
+            swift.contains(
+                "} else if link.offGroup + 1 >= Self.FAST_LINK_OFF_GROUP_LIMIT { \
+                 self.emitDiagnostic(\"error\", \"Fast link: the phone is not on the offered network\", \
+                 context: [ \"linkId\": link.linkId, ]) self.endFastLink(reason: \"failed\") }"
+            ),
             "ios/WifiDirectManager.swift: a join that never reaches the group must end \
              `failed` after a bounded number of looks, not wait out its offer"
         );
@@ -20454,6 +20461,17 @@ mod tests {
             2,
             "ios/WifiDirectManager.swift: a fast-link dial that finds the stream table full \
              must try again, not end the redial chain"
+        );
+        assert!(
+            swift.contains(
+                "fastLink = link checkBeforeJoin(link, passphrase: passphrase, looks: 0) }"
+            ) && swift.contains(
+                "if !Self.isGateway(link.host, of: path) { \
+                 self.applyFastLinkJoin(link, passphrase: passphrase) }"
+            ),
+            "ios/WifiDirectManager.swift: a join must refuse an offered host that is already \
+             the gateway of the network the phone is on, before the prompt; the gateway check \
+             alone dials the user's own router when the join silently does not happen"
         );
     }
     /// An Android host records its fast link's group name once it sees the

@@ -908,6 +908,10 @@ extension WifiDirectManager {
     /// group refusing every other link. Twenty seconds: on an iPhone 16 the
     /// group's address arrived about 3 s after the join.
     private static let FAST_LINK_OFF_GROUP_LIMIT = 10
+    /// Looks before the prompt, 2 s apart, that find the offered host already
+    /// the gateway before the offer is refused `invalid`. Eight seconds: a
+    /// phone leaving a fast link's group was back on its own Wi-Fi in about 4.
+    private static let FAST_LINK_PRE_JOIN_LOOKS = 4
 
     /// Whether `error` is the hotspot error `code`. The domain is checked:
     /// another framework's error that shares the number would otherwise read
@@ -961,12 +965,56 @@ extension WifiDirectManager {
             deadline: ProcessInfo.processInfo.systemUptime + TimeInterval(directive.expiresInMs) / 1000
         )
         fastLink = link
+        checkBeforeJoin(link, passphrase: passphrase, looks: 0)
+    }
+
+    /// Before the prompt, the offered host must not already be the gateway of
+    /// the network the phone is on. The dial goes out once the Wi-Fi gateway
+    /// is the host (`dialFastLink`), and `apply` can finish with no error
+    /// while the phone stays on its own Wi-Fi, so an offer naming the user's
+    /// own router would otherwise be dialled there, again on every redial
+    /// until the offer expired. A match is looked at again before it is
+    /// refused: right after a link ends the phone is still leaving that
+    /// group, whose owner has the same address as every Android group's.
+    private func checkBeforeJoin(_ link: FastLinkJoin, passphrase: String, looks: Int) {
+        lookAtWifiPath { [weak self] path in
+            guard let self = self, self.fastLink === link else { return }
+            if !Self.isGateway(link.host, of: path) {
+                self.applyFastLinkJoin(link, passphrase: passphrase)
+            } else if looks + 1 < Self.FAST_LINK_PRE_JOIN_LOOKS {
+                self.linkQueue.asyncAfter(deadline: .now() + Self.FAST_LINK_REDIAL) { [weak self] in
+                    self?.checkBeforeJoin(link, passphrase: passphrase, looks: looks + 1)
+                }
+            } else {
+                self.emitDiagnostic("warning", "Fast link: the offered host is the gateway of the network the phone is already on", context: [
+                    "linkId": link.linkId,
+                ])
+                self.fastLink = nil
+                self.protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "invalid")
+            }
+        }
+    }
+
+    private func applyFastLinkJoin(_ link: FastLinkJoin, passphrase: String) {
         emitDiagnostic("info", "Fast link: joining a network", context: ["linkId": link.linkId])
-        let configuration = NEHotspotConfiguration(ssid: ssid, passphrase: passphrase, isWEP: false)
+        let configuration = NEHotspotConfiguration(ssid: link.ssid, passphrase: passphrase, isWEP: false)
         configuration.joinOnce = true
         NEHotspotConfigurationManager.shared.apply(configuration) { [weak self] error in
             self?.linkQueue.async { self?.fastLinkJoinFinished(link, error: error as NSError?) }
         }
+    }
+
+    /// One look at the Wi-Fi path, on linkQueue. The handler holds the
+    /// monitor, so it is dropped on the first update or each look would keep
+    /// one alive.
+    private func lookAtWifiPath(_ body: @escaping (NWPath) -> Void) {
+        let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        monitor.pathUpdateHandler = { path in
+            monitor.pathUpdateHandler = nil
+            monitor.cancel()
+            body(path)
+        }
+        monitor.start(queue: linkQueue)
     }
 
     private func fastLinkJoinFinished(_ link: FastLinkJoin, error: NSError?) {
@@ -1036,18 +1084,14 @@ extension WifiDirectManager {
         // a group already gone), and `.wifi` alone would then send the dial,
         // and the preamble, to whatever the offer named on the user's home
         // network. The host is the group's owner, so the phone is on the
-        // group exactly when its Wi-Fi path's gateway is the offered host.
-        // Not `NEHotspotNetwork.fetchCurrent`: a `joinOnce` network is not
+        // group exactly when its Wi-Fi path's gateway is the offered host;
+        // `checkBeforeJoin` refused a host that was already the gateway of
+        // the network the phone was on. Not `NEHotspotNetwork.fetchCurrent`: a `joinOnce` network is not
         // one the app configured as iOS counts it, so without location
         // permission that names no network at all, and every join failed.
         // Until the phone is on it, the dial waits, for at most
         // FAST_LINK_OFF_GROUP_LIMIT looks.
-        let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
-        monitor.pathUpdateHandler = { [weak self] path in
-            // One look per dial. The handler holds the monitor, so it is
-            // dropped here or each redial would keep one alive.
-            monitor.pathUpdateHandler = nil
-            monitor.cancel()
+        lookAtWifiPath { [weak self] path in
             guard let self = self, self.fastLink === link else { return }
             if Self.isGateway(link.host, of: path) {
                 link.offGroup = 0
@@ -1062,7 +1106,6 @@ extension WifiDirectManager {
                 self.scheduleFastLinkRedial(link)
             }
         }
-        monitor.start(queue: linkQueue)
     }
 
     /// Whether `host`, an IP literal, is a gateway of `path`.
