@@ -825,6 +825,13 @@ impl FastLinks {
             self.reply_close(peer, link_id, CloseReason::Declined);
             return;
         }
+        // Before anything held is given up: a device that cannot join would
+        // otherwise drop its waiting request with no `closed`, or end the
+        // link it hosts in the tie-break below, and then refuse the offer.
+        if !self.roles.can_join {
+            self.reply_close(peer, link_id, CloseReason::CannotJoin);
+            return;
+        }
         // Whether this device's application asked for a link with the peer:
         // its request is waiting, or it is hosting for the peer itself.
         let mut asked = false;
@@ -877,10 +884,6 @@ impl FastLinks {
                     }
                 }
             }
-        }
-        if !self.roles.can_join {
-            self.reply_close(peer, link_id, CloseReason::CannotJoin);
-            return;
         }
         if !asked && !self.roles.accept_unrequested {
             self.reply_close(peer, link_id, CloseReason::Declined);
@@ -1875,6 +1878,27 @@ mod tests {
         iphone.stream_proved(LOW, later);
         android.stream_proved(HIGH, later);
         assert_eq!(states(&mut android).last(), Some(&FastLinkState::Up));
+    }
+
+    #[test]
+    fn a_device_that_can_no_longer_join_keeps_what_it_holds() {
+        let t0 = Instant::now();
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let id = iphone.request(LOW, fresh(1), t0).unwrap();
+        deliver(&mut iphone, HIGH, &mut android, LOW, t0, 0);
+        iphone.take_changes();
+        iphone.set_roles(FastLinkRoles::default());
+        android.next_directive(t0);
+        assert!(android.hosting(&id, "192.168.49.1", 8988, t0, 0));
+        deliver(&mut android, LOW, &mut iphone, HIGH, t0, 0);
+
+        assert_eq!(iphone.peer(), Some(LOW), "the request still waits");
+        assert!(iphone.take_changes().is_empty());
+        assert!(!iphone.has_directives());
+        // Its own timer ends it, with the one `closed` the application waits on.
+        iphone.tick(t0 + REQUEST_TIMEOUT, |_| false);
+        assert_eq!(states(&mut iphone), [FastLinkState::Closed]);
     }
 
     #[test]
