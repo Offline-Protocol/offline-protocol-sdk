@@ -1623,9 +1623,19 @@ impl OfflineProtocol {
                             "Dropping a sealed service frame that is not a request or response"
                         );
                     }
+                    // A fast-link frame from a group plaintext never reaches
+                    // here; from this session it is routed below, after the
+                    // confirm, and never surfaced.
+                    let fast_link_frame = (in_session
+                        && text.starts_with(internal_prefixes::FAST_LINK))
+                    .then(|| std::mem::take(&mut text));
+                    let stray_fast_link_frame =
+                        !in_session && text.starts_with(internal_prefixes::FAST_LINK);
                     let surfaced = if is_session_confirm
                         || sealed_service_frame.is_some()
                         || unroutable_service_frame
+                        || fast_link_frame.is_some()
+                        || stray_fast_link_frame
                     {
                         Some(InternalMessageResult::Consumed)
                     } else if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {

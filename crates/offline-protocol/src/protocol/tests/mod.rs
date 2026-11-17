@@ -23652,6 +23652,41 @@ fn a_membership_frame_is_consumed_and_never_answered() {
     );
 }
 
+/// A fast-link frame that arrives bare, outside any session, is consumed:
+/// never delivered as application text, never answered and never acted on.
+/// An offer carries a passphrase, so one that crossed the air readable is
+/// exactly the frame the receiver must not reward (ADR 0038).
+#[test]
+fn a_bare_fast_link_frame_is_consumed_and_never_answered() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let sent = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+    let before = sent.sent_messages().len();
+
+    let content = format!(
+        "{}{{\"v\":1,\"kind\":\"offer\",\"link\":\"{}\",\"ssid\":\"DIRECT-ab-0123456789ab\",\
+         \"passphrase\":\"{}\",\"host\":\"192.168.49.1\",\"port\":8988,\
+         \"issued_at_ms\":0,\"ttl_ms\":120000}}",
+        internal_prefixes::FAST_LINK,
+        "a".repeat(32),
+        "b".repeat(32),
+    );
+    let message = signed_frame(&id("alice"), "user123", &content);
+
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    assert_eq!(
+        sent.sent_messages().len(),
+        before,
+        "a bare fast-link frame is never answered"
+    );
+}
+
 /// No node sends `__MEMBER__` on its own, and above all not on discovery.
 ///
 /// A build that does not reserve the prefix rejects the frame with a security

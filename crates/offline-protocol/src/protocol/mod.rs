@@ -3735,6 +3735,15 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // A fast-link frame (ADR 0038) is routed only from the decrypted
+        // plaintext of a 1:1 session. One that arrived bare crossed every hop
+        // readable, offer passphrase and all, so it is consumed and never
+        // acted on: acting on it would teach a sender that a plaintext offer
+        // works. Never surfaced either, since it is not application text.
+        if content.starts_with(internal_prefixes::FAST_LINK) {
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // --- Group (mesh/MLS) messages ---
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_MSG) {

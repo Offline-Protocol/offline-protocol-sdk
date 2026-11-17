@@ -1,10 +1,11 @@
 //! The control-frame prefixes a 1:1 sealed conversation is carried on.
 //!
-//! A frame's type is the reserved prefix its content begins with. The seven
+//! A frame's type is the reserved prefix its content begins with. The eight
 //! here are the ones both ends of a pair speak: everything needed to
 //! establish a session, carry sealed payloads over it, and confirm it came
-//! up, and the membership exchange a leaf with a certificate runs like any
-//! other node. They live in this crate because a leaf node emits and parses them
+//! up, the membership exchange a leaf with a certificate runs like any
+//! other node, and the fast link, by which a pair brings up a Wi-Fi network
+//! for itself. They live in this crate because a leaf node emits and parses them
 //! with a different MLS implementation than the engine, and two ends that
 //! disagree about a prefix byte do not have a conversation at all.
 //!
@@ -70,6 +71,17 @@ pub const SESSION_CONFIRM_ENCRYPTED: &str = "__MLS_ENC_CONFIRM__";
 /// [`MemberFrame`]: crate::MemberFrame
 pub const MEMBER: &str = "__MEMBER__";
 
+/// Carries one step of a fast link (ADR 0038): a request for one, an offer
+/// of a Wi-Fi network's credentials, or its close. Travels **only inside**
+/// the decrypted plaintext of an [`ENCRYPTED`] envelope in a confirmed 1:1
+/// session, never on the wire as a frame of its own.
+///
+/// Inside, because an offer carries a passphrase: MLS hides it, names the
+/// sender and refuses a replayed ciphertext, and a control-plane signature
+/// would do only the second. It is a pair's frame like the others here, and a
+/// leaf with a Wi-Fi radio can host or join a link as well as a phone can.
+pub const FAST_LINK: &str = "__FAST_LINK__";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +102,7 @@ mod tests {
         assert_eq!(SESSION_CONFIRM_ACK, "__MLS_CONFIRM_ACK__");
         assert_eq!(SESSION_CONFIRM_ENCRYPTED, "__MLS_ENC_CONFIRM__");
         assert_eq!(MEMBER, "__MEMBER__");
+        assert_eq!(FAST_LINK, "__FAST_LINK__");
     }
 
     /// No prefix may be a prefix of another.
@@ -109,6 +122,7 @@ mod tests {
             SESSION_CONFIRM_ACK,
             SESSION_CONFIRM_ENCRYPTED,
             MEMBER,
+            FAST_LINK,
         ];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {

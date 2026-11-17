@@ -109,7 +109,7 @@ seconds and an answer over the mesh or a relay can take longer.
 
 ### Prefixes that never appear on the wire
 
-Three prefixes are reserved but travel only **inside** an encrypted envelope. They
+Four prefixes are reserved but travel only **inside** an encrypted envelope. They
 are listed in the registry so application content can never impersonate them.
 
 | Prefix | Where it lives | Purpose |
@@ -117,6 +117,7 @@ are listed in the registry so application content can never impersonate them.
 | `__MLS_ENC_CONFIRM__` | Inside an `__MLS_ENC__` envelope | A group-aware decrypt that lets the both-create session owner converge. Consumed on receipt, never surfaced to the application |
 | `__RICH_V1__` | Inside the decrypted MLS plaintext | The sealed rich payload body |
 | `__DATA_V1__` | Inside the decrypted MLS plaintext | Replicated-document sync frames, negotiated as `data_versions`. See [Document sync frames](#document-sync-frames) |
+| `__FAST_LINK__` | Inside the decrypted plaintext of a 1:1 session only | A request for, offer of, or close of a Wi-Fi network for the pair, negotiated as `link_versions`. See [Fast link frames](#fast-link-frames) |
 
 ### Connection lifecycle
 
@@ -468,6 +469,47 @@ fetch, and what travels over the media path.
 The prefix itself is registered above, and is subject to every rule in this
 document: it is an internal prefix, it never appears as an outer wire prefix,
 and a message body a caller supplies may not begin with it.
+
+## Fast link frames
+
+`__FAST_LINK__` carries one step of a fast link
+([ADR 0038](../adr/0038-a-fast-link-is-offered-inside-the-session.md), and the
+runtime behaviour in [its state machine](../state-machines/fast-link.md)). The
+body after the prefix is a JSON object with `"v": 1`, a `kind`, and `link`, a
+link id of 32 lowercase hex digits that the device starting the link draws at
+random:
+
+| `kind` | Further fields | Meaning |
+|--------|----------------|---------|
+| `request` | none | The sender can join a network and asks the recipient to host one |
+| `offer` | `ssid`, `passphrase`, `host`, `port`, `issued_at_ms`, `ttl_ms` | The sender is hosting a network for the recipient: join `ssid` with `passphrase` and dial `host:port`, within `ttl_ms` of arrival |
+| `close` | `reason` | The link with this id is over |
+
+Four rules hold for every frame of the family:
+
+- **Inside a 1:1 session, or not at all.** A sender seals it with the strict
+  encryptor, which needs a confirmed session and never starts one, and a
+  receiver routes it only from a decrypted plaintext of a `session:` group.
+  Found anywhere else (a bare frame on the wire, a group plaintext) it is
+  consumed and never surfaced. The body carries a passphrase, and that is the
+  only way it reaches nobody else.
+- **Ephemeral.** It is sent once, over a live direct link, with
+  `requires_ack` false ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
+  A frame that cannot leave now is not sent. Nothing in the family is ever
+  answered by an acknowledgement, queued, relayed or deposited with a
+  custodian.
+- **Gated by `link_versions` entry 1.** No frame of the family is sent to a
+  peer that has not advertised it ([Capability negotiation](capability-negotiation.md)).
+- **Bounded.** A receiver refuses an offer whose `ssid` is not 1 to 32 bytes,
+  whose `passphrase` is not 8 to 63 printable ASCII characters, whose `host` is
+  not an IP literal in a private or link-local range, whose `port` is 0, whose
+  `ttl_ms` is over 300,000, or whose `issued_at_ms` lies more than 300 s ahead
+  of its clock or more than `ttl_ms` plus 300 s behind it, and answers it with
+  a `close` whose `reason` is `invalid`. A `host` is never resolved as a name.
+
+`reason` is one of `declined`, `failed`, `host_failed`, `cannot_host`,
+`cannot_join`, `busy`, `invalid`, `expired`, `no_offer`, `lost`, `idle`,
+`background` or `closed`. A receiver treats an unknown reason as `failed`.
 
 ## The control-plane signature gate
 
