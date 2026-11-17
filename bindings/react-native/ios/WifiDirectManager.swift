@@ -14,6 +14,8 @@ import Network
 // every use of Network's ambiguous in this file.
 import class NetworkExtension.NEHotspotConfiguration
 import class NetworkExtension.NEHotspotConfigurationManager
+import enum NetworkExtension.NEHotspotConfigurationError
+import let NetworkExtension.NEHotspotConfigurationErrorDomain
 
 /// The engine's peer-stream slot on iOS, over `NWListener`, `NWBrowser` and
 /// `NWConnection`.
@@ -891,10 +893,18 @@ private final class FastLinkJoin {
 extension WifiDirectManager {
     /// Gives a dial this long to become ready before it is tried again.
     private static let FAST_LINK_REDIAL: TimeInterval = 2.0
-    /// `NEHotspotConfigurationError.userDenied`.
-    private static let HOTSPOT_USER_DENIED = 7
-    /// `NEHotspotConfigurationError.alreadyAssociated`: the join holds.
-    private static let HOTSPOT_ALREADY_ASSOCIATED = 13
+
+    /// Whether `error` is the hotspot error `code`. The domain is checked:
+    /// another framework's error that shares the number would otherwise read
+    /// as the user's refusal, starting the peer's decline pause, or as a join
+    /// that held.
+    private static func isHotspotError(
+        _ error: NSError?, _ code: NEHotspotConfigurationError
+    ) -> Bool {
+        guard let error = error else { return false }
+        return error.domain == NEHotspotConfigurationErrorDomain
+            && error.code == code.rawValue
+    }
 
     /// Runs what the engine asked for. linkQueue only.
     fileprivate func drainFastLinkDirectives() {
@@ -950,13 +960,13 @@ extension WifiDirectManager {
             NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: link.ssid)
             // A refusal still counts against the peer, which may have closed
             // its link on purpose to keep the user's Cancel from registering.
-            if error?.code == Self.HOTSPOT_USER_DENIED {
+            if Self.isHotspotError(error, .userDenied) {
                 protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "declined")
             }
             return
         }
-        if let error = error, error.code != Self.HOTSPOT_ALREADY_ASSOCIATED {
-            let reason = error.code == Self.HOTSPOT_USER_DENIED ? "declined" : "failed"
+        if let error = error, !Self.isHotspotError(error, .alreadyAssociated) {
+            let reason = Self.isHotspotError(error, .userDenied) ? "declined" : "failed"
             emitDiagnostic("warning", "Fast link: the join did not happen", context: [
                 "linkId": link.linkId,
                 "reason": reason,
