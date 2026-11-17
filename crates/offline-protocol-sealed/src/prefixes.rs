@@ -78,8 +78,10 @@ pub const MEMBER: &str = "__MEMBER__";
 ///
 /// Inside, because an offer carries a passphrase: MLS hides it, names the
 /// sender and refuses a replayed ciphertext, and a control-plane signature
-/// would do only the second. It is a pair's frame like the others here, and a
-/// leaf with a Wi-Fi radio can host or join a link as well as a phone can.
+/// would do only the second. It is a pair's frame like the others here: a
+/// device built on this crate with a Wi-Fi radio could host or join a link,
+/// though the leaf crate advertises no `link_versions` today and so is never
+/// offered one.
 pub const FAST_LINK: &str = "__FAST_LINK__";
 
 #[cfg(test)]
