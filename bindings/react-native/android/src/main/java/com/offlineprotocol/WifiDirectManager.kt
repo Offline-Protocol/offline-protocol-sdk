@@ -1462,13 +1462,14 @@ class WifiDirectManager(
 
     /**
      * The engine's wake-up, for its fast-link directives: posted like the
-     * body drain, and paused with it. Separate from [onMessagesAvailable],
-     * whose drain stops at "no stream yet", because a directive is what
-     * brings the first stream up. A paused transport answers when the poll
-     * resumes, and the engine's timers cover the wait.
+     * body drain. Separate from [onMessagesAvailable], whose drain stops at
+     * "no stream yet", because a directive is what brings the first stream
+     * up. Not paused with it: a `close` must take a group down while the app
+     * is in the background, or the group stays on the air, and blocks every
+     * later link, until the app returns. What a pause refuses is a new
+     * network ([drainFastLinkDirectives]).
      */
     fun onFastLinkWake() {
-        if (isPaused) return
         transportHandler.post { drainFastLinkDirectives() }
     }
 
@@ -1484,10 +1485,13 @@ class WifiDirectManager(
             // One directive never takes the process down: everything below
             // runs on the transport looper, where an exception is a crash.
             try {
-                when (directive.kind) {
-                    "host" -> hostFastLink(directive)
-                    "join" -> joinFastLink(directive)
-                    "close" -> closeFastLink(directive.linkId)
+                when {
+                    directive.kind == "close" -> closeFastLink(directive.linkId)
+                    // No new network from the background: the user is not
+                    // looking, and the engine's timers would end it anyway.
+                    isPaused -> fastLinkEnded(directive.linkId, "background")
+                    directive.kind == "host" -> hostFastLink(directive)
+                    directive.kind == "join" -> joinFastLink(directive)
                 }
             } catch (e: Exception) {
                 emitDiagnostic("warning", "Fast link: a directive failed", mapOf(

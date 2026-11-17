@@ -892,6 +892,12 @@ extension WifiDirectManager {
     fileprivate func drainFastLinkDirectives() {
         guard state == .running else { return }
         while let directive = protocolInstance.wifiDirectNextFastLinkDirective() {
+            // From the background a join would prompt a user who is not
+            // looking, and iOS would drop the network 15 s later anyway.
+            if isPaused, directive.kind != "close" {
+                protocolInstance.wifiDirectFastLinkEnded(linkId: directive.linkId, reason: "background")
+                continue
+            }
             switch directive.kind {
             case "join":
                 joinFastLink(directive)
