@@ -105,7 +105,9 @@ lifetime from the moment it arrived.
 ## Ending a link
 
 Every end, whatever its cause, does the same three things: a `close` directive
-for this device's platform when the platform holds anything for the link, a
+for this device's platform when the platform has taken a directive for the
+link (one it has not taken yet is withdrawn instead, so a paused platform
+never brings up, or prompts for, a network after its link ended), a
 `close` frame for the peer when the peer knows of the link and the end did not
 come from the peer, and one `fast_link_changed` event with state `closed` and
 the reason.

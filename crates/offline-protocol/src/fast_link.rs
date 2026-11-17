@@ -469,8 +469,10 @@ struct Link {
     credentials: Option<(String, String)>,
     /// The host's offer, kept to answer a repeated request.
     offer: Option<Offer>,
-    /// The platform holds something for this link, so its end needs a
-    /// `close` directive.
+    /// The platform drained a directive for this link, so its end needs a
+    /// `close` directive. Set when the platform takes it, not when it is
+    /// queued: a link that ends before then has its directive withdrawn and
+    /// owes the platform nothing.
     platform_engaged: bool,
     /// The peer knows of this link, so its end needs a `close` frame.
     peer_engaged: bool,
@@ -567,7 +569,7 @@ impl FastLinks {
             last_activity: now,
             credentials: Some((fresh.ssid, fresh.passphrase)),
             offer: None,
-            platform_engaged: true,
+            platform_engaged: false,
             peer_engaged,
         });
         self.changed(None);
@@ -770,7 +772,7 @@ impl FastLinks {
             last_activity: now,
             credentials: None,
             offer: None,
-            platform_engaged: true,
+            platform_engaged: false,
             peer_engaged: true,
         });
         self.changed(None);
@@ -888,6 +890,11 @@ impl FastLinks {
         let Some(link) = self.link.take() else {
             return;
         };
+        // A directive the platform never took is withdrawn: handed out after
+        // the link ended it would bring up a network nobody waits on, or put
+        // a join prompt in front of the user for one already gone.
+        self.directives
+            .retain(|pending| pending.directive.link_id != link.id);
         if self.ended.len() >= MAX_ENDED_REMEMBERED {
             self.ended.pop_front();
         }
@@ -936,9 +943,23 @@ impl FastLinks {
         !self.directives.is_empty()
     }
 
-    /// The next directive, its lifetime counted from `now`.
+    /// The next directive, its lifetime counted from `now`. A `host` or
+    /// `join` whose time has run out is skipped: the tick ends its link.
     pub(crate) fn next_directive(&mut self, now: Instant) -> Option<FastLinkDirective> {
-        let pending = self.directives.pop_front()?;
+        let pending = loop {
+            let pending = self.directives.pop_front()?;
+            let spent = pending.deadline.is_some_and(|deadline| now >= deadline);
+            if !spent || pending.directive.kind == FastLinkDirectiveKind::Close {
+                break pending;
+            }
+        };
+        if let Some(link) = self.link.as_mut() {
+            if link.id == pending.directive.link_id
+                && pending.directive.kind != FastLinkDirectiveKind::Close
+            {
+                link.platform_engaged = true;
+            }
+        }
         let mut directive = pending.directive;
         directive.expires_in_ms = pending
             .deadline
@@ -1581,6 +1602,48 @@ mod tests {
         assert!(!android.has_directives());
         assert!(android.take_frames().is_empty());
         assert!(android.peer().is_none());
+    }
+
+    #[test]
+    fn a_directive_the_platform_never_took_is_withdrawn_with_its_link() {
+        let t0 = Instant::now();
+        // A paused platform drains nothing while the link times out.
+        let mut android = machine(host_roles());
+        android.request(HIGH, fresh(1), t0).unwrap();
+        android.tick(t0 + HOSTING_TIMEOUT, |_| false);
+        assert!(
+            android.next_directive(t0 + HOSTING_TIMEOUT).is_none(),
+            "no stale host, and no close owed"
+        );
+
+        // A join whose time ran out before it was taken is skipped.
+        let mut iphone = machine(join_roles());
+        let id = fresh(2).link_id;
+        let offer = Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+        };
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&id, FrameBody::Offer(offer)),
+            fresh(3),
+            t0,
+            0,
+        );
+        assert!(
+            iphone.next_directive(t0 + OFFER_TTL).is_none(),
+            "no prompt for a spent offer"
+        );
+        iphone.tick(t0 + OFFER_TTL, |_| false);
+        assert!(
+            iphone.next_directive(t0 + OFFER_TTL).is_none(),
+            "nothing was taken, so no close"
+        );
     }
 
     #[test]
