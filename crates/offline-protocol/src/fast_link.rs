@@ -519,6 +519,12 @@ struct Link {
     /// The peer started it: a host link brought up for its request, or a
     /// join of an offer this device did not ask for.
     requested_by_peer: bool,
+    /// The link carried a body of [`ACTIVITY_MIN_BYTES`] or more, or a
+    /// transfer over it. Only such a link counts as used toward the host
+    /// backoff and the pause on unasked offers: counting any link that came
+    /// up let a peer join, carry nothing, let it idle out and ask again,
+    /// holding the group without end.
+    carried: bool,
 }
 
 /// The machine. One link at a time (invariant 3).
@@ -616,6 +622,7 @@ impl FastLinks {
             platform_engaged: false,
             peer_engaged: true,
             requested_by_peer: false,
+            carried: false,
         });
         self.changed(None);
         Ok(id)
@@ -648,6 +655,7 @@ impl FastLinks {
             platform_engaged: false,
             peer_engaged,
             requested_by_peer: peer_engaged,
+            carried: false,
         });
         self.changed(None);
     }
@@ -921,6 +929,7 @@ impl FastLinks {
             platform_engaged: false,
             peer_engaged: true,
             requested_by_peer: !asked,
+            carried: false,
         });
         self.changed(None);
     }
@@ -1017,6 +1026,7 @@ impl FastLinks {
         if let Some(link) = self.link.as_mut() {
             if link.peer == peer {
                 link.last_activity = now;
+                link.carried = true;
             }
         }
     }
@@ -1035,6 +1045,7 @@ impl FastLinks {
             FastLinkState::Up => {
                 if busy(&link.peer) {
                     link.last_activity = now;
+                    link.carried = true;
                     None
                 } else if now.saturating_duration_since(link.last_activity) >= IDLE_LIMIT {
                     Some(CloseReason::Idle)
@@ -1049,9 +1060,10 @@ impl FastLinks {
         }
     }
 
-    /// Counts a link hosted for `peer`'s request that ended: one its stream
-    /// used resets the count; one that went unused adds to it when it expired
-    /// or the peer ended it, whatever reason the peer gave; and
+    /// Counts a link hosted for `peer`'s request that ended: one that carried
+    /// something ([`Link::carried`]) resets the count; one that did not adds
+    /// to it when it expired, went idle or lost its stream, or the peer ended
+    /// it, whatever reason the peer gave; and
     /// [`MAX_UNANSWERED_HOSTINGS`] in a row start [`HOST_BACKOFF`]. Ends this
     /// device caused (its platform failing, its tie-break, its user) are not
     /// the peer's to answer for. Counting only `expired` let a peer close
@@ -1068,7 +1080,14 @@ impl FastLinks {
             self.unanswered.retain(|(unanswered, _)| unanswered != peer);
             return;
         }
-        if !by_peer && reason != CloseReason::Expired {
+        // This device's own ends that still name the peer's silence count:
+        // its offer expiring, the stream it proved going idle or dropping.
+        if !by_peer
+            && !matches!(
+                reason,
+                CloseReason::Expired | CloseReason::Idle | CloseReason::Lost
+            )
+        {
             return;
         }
         let count = match self.unanswered.iter_mut().find(|(p, _)| p == peer) {
@@ -1094,7 +1113,8 @@ impl FastLinks {
     }
 
     /// Counts an offer `peer` made without being asked that ended: one that
-    /// came up resets the count; one that did not adds to it, whatever the
+    /// carried something ([`Link::carried`]) resets the count; one that did
+    /// not, up or not, adds to it, whatever the
     /// peer's reason, unless this device ended it itself (its application
     /// closing it, leaving the foreground, or its user declining, which
     /// pauses already).
@@ -1185,13 +1205,7 @@ impl FastLinks {
             self.released.push_back(link.peer.clone());
         }
         if link.role == FastLinkRole::Host && link.requested_by_peer {
-            self.count_hosting(
-                &link.peer,
-                link.state == FastLinkState::Up,
-                !tell_peer,
-                reason,
-                now,
-            );
+            self.count_hosting(&link.peer, link.carried, !tell_peer, reason, now);
         }
         if link.role == FastLinkRole::Join {
             if self.ended_joins.len() >= MAX_ENDED_REMEMBERED {
@@ -1208,13 +1222,7 @@ impl FastLinks {
                 self.record_decline(link.peer.clone(), now);
             }
             if link.requested_by_peer {
-                self.count_offer(
-                    &link.peer,
-                    link.state == FastLinkState::Up,
-                    !tell_peer,
-                    reason,
-                    now,
-                );
+                self.count_offer(&link.peer, link.carried, !tell_peer, reason, now);
             }
         }
         if link.platform_engaged {
@@ -2568,6 +2576,56 @@ mod tests {
         assert!(
             !iphone.has_directives(),
             "the third unasked offer is never shown"
+        );
+    }
+
+    #[test]
+    fn links_that_come_up_and_carry_nothing_count_as_unanswered() {
+        let mut android = machine(host_roles());
+        let mut now = Instant::now();
+        // The peer asks, joins, proves its stream, carries nothing, and lets
+        // the link idle out; then asks again.
+        let mut round = |android: &mut FastLinks, seed, now: Instant, carry: bool| {
+            let id = fresh(seed).link_id;
+            android.on_frame(
+                HIGH,
+                LOW,
+                Frame::new(&id, FrameBody::Request),
+                fresh(seed + 10),
+                now,
+                0,
+            );
+            if android.next_directive(now).map(|d| d.kind) != Some(FastLinkDirectiveKind::Host) {
+                return false;
+            }
+            assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+            android.stream_proved(HIGH, now);
+            if carry {
+                android.activity(HIGH, ACTIVITY_MIN_BYTES, now);
+            }
+            android.tick(now + IDLE_LIMIT, |_| false);
+            assert!(android.peer().is_none(), "ended idle");
+            android.take_frames();
+            android.next_directive(now);
+            true
+        };
+
+        // A link that carried something resets the count.
+        assert!(round(&mut android, 1, now, false));
+        now += IDLE_LIMIT;
+        assert!(round(&mut android, 2, now, true));
+        now += IDLE_LIMIT;
+        assert!(round(&mut android, 3, now, false));
+        now += IDLE_LIMIT;
+        // Two in a row that carried nothing: the next request is refused.
+        assert!(round(&mut android, 4, now, false));
+        now += IDLE_LIMIT;
+        assert!(!round(&mut android, 5, now, false));
+        assert_eq!(
+            android.take_frames()[0].1.body,
+            FrameBody::Close {
+                reason: "busy".to_string()
+            }
         );
     }
 

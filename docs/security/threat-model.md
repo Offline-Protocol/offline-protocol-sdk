@@ -1489,8 +1489,9 @@ not ask: an offer needs no request, unless the application set
 `wifiDirect.fastLink` to `requestedOnly`, which answers every offer it did not
 ask for `declined` and never shows it. Under the default, once the user declines, that peer's
 offers are refused for ten minutes, and so they are once two offers in a row
-it made unasked ended without a link coming up (a prompt ignored until the
-offer expired, or a host that never proved a stream). A second offer while one
+it made unasked ended having carried nothing (a prompt ignored until the
+offer expired, a host that never proved a stream, or a link that came up and
+idled out). A second offer while one
 is on screen is refused too, so the most it gets is two prompts per ten
 minutes per session. An
 Android joiner shows no prompt at all: Wi-Fi Direct joins a group by name and
@@ -1505,9 +1506,12 @@ no route onward.
 a link from forming, which is no more than they could already do to the
 messages themselves. The traffic stays on Bluetooth. A session peer can make
 an Android host bring up a group by asking, and holds the device's one group
-(and so its own group formation) while it lasts: at most two offer lifetimes,
-about four minutes, before the host stops answering that peer's requests for
-ten minutes.
+(and so its own group formation) while it lasts: at most two links that carry
+nothing, each an offer lifetime and, if joined, the idle limit after it
+(about six minutes in all), before the host stops answering that peer's
+requests for ten minutes. A link that came up counts toward this unless it
+carried a body of 16 KiB or a transfer, so joining and idling does not reset
+it.
 
 **Why it stands:** a network that does not broadcast its existence cannot be
 joined by an iPhone that was handed its name, and the session is the only

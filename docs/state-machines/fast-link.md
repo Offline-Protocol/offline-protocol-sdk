@@ -82,9 +82,13 @@ for go ahead and no join prompt or group appears that it did not want.
 One that already offered this peer a link sends the same offer again, since
 the request means the first one was lost. Otherwise it starts hosting under
 the request's link id, unless two links it hosted in a row for that peer's
-requests went unused, expiring or ended by the peer (whatever reason it gives)
-with no stream from it: then it answers `busy` for ten minutes, so a peer that never joins cannot keep a group on the air, and the
-device's own group formation locked out, by asking again each time. One miss
+requests carried nothing (no body of 16 KiB or more, no transfer) and ended by
+expiring, going idle, losing their stream, or at the peer's hand, whatever
+reason it gives: then it answers `busy` for ten minutes, so a peer cannot keep
+a group on the air, and the device's own group formation locked out, by
+asking again each time. A link that came up counts the same as one never
+joined unless it carried something: otherwise a peer could join, carry
+nothing, let the link idle out and ask again, without end. One miss
 is forgiven, so a user who did not tap in time can ask again, and this
 device's own request to the peer ends the pause.
 
@@ -98,11 +102,11 @@ ten minutes after this device's user declined a peer's network, that peer's
 offers are answered `declined` and never shown: each join on iOS is a system
 prompt, and without the pause a peer could put up another the moment one was
 refused. Two offers in a row that the peer made unasked and that ended
-without a link coming up start the same pause, whatever the peer's reason or
+having carried nothing, up or not, start the same pause, whatever the peer's reason or
 the offer's expiry, unless this device ended them itself (its application
 closing the link, leaving the foreground): a prompt the user ignores is never
 declined, and without this the peer could prompt again once per offer
-lifetime. One is forgiven, a link that comes up clears the count, and the
+lifetime. One is forgiven, a link that carries something clears the count, and the
 user's own request to that peer ends the pause. A second offer
 from the peer while one is being joined or is up is answered `busy` and the
 first stands: an honest host's new network follows its own `close`, and a
