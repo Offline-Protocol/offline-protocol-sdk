@@ -655,6 +655,7 @@ and is the one a client is written against.
 | `message_failed` | `message_id`, `reason`, `retry_count #` | `message_id` |
 | `message_decryption_failed` | `message_id`, `sender`, `code <DecryptionFailureCode>`, `reason`, `sealed_at_ms #?`, `session_established_at_ms #?` | `all` |
 | `transport_switched` | `from?`, `to`, `reason` | `all` |
+| `fast_link_changed` | `peer_id`, `link_id`, `role`, `state`, `reason?` | `all` |
 | `relay_promoted` | `connection_count #`, `battery_level #?` | `all` |
 | `relay_demoted` | `reason` | `all` |
 | `neighbor_discovered` | `peer_id`, `transport`, `rssi #?` | `all` |

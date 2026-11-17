@@ -304,6 +304,16 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             to: _,
             reason: _,
         } => {}
+        // The link id is random per link and names nobody.
+        Event::FastLinkChanged {
+            peer_id,
+            link_id: _,
+            role: _,
+            state: _,
+            reason: _,
+        } => {
+            hash_string(peer_id, scrubber);
+        }
         Event::RelayPromoted {
             connection_count: _,
             battery_level: _,
@@ -941,6 +951,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::MessageFailed { .. }
         | Event::MessageDecryptionFailed { .. }
         | Event::TransportSwitched { .. }
+        | Event::FastLinkChanged { .. }
         | Event::RelayPromoted { .. }
         | Event::RelayDemoted { .. }
         | Event::NeighborDiscovered { .. }

@@ -6,6 +6,7 @@ mod data_layer;
 mod data_sync;
 mod data_sync_group;
 mod ephemeral;
+mod fast_link;
 #[cfg(feature = "file-store")]
 mod file_stores;
 mod leaf_pairing;

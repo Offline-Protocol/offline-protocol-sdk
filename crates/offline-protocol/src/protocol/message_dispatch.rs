@@ -1678,6 +1678,9 @@ impl OfflineProtocol {
                     if let Some(frame) = sealed_service_frame {
                         self.handle_sealed_service_frame(&sender_owned, &frame, message);
                     }
+                    if let Some(frame) = fast_link_frame {
+                        self.handle_fast_link_frame(&sender_owned, &frame);
+                    }
                     surfaced
                 }
                 DecryptResult::Empty => {

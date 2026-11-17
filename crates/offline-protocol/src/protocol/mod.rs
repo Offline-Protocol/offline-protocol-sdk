@@ -10,6 +10,7 @@ pub(crate) mod data;
 mod data_sync;
 mod decryption_queue;
 mod ephemeral;
+mod fast_link;
 pub(crate) mod mesh_relay;
 mod message_dispatch;
 mod nostr_discovery;
@@ -448,6 +449,12 @@ pub struct OfflineProtocol {
     ///
     /// [`FAST_LINK_V1`]: offline_protocol_sealed::FAST_LINK_V1
     pub(crate) peer_fast_link: std::collections::HashSet<String>,
+
+    /// The fast link in progress, if any, and what it has queued for the
+    /// peer, the platform and the application (ADR 0038). Memory only: a
+    /// restart ends every link, and the platform's networks with the
+    /// process.
+    pub(crate) fast_links: crate::fast_link::FastLinks,
 
     /// Delivery ACKs waiting to be coalesced, per peer: the carrier the
     /// answered frames arrived on, when the first was held, and the answered
@@ -1331,6 +1338,7 @@ impl OfflineProtocol {
             peer_undecryptable_ack: std::collections::HashSet::new(),
             peer_coalesced_ack: std::collections::HashSet::new(),
             peer_fast_link: std::collections::HashSet::new(),
+            fast_links: crate::fast_link::FastLinks::default(),
             coalesced_acks_out: HashMap::new(),
             answered_deliveries: HashMap::new(),
             mesh_resend_generations: HashMap::new(),
@@ -3888,6 +3896,7 @@ impl OfflineProtocol {
         #[cfg(feature = "data")]
         self.send_due_data_settle_offers(Instant::now());
         self.tick_service_subscriptions();
+        self.tick_fast_link();
         self.refresh_nostr_key_package_slots();
         self.refresh_nostr_discovery_claim();
         // A relay is free never to send end-of-stored-events, and that is the

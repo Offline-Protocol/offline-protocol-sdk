@@ -4265,6 +4265,12 @@ impl OfflineProtocol {
         transport: Option<TransportType>,
     ) -> Result<()> {
         self.mark_message_sent(message, transport, Some(1));
+        // Traffic on the peer-stream slot keeps a fast link off its idle
+        // limit (ADR 0038). Inbound traffic is noted where the platform hands
+        // a body up.
+        if transport == Some(TransportType::WiFiDirect) {
+            self.fast_link_activity(message.recipient.as_str());
+        }
         // Never `?`: the frame is already on the wire, so an error here would
         // report a transmitted message as failed. Every transmit path asks
         // `defer_for_ack_capacity` first, so this is only reachable through a

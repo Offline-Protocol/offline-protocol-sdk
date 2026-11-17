@@ -1470,6 +1470,33 @@ export interface TransportSwitchedEvent extends BaseEvent {
 }
 
 /**
+ * A fast link changed state (ADR 0038): a Wi-Fi network this device hosts
+ * for a peer, or joins from it, brought up through their session.
+ *
+ * `requestFastLink` returns as soon as the first step is taken; this event is
+ * how the outcome arrives. It never carries a network name or a passphrase.
+ * Traffic moves onto the link by ordinary transport selection, which
+ * `transport_switched` reports.
+ */
+export interface FastLinkChangedEvent extends BaseEvent {
+  type: 'fast_link_changed';
+  /** The peer's canonical address (`off1…`). */
+  peer_id: string;
+  /** The link, 32 lowercase hex digits. */
+  link_id: string;
+  /** This device's side. */
+  role: 'host' | 'join';
+  /** Where the link is now. */
+  state: 'requested' | 'hosting' | 'offered' | 'joining' | 'up' | 'closed';
+  /**
+   * Why it closed, only on `closed`: `declined` (the joiner's user said no),
+   * `idle`, `lost`, `expired`, `background`, `busy`, `cannot_host`,
+   * `cannot_join`, and others; an unknown value means it failed.
+   */
+  reason: string | null;
+}
+
+/**
  * Relay promoted event
  */
 /**
@@ -3156,6 +3183,7 @@ export type ProtocolEvent =
   | MessageFailedEvent
   | MessageDecryptionFailedEvent
   | TransportSwitchedEvent
+  | FastLinkChangedEvent
   | RelayPromotedEvent
   | RelayDemotedEvent
   | RelayDemotedBatteryEvent

@@ -113,6 +113,7 @@ pub(crate) mod tests {
         "protocol.message.failed",
         "protocol.message.decryption_failed",
         "protocol.transport.switched",
+        "protocol.fast_link.changed",
         "protocol.relay.promoted",
         "protocol.relay.demoted",
         "protocol.neighbor.discovered",
@@ -305,6 +306,7 @@ pub(crate) mod tests {
             | Event::MessageFailed { .. }
             | Event::MessageDecryptionFailed { .. }
             | Event::TransportSwitched { .. }
+            | Event::FastLinkChanged { .. }
             | Event::RelayPromoted { .. }
             | Event::RelayDemoted { .. }
             | Event::NeighborDiscovered { .. }
@@ -453,6 +455,13 @@ pub(crate) mod tests {
                 from: None,
                 to: String::new(),
                 reason: String::new(),
+            },
+            Event::FastLinkChanged {
+                peer_id: String::new(),
+                link_id: String::new(),
+                role: String::new(),
+                state: String::new(),
+                reason: None,
             },
             Event::RelayPromoted {
                 connection_count: 0,

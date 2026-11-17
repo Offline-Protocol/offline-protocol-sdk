@@ -761,6 +761,28 @@ pub enum Event {
         reason: String,
     },
 
+    /// A fast link (ADR 0038) changed state: a Wi-Fi network this device
+    /// hosts for a peer, or joins from it, brought up through their session.
+    ///
+    /// `request_fast_link` returns as soon as its first step is taken; this is
+    /// how the application learns the outcome. It never carries a network
+    /// name or a passphrase. The traffic itself moves to the link by the
+    /// ordinary transport selection, which `TransportSwitched` reports.
+    FastLinkChanged {
+        /// The peer's canonical address.
+        peer_id: String,
+        /// The link, 32 lowercase hex digits.
+        link_id: String,
+        /// `"host"` or `"join"`: this device's side.
+        role: String,
+        /// `"requested"`, `"hosting"`, `"offered"`, `"joining"`, `"up"` or
+        /// `"closed"`.
+        state: String,
+        /// Why it closed (`"idle"`, `"declined"`, `"lost"`, ...); only on
+        /// `"closed"`.
+        reason: Option<String>,
+    },
+
     /// This device started acting as a relay — carrying traffic for other
     /// devices that cannot reach each other directly.
     ///
@@ -2171,6 +2193,17 @@ impl Event {
         }
     }
 
+    /// Creates a FastLinkChanged event from the state machine's change.
+    pub fn fast_link_changed(change: crate::fast_link::FastLinkChange) -> Self {
+        Self::FastLinkChanged {
+            peer_id: change.peer_id,
+            link_id: change.link_id,
+            role: change.role.as_str().to_string(),
+            state: change.state.as_str().to_string(),
+            reason: change.reason.map(|reason| reason.as_str().to_string()),
+        }
+    }
+
     /// Creates a RelayPromoted event.
     pub fn relay_promoted(connection_count: usize, battery_level: Option<u8>) -> Self {
         Self::RelayPromoted {
@@ -3033,6 +3066,7 @@ impl Event {
             Self::MessageFailed { .. } => "protocol.message.failed",
             Self::MessageDecryptionFailed { .. } => "protocol.message.decryption_failed",
             Self::TransportSwitched { .. } => "protocol.transport.switched",
+            Self::FastLinkChanged { .. } => "protocol.fast_link.changed",
             Self::RelayPromoted { .. } => "protocol.relay.promoted",
             Self::RelayDemoted { .. } => "protocol.relay.demoted",
             Self::NeighborDiscovered { .. } => "protocol.neighbor.discovered",
@@ -3316,6 +3350,20 @@ impl fmt::Debug for Event {
                 .field("reason", reason)
                 .field("sealed_at_ms", sealed_at_ms)
                 .field("session_established_at_ms", session_established_at_ms)
+                .finish(),
+            Self::FastLinkChanged {
+                peer_id: _,
+                link_id,
+                role,
+                state,
+                reason,
+            } => f
+                .debug_struct("FastLinkChanged")
+                .field("peer_id", &"[REDACTED]")
+                .field("link_id", link_id)
+                .field("role", role)
+                .field("state", state)
+                .field("reason", reason)
                 .finish(),
             Self::TransportSwitched { from, to, reason } => f
                 .debug_struct("TransportSwitched")
@@ -4594,6 +4642,13 @@ mod tests {
                 peer_id: SENTINEL.to_string(),
                 transport: "BLE".to_string(),
                 rssi: -50,
+            },
+            Event::FastLinkChanged {
+                peer_id: SENTINEL.to_string(),
+                link_id: "0".repeat(32),
+                role: "host".to_string(),
+                state: "closed".to_string(),
+                reason: Some("idle".to_string()),
             },
             Event::SecureSessionEstablished {
                 peer_id: SENTINEL.to_string(),
