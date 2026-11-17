@@ -910,8 +910,8 @@ extension WifiDirectManager {
 
     /// Whether `error` is the hotspot error `code`. The domain is checked:
     /// another framework's error that shares the number would otherwise read
-    /// as the user's refusal, starting the peer's decline pause, or as a join
-    /// that held.
+    /// as the user's refusal, starting the peer's decline pause, or as an
+    /// offer that named the network the phone is already on.
     private static func isHotspotError(
         _ error: NSError?, _ code: NEHotspotConfigurationError
     ) -> Bool {
@@ -979,7 +979,20 @@ extension WifiDirectManager {
             }
             return
         }
-        if let error = error, !Self.isHotspotError(error, .alreadyAssociated) {
+        if Self.isHotspotError(error, .alreadyAssociated) {
+            // A fast link's network is new and its name random, so a phone
+            // already on it was never on a fast link: the peer named the
+            // network the phone was on, and a dial would go to the offer's
+            // address on the user's own network. Nothing was configured, so
+            // nothing is removed; the user's network stays as it was.
+            emitDiagnostic("warning", "Fast link: the offer named the network the phone is already on", context: [
+                "linkId": link.linkId,
+            ])
+            fastLink = nil
+            protocolInstance.wifiDirectFastLinkEnded(linkId: link.linkId, reason: "invalid")
+            return
+        }
+        if let error = error {
             let reason = Self.isHotspotError(error, .userDenied) ? "declined" : "failed"
             emitDiagnostic("warning", "Fast link: the join did not happen", context: [
                 "linkId": link.linkId,

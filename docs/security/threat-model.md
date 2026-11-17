@@ -1480,7 +1480,9 @@ and so take the joiner off its own Wi-Fi, after the system prompt on iOS. The
 offered address must be a private or link-local IP literal, the joiner's dial
 stays on the group (an iPhone dials only once iOS reports it is on the
 offered network, since a join can finish with no error while the phone stays
-on its own Wi-Fi; an Android, which keeps its own Wi-Fi, dials the group
+on its own Wi-Fi; the offered name must be a Wi-Fi Direct group's, and an
+offer naming the network the iPhone is already on, which iOS reports as
+already joined, ends `invalid` and is never dialled; an Android, which keeps its own Wi-Fi, dials the group
 owner's address and not the offer's), and the
 stream must prove the offerer's own
 address, so a link that proves nothing ends when its offer expires, at most
