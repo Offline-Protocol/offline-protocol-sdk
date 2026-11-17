@@ -4614,7 +4614,9 @@ export class OfflineProtocol {
    * `media_send_failed`; send it again and it goes over what remains.
    *
    * Resolves with the link id as soon as the first step is taken; the outcome
-   * arrives as `fast_link_changed` events. On iOS the join shows a system
+   * arrives as `fast_link_changed` events for the peer. Match them by
+   * `peerId`, not by this id: a device holds one link at a time, and the id
+   * changes once when the host answers with a network it already had. On iOS the join shows a system
    * prompt and takes the phone off its own Wi-Fi while the link lasts, and
    * the link ends when the app leaves the foreground, so ask for it when a
    * transfer is worth that. Needs the Hotspot Configuration and Access Wi-Fi

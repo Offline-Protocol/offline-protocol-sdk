@@ -190,7 +190,11 @@ keepalive, about 40 s later.
 `fast_link_changed` carries the peer, the link id, the role (`host` or
 `join`), the state (one of the six above) and, on `closed`, the reason. It is
 how the application learns the outcome of `request_fast_link`, which returns
-as soon as the first step is taken. It never carries a network name or a
+as soon as the first step is taken. The application matches it by peer, of
+which a device holds one link at a time, not by the id the request returned:
+when the host answers with a network it already had (a request asked again
+after a lost offer), the link takes the host's id and the request's id sees
+no further event. It never carries a network name or a
 passphrase.
 
 ## What the shapes prevent

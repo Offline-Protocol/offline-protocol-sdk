@@ -1421,7 +1421,9 @@ interface OfflineProtocol {
     // session, and the stream over it fills the peer-stream slot, so traffic
     // moves to it by ordinary transport selection. Returns the link id as
     // soon as the first step is taken; the outcome arrives as
-    // `fast_link_changed` events. On iOS a join shows a system prompt and
+    // `fast_link_changed` events for the peer. Track the link by peer: the
+    // id changes once when the host answers with a network it already had.
+    // On iOS a join shows a system prompt and
     // takes the phone off its own Wi-Fi while the link lasts, so this is the
     // application's call, never automatic. Refused when the peer has not
     // advertised it, there is no confirmed session or live direct link, a

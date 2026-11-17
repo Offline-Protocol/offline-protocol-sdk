@@ -45,7 +45,9 @@ impl OfflineProtocol {
     ///
     /// Returns as soon as the first step is taken: this device starts
     /// hosting when it can, and otherwise asks the peer to host. The outcome
-    /// arrives as `FastLinkChanged` events. Refused when the peer has not
+    /// arrives as `FastLinkChanged` events for `peer`, matched by peer rather
+    /// than by this id, which changes once when the host answers with a
+    /// network it already had. Refused when the peer has not
     /// advertised the capability, there is no confirmed session or no live
     /// direct link to it, a peer stream already proves it, this device can
     /// neither host nor join, or a link with another peer is held.

@@ -765,7 +765,10 @@ pub enum Event {
     /// hosts for a peer, or joins from it, brought up through their session.
     ///
     /// `request_fast_link` returns as soon as its first step is taken; this is
-    /// how the application learns the outcome. It never carries a network
+    /// how the application learns the outcome. Match it by `peer_id`, of
+    /// which a device holds one link at a time: the `link_id` changes once
+    /// when the host answers with a network it already had, and the request's
+    /// own id then sees no further event. It never carries a network
     /// name or a passphrase. The traffic itself moves to the link by the
     /// ordinary transport selection, which `TransportSwitched` reports.
     FastLinkChanged {
