@@ -1435,7 +1435,8 @@ class WifiDirectManager(
     private class FastLinkJoined(
         val linkId: String,
         val peer: String,
-        val host: String,
+        // The offer's port. Its host is not kept: the dial goes to the
+        // owner's address the group reports ([connectToGroupOwner]).
         val port: Int,
     ) {
         @Volatile var connected = false
@@ -1599,7 +1600,7 @@ class WifiDirectManager(
             fastLinkEnded(directive.linkId, "failed")
             return
         }
-        val joined = FastLinkJoined(directive.linkId, directive.peerId, host, port)
+        val joined = FastLinkJoined(directive.linkId, directive.peerId, port)
         fastLinkJoined = joined
         emitDiagnostic("info", "Fast link: joining a network", mapOf("linkId" to directive.linkId))
         p2p.connect(ch, config, object : WifiP2pManager.ActionListener {
@@ -1797,15 +1798,18 @@ class WifiDirectManager(
         socketExecutor.execute {
             var ran = PeerStreamSockets.Ran(proved = null, heard = false)
             try {
-                // A fast link names the owner's address, port and identity in
-                // its offer; any other group's owner is dialled on the group
-                // port and proves whoever it is.
+                // A fast link's offer names the owner's port and identity;
+                // any other group's owner is dialled on the group port and
+                // proves whoever it is. The address is always the owner's
+                // own, from the group: never the offer's, which could name a
+                // host on the Wi-Fi network this device also stays on, and
+                // send the dial off the group (ADR 0038, decision 6).
                 val joined = fastLinkJoined
                 val socket = Socket()
                 try {
                     socket.connect(
                         InetSocketAddress(
-                            joined?.host ?: address,
+                            address,
                             joined?.port ?: PeerStreamListener.GROUP_OWNER_PORT,
                         ),
                         CONNECTION_TIMEOUT_MS.toInt(),
