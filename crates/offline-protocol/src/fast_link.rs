@@ -661,6 +661,10 @@ impl FastLinks {
                     .is_some_and(|link| link.id == frame.link && link.peer == peer)
                 {
                     self.end(CloseReason::parse(&reason), false, now);
+                } else {
+                    // A close can overtake the offer it ends: remembered, so
+                    // the offer is refused as late when it lands.
+                    self.remember_ended(&frame.link, now);
                 }
             }
         }
@@ -889,6 +893,13 @@ impl FastLinks {
         }
     }
 
+    fn remember_ended(&mut self, link_id: &str, now: Instant) {
+        if self.ended.len() >= MAX_ENDED_REMEMBERED {
+            self.ended.pop_front();
+        }
+        self.ended.push_back((link_id.to_string(), now));
+    }
+
     fn ended_recently(&mut self, link_id: &str, now: Instant) -> bool {
         while self
             .ended
@@ -912,16 +923,13 @@ impl FastLinks {
         // a join prompt in front of the user for one already gone.
         self.directives
             .retain(|pending| pending.directive.link_id != link.id);
-        if self.ended.len() >= MAX_ENDED_REMEMBERED {
-            self.ended.pop_front();
-        }
+        self.remember_ended(&link.id, now);
         if reason == CloseReason::Declined && link.role == FastLinkRole::Join {
             if self.declined.len() >= MAX_ENDED_REMEMBERED {
                 self.declined.pop_front();
             }
             self.declined.push_back((link.peer.clone(), now));
         }
-        self.ended.push_back((link.id.clone(), now));
         if link.platform_engaged {
             self.directives.push_back(PendingDirective {
                 directive: FastLinkDirective {
@@ -1734,6 +1742,43 @@ mod tests {
             iphone.next_directive(t0 + DECLINE_BACKOFF).unwrap().kind,
             FastLinkDirectiveKind::Join
         );
+    }
+
+    #[test]
+    fn a_close_that_overtakes_its_offer_keeps_the_offer_from_prompting() {
+        let t0 = Instant::now();
+        let mut iphone = machine(join_roles());
+        let id = fresh(1).link_id;
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(
+                &id,
+                FrameBody::Close {
+                    reason: "expired".to_string(),
+                },
+            ),
+            fresh(2),
+            t0,
+            0,
+        );
+        let offer = Offer {
+            ssid: "DIRECT-ab-0123456789ab".to_string(),
+            passphrase: "b".repeat(32),
+            host: "192.168.49.1".to_string(),
+            port: 8988,
+            issued_at_ms: 0,
+            ttl_ms: 120_000,
+        };
+        iphone.on_frame(
+            LOW,
+            HIGH,
+            Frame::new(&id, FrameBody::Offer(offer)),
+            fresh(3),
+            t0,
+            0,
+        );
+        assert!(!iphone.has_directives());
     }
 
     #[test]
