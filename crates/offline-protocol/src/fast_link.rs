@@ -709,7 +709,18 @@ impl FastLinks {
         now: Instant,
         now_ms: i64,
     ) {
-        if self.ended_recently(&frame.link, now) {
+        // A late offer still answers a request this device is waiting on now,
+        // from the same peer: the user has just asked again, so the prompt is
+        // wanted, and a host still holding the old network answers the new
+        // request with it. Refused, the retry after a lost offer met a host
+        // that resent the old one, and ended `no_offer` with nothing shown.
+        let answers_request = matches!(frame.body, FrameBody::Offer(_))
+            && self.link.as_ref().is_some_and(|link| {
+                link.peer == peer
+                    && link.role == FastLinkRole::Join
+                    && link.state == FastLinkState::Requested
+            });
+        if !answers_request && self.ended_recently(&frame.link, now) {
             // A late request needs no answer: its sender has given up on it.
             // A late offer gets one, so the host takes its network down.
             if matches!(frame.body, FrameBody::Offer(_)) {
@@ -1833,6 +1844,37 @@ mod tests {
             FastLinkDirectiveKind::Host
         );
         assert!(android.next_directive(t0).is_none(), "one network, not two");
+    }
+
+    #[test]
+    fn asking_again_after_a_lost_offer_joins_the_network_still_up() {
+        let t0 = Instant::now();
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let first = iphone.request(LOW, fresh(1), t0).unwrap();
+        deliver(&mut iphone, HIGH, &mut android, LOW, t0, 0);
+        android.next_directive(t0);
+        assert!(android.hosting(&first, "192.168.49.1", 8988, t0, 0));
+        // The offer is lost, and the requester gives up.
+        android.take_frames();
+        iphone.tick(t0 + REQUEST_TIMEOUT, |_| false);
+        iphone.take_frames();
+
+        // The user asks again under a new id; the host, still offering, sends
+        // the network it already has.
+        let later = t0 + REQUEST_TIMEOUT;
+        let second = iphone.request(LOW, fresh(2), later).unwrap();
+        assert_ne!(first, second);
+        deliver(&mut iphone, HIGH, &mut android, LOW, later, 0);
+        deliver(&mut android, LOW, &mut iphone, HIGH, later, 0);
+
+        let join = iphone.next_directive(later).unwrap();
+        assert_eq!(join.kind, FastLinkDirectiveKind::Join);
+        assert_eq!(join.link_id, first);
+        assert!(iphone.take_frames().is_empty(), "no `expired` to the host");
+        iphone.stream_proved(LOW, later);
+        android.stream_proved(HIGH, later);
+        assert_eq!(states(&mut android).last(), Some(&FastLinkState::Up));
     }
 
     #[test]

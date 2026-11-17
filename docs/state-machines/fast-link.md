@@ -126,7 +126,11 @@ request is dropped; an offer is answered `close` (`expired`), so the host
 takes its network down, and is never joined. On two phones a request
 delayed 63 s reached the host after the requester had given up, and before
 this rule its offer prompted the requester's user to join a network that had
-already been removed.
+already been removed. The one exception is an offer from a peer this device
+is waiting on now, its own request to that peer still open: the user has just
+asked again, so the prompt is wanted, and the offer answers the new request.
+A host still offering the old network sends it again for the new request, and
+refusing it ended the user's second attempt `no_offer` with nothing shown.
 
 An offer is valid when its name is 1 to 32 bytes, its passphrase 8 to 63
 printable ASCII characters, its host a private or link-local IP literal, its
