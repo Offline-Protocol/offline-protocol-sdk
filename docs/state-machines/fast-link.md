@@ -139,6 +139,10 @@ presence update every 15 s held a link up indefinitely when they did. A link
 that carries nothing large for 60 s is costing the user their own Wi-Fi for
 no reason.
 
+Pausing the engine ends a link with `background`: a paused engine runs none
+of these timers, and a host's group would otherwise stay on the air until the
+application returned, with nothing bounding it.
+
 A joiner's platform that is about to lose the network reports it as `ended`
 first: on iOS, leaving the foreground, after which iOS disconnects at 15 s
 whatever the engine thinks. Without the report the host learns from TCP

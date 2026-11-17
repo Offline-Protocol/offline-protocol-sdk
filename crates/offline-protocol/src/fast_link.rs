@@ -887,6 +887,16 @@ impl FastLinks {
         true
     }
 
+    /// Ends the link with `peer` for a reason of this device's own, telling
+    /// the peer.
+    pub(crate) fn end_for(&mut self, peer: &str, reason: CloseReason, now: Instant) -> bool {
+        if self.peer() != Some(peer) {
+            return false;
+        }
+        self.end(reason, true, now);
+        true
+    }
+
     /// Ends the link with `peer` without telling the peer: this device's user
     /// blocked it, and nothing more is sent to a blocked peer.
     pub(crate) fn forget(&mut self, peer: &str, now: Instant) -> bool {

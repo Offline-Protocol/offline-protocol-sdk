@@ -410,3 +410,32 @@ fn only_a_transfer_on_the_peer_stream_holds_the_link() {
     on_stream.pinned_transport = TransportType::WiFiDirect;
     assert!(OfflineProtocol::holds_fast_link(&on_stream));
 }
+
+/// Pausing the engine ends a link: a paused engine runs no timers, so an
+/// Android host's group would otherwise stay up until the app returned.
+#[test]
+fn pausing_the_engine_ends_a_link() {
+    let (mut alice, mut bob) = pair();
+    let link_id = alice.protocol.request_fast_link(&bob.address).unwrap();
+    alice.protocol.next_fast_link_directive();
+    alice
+        .protocol
+        .fast_link_hosting(&link_id, "192.168.49.1", 8988)
+        .unwrap();
+    bob.deliver(alice.take_sent());
+
+    alice.protocol.pause().unwrap();
+    let close = alice.protocol.next_fast_link_directive().unwrap();
+    assert_eq!(close.kind, FastLinkDirectiveKind::Close);
+    assert_eq!(
+        alice.link_states().last().unwrap(),
+        &("closed".to_string(), Some("background".to_string()))
+    );
+    // The peer is told, so its half ends too.
+    bob.protocol.next_fast_link_directive();
+    bob.deliver(alice.take_sent());
+    assert_eq!(
+        bob.link_states().last().unwrap(),
+        &("closed".to_string(), Some("background".to_string()))
+    );
+}

@@ -2435,6 +2435,11 @@ impl OfflineProtocol {
         }
 
         state.state = ProtocolState::Paused;
+        drop(state);
+        // A paused engine runs no timers, so a fast link would outlive every
+        // bound its state machine promises while the host's group stays on
+        // the air. It ends here, as the iPhone's side already does.
+        self.end_fast_link_on_pause();
         Ok(())
     }
 
