@@ -1480,7 +1480,10 @@ and so take the joiner off its own Wi-Fi, after the system prompt on iOS. The
 offered address must be a private or link-local IP literal, the joiner's dial
 is bound to the Wi-Fi interface, and the stream must prove the offerer's own
 address, so a link that proves nothing ends when its offer expires, at most
-300 s later. While a joiner is on the host's network the host is its access
+300 s later. It can also put the iOS join prompt in front of a user who did
+not ask: an offer needs no request. Once the user declines, that peer's
+offers are refused for ten minutes, so the most it gets is one prompt per ten
+minutes per session. While a joiner is on the host's network the host is its access
 point, and sees whatever else the joiner's device sends there, as any access
 point does: name lookups and connection attempts of other applications, with
 no route onward.

@@ -77,7 +77,11 @@ the request means the first one was lost. Otherwise it starts hosting under
 the request's link id.
 
 **An `offer` arrives.** A device that cannot join answers `close`
-(`cannot_join`), and one holding a link with another peer answers `busy`. An
+(`cannot_join`), and one holding a link with another peer answers `busy`. For
+ten minutes after this device's user declined a peer's network, that peer's
+offers are answered `declined` and never shown: each join on iOS is a system
+prompt, and without the pause a peer could put up another the moment one was
+refused. The user's own request to that peer ends the pause. An
 offer that fails validation (below) is answered `close` (`invalid`) and nothing
 else happens. When both devices are hosting for each other, the lower address
 keeps hosting: the higher one closes its own link and joins, and the lower one

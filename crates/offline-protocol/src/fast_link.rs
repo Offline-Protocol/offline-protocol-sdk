@@ -64,6 +64,12 @@ pub const PASSPHRASE_HEX_LEN: usize = 32;
 /// the clock slack.
 pub const ENDED_MEMORY: Duration = Duration::from_millis(MAX_OFFER_TTL_MS + 300_000);
 
+/// How long, after this device's user declined a peer's network, that peer's
+/// unrequested offers are refused. Every join on iOS puts a system prompt in
+/// front of the user; without a pause a session peer could put up another
+/// the moment one was declined.
+pub const DECLINE_BACKOFF: Duration = Duration::from_secs(600);
+
 /// How many ended link ids are remembered. One link at a time, so a few.
 pub const MAX_ENDED_REMEMBERED: usize = 16;
 
@@ -492,6 +498,9 @@ pub(crate) struct FastLinks {
     /// reached the host after the requester had given up, and its offer then
     /// prompted the requester's user to join a network already removed.
     ended: VecDeque<(String, Instant)>,
+    /// Peers whose network this device's user declined, and when; their
+    /// offers are refused for [`DECLINE_BACKOFF`] unless the user asks.
+    declined: VecDeque<(String, Instant)>,
 }
 
 impl FastLinks {
@@ -518,6 +527,8 @@ impl FastLinks {
                 Err(FastLinkRefusal::Busy)
             };
         }
+        // The user asking is the user's answer to an earlier decline.
+        self.declined.retain(|(declined, _)| declined != peer);
         if self.roles.can_host {
             let id = fresh.link_id.clone();
             self.start_host(peer, fresh, now, false);
@@ -713,6 +724,12 @@ impl FastLinks {
             self.reply_close(peer, link_id, CloseReason::Invalid);
             return;
         }
+        self.declined
+            .retain(|(_, at)| now.saturating_duration_since(*at) < DECLINE_BACKOFF);
+        if self.declined.iter().any(|(declined, _)| declined == peer) {
+            self.reply_close(peer, link_id, CloseReason::Declined);
+            return;
+        }
         if let Some(link) = self.link.clone() {
             if link.peer != peer {
                 self.reply_close(peer, link_id, CloseReason::Busy);
@@ -897,6 +914,12 @@ impl FastLinks {
             .retain(|pending| pending.directive.link_id != link.id);
         if self.ended.len() >= MAX_ENDED_REMEMBERED {
             self.ended.pop_front();
+        }
+        if reason == CloseReason::Declined && link.role == FastLinkRole::Join {
+            if self.declined.len() >= MAX_ENDED_REMEMBERED {
+                self.declined.pop_front();
+            }
+            self.declined.push_back((link.peer.clone(), now));
         }
         self.ended.push_back((link.id.clone(), now));
         if link.platform_engaged {
@@ -1643,6 +1666,73 @@ mod tests {
         assert!(
             iphone.next_directive(t0 + OFFER_TTL).is_none(),
             "nothing was taken, so no close"
+        );
+    }
+
+    #[test]
+    fn a_declined_peer_cannot_prompt_again_until_the_user_asks() {
+        let t0 = Instant::now();
+        let offer = |id: &str, links: &mut FastLinks, at: Instant| {
+            let offer = Offer {
+                ssid: "DIRECT-ab-0123456789ab".to_string(),
+                passphrase: "b".repeat(32),
+                host: "192.168.49.1".to_string(),
+                port: 8988,
+                issued_at_ms: 0,
+                ttl_ms: 120_000,
+            };
+            links.on_frame(
+                LOW,
+                HIGH,
+                Frame::new(id, FrameBody::Offer(offer)),
+                fresh(9),
+                at,
+                0,
+            );
+        };
+        let mut iphone = machine(join_roles());
+        let first = fresh(1).link_id;
+        offer(&first, &mut iphone, t0);
+        iphone.next_directive(t0);
+        assert!(iphone.platform_ended(&first, CloseReason::Declined, t0));
+        iphone.take_frames();
+
+        // Another unasked-for offer at once: refused, no prompt.
+        let second = fresh(2).link_id;
+        offer(&second, &mut iphone, t0 + Duration::from_secs(1));
+        assert!(!iphone.has_directives());
+        assert_eq!(
+            iphone.take_frames()[0].1.body,
+            FrameBody::Close {
+                reason: "declined".to_string()
+            }
+        );
+
+        // After the backoff it may prompt again.
+        let third = fresh(3).link_id;
+        offer(&third, &mut iphone, t0 + DECLINE_BACKOFF);
+        assert_eq!(
+            iphone.next_directive(t0 + DECLINE_BACKOFF).unwrap().kind,
+            FastLinkDirectiveKind::Join
+        );
+        iphone.close(LOW, t0 + DECLINE_BACKOFF);
+        iphone.take_frames();
+
+        // And the user's own request clears it at once.
+        let fourth = fresh(4).link_id;
+        offer(&fourth, &mut iphone, t0 + DECLINE_BACKOFF);
+        iphone.next_directive(t0);
+        iphone.platform_ended(&fourth, CloseReason::Declined, t0 + DECLINE_BACKOFF);
+        let asked = iphone.request(LOW, fresh(5), t0 + DECLINE_BACKOFF).unwrap();
+        iphone.take_frames();
+        offer(
+            &asked,
+            &mut iphone,
+            t0 + DECLINE_BACKOFF + Duration::from_secs(1),
+        );
+        assert_eq!(
+            iphone.next_directive(t0 + DECLINE_BACKOFF).unwrap().kind,
+            FastLinkDirectiveKind::Join
         );
     }
 
