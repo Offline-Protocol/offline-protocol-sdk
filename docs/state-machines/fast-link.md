@@ -143,7 +143,8 @@ asked again, so the prompt is wanted, and the offer answers the new request.
 A host still offering the old network sends it again for the new request, and
 refusing it ended the user's second attempt `no_offer` with nothing shown.
 
-An offer is valid when its name is 1 to 32 bytes, its passphrase 8 to 63
+An offer is valid when its name is 9 to 32 bytes starting `DIRECT-`, as a
+Wi-Fi Direct group's is, its passphrase 8 to 63
 printable ASCII characters, its host a private or link-local IP literal, its
 port not zero, its lifetime at most 300 s, and the time it states it was made no
 more than 300 s in the future or more than its lifetime plus 300 s in the

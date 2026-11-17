@@ -501,7 +501,10 @@ Four rules hold for every frame of the family:
   custodian.
 - **Gated by `link_versions` entry 1.** No frame of the family is sent to a
   peer that has not advertised it ([Capability negotiation](capability-negotiation.md)).
-- **Bounded.** A receiver refuses an offer whose `ssid` is not 1 to 32 bytes,
+- **Bounded.** A receiver refuses an offer whose `ssid` is not 9 to 32 bytes
+  starting `DIRECT-` (a Wi-Fi Direct group's name, as every host's is; any
+  name let a peer offer the network the joiner was already on, and an iPhone
+  took that join as done and dialled the offer's address there),
   whose `passphrase` is not 8 to 63 printable ASCII characters, whose `host` is
   not an IP literal in a private or link-local range, whose `port` is 0, whose
   `ttl_ms` is over 300,000, or whose `issued_at_ms` lies more than 300 s ahead

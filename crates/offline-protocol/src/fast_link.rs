@@ -321,7 +321,12 @@ impl Offer {
     /// The bounds of the control-messages chapter, against the receiver's
     /// clock.
     pub(crate) fn is_valid(&self, now_ms: i64) -> bool {
-        let ssid_ok = (1..=32).contains(&self.ssid.len());
+        // A Wi-Fi Direct group's name, as every host's is (Android refuses
+        // any other). Any name let a peer offer the network the joiner was
+        // already on: an iPhone took the join as done and dialled the offer's
+        // address on the user's own network.
+        let ssid_ok = (SSID_PREFIX.len() + 2..=32).contains(&self.ssid.len())
+            && self.ssid.starts_with(SSID_PREFIX);
         let passphrase_ok = (8..=63).contains(&self.passphrase.len())
             && self.passphrase.bytes().all(|b| (0x20..=0x7e).contains(&b));
         let ttl_ok = self.ttl_ms > 0 && self.ttl_ms <= MAX_OFFER_TTL_MS;
@@ -332,6 +337,10 @@ impl Offer {
         ssid_ok && passphrase_ok && is_local_host(&self.host) && self.port != 0 && time_ok
     }
 }
+
+/// What every offered network's name starts with, and two characters after
+/// it: a Wi-Fi Direct group's.
+pub const SSID_PREFIX: &str = "DIRECT-";
 
 /// A link id and credentials, drawn by the engine from its random source.
 #[derive(Clone, PartialEq, Eq)]
@@ -1620,6 +1629,15 @@ mod tests {
             },
             Offer {
                 ssid: String::new(),
+                ..good.clone()
+            },
+            // The network the joiner may already be on: never a group.
+            Offer {
+                ssid: "HomeWiFi".to_string(),
+                ..good.clone()
+            },
+            Offer {
+                ssid: "DIRECT-".to_string(),
                 ..good.clone()
             },
             Offer {
