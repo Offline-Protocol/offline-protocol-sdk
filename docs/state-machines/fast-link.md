@@ -88,7 +88,9 @@ reason it gives: then it answers `busy` for ten minutes, so a peer cannot keep
 a group on the air, and the device's own group formation locked out, by
 asking again each time. A link that came up counts the same as one never
 joined unless it carried something: otherwise a peer could join, carry
-nothing, let the link idle out and ask again, without end. One miss
+nothing, let the link idle out and ask again, without end. A miss more than
+ten minutes before the next is forgotten, so two in a row means two close
+together. One miss
 is forgiven, so a user who did not tap in time can ask again, and this
 device's own request to the peer ends the pause.
 

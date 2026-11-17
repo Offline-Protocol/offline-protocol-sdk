@@ -551,7 +551,7 @@ pub(crate) struct FastLinks {
     ended_joins: VecDeque<(String, String)>,
     /// Per peer, the links hosted in a row for its requests that expired
     /// with no stream from it.
-    unanswered: VecDeque<(String, u8)>,
+    unanswered: VecDeque<(String, u8, Instant)>,
     /// Peers whose requests are refused, and since when ([`HOST_BACKOFF`]).
     host_backoff: VecDeque<(String, Instant)>,
     /// Per peer, the offers it made without being asked that ended in a row
@@ -560,7 +560,7 @@ pub(crate) struct FastLinks {
     /// Cancel does: a user who ignored the prompt, or a host that never
     /// proved a stream, otherwise left the peer free to prompt again once
     /// per offer lifetime.
-    unanswered_offers: VecDeque<(String, u8)>,
+    unanswered_offers: VecDeque<(String, u8, Instant)>,
     /// Peers whose link ended after it was up. A transfer pinned to the
     /// slot for one of them can no longer reach it: its carrier is fixed when
     /// it starts, so it would retry on a dead slot until its retries ran out.
@@ -594,9 +594,10 @@ impl FastLinks {
         // The user asking is the user's answer to an earlier decline, and to
         // the peer's unanswered requests.
         self.declined.retain(|(declined, _)| declined != peer);
-        self.unanswered.retain(|(unanswered, _)| unanswered != peer);
+        self.unanswered
+            .retain(|(unanswered, _, _)| unanswered != peer);
         self.unanswered_offers
-            .retain(|(unanswered, _)| unanswered != peer);
+            .retain(|(unanswered, _, _)| unanswered != peer);
         self.host_backoff
             .retain(|(backed_off, _)| backed_off != peer);
         if self.roles.can_host {
@@ -1077,7 +1078,8 @@ impl FastLinks {
         now: Instant,
     ) {
         if used {
-            self.unanswered.retain(|(unanswered, _)| unanswered != peer);
+            self.unanswered
+                .retain(|(unanswered, _, _)| unanswered != peer);
             return;
         }
         // This device's own ends that still name the peer's silence count:
@@ -1090,21 +1092,29 @@ impl FastLinks {
         {
             return;
         }
-        let count = match self.unanswered.iter_mut().find(|(p, _)| p == peer) {
-            Some((_, count)) => {
-                *count = count.saturating_add(1);
+        // A miss older than the pause it would start is forgotten, so one
+        // long ago and one now are not two in a row.
+        let count = match self.unanswered.iter_mut().find(|(p, _, _)| p == peer) {
+            Some((_, count, at)) => {
+                *count = if now.saturating_duration_since(*at) >= HOST_BACKOFF {
+                    1
+                } else {
+                    count.saturating_add(1)
+                };
+                *at = now;
                 *count
             }
             None => {
                 if self.unanswered.len() >= MAX_ENDED_REMEMBERED {
                     self.unanswered.pop_front();
                 }
-                self.unanswered.push_back((peer.to_string(), 1));
+                self.unanswered.push_back((peer.to_string(), 1, now));
                 1
             }
         };
         if count >= MAX_UNANSWERED_HOSTINGS {
-            self.unanswered.retain(|(unanswered, _)| unanswered != peer);
+            self.unanswered
+                .retain(|(unanswered, _, _)| unanswered != peer);
             if self.host_backoff.len() >= MAX_ENDED_REMEMBERED {
                 self.host_backoff.pop_front();
             }
@@ -1129,7 +1139,7 @@ impl FastLinks {
     ) {
         if used {
             self.unanswered_offers
-                .retain(|(unanswered, _)| unanswered != peer);
+                .retain(|(unanswered, _, _)| unanswered != peer);
             return;
         }
         // Only this device's own ends are skipped. A host never has cause to
@@ -1143,22 +1153,33 @@ impl FastLinks {
         {
             return;
         }
-        let count = match self.unanswered_offers.iter_mut().find(|(p, _)| p == peer) {
-            Some((_, count)) => {
-                *count = count.saturating_add(1);
+        // A miss older than the pause it would start is forgotten, so one
+        // long ago and one now are not two in a row.
+        let count = match self
+            .unanswered_offers
+            .iter_mut()
+            .find(|(p, _, _)| p == peer)
+        {
+            Some((_, count, at)) => {
+                *count = if now.saturating_duration_since(*at) >= HOST_BACKOFF {
+                    1
+                } else {
+                    count.saturating_add(1)
+                };
+                *at = now;
                 *count
             }
             None => {
                 if self.unanswered_offers.len() >= MAX_ENDED_REMEMBERED {
                     self.unanswered_offers.pop_front();
                 }
-                self.unanswered_offers.push_back((peer.to_string(), 1));
+                self.unanswered_offers.push_back((peer.to_string(), 1, now));
                 1
             }
         };
         if count >= MAX_UNANSWERED_HOSTINGS {
             self.unanswered_offers
-                .retain(|(unanswered, _)| unanswered != peer);
+                .retain(|(unanswered, _, _)| unanswered != peer);
             self.record_decline(peer.to_string(), now);
         }
     }
@@ -2626,6 +2647,44 @@ mod tests {
             FrameBody::Close {
                 reason: "busy".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn a_miss_long_ago_is_not_one_in_a_row() {
+        let mut android = machine(host_roles());
+        let t0 = Instant::now();
+        let mut miss = |android: &mut FastLinks, seed, now: Instant| {
+            let id = fresh(seed).link_id;
+            android.on_frame(
+                HIGH,
+                LOW,
+                Frame::new(&id, FrameBody::Request),
+                fresh(seed + 10),
+                now,
+                0,
+            );
+            let hosted =
+                android.next_directive(now).map(|d| d.kind) == Some(FastLinkDirectiveKind::Host);
+            if hosted {
+                assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+                android.tick(now + OFFER_TTL, |_| false);
+                android.take_frames();
+                android.next_directive(now + OFFER_TTL);
+            }
+            hosted
+        };
+        assert!(miss(&mut android, 1, t0));
+        // The second miss comes after the pause would have ended: forgiven.
+        let later = t0 + OFFER_TTL + HOST_BACKOFF;
+        assert!(miss(&mut android, 2, later));
+        assert!(
+            miss(&mut android, 3, later + OFFER_TTL),
+            "one miss, not two"
+        );
+        assert!(
+            !miss(&mut android, 4, later + OFFER_TTL * 2),
+            "two in a row"
         );
     }
 
