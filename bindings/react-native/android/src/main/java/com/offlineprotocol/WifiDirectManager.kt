@@ -1127,6 +1127,9 @@ class WifiDirectManager(
         // Nothing to form over while Wi-Fi P2P is off: every call would fail
         // BUSY, and a join attempted then is refused with no group to find.
         if (!p2pUp) return
+        // A fast link holds the one group this device can own or join, from
+        // its createGroup or connect on, which is before `inGroup` says so.
+        if (fastLinkHosted != null || fastLinkJoined != null) return
         val now = SystemClock.elapsedRealtime()
         adverts.values.removeAll { now - it.seenAtMs > ADVERT_TTL_MS }
         deadOwners.values.removeAll { now - it >= WifiDirectGroupFormation.DEAD_OWNER_TTL_MS }
