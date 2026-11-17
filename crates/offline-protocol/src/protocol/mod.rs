@@ -456,6 +456,15 @@ pub struct OfflineProtocol {
     /// process.
     pub(crate) fast_links: crate::fast_link::FastLinks,
 
+    /// Set while the pending-decryption queue is drained. A fast-link frame
+    /// decrypted then is consumed and never acted on: it is only ever acted
+    /// on from a live decrypt (invariant 1 of
+    /// `docs/state-machines/fast-link.md`). The queue keeps entries for a
+    /// day, so a drained request would bring up a group for a requester that
+    /// gave up long ago, and a drained offer would prompt for a network
+    /// already gone.
+    pub(crate) draining_pending_decryption: bool,
+
     /// Delivery ACKs waiting to be coalesced, per peer: the carrier the
     /// answered frames arrived on, when the first was held, and the answered
     /// ids with the first one's hop count. Sent as one frame once
@@ -1339,6 +1348,7 @@ impl OfflineProtocol {
             peer_coalesced_ack: std::collections::HashSet::new(),
             peer_fast_link: std::collections::HashSet::new(),
             fast_links: crate::fast_link::FastLinks::default(),
+            draining_pending_decryption: false,
             coalesced_acks_out: HashMap::new(),
             answered_deliveries: HashMap::new(),
             mesh_resend_generations: HashMap::new(),

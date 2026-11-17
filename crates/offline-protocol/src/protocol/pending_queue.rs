@@ -339,7 +339,12 @@ impl OfflineProtocol {
                 continue;
             }
 
-            if let Some(result) = self.process_internal_message(&msg) {
+            // A fast-link frame among these is consumed, not acted on: it
+            // names a moment that has passed (see the field).
+            self.draining_pending_decryption = true;
+            let result = self.process_internal_message(&msg);
+            self.draining_pending_decryption = false;
+            if let Some(result) = result {
                 match result {
                     InternalMessageResult::Decrypted(content) => {
                         let mut decrypted_msg = msg.clone();

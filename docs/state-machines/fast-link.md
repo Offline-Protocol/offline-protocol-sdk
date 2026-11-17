@@ -15,6 +15,9 @@ what each shape prevents.
    over a live direct link (Bluetooth LE whenever the peer is linked there,
    never down the stream the frame may be ending), and never enters the outbox, a relay or a
    neighbour's custody. A frame that arrives in plaintext is never routed here.
+   Nor is one that reached this device before its session did: it waits
+   undecrypted with every other sealed body, for up to a day, and is consumed
+   when the session is ready, never acted on.
 2. **A link never announces a peer.** Only a stream's preamble does, exactly as
    on every other network. The joiner's stream is opened with the host's
    address as its claim, and the host refuses any other proved address on the

@@ -1679,7 +1679,14 @@ impl OfflineProtocol {
                         self.handle_sealed_service_frame(&sender_owned, &frame, message);
                     }
                     if let Some(frame) = fast_link_frame {
-                        self.handle_fast_link_frame(&sender_owned, &frame);
+                        if self.draining_pending_decryption {
+                            debug!(
+                                sender = %sender_owned,
+                                "Dropping a fast-link frame that waited for the session"
+                            );
+                        } else {
+                            self.handle_fast_link_frame(&sender_owned, &frame);
+                        }
                     }
                     surfaced
                 }

@@ -490,6 +490,62 @@ fn a_transfer_on_the_link_fails_when_the_link_ends() {
     assert_eq!(failed, [on_link]);
 }
 
+/// An offer that reached the joiner before its session did waits in the
+/// pending-decryption queue, which keeps entries for a day. When it drains it
+/// is consumed, never acted on: it names a network that may be long gone, and
+/// acting on it would prompt the user to join nothing.
+#[test]
+fn a_frame_that_waited_for_the_session_is_never_acted_on() {
+    let mut alice = Node::new("alice");
+    let mut bob = Node::new("bob");
+    // Alice holds a session bob has not joined yet.
+    let welcome = {
+        let bob_kp = {
+            let manager = bob.protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let manager = alice.protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(&bob.address, &bob_kp.key_package_data)
+            .unwrap();
+        manager.create_session(&bob.address).unwrap()
+    };
+    for (node, peer) in [(&mut alice, bob.address.clone()), (&mut bob, id("alice"))] {
+        node.protocol.record_encryption_capable(&peer);
+        node.protocol.peer_fast_link.insert(peer.clone());
+        node.transport.add_connected_peer(peer, -40);
+    }
+    alice
+        .protocol
+        .persist_session_state(&bob.address, SessionState::Confirmed, "test")
+        .unwrap();
+    alice
+        .protocol
+        .confirmed_sessions
+        .insert(bob.address.clone());
+    alice.protocol.set_fast_link_roles(true, true, true);
+    bob.protocol.set_fast_link_roles(false, true, true);
+
+    let link_id = alice.protocol.request_fast_link(&bob.address).unwrap();
+    alice.protocol.next_fast_link_directive();
+    alice
+        .protocol
+        .fast_link_hosting(&link_id, "192.168.49.1", 8988)
+        .unwrap();
+    bob.deliver(alice.take_sent());
+    assert!(bob.link_states().is_empty(), "with no session it waits");
+
+    {
+        let manager = bob.protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.join_session(&welcome).unwrap();
+    }
+    bob.protocol.process_pending_decryption(&id("alice"));
+
+    assert!(bob.protocol.next_fast_link_directive().is_none());
+    assert!(bob.link_states().is_empty());
+    assert!(bob.protocol.fast_links.peer().is_none());
+}
+
 /// Stopping the engine ends a link too: a platform that starts it again
 /// would otherwise find the old link held and every request answered `busy`.
 #[test]
