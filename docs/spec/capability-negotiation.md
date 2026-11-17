@@ -14,6 +14,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `ctrl_versions` | End to end | Which control-frame signing payload we build for this peer. Entry 2 means the peer verifies `offline-ctrl-v2`, which binds the frame's timestamp | Build `offline-ctrl-v1`, which states no freshness |
 | `svc_versions` | End to end | Whether a service request or response may travel sealed inside `__MLS_ENC__` toward this peer. Entry 1 means the peer routes a decrypted `__SVC_REQ__` or `__SVC_RESP__` into its service layer, with the MLS-authenticated sender as the requester. Entry 2 means it routes the four subscription frames from a session slot | Signed plaintext service frames. Without entry 2 from a signed package that has been seen, a subscription is refused at the call; with no package seen, it is tried and ends at its pending timeout |
 | `ack_versions` | End to end | Which delivery-ACK statuses we may send this peer. Entry 1 means the peer reads `ack_status: "undecryptable"` as "this frame can never decrypt" (it resends the message once, re-sealed when it can) rather than as a delivery. Entry 2 means the peer reads `ack_more`, so one delivery ACK may answer up to five of its frames | Never answer an undecryptable frame; leave it unacknowledged. Acknowledge each frame in its own ACK |
+| `link_versions` | End to end | Whether we may send this peer a `__FAST_LINK__` frame. Entry 1 means the peer routes a decrypted `request`, `offer` or `close` into its fast-link layer ([ADR 0038](../adr/0038-a-fast-link-is-offered-inside-the-session.md)). It says what the peer parses, never whether its radio can host or join a network, which the frames themselves answer. Omitted from the payload when empty | No fast link with that peer |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
@@ -154,6 +155,12 @@ member, which today is entries 2 and 6, read independently. It opens the
 *group* gate only, never 1:1 replication, and any directly received key
 package from that peer overrides it in both directions. Absence of an attestation means "no information" and MUST NOT be
 read as a downgrade.
+
+`link_versions` persists with the rest, for the plainer reason: a peer met
+before a restart could otherwise not be offered a fast link until its next key
+package. It gates no security decision. What protects an offer is the session
+it is sealed in, and a forged entry only makes this device send that peer
+sealed frames it consumes and drops.
 
 `ack_versions` persists with the rest. A peer that has not advertised entry 1,
 or whose advertisement this device has not yet received, is sent no
@@ -310,6 +317,7 @@ A minimal leaf advertises little and works fully:
 | `ctrl_versions` | `[2]`, always | Not optional, unlike every other row: a leaf verifies the freshness-bound payload on every control frame except `__MLS_KEY_PKG__`, so a peer that never learned this and kept sending the older one would have its Welcome refused and never complete a pairing |
 | `svc_versions` | Empty | A leaf has no service registry; peers send it signed plaintext service frames, which it never receives in practice |
 | `ack_versions` | Empty | Peers leave a frame the leaf can never decrypt unanswered rather than answering `undecryptable` |
+| `link_versions` | Absent | Peers never offer it a fast link; a leaf has no Wi-Fi network to host or join through the leaf crate |
 | `nostr_pubkey` | Absent unless the device is reachable over that carrier | Peers seal to the publicly computable key |
 
 Two consequences follow from the universal rules above, and both are easy to

@@ -1639,6 +1639,13 @@ pub(crate) struct PeerCapabilities {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ack_versions: Vec<u8>,
 
+    /// Fast-link versions the peer routes, from
+    /// [`KeyPackagePayload::link_versions`]. Persisted for the same reason as
+    /// the lists above: without it a peer met before a restart could not be
+    /// offered a fast link until its next key package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) link_versions: Vec<u8>,
+
     /// The peer's Nostr public key, from [`KeyPackagePayload::nostr_pubkey`].
     ///
     /// Persisted for the same reason as the capability lists: the cached key
@@ -1676,48 +1683,32 @@ pub(crate) fn normalize_nostr_pubkey(candidate: &str) -> Option<String> {
 pub(crate) const MAX_PERSISTED_CAPABILITY_VERSIONS: usize = 8;
 
 impl PeerCapabilities {
-    /// Builds a record from the wire-advertised version lists, truncating
-    /// each to [`MAX_PERSISTED_CAPABILITY_VERSIONS`].
+    /// Builds a record from a key package's advertised version lists,
+    /// truncating each to [`MAX_PERSISTED_CAPABILITY_VERSIONS`].
+    ///
+    /// `svc_versions` and `nostr_pubkey` come from the caller rather than
+    /// the payload: both are honoured only from a signed key package, and
+    /// the caller is the one that knows whether this one was.
     pub(crate) fn from_advertised(
-        env_versions: &[u8],
-        rich_versions: &[u8],
-        data_versions: &[u8],
-        ctrl_versions: &[u8],
+        payload: &KeyPackagePayload,
         svc_versions: &[u8],
-        ack_versions: &[u8],
         nostr_pubkey: Option<&str>,
     ) -> Self {
+        let capped = |versions: &[u8]| -> Vec<u8> {
+            versions
+                .iter()
+                .copied()
+                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
+                .collect()
+        };
         Self {
-            env_versions: env_versions
-                .iter()
-                .copied()
-                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
-                .collect(),
-            rich_versions: rich_versions
-                .iter()
-                .copied()
-                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
-                .collect(),
-            data_versions: data_versions
-                .iter()
-                .copied()
-                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
-                .collect(),
-            ctrl_versions: ctrl_versions
-                .iter()
-                .copied()
-                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
-                .collect(),
-            svc_versions: svc_versions
-                .iter()
-                .copied()
-                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
-                .collect(),
-            ack_versions: ack_versions
-                .iter()
-                .copied()
-                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
-                .collect(),
+            env_versions: capped(&payload.env_versions),
+            rich_versions: capped(&payload.rich_versions),
+            data_versions: capped(&payload.data_versions),
+            ctrl_versions: capped(&payload.ctrl_versions),
+            svc_versions: capped(svc_versions),
+            ack_versions: capped(&payload.ack_versions),
+            link_versions: capped(&payload.link_versions),
             attested_rich_versions: Vec::new(),
             attested_data_versions: Vec::new(),
             nostr_pubkey: nostr_pubkey.and_then(normalize_nostr_pubkey),
@@ -1733,6 +1724,7 @@ impl PeerCapabilities {
             || !self.ctrl_versions.is_empty()
             || !self.svc_versions.is_empty()
             || !self.ack_versions.is_empty()
+            || !self.link_versions.is_empty()
             || !self.attested_rich_versions.is_empty()
             || !self.attested_data_versions.is_empty()
             || self.nostr_pubkey.is_some()

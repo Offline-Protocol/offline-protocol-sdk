@@ -1270,6 +1270,7 @@ def build_key_package_vectors() -> dict:
                     "ctrl_versions": [],
                     "svc_versions": [],
                     "ack_versions": [],
+                    "link_versions": [],
                     "nostr_pubkey": None,
                 },
                 "note": "Every absent list defaults to empty, and empty selects "
@@ -1296,6 +1297,7 @@ def build_key_package_vectors() -> dict:
                     "ctrl_versions": [2],
                     "svc_versions": [1],
                     "ack_versions": [1],
+                    "link_versions": [],
                     "nostr_pubkey": "abcd",
                 },
                 "note": "data_versions entries are read independently, so [1,2,3] "
@@ -1318,6 +1320,7 @@ def build_key_package_vectors() -> dict:
                     "ctrl_versions": [],
                     "svc_versions": [],
                     "ack_versions": [],
+                    "link_versions": [],
                     "nostr_pubkey": None,
                 },
                 "note": "An unknown field is ignored rather than refused. A "
@@ -1341,10 +1344,35 @@ def build_key_package_vectors() -> dict:
                     "ctrl_versions": [],
                     "svc_versions": [],
                     "ack_versions": [],
+                    "link_versions": [],
                     "nostr_pubkey": None,
                 },
                 "note": "Absent and null mean the same thing on the way in. On "
                 "the way out the field is omitted rather than written null.",
+            },
+            {
+                "name": "a peer that routes fast-link frames",
+                "json": '{"user_id":"off1abc","key_package_data":[],'
+                '"ack_versions":[1,2],"link_versions":[1]}',
+                "expect": {
+                    "user_id": "off1abc",
+                    "key_package_data": [],
+                    "remaining_lifetime_ms": 0,
+                    "timestamp_ms": 0,
+                    "session_reset": False,
+                    "wire_versions": [],
+                    "env_versions": [],
+                    "rich_versions": [],
+                    "data_versions": [],
+                    "ctrl_versions": [],
+                    "svc_versions": [],
+                    "ack_versions": [1, 2],
+                    "link_versions": [1],
+                    "nostr_pubkey": None,
+                },
+                "note": "link_versions says what the peer parses, not whether "
+                "its radio can host or join a network; the fast-link frames "
+                "answer that. A sender omits the list when it is empty.",
             },
         ],
         "emission_is_not_pinned": {

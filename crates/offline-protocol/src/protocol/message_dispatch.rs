@@ -220,6 +220,22 @@ impl OfflineProtocol {
             } else {
                 self.peer_coalesced_ack.remove(sender);
             }
+            // Record whether this peer routes fast-link frames (ADR 0038).
+            // Same shape again, and like the ACK lists not gated on our
+            // config: it says what the peer parses.
+            if payload
+                .link_versions
+                .contains(&offline_protocol_sealed::FAST_LINK_V1)
+            {
+                if !self.peer_fast_link.contains(sender)
+                    && self.peer_fast_link.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_fast_link.clear();
+                }
+                self.peer_fast_link.insert(sender.to_string());
+            } else {
+                self.peer_fast_link.remove(sender);
+            }
 
             // Record whether this peer replicates documents, so the data
             // layer may push `__DATA_V1__` frames to them. Same shape again:
@@ -409,12 +425,8 @@ impl OfflineProtocol {
                 .mark_peer_nostr_pubkey(sender, advertised_nostr_pubkey.as_deref());
 
             let caps = PeerCapabilities::from_advertised(
-                &payload.env_versions,
-                &payload.rich_versions,
-                &payload.data_versions,
-                &payload.ctrl_versions,
+                &payload,
                 if signed { &payload.svc_versions } else { &[] },
-                &payload.ack_versions,
                 advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {

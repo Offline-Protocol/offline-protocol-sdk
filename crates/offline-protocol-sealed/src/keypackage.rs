@@ -222,6 +222,33 @@ pub struct KeyPackagePayload {
     #[serde(default)]
     pub ack_versions: Vec<u8>,
 
+    /// Fast-link versions the sender routes (e.g. `[1]` for
+    /// [`FAST_LINK_V1`]): a [`prefixes::FAST_LINK`] frame found inside a
+    /// decrypted 1:1 MLS plaintext is handed to its fast-link layer rather
+    /// than surfaced as a chat message (ADR 0038). Absent on legacy nodes, and
+    /// toward a peer that advertises nothing here no fast-link frame is ever
+    /// sent, so it is never asked to host or join and never shown one.
+    ///
+    /// It says what the sender parses, not what its platform can do. Whether
+    /// a device can host or join a network is a property of its radio and its
+    /// permissions, which change at runtime, so the frames themselves answer
+    /// that (`cannot_host`, `cannot_join`).
+    ///
+    /// End to end, like `rich_versions`: it describes the far end's parser.
+    /// Omitted when empty, so a payload that does not advertise it is byte
+    /// for byte what it was.
+    ///
+    /// Trust boundary: a plaintext field like the lists above. Stripping it
+    /// means no fast link with that peer, and the traffic stays on whatever
+    /// carried it before; forging it onto a peer that cannot parse the frames
+    /// makes us send it sealed frames it consumes and drops, which only the
+    /// session could have produced. A feature negotiation, never a security
+    /// control: what protects an offer is the session it is sealed in.
+    ///
+    /// [`prefixes::FAST_LINK`]: crate::prefixes::FAST_LINK
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_versions: Vec<u8>,
+
     /// This install's Nostr public key (x-only, 64-char lowercase hex), so a
     /// peer can seal Nostr gift wraps to a key only this install holds.
     ///
@@ -306,6 +333,13 @@ pub const ACK_UNDECRYPTABLE_V1: u8 = 1;
 /// than it was offered.
 pub const ACK_COALESCED_V1: u8 = 2;
 
+/// Fast-link version advertised in [`KeyPackagePayload::link_versions`]: the
+/// sender routes the `request`, `offer` and `close` frames it finds inside a
+/// decrypted 1:1 MLS plaintext under [`prefixes::FAST_LINK`] (ADR 0038).
+///
+/// [`prefixes::FAST_LINK`]: crate::prefixes::FAST_LINK
+pub const FAST_LINK_V1: u8 = 1;
+
 /// The conformance vectors for the key package payload.
 ///
 /// The chapter these pin is `docs/spec/capability-negotiation.md`, and they pin
@@ -343,7 +377,7 @@ mod spec_vectors {
     /// it: a loop over an array a bad merge emptied passes by not running.
     #[test]
     fn the_vector_file_is_the_size_it_was() {
-        assert_eq!(vectors()["parse"].as_array().expect("parse").len(), 4);
+        assert_eq!(vectors()["parse"].as_array().expect("parse").len(), 5);
     }
 
     #[test]
@@ -389,6 +423,7 @@ mod spec_vectors {
                 ("ctrl_versions", &got.ctrl_versions),
                 ("svc_versions", &got.svc_versions),
                 ("ack_versions", &got.ack_versions),
+                ("link_versions", &got.link_versions),
             ] {
                 assert_eq!(got, &u8s(&want[field]), "[{name}] {field}");
             }
@@ -430,12 +465,44 @@ mod spec_vectors {
             svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
+            link_versions: Vec::new(),
         };
         let rendered = serde_json::to_string(&payload).expect("it serializes");
         assert!(
             !rendered.contains("nostr_pubkey"),
             "an absent Nostr key was written into the body: {rendered}"
         );
+    }
+
+    /// An empty `link_versions` is omitted on the way out, so a key package
+    /// that advertises no fast link is byte for byte what it was before the
+    /// field existed: a leaf's, above all, whose frames are counted.
+    #[test]
+    fn an_empty_link_list_is_omitted() {
+        let mut payload = KeyPackagePayload {
+            user_id: "off1abc".to_string(),
+            key_package_data: Vec::new(),
+            remaining_lifetime_ms: 0,
+            timestamp_ms: 0,
+            session_reset: false,
+            no_session: false,
+            wire_versions: Vec::new(),
+            env_versions: Vec::new(),
+            rich_versions: Vec::new(),
+            data_versions: Vec::new(),
+            ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
+            ack_versions: Vec::new(),
+            nostr_pubkey: None,
+            link_versions: Vec::new(),
+        };
+        let rendered = serde_json::to_string(&payload).expect("it serializes");
+        assert!(!rendered.contains("link_versions"), "{rendered}");
+
+        payload.link_versions = alloc::vec![FAST_LINK_V1];
+        let rendered = serde_json::to_string(&payload).expect("it serializes");
+        let back: KeyPackagePayload = serde_json::from_str(&rendered).expect("it parses");
+        assert_eq!(back.link_versions, [FAST_LINK_V1]);
     }
 
     /// The chapter, or `None` where the repo tree is absent: `cargo package`
@@ -466,6 +533,7 @@ mod spec_vectors {
             "ctrl_versions",
             "svc_versions",
             "ack_versions",
+            "link_versions",
             "nostr_pubkey",
             "session_reset",
         ] {

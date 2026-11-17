@@ -7042,6 +7042,10 @@ impl OfflineProtocol {
                 offline_protocol_sealed::ACK_COALESCED_V1,
             ],
             nostr_pubkey: self.transport_manager.nostr_public_key(),
+            // Read unconditionally (rule 1 of capability negotiation): whether
+            // this device can host or join a network is its platform's to
+            // say, at runtime, and the frames answer that (ADR 0038).
+            link_versions: vec![offline_protocol_sealed::FAST_LINK_V1],
         }
     }
 
