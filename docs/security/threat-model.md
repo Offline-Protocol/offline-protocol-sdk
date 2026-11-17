@@ -1488,8 +1488,11 @@ address, so a link that proves nothing ends when its offer expires, at most
 not ask: an offer needs no request, unless the application set
 `wifiDirect.fastLink` to `requestedOnly`, which answers every offer it did not
 ask for `declined` and never shows it. Under the default, once the user declines, that peer's
-offers are refused for ten minutes, and a second offer while one is on screen
-is refused, so the most it gets is one prompt per ten minutes per session. An
+offers are refused for ten minutes, and so they are once two offers in a row
+it made unasked ended without a link coming up (a prompt ignored until the
+offer expired, or a host that never proved a stream). A second offer while one
+is on screen is refused too, so the most it gets is two prompts per ten
+minutes per session. An
 Android joiner shows no prompt at all: Wi-Fi Direct joins a group by name and
 passphrase silently, so a session peer can move an Android device onto its
 group whenever it is in range, bounded by the same lifetime and by the

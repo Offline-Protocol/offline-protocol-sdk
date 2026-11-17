@@ -516,7 +516,8 @@ struct Link {
     platform_engaged: bool,
     /// The peer knows of this link, so its end needs a `close` frame.
     peer_engaged: bool,
-    /// A host link brought up because the peer asked.
+    /// The peer started it: a host link brought up for its request, or a
+    /// join of an offer this device did not ask for.
     requested_by_peer: bool,
 }
 
@@ -547,6 +548,13 @@ pub(crate) struct FastLinks {
     unanswered: VecDeque<(String, u8)>,
     /// Peers whose requests are refused, and since when ([`HOST_BACKOFF`]).
     host_backoff: VecDeque<(String, Instant)>,
+    /// Per peer, the offers it made without being asked that ended in a row
+    /// with no link up. Each was a join prompt on iOS, so
+    /// [`MAX_UNANSWERED_HOSTINGS`] of them start the decline pause, as a
+    /// Cancel does: a user who ignored the prompt, or a host that never
+    /// proved a stream, otherwise left the peer free to prompt again once
+    /// per offer lifetime.
+    unanswered_offers: VecDeque<(String, u8)>,
     /// Peers whose link ended after it was up. A transfer pinned to the
     /// slot for one of them can no longer reach it: its carrier is fixed when
     /// it starts, so it would retry on a dead slot until its retries ran out.
@@ -581,6 +589,8 @@ impl FastLinks {
         // the peer's unanswered requests.
         self.declined.retain(|(declined, _)| declined != peer);
         self.unanswered.retain(|(unanswered, _)| unanswered != peer);
+        self.unanswered_offers
+            .retain(|(unanswered, _)| unanswered != peer);
         self.host_backoff
             .retain(|(backed_off, _)| backed_off != peer);
         if self.roles.can_host {
@@ -883,7 +893,7 @@ impl FastLinks {
             offer: None,
             platform_engaged: false,
             peer_engaged: true,
-            requested_by_peer: false,
+            requested_by_peer: !asked,
         });
         self.changed(None);
     }
@@ -1056,6 +1066,49 @@ impl FastLinks {
         }
     }
 
+    /// Counts an offer `peer` made without being asked that ended: one that
+    /// came up resets the count; one that did not adds to it, unless this
+    /// device ended it for a reason of its own (its application closing it,
+    /// leaving the foreground) or its user declined, which pauses already.
+    /// [`MAX_UNANSWERED_HOSTINGS`] in a row start the decline pause.
+    fn count_offer(
+        &mut self,
+        peer: &str,
+        used: bool,
+        by_peer: bool,
+        reason: CloseReason,
+        now: Instant,
+    ) {
+        if used {
+            self.unanswered_offers
+                .retain(|(unanswered, _)| unanswered != peer);
+            return;
+        }
+        if reason == CloseReason::Declined
+            || (!by_peer && matches!(reason, CloseReason::Closed | CloseReason::Background))
+        {
+            return;
+        }
+        let count = match self.unanswered_offers.iter_mut().find(|(p, _)| p == peer) {
+            Some((_, count)) => {
+                *count = count.saturating_add(1);
+                *count
+            }
+            None => {
+                if self.unanswered_offers.len() >= MAX_ENDED_REMEMBERED {
+                    self.unanswered_offers.pop_front();
+                }
+                self.unanswered_offers.push_back((peer.to_string(), 1));
+                1
+            }
+        };
+        if count >= MAX_UNANSWERED_HOSTINGS {
+            self.unanswered_offers
+                .retain(|(unanswered, _)| unanswered != peer);
+            self.record_decline(peer.to_string(), now);
+        }
+    }
+
     fn record_decline(&mut self, peer: String, now: Instant) {
         if self.declined.len() >= MAX_ENDED_REMEMBERED {
             self.declined.pop_front();
@@ -1119,6 +1172,15 @@ impl FastLinks {
             if reason == CloseReason::Declined && tell_peer && link.state == FastLinkState::Joining
             {
                 self.record_decline(link.peer.clone(), now);
+            }
+            if link.requested_by_peer {
+                self.count_offer(
+                    &link.peer,
+                    link.state == FastLinkState::Up,
+                    !tell_peer,
+                    reason,
+                    now,
+                );
             }
         }
         if link.platform_engaged {
@@ -2331,6 +2393,54 @@ mod tests {
         deliver(&mut android, LOW, &mut iphone, HIGH, t0, 0);
         assert_eq!(
             iphone.next_directive(t0).unwrap().kind,
+            FastLinkDirectiveKind::Join
+        );
+    }
+
+    #[test]
+    fn offers_left_unanswered_pause_the_peer_like_a_decline() {
+        let mut android = machine(host_roles());
+        let mut iphone = machine(join_roles());
+        let mut now = Instant::now();
+        // The Android offers a link nobody on the iPhone asked for; the
+        // prompt is ignored and the offer expires.
+        let offer = |android: &mut FastLinks, iphone: &mut FastLinks, seed, now| {
+            let id = android.request(HIGH, fresh(seed), now).unwrap();
+            android.next_directive(now);
+            assert!(android.hosting(&id, "192.168.49.1", 8988, now, 0));
+            deliver(android, LOW, iphone, HIGH, now, 0);
+            iphone.next_directive(now)
+        };
+
+        assert!(offer(&mut android, &mut iphone, 1, now).is_some());
+        now += OFFER_TTL;
+        iphone.tick(now, |_| false);
+        deliver(&mut iphone, HIGH, &mut android, LOW, now, 0);
+        // One is forgiven.
+        assert!(offer(&mut android, &mut iphone, 2, now).is_some());
+        now += OFFER_TTL;
+        iphone.tick(now, |_| false);
+        deliver(&mut iphone, HIGH, &mut android, LOW, now, 0);
+
+        // The second in a row pauses the peer: no third prompt.
+        assert!(offer(&mut android, &mut iphone, 3, now).is_none());
+        assert_eq!(
+            iphone.take_frames()[0].1.body,
+            FrameBody::Close {
+                reason: "declined".to_string()
+            }
+        );
+
+        // The iPhone's user asking ends the pause.
+        assert!(android.close(HIGH, now));
+        android.take_frames();
+        let asked = iphone.request(LOW, fresh(4), now).unwrap();
+        deliver(&mut iphone, HIGH, &mut android, LOW, now, 0);
+        android.next_directive(now);
+        assert!(android.hosting(&asked, "192.168.49.1", 8988, now, 0));
+        deliver(&mut android, LOW, &mut iphone, HIGH, now, 0);
+        assert_eq!(
+            iphone.next_directive(now).unwrap().kind,
             FastLinkDirectiveKind::Join
         );
     }
