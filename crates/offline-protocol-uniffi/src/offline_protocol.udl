@@ -1414,6 +1414,26 @@ interface OfflineProtocol {
     // from scratch.
     void internet_address_declaration_refused(string reason);
 
+    // Fast link (ADR 0038). Brings up a Wi-Fi network between this device and
+    // `peer_id`, a peer with a confirmed session that is reachable over a
+    // live direct link (Bluetooth LE) and has advertised the capability. One
+    // device hosts and the other joins, with credentials sealed in the
+    // session, and the stream over it fills the peer-stream slot, so traffic
+    // moves to it by ordinary transport selection. Returns the link id as
+    // soon as the first step is taken; the outcome arrives as
+    // `fast_link_changed` events. On iOS a join shows a system prompt and
+    // takes the phone off its own Wi-Fi while the link lasts, so this is the
+    // application's call, never automatic. Refused when the peer has not
+    // advertised it, there is no confirmed session or live direct link, a
+    // peer stream already reaches it, this device can neither host nor join,
+    // or a link with another peer is held.
+    [Throws=ProtocolError]
+    string request_fast_link(string peer_id);
+
+    // Ends the fast link with `peer_id`, telling the peer and this device's
+    // platform. Returns whether there was one.
+    boolean close_fast_link(string peer_id);
+
     // Peer-stream transport operations (the `wifi_direct` slot)
     //
     // A byte stream the platform established to exactly one peer: a Wi-Fi
@@ -1463,6 +1483,33 @@ interface OfflineProtocol {
     // was announced; a stream that never proved a peer has nothing to report.
     [Throws=ProtocolError]
     void wifi_direct_peer_disconnected(string peer_id);
+
+    // Fast link, the platform's half (ADR 0038,
+    // docs/state-machines/fast-link.md). The platform declares what it can
+    // do once it knows its permissions: an Android device that can create a
+    // Wi-Fi Direct group with given credentials hosts and joins, an iPhone
+    // with the Hotspot Configuration entitlement joins. Until it does, both
+    // are false and every request is refused.
+    void wifi_direct_set_fast_link_roles(boolean can_host, boolean can_join);
+
+    // The next instruction for the platform, drained alongside
+    // `wifi_direct_get_next_message` whenever the transport callback fires:
+    // `host` (bring up a network with `ssid` and `passphrase`, admit only
+    // `peer_id`, then report it), `join` (join it, dial `host:port`, claim
+    // `peer_id`) or `close` (end the stream and leave or remove the
+    // network). The passphrase must never be logged.
+    FastLinkDirective? wifi_direct_next_fast_link_directive();
+
+    // The host's network is up and its listener is on `host:port`, a private
+    // or link-local address on that network. The offer goes to the peer.
+    [Throws=ProtocolError]
+    void wifi_direct_fast_link_hosting(string link_id, string host, u16 port);
+
+    // The platform could not do what it was told, or can no longer hold the
+    // link: `declined` (the user refused the join), `failed`, `host_failed`,
+    // or `background` (iOS drops a joined network 15 s after the app leaves
+    // the foreground). The peer is told.
+    void wifi_direct_fast_link_ended(string link_id, string reason);
 
     // Reticulum transport callback (event-driven sending)
     void set_reticulum_transport_callback(ReticulumTransportCallback callback);
@@ -2575,6 +2622,22 @@ dictionary InternetMessage {
 dictionary WifiDirectMessage {
     string recipient_id;
     sequence<u8> data;
+};
+
+// One fast-link instruction for the platform (ADR 0038). `kind` is `host`,
+// `join` or `close`; the optional fields are set for the kinds that use
+// them. `expires_in_ms` is how long the platform has to bring the network up
+// (`host`) or prove the stream (`join`), and zero on `close`.
+dictionary FastLinkDirective {
+    string kind;
+    string link_id;
+    string peer_id;
+    string? ssid;
+    string? passphrase;
+    string? host;
+    u16? port;
+    u64 expires_in_ms;
+    string? reason;
 };
 
 // The signed proof a device presents to attach to a gateway: everything

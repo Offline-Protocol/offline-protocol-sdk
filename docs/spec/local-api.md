@@ -416,6 +416,19 @@ other client's sessions too.
 | `get_blocked_users` | | `[]` |
 | `is_user_blocked` | `user_id` | `!` |
 
+### Engine: fast link
+
+A Wi-Fi network brought up between this instance and a peer it meets only
+over Bluetooth LE ([ADR 0038](../adr/0038-a-fast-link-is-offered-inside-the-session.md)).
+A host process can neither host nor join one, so on a server these are
+refused unless its driver declared a role; the outcome of a request arrives
+as `fast_link_changed` events.
+
+| Method | Params | Result |
+|---|---|---|
+| `request_fast_link` | `peer_id` | string (the link id) |
+| `close_fast_link` | `peer_id` | `!` |
+
 ### Engine: transports and metrics
 
 Read-only views of the instance. Everything here describes the whole server,
@@ -555,7 +568,7 @@ this chapter asserts it.
 | `set_ble_transport_callback`, `set_wifi_direct_transport_callback`, `set_reticulum_transport_callback`, `set_nostr_transport_callback` | A callback interface has no JSON form, and each installs the driver of a carrier |
 | `ble_peer_discovered`, `ble_peer_lost`, `ble_peer_rssi`, `ble_node_hash`, `set_peer_rssi_events`, `ble_status_changed`, `ble_fragment_received`, `ble_get_next_fragment`, `ble_return_fragment`, `ble_get_peer_count`, `ble_set_peer_mtu`, `ble_clear_peer_mtu`, `ble_undersized_mtu_reports`, `ble_fragment_fallback_count`, `ble_recipient_not_among_peers_count`, `protocol_lock_diagnostics` | The Bluetooth LE driver's feed and drain, its signal readings and the switch the binding flips for them, and the host's lock diagnostics |
 | `internet_status_changed`, `internet_message_received`, `internet_get_next_message`, `internet_confirm_sent`, `internet_send_failed`, `internet_send_failed_with_reason`, `internet_peer_presence`, `internet_presence_watchlist`, `internet_relay_capabilities`, `internet_group_report_received`, `internet_address_declared`, `internet_address_declaration_refused` | The relay client's feed and drain, including the dedicated entry points the threat model's boundary 2 requires |
-| `wifi_direct_status_changed`, `wifi_direct_message_received`, `wifi_direct_get_next_message`, `wifi_direct_peer_connected`, `wifi_direct_peer_disconnected` | The peer-stream driver's feed and drain |
+| `wifi_direct_status_changed`, `wifi_direct_message_received`, `wifi_direct_get_next_message`, `wifi_direct_peer_connected`, `wifi_direct_peer_disconnected`, `wifi_direct_set_fast_link_roles`, `wifi_direct_next_fast_link_directive`, `wifi_direct_fast_link_hosting`, `wifi_direct_fast_link_ended` | The peer-stream driver's feed and drain, and the networks it brings up or joins for a fast link, whose directives carry a passphrase |
 | `reticulum_status_changed`, `reticulum_message_received`, `reticulum_get_next_message`, `reticulum_confirm_sent`, `reticulum_send_failed`, `reticulum_send_failed_with_reason`, `reticulum_address_declared`, `reticulum_address_declaration_refused`, `reticulum_gateway_capabilities`, `reticulum_peer_presence`, `reticulum_presence_watchlist` | The gateway client's feed and drain |
 | `nostr_status_changed`, `nostr_message_received`, `nostr_message_received_at`, `nostr_get_next_message`, `nostr_confirm_sent`, `nostr_send_failed`, `nostr_send_failed_with_reason`, `nostr_get_public_key`, `nostr_get_subscription_filter`, `nostr_get_next_query`, `nostr_query_event_received`, `nostr_query_completed` | The Nostr client's feed and drain |
 | `update_transport_metrics`, `remove_transport`, `set_battery_level`, `set_battery_state` | Facts about the host that only the host process knows |

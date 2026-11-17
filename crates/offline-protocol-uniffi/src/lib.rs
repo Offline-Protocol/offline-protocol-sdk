@@ -2579,6 +2579,57 @@ pub struct WifiDirectMessage {
     pub data: Vec<u8>,
 }
 
+/// One fast-link instruction for the platform (ADR 0038). See the UDL.
+#[derive(Clone)]
+pub struct FastLinkDirective {
+    pub kind: String,
+    pub link_id: String,
+    pub peer_id: String,
+    pub ssid: Option<String>,
+    pub passphrase: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub expires_in_ms: u64,
+    pub reason: Option<String>,
+}
+
+impl std::fmt::Debug for FastLinkDirective {
+    // Never the passphrase: it is a network credential (invariant 5 of the
+    // fast link state machine).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FastLinkDirective")
+            .field("kind", &self.kind)
+            .field("link_id", &self.link_id)
+            .field("peer_id", &"[REDACTED]")
+            .field("ssid", &self.ssid)
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("expires_in_ms", &self.expires_in_ms)
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+impl From<offline_protocol::fast_link::FastLinkDirective> for FastLinkDirective {
+    fn from(directive: offline_protocol::fast_link::FastLinkDirective) -> Self {
+        Self {
+            kind: directive.kind.as_str().to_string(),
+            link_id: directive.link_id,
+            peer_id: directive.peer_id,
+            ssid: directive.ssid,
+            passphrase: directive.passphrase,
+            host: directive.host,
+            port: directive.port,
+            expires_in_ms: directive.expires_in_ms,
+            reason: directive.reason.map(|reason| reason.as_str().to_string()),
+        }
+    }
+}
+
 /// Reticulum message for outgoing data
 #[derive(Debug, Clone)]
 pub struct ReticulumMessage {
@@ -5293,6 +5344,8 @@ impl OfflineProtocol {
         // then finds no link and adds nothing (wifi_direct_peer_disconnected).
         if after == 0 {
             for link in before {
+                // The layer's end is the stream's end for a fast link too.
+                self.lock_inner()?.fast_link_stream_lost(&link.peer_id);
                 if self.peer_linked_elsewhere(&link.peer_id, CoreTransportType::WiFiDirect) {
                     continue;
                 }
@@ -5365,6 +5418,8 @@ impl OfflineProtocol {
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let mut protocol = self.lock_inner()?;
+        // Traffic on the slot keeps a fast link off its idle limit.
+        protocol.fast_link_activity(&sender_id);
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)
@@ -5438,6 +5493,8 @@ impl OfflineProtocol {
             })?
             .unwrap_or_default();
         self.emit_wifi_direct_switch(before, after);
+        // A fast link waiting for this peer's stream is up.
+        self.lock_inner()?.fast_link_stream_proved(&peer_id);
 
         self.notify_neighbor_reachable(&peer_id, "WiFiDirect", None)
     }
@@ -5466,6 +5523,11 @@ impl OfflineProtocol {
             })?
             .unwrap_or_default();
         self.emit_wifi_direct_switch(before, after);
+        // A fast link carried by this stream is over, whether or not the
+        // peer is still reachable some other way.
+        if held {
+            self.lock_inner()?.fast_link_stream_lost(&peer_id);
+        }
 
         // Reported once, and only when the peer is out of reach. A link the
         // layer already ended was reported by wifi_direct_status_changed, and
@@ -7908,6 +7970,57 @@ impl OfflineProtocol {
     pub fn block_user(&self, user_id: String) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
         guard.block_user(&user_id).map_err(ProtocolError::from)
+    }
+
+    /// Asks for a fast link to `peer_id` (ADR 0038). See the UDL.
+    pub fn request_fast_link(&self, peer_id: String) -> Result<String, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .request_fast_link(&peer_id)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Ends the fast link with `peer_id`. Returns whether there was one.
+    pub fn close_fast_link(&self, peer_id: String) -> bool {
+        self.lock_inner()
+            .map(|mut guard| guard.close_fast_link(&peer_id))
+            .unwrap_or(false)
+    }
+
+    /// The platform says what it can do for a fast link.
+    pub fn wifi_direct_set_fast_link_roles(&self, can_host: bool, can_join: bool) {
+        if let Ok(mut guard) = self.lock_inner() {
+            guard.set_fast_link_roles(can_host, can_join);
+        }
+    }
+
+    /// The next fast-link instruction for the platform.
+    pub fn wifi_direct_next_fast_link_directive(&self) -> Option<FastLinkDirective> {
+        self.lock_inner()
+            .ok()?
+            .next_fast_link_directive()
+            .map(FastLinkDirective::from)
+    }
+
+    /// The host's network is up, its listener on `host:port`.
+    pub fn wifi_direct_fast_link_hosting(
+        &self,
+        link_id: String,
+        host: String,
+        port: u16,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .fast_link_hosting(&link_id, &host, port)
+            .map_err(ProtocolError::from)
+    }
+
+    /// The platform could not do what it was told, or can no longer hold the
+    /// link.
+    pub fn wifi_direct_fast_link_ended(&self, link_id: String, reason: String) {
+        if let Ok(mut guard) = self.lock_inner() {
+            guard.fast_link_ended(&link_id, &reason);
+        }
     }
 
     /// Unblock a previously blocked user.

@@ -19,6 +19,7 @@ public interface OfflineProtocolInterface {
     public void blockUser(java.lang.String userId) throws ProtocolException;
     public java.lang.String cancelConnectionRequest(java.lang.String recipient) throws ProtocolException;
     public void cancelFileTransfer(java.lang.String fileId) throws ProtocolException;
+    public boolean closeFastLink(java.lang.String peerId);
     public void closeFileStores() throws ProtocolException;
     public MlsGroupInfo createGroup(java.lang.String groupName) throws ProtocolException;
     public java.lang.String createInvite(java.lang.String petname, boolean sign) throws ProtocolException;
@@ -128,6 +129,7 @@ public interface OfflineProtocolInterface {
     public void removeFromGroup(java.lang.String groupId, java.lang.String memberId) throws ProtocolException;
     public void removeTransport(TransportType transportType) throws ProtocolException;
     public void renameGroup(java.lang.String groupId, java.lang.String newName) throws ProtocolException;
+    public java.lang.String requestFastLink(java.lang.String peerId) throws ProtocolException;
     public boolean requestGroupRelayRegistration(java.lang.String groupId) throws ProtocolException;
     public boolean resolveUsername(java.lang.String username) throws ProtocolException;
     public void resume() throws ProtocolException;
@@ -180,10 +182,14 @@ public interface OfflineProtocolInterface {
     public void updateTransportMetrics(TransportType transportType, TransportMetrics metrics) throws ProtocolException;
     public boolean verifySignature(java.util.List<java.lang.Byte> publicKey, java.util.List<java.lang.Byte> data, java.util.List<java.lang.Byte> signature) throws ProtocolException;
     public boolean verifySignatureBytes(byte[] publicKey, byte[] data, byte[] signature) throws ProtocolException;
+    public void wifiDirectFastLinkEnded(java.lang.String linkId, java.lang.String reason);
+    public void wifiDirectFastLinkHosting(java.lang.String linkId, java.lang.String host, short port) throws ProtocolException;
     public WifiDirectMessage wifiDirectGetNextMessage();
     public void wifiDirectMessageReceived(java.lang.String senderId, java.util.List<java.lang.Byte> data) throws ProtocolException;
+    public FastLinkDirective wifiDirectNextFastLinkDirective();
     public void wifiDirectPeerConnected(java.lang.String peerId) throws ProtocolException;
     public void wifiDirectPeerDisconnected(java.lang.String peerId) throws ProtocolException;
+    public void wifiDirectSetFastLinkRoles(boolean canHost, boolean canJoin);
     public void wifiDirectStatusChanged(boolean isConnected) throws ProtocolException;
     
 }

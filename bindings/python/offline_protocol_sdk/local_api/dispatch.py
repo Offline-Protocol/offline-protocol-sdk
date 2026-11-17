@@ -102,6 +102,9 @@ EXPOSED: frozenset[str] = frozenset(
         "unblock_user",
         "get_blocked_users",
         "is_user_blocked",
+        # fast link
+        "request_fast_link",
+        "close_fast_link",
         # transports and metrics
         "get_active_transports",
         "get_transport_metrics",
@@ -257,6 +260,10 @@ PLATFORM: frozenset[str] = frozenset(
         "wifi_direct_get_next_message",
         "wifi_direct_peer_connected",
         "wifi_direct_peer_disconnected",
+        "wifi_direct_set_fast_link_roles",
+        "wifi_direct_next_fast_link_directive",
+        "wifi_direct_fast_link_hosting",
+        "wifi_direct_fast_link_ended",
         # gateway client
         "reticulum_status_changed",
         "reticulum_message_received",

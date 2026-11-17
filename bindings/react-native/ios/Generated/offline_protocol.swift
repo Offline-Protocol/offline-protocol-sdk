@@ -1559,6 +1559,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func cancelFileTransfer(fileId: String) throws 
     
+    func closeFastLink(peerId: String)  -> Bool
+    
     func closeFileStores() throws 
     
     func createGroup(groupName: String) throws  -> MlsGroupInfo
@@ -1777,6 +1779,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func renameGroup(groupId: String, newName: String) throws 
     
+    func requestFastLink(peerId: String) throws  -> String
+    
     func requestGroupRelayRegistration(groupId: String) throws  -> Bool
     
     func resolveUsername(username: String) throws  -> Bool
@@ -1881,13 +1885,21 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func verifySignatureBytes(publicKey: Data, data: Data, signature: Data) throws  -> Bool
     
+    func wifiDirectFastLinkEnded(linkId: String, reason: String) 
+    
+    func wifiDirectFastLinkHosting(linkId: String, host: String, port: UInt16) throws 
+    
     func wifiDirectGetNextMessage()  -> WifiDirectMessage?
     
     func wifiDirectMessageReceived(senderId: String, data: [UInt8]) throws 
     
+    func wifiDirectNextFastLinkDirective()  -> FastLinkDirective?
+    
     func wifiDirectPeerConnected(peerId: String) throws 
     
     func wifiDirectPeerDisconnected(peerId: String) throws 
+    
+    func wifiDirectSetFastLinkRoles(canHost: Bool, canJoin: Bool) 
     
     func wifiDirectStatusChanged(isConnected: Bool) throws 
     
@@ -2122,6 +2134,16 @@ open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiC
         FfiConverterString.lower(fileId),uniffiCallStatus
     )
 }
+}
+    
+open func closeFastLink(peerId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_fast_link(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),uniffiCallStatus
+    )
+})
 }
     
 open func closeFileStores()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
@@ -3156,6 +3178,16 @@ open func renameGroup(groupId: String, newName: String)throws   {try rustCallWit
 }
 }
     
+open func requestFastLink(peerId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_fast_link(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),uniffiCallStatus
+    )
+})
+}
+    
 open func requestGroupRelayRegistration(groupId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
@@ -3677,6 +3709,27 @@ open func verifySignatureBytes(publicKey: Data, data: Data, signature: Data)thro
 })
 }
     
+open func wifiDirectFastLinkEnded(linkId: String, reason: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(linkId),
+        FfiConverterString.lower(reason),uniffiCallStatus
+    )
+}
+}
+    
+open func wifiDirectFastLinkHosting(linkId: String, host: String, port: UInt16)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(linkId),
+        FfiConverterString.lower(host),
+        FfiConverterUInt16.lower(port),uniffiCallStatus
+    )
+}
+}
+    
 open func wifiDirectGetNextMessage() -> WifiDirectMessage?  {
     return try!  FfiConverterOptionTypeWifiDirectMessage.lift(try! rustCall() {
         uniffiCallStatus in
@@ -3696,6 +3749,15 @@ open func wifiDirectMessageReceived(senderId: String, data: [UInt8])throws   {tr
 }
 }
     
+open func wifiDirectNextFastLinkDirective() -> FastLinkDirective?  {
+    return try!  FfiConverterOptionTypeFastLinkDirective.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_next_fast_link_directive(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func wifiDirectPeerConnected(peerId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(
@@ -3710,6 +3772,16 @@ open func wifiDirectPeerDisconnected(peerId: String)throws   {try rustCallWithEr
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(peerId),uniffiCallStatus
+    )
+}
+}
+    
+open func wifiDirectSetFastLinkRoles(canHost: Bool, canJoin: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_set_fast_link_roles(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(canHost),
+        FfiConverterBool.lower(canJoin),uniffiCallStatus
     )
 }
 }
@@ -4392,6 +4464,88 @@ public func FfiConverterTypeEncryptionConfig_lift(_ buf: RustBuffer) throws -> E
 #endif
 public func FfiConverterTypeEncryptionConfig_lower(_ value: EncryptionConfig) -> RustBuffer {
     return FfiConverterTypeEncryptionConfig.lower(value)
+}
+
+
+public struct FastLinkDirective: Equatable, Hashable {
+    public var kind: String
+    public var linkId: String
+    public var peerId: String
+    public var ssid: String?
+    public var passphrase: String?
+    public var host: String?
+    public var port: UInt16?
+    public var expiresInMs: UInt64
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: String, linkId: String, peerId: String, ssid: String?, passphrase: String?, host: String?, port: UInt16?, expiresInMs: UInt64, reason: String?) {
+        self.kind = kind
+        self.linkId = linkId
+        self.peerId = peerId
+        self.ssid = ssid
+        self.passphrase = passphrase
+        self.host = host
+        self.port = port
+        self.expiresInMs = expiresInMs
+        self.reason = reason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FastLinkDirective: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFastLinkDirective: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FastLinkDirective {
+        return
+            try FastLinkDirective(
+                kind: FfiConverterString.read(from: &buf), 
+                linkId: FfiConverterString.read(from: &buf), 
+                peerId: FfiConverterString.read(from: &buf), 
+                ssid: FfiConverterOptionString.read(from: &buf), 
+                passphrase: FfiConverterOptionString.read(from: &buf), 
+                host: FfiConverterOptionString.read(from: &buf), 
+                port: FfiConverterOptionUInt16.read(from: &buf), 
+                expiresInMs: FfiConverterUInt64.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FastLinkDirective, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.linkId, into: &buf)
+        FfiConverterString.write(value.peerId, into: &buf)
+        FfiConverterOptionString.write(value.ssid, into: &buf)
+        FfiConverterOptionString.write(value.passphrase, into: &buf)
+        FfiConverterOptionString.write(value.host, into: &buf)
+        FfiConverterOptionUInt16.write(value.port, into: &buf)
+        FfiConverterUInt64.write(value.expiresInMs, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFastLinkDirective_lift(_ buf: RustBuffer) throws -> FastLinkDirective {
+    return try FfiConverterTypeFastLinkDirective.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFastLinkDirective_lower(_ value: FastLinkDirective) -> RustBuffer {
+    return FfiConverterTypeFastLinkDirective.lower(value)
 }
 
 
@@ -10203,6 +10357,30 @@ fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt16: FfiConverterRustBuffer {
+    typealias SwiftType = UInt16?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt16.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionInt16: FfiConverterRustBuffer {
     typealias SwiftType = Int16?
 
@@ -10435,6 +10613,30 @@ fileprivate struct FfiConverterOptionTypeCustodyConfig: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeCustodyConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFastLinkDirective: FfiConverterRustBuffer {
+    typealias SwiftType = FastLinkDirective?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFastLinkDirective.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFastLinkDirective.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -11373,6 +11575,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 44634) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link() != 32622) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 57369) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11700,6 +11905,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 36114) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link() != 19701) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 3982) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11856,16 +12064,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 24438) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended() != 54290) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting() != 47337) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 50868) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 59107) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive() != 7498) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 38596) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 15986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() != 20631) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 12337) {

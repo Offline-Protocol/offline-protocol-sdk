@@ -235,6 +235,9 @@ final class NamespaceLibrary {
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != ((short) 44634)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_fast_link() != ((short) 32622)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != ((short) 57369)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
@@ -562,6 +565,9 @@ final class NamespaceLibrary {
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != ((short) 36114)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_fast_link() != ((short) 19701)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != ((short) 3982)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
@@ -718,16 +724,28 @@ final class NamespaceLibrary {
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != ((short) 24438)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended() != ((short) 54290)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting() != ((short) 47337)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != ((short) 50868)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != ((short) 59107)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_next_fast_link_directive() != ((short) 7498)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != ((short) 38596)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != ((short) 15986)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_set_fast_link_roles() != ((short) 20631)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != ((short) 12337)) {
