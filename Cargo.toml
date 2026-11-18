@@ -14,6 +14,7 @@ members = [
     "crates/offline-protocol",
     "crates/offline-protocol-uniffi",
     "crates/offline-protocol-web",
+    "crates/offline-protocol-webrtc-direct",
     "crates/offline-protocol-bench",
 ]
 

@@ -612,9 +612,11 @@ jobs:
 
       # Without the UniFFI crate, which declares its own, higher rust-version:
       # its bindgen build dependencies need 1.91 (see its Cargo.toml). It is
-      # built on stable by every other job here.
+      # built on stable by every other job here. Without the WebRTC Direct
+      # crate either: str0m 0.25 needs Rust 1.89, and no library crate
+      # depends on it.
       - name: Check workspace on MSRV
-        run: cargo check --workspace --exclude offline-protocol-uniffi --all-targets --locked
+        run: cargo check --workspace --exclude offline-protocol-uniffi --exclude offline-protocol-webrtc-direct --all-targets --locked
 
       # The UniFFI crate on its own declared floor. Every other job builds it
       # on stable, so without this step its `rust-version` could fall behind

@@ -458,7 +458,14 @@ at once are told apart by that key.
    and whose MESSAGE-INTEGRITY verifies under `<w>`. Anything else is
    dropped, with no reply. The listener learns the page's address from the
    request's source (a peer-reflexive candidate), and never needs the page's
-   candidates, which a browser may hide behind mDNS names.
+   candidates, which a browser may hide behind mDNS names. A check is
+   routed to a dial by the page's username, never by its source alone, so
+   two pages behind one address are never handed each other's dial. Once a
+   dial ends, the listener refuses its page's username: the page's consent
+   checks keep arriving, and admitting them as a new dial would answer them
+   from a connection that never completes, so the page would never learn
+   its stream had ended. A page that dials again has a new username,
+   because a browser makes new ICE credentials for every connection.
 2. **Answering.** The listener is ICE-lite and controlled. It answers on
    the first pair an admitted check arrived on, without waiting for
    USE-CANDIDATE: it cannot run checks of its own, so that check is all the
@@ -475,6 +482,10 @@ at once are told apart by that key.
    inbound stream. A listener ends a stream after 15 s with no admitted
    check, because the page's consent checks are the only liveness signal an
    ICE-lite agent receives.
+
+The listeners in this repository cannot bind an IPv4 link-local address:
+str0m 0.25 refuses one as a host candidate. A code may still name one, and
+an IPv6 link-local address works.
 
 The certificate, username, password and port are fresh each time a
 listener opens, and closing it ends its streams. So a code admits dials

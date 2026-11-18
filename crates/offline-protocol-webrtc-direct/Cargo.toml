@@ -1,0 +1,45 @@
+[package]
+name = "offline-protocol-webrtc-direct"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+# AGPL-3.0-only requires the license text to accompany the program, and a
+# published crate ships on its own, so this crate carries its own byte-identical
+# LICENSE copy like every other publishable crate in the workspace;
+# scripts/check-license-consistency.sh asserts the copies never drift.
+repository.workspace = true
+# Not the workspace's 1.87: str0m 0.25 requires 1.89. No library crate
+# depends on this one (the FFI crate, which already requires 1.91, is its
+# consumer), so the library crates keep the workspace promise and the MSRV
+# job checks them without this one.
+rust-version = "1.89"
+description = "A WebRTC Direct listener for the Offline Protocol SDK: a page on the local network dials a native device from a code"
+
+[lints]
+workspace = true
+
+[dependencies]
+offline-protocol-core = { workspace = true }
+# The one framing and preamble reader (`PeerStreamReader`, `frame`).
+offline-protocol-transport = { workspace = true }
+# The one identity assertion verifier.
+offline-protocol-mls = { workspace = true }
+base64 = { workspace = true }
+# The STUN FINGERPRINT the nomination rewrite recomputes. The same crate
+# str0m's ICE agent computes it with, so nothing new enters the graph.
+crc = "3"
+getrandom = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# WebRTC with the platform's own crypto where it has one (ADR 0039, decision
+# 10): Apple's on Apple platforms, aws-lc-rs everywhere else. Without default
+# features, which add aws-lc-rs everywhere and an HTTP server for str0m's
+# examples.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+str0m = { version = "0.25", default-features = false, features = ["apple-crypto"] }
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+str0m = { version = "0.25", default-features = false, features = ["aws-lc-rs"] }
