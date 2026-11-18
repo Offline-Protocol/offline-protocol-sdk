@@ -1610,6 +1610,46 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         ProtocolEngineHostBridgeReactNative.closeFastLink(this, peerId, promise)
     }
 
+    // WebRTC Direct (ADR 0039). The listener belongs to the Wi-Fi Direct
+    // transport's stream table, not to the engine, so these go to the manager
+    // rather than through the shared engine bridge. The code's fragment
+    // carries the listener's ICE password: resolved to the application,
+    // never logged.
+
+    @ReactMethod
+    fun openWebrtcDirect(promise: Promise) {
+        val manager = wifiDirectManager
+        if (manager == null) {
+            promise.reject(
+                "ERROR_WEBRTC_DIRECT",
+                "Enable the wifiDirect transport first: a WebRTC Direct listener's streams are its peer streams",
+                null,
+            )
+            return
+        }
+        try {
+            val code = manager.openWebrtcDirect()
+            promise.resolve(Arguments.createMap().apply {
+                putString("code", code.fragment)
+                putString("host", code.host)
+                putInt("port", code.port)
+                putString("address", code.address)
+            })
+        } catch (e: Exception) {
+            rejectBridgePromise(promise, e, "ERROR_WEBRTC_DIRECT", "Failed to open a WebRTC Direct listener", mapProtocolErrors = true)
+        }
+    }
+
+    @ReactMethod
+    fun closeWebrtcDirect(promise: Promise) {
+        try {
+            wifiDirectManager?.closeWebrtcDirect()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_WEBRTC_DIRECT", "Failed to close the WebRTC Direct listener: ${e.message}", e)
+        }
+    }
+
     // User Blocking
 
     @ReactMethod

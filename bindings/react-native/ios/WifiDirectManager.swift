@@ -377,6 +377,19 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
     }
 
+    // MARK: - WebRTC Direct (ADR 0039)
+
+    /// Not on iOS yet: the listener's socket, pump and stream-table rows come
+    /// with the iOS step of ADR 0039. Throws, so the React Native method
+    /// exists on both platforms and rejects here with a clear message rather
+    /// than being undefined.
+    public func openWebrtcDirect() throws -> WebrtcDirectCode {
+        throw TransportError.notAvailable("WebRTC Direct is not available on iOS yet")
+    }
+
+    /// Nothing is ever open on iOS yet; see `openWebrtcDirect`.
+    public func closeWebrtcDirect() {}
+
     // MARK: - Message Handling (Event-Driven)
 
     /// Called by the Rust transport callback when new outgoing messages are

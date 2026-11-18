@@ -69,6 +69,7 @@ import type {
   ServiceSubscriptionInfo,
   SubscriptionMode,
   SubscriptionPolicy,
+  WebrtcDirectCode,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import {
@@ -4657,6 +4658,40 @@ export class OfflineProtocol {
   async closeFastLink(peerId: string): Promise<boolean> {
     warnPeerIdIfMisshapen(peerId, 'closeFastLink');
     return await OfflineProtocolNativeModule.closeFastLink(peerId);
+  }
+
+  // ─── WebRTC Direct ──────────────────────────────────────────
+
+  /**
+   * Opens a WebRTC Direct listener (ADR 0039): a page running the browser
+   * node on the same Wi-Fi network dials this device from the code it
+   * resolves with, with no internet and no server, in Chromium, Firefox and
+   * Safari alike. Each dial that proves an address becomes an ordinary peer
+   * stream of the `wifiDirect` transport, so messages to and from the page
+   * flow as they do for any peer.
+   *
+   * Put `code` after your page's URL behind `#` and show it as a QR code or
+   * text. It carries the listener's password and admits whoever holds it
+   * while the listener is open, so close the listener when you stop showing
+   * it, and never log it. Opening again closes the previous listener first:
+   * its streams end and its code stops working, since every open makes a new
+   * certificate, password and port.
+   *
+   * Needs the `wifiDirect` transport running, MLS initialized, and the
+   * device on a Wi-Fi network with a private IPv4 address. The listener
+   * closes when the transport stops or the device leaves that network.
+   * Android only for now: on iOS it rejects.
+   */
+  async openWebrtcDirect(): Promise<WebrtcDirectCode> {
+    return await OfflineProtocolNativeModule.openWebrtcDirect();
+  }
+
+  /**
+   * Closes the WebRTC Direct listener, if one is open. Every stream a page
+   * dialled ends, and its code admits nothing again.
+   */
+  async closeWebrtcDirect(): Promise<void> {
+    await OfflineProtocolNativeModule.closeWebrtcDirect();
   }
 
   // ─── User Blocking ──────────────────────────────────────────

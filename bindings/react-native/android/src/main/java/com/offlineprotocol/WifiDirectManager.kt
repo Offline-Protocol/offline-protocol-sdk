@@ -18,8 +18,10 @@ import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import androidx.core.content.ContextCompat
 import uniffi.offline_protocol.FastLinkDirective
 import uniffi.offline_protocol.OfflineProtocol
+import uniffi.offline_protocol.WebrtcDirectEventKind
 import uniffi.offline_protocol.verifyIdentityAssertion
 import java.io.*
+import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -55,6 +57,11 @@ import java.util.concurrent.atomic.AtomicLong
  * loopback sockets. What stays here is the group: the listener, the one
  * outbound socket a client opens to its owner, and reconnecting that socket
  * while the group lasts.
+ *
+ * A third source of streams is a page that dialled this device's WebRTC
+ * Direct listener ([openWebrtcDirect], ADR 0039): [WebrtcDirectListener]
+ * runs its socket and the engine's listener, and each stream it proves is a
+ * row in the same [PeerStreamSockets] table (docs/bridges/kotlin.md K10).
  *
  * Forming the group is opt-in. With [formGroups] (`wifiDirect.autoAccept`)
  * on Android 10 and later, the manager finds devices of the same application
@@ -640,6 +647,10 @@ class WifiDirectManager(
         stopServerSocket()
 
         endFastLinkOnStop()
+
+        // Before the streams: the listener's Closed events end its dialled
+        // streams through the table, each reported lost once.
+        closeWebrtcDirect()
 
         lan?.stop()
         lan = null
@@ -2075,10 +2086,14 @@ class WifiDirectManager(
     private fun lanNetworkChanged(addresses: Set<InetAddress>?) {
         if (state != TransportState.RUNNING) return
         if (addresses == null) {
+            // The listener's socket was bound to that network: its code
+            // names an address no page can reach any more.
+            closeWebrtcDirect()
             lanAddresses = emptySet()
             sockets.closeCarrier(PeerStreamSockets.Carrier.LAN)
             lanUp = false
         } else {
+            webrtc?.boundAddress?.let { bound -> if (bound !in addresses) closeWebrtcDirect() }
             lanAddresses = addresses
             lanUp = true
         }
@@ -2098,6 +2113,145 @@ class WifiDirectManager(
         } catch (e: Exception) {
             Log.e(TAG, "Error notifying protocol", e)
         }
+    }
+
+    // MARK: - WebRTC Direct (ADR 0039)
+
+    // The listener a page dials, between openWebrtcDirect and its close.
+    // Written under [webrtcLock]; read without it to compare an address.
+    // Lock order: [webrtcLock], then the listener's own, then a stream's.
+    // Never held across [TransportConfinement.runSync]: the transport thread
+    // takes it to close the listener when the network goes.
+    private val webrtcLock = Any()
+    @Volatile private var webrtc: WebrtcDirectListener? = null
+
+    /** The engine's `webrtc_direct_*` methods; [WebrtcDirectListener] serialises every call. */
+    private val webrtcEngine = object : WebrtcDirectListener.Engine {
+        override fun open(localIp: String, localPort: Int): WebrtcDirectListener.Code {
+            val code = protocol.webrtcDirectOpen(localIp, localPort.toUShort())
+            return WebrtcDirectListener.Code(code.fragment, code.host, code.port.toInt(), code.address)
+        }
+
+        override fun close() = protocol.webrtcDirectClose()
+
+        override fun datagramReceived(sourceIp: String, sourcePort: Int, data: ByteArray) =
+            protocol.webrtcDirectDatagramReceived(sourceIp, sourcePort.toUShort(), data.map { it.toUByte() })
+
+        override fun nextDatagram(): WebrtcDirectListener.Datagram? =
+            protocol.webrtcDirectNextDatagram()?.let { d ->
+                WebrtcDirectListener.Datagram(
+                    d.destinationIp, d.destinationPort.toInt(),
+                    ByteArray(d.data.size) { i -> d.data[i].toByte() },
+                )
+            }
+
+        override fun nextEvent(): WebrtcDirectListener.Event? {
+            val event = protocol.webrtcDirectNextEvent() ?: return null
+            val stream = event.stream.toLong()
+            return when (event.kind) {
+                WebrtcDirectEventKind.PROVED -> WebrtcDirectListener.Event.Proved(
+                    stream, event.address ?: "", event.remoteIp ?: "", event.remotePort?.toInt() ?: 0,
+                )
+                WebrtcDirectEventKind.BODY -> WebrtcDirectListener.Event.Body(
+                    stream, event.data?.let { data -> ByteArray(data.size) { i -> data[i].toByte() } } ?: ByteArray(0),
+                )
+                WebrtcDirectEventKind.CLOSED -> WebrtcDirectListener.Event.Closed(stream)
+            }
+        }
+
+        override fun send(stream: Long, body: ByteArray) =
+            protocol.webrtcDirectSend(stream.toULong(), body.map { it.toUByte() })
+
+        override fun closeStream(stream: Long) = protocol.webrtcDirectCloseStream(stream.toULong())
+
+        override fun tick(): Long? = protocol.webrtcDirectTick()?.toLong()
+    }
+
+    /** The listener's events into the one stream table, beside the TCP streams. */
+    private val webrtcSink = object : WebrtcDirectListener.Sink {
+        override fun proved(listener: WebrtcDirectListener, stream: Long, address: String, remoteIp: String) {
+            sockets.dialProved(listener, stream, address, remoteIp, accepting = state == TransportState.RUNNING)
+        }
+
+        override fun body(stream: Long, data: ByteArray) = sockets.dialBody(stream, data)
+
+        override fun closed(stream: Long) = sockets.dialClosed(stream)
+    }
+
+    /**
+     * Opens a WebRTC Direct listener (ADR 0039) on this device's private
+     * IPv4 address on the Wi-Fi network, and returns its dial code. A page on
+     * that network dials the code, and each dial that proves an address is a
+     * peer stream in this transport's one table. A listener already open is
+     * closed first, its streams reported lost and its code dead: the socket,
+     * certificate and credentials are fresh on every open.
+     *
+     * The socket is bound to the Wi-Fi network, as LAN dials are (ADR 0028),
+     * so nothing it sends follows the default network onto cellular, and to
+     * the one address the code names, never a wildcard.
+     *
+     * Blocks for the open (a certificate is made), so never on the main
+     * thread. Throws when the transport is not running, the device is on no
+     * Wi-Fi network with a private address, or the engine refuses (no
+     * identity yet, or a library built without `webrtc-direct`). The code's
+     * fragment carries the ICE password: the caller shows it, and nothing
+     * here logs it.
+     */
+    internal fun openWebrtcDirect(): WebrtcDirectListener.Code {
+        if (state != TransportState.RUNNING) {
+            throw IllegalStateException("start the Wi-Fi Direct transport before opening a WebRTC Direct listener")
+        }
+        // Read on the transport thread, which owns the LAN carrier.
+        val (network, properties) = confinement.runSync { lan?.wifiNetwork() }
+            ?: throw IllegalStateException("not on a Wi-Fi network: a WebRTC Direct listener binds the network's own address")
+        val ip = WebrtcDirectListener.listenAddress(properties.linkAddresses.map { it.address })
+            ?: throw IllegalStateException("the Wi-Fi network gave this device no private IPv4 address")
+        synchronized(webrtcLock) {
+            closeWebrtcDirectLocked()
+            val socket = DatagramSocket(null)
+            try {
+                network.bindSocket(socket)
+                socket.bind(InetSocketAddress(ip, 0))
+            } catch (e: Exception) {
+                socket.close()
+                throw IllegalStateException("WebRTC Direct could not bind ${ip.hostAddress}: ${e.message ?: e.javaClass.simpleName}")
+            }
+            val listener = WebrtcDirectListener(webrtcEngine, webrtcSink, ::emitDiagnostic) { lost ->
+                // The socket went without a close of ours: its streams end
+                // now rather than at their consent timeout.
+                transportHandler.post { closeWebrtcDirect(lost) }
+            }
+            val code = listener.open(socket)
+            if (state != TransportState.RUNNING) {
+                // Stopped while the listener opened.
+                listener.close()
+                sockets.closeDials()
+                throw IllegalStateException("the Wi-Fi Direct transport stopped while the listener opened")
+            }
+            webrtc = listener
+            return code
+        }
+    }
+
+    /**
+     * Closes the WebRTC Direct listener, if one is open. Every dialled stream
+     * ends and each that held an address is reported lost once; the code
+     * admits nothing again. False when none was open.
+     */
+    fun closeWebrtcDirect(): Boolean = synchronized(webrtcLock) { closeWebrtcDirectLocked() }
+
+    private fun closeWebrtcDirect(only: WebrtcDirectListener) {
+        synchronized(webrtcLock) { if (webrtc === only) closeWebrtcDirectLocked() }
+    }
+
+    private fun closeWebrtcDirectLocked(): Boolean {
+        val listener = webrtc ?: return false
+        webrtc = null
+        // The listener reports every proved stream closed, and each ends
+        // through the table as it is; any it did not report end here.
+        listener.close()
+        sockets.closeDials()
+        return true
     }
 
     // MARK: - Message Handling (Event-Driven)

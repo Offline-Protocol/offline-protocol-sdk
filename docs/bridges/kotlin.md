@@ -278,6 +278,87 @@ nothing, in at least one direction, until the Android app restarted.
   rule, its bounds and those gaps are in
   [the transport lifecycle](../state-machines/transport-lifecycle.md#per-transport-constraints).
 
+## K10. A stream a page dialled is a row in the one stream table
+
+**Invariants:** a stream a page dialled to this device's WebRTC Direct
+listener ([ADR 0039](../adr/0039-a-browser-dials-a-native-device-from-a-code.md),
+[stream framing](../spec/stream-framing.md#dialling-a-listener-from-a-browser))
+is held in the same table as the TCP streams of K8, under the same caps and
+the same one-announced-stream-per-address rule, so the core hears one
+announcement and, later, one loss per address whichever kind carries it. Of
+two dialled streams proving one address the newer is kept; against a TCP
+stream the existing one stays, in both directions. A dialled stream counts
+as inbound, from the address its page's first check came from. A stream
+proving this device's own address is refused. The dial code is returned to
+the application and never logged. The listener's socket is bound to the
+Wi-Fi network and to that network's one private IPv4 address, never a
+wildcard and never the default network.
+
+`WifiDirectManager.openWebrtcDirect()` (React Native `openWebrtcDirect()`)
+opens the listener while the transport runs and returns the code;
+`closeWebrtcDirect()` closes it, and so do `stop()` and the Wi-Fi network
+going away or losing the bound address, since its code then names an address
+no page can reach. Opening again closes the previous listener first, its
+streams reported lost: the socket, certificate and credentials are fresh on
+every open. The listener itself (admission by authenticated check only,
+DTLS, the channel, the preamble and the framing) is the engine's
+`webrtc_direct_*`, and `WebrtcDirectListener` moves only what the UDL
+contract gives it: every datagram the socket receives, unfiltered; every
+datagram and event the engine queued, after every call; and a tick on a
+timer re-armed from the tick's own return. Every call into the engine is
+made under that class's one lock, so the engine's listener is never entered
+from two threads at once (the receive thread, the timer, the transport
+thread's sends), and a handler that calls back in (a refusal, a supersede)
+only marks the pump to go round again, so events are handled in order and
+never inside one another.
+
+- **One table.** `PeerStreamSockets.dialProved` puts the stream in the same
+  `PeerStreamLinks` and the same admission count as the sockets, and
+  `dialBody` and `dialClosed` go through the same `deliver` and `endStream`.
+  A table per kind would let a page and a TCP peer each announce the same
+  address, and the first close would tell the core a reachable peer is gone,
+  which a copied preamble
+  ([R16](../security/threat-model.md#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier))
+  is enough to cause.
+- **The newer dialled stream wins.** `PeerStreamLinks.announce` decides it
+  ahead of the lower-address rule of K8. Only the page dials, so that rule
+  has no race to settle here, and under it a device whose address is the
+  lower would keep the older dialled stream: a page that reloaded, or came
+  back after a Wi-Fi drop, would be refused until the dead stream's consent
+  ran out, up to 15 s, while the page, which closed its old link before
+  dialling again (W3, W16), waits on a stream this device will not hold. The
+  superseded stream is closed with `webrtc_direct_close_stream`, out of the
+  table first, so its `Closed` reports nothing. Against a TCP stream the
+  existing one stays, so neither kind can take an address from the other.
+  `every_peer_stream_manager_keeps_the_newer_dialled_stream` pins the lines,
+  beside Python's (P18).
+- **The caps cover both kinds**: 16 streams, 12 inbound and 4 from one
+  remote address, the chapter's mobile values. A dial past a cap is closed
+  and never announced. A dialled stream it would supersede is not counted,
+  so a page at the cap can still reload. Counted as outbound, dialled
+  streams would let one machine hold the per-address bound twice over.
+- **The socket is bound to the Wi-Fi network** with `Network.bindSocket`,
+  as LAN dials are ([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)),
+  and to the address `WebrtcDirectListener.listenAddress` picks from that
+  network's `LinkProperties` (private IPv4, else IPv4 link-local). Unbound,
+  its answers would follow the default network, which on a Wi-Fi with no
+  internet is cellular, and a wildcard address cannot go in a code and
+  would admit checks from networks the code was never shown on.
+- **The code never reaches a log.** It carries the listener's ICE password
+  and admits whoever holds it while the listener is open
+  ([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)).
+  Diagnostics carry the host, port and address only, and
+  `WebrtcDirectListener.Code.toString` leaves the fragment out, so a stray
+  string template cannot leak it either. This is the fast link's passphrase
+  rule (ADR 0038) applied to a code.
+
+The listener lives while the application keeps it open, in the background
+too; iOS will close it when the application leaves the foreground (ADR 0039
+decision 8). `WebrtcDirectDialledStreamsTest` pins the table's rules and
+`WebrtcDirectListenerTest` the pump, the clock, the close and the code, both
+on a fake engine. A page dialling a phone is covered only by a device run
+(C9).
+
 ## Testing
 
 Unit tests live in

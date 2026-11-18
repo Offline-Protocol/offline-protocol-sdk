@@ -21702,20 +21702,56 @@ mod tests {
         let python = std::fs::read_to_string(&python_path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", python_path.display()));
 
-        let managers: [(&str, &str, &[&str]); 1] = [(
-            "bindings/python/offline_protocol_sdk/peer_stream_manager.py",
-            &python,
-            &[
-                // A TCP stream and a dialled one say which they are.
-                "class _Stream:\n    \"\"\"One stream, both directions, and what it has proved.\"\"\"\n\n    #: A TCP stream: this host or the peer may have opened it.\n    dialled = False",
-                "    #: Only a page dials a listener (ADR 0039).\n    dialled = True",
-                // The rule, ahead of the lower-address tie-break.
-                "        if new.dialled or older.dialled:\n            return new.dialled and older.dialled\n        local = self.local_address",
-                // Both kinds go through it, from one table.
-                "if not self._new_stream_wins(stream, older, derived):",
-                "            self._streams.add(stream)\n            if self._hold(stream, address):",
-            ],
-        )];
+        // The Kotlin sources are read with comments dropped and whitespace
+        // collapsed (`rn_source_code_only`), so their lines are one-spaced.
+        let links =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt");
+        let sockets =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt");
+
+        let managers: [(&str, &str, &[&str]); 3] = [
+            (
+                "bindings/python/offline_protocol_sdk/peer_stream_manager.py",
+                &python,
+                &[
+                    // A TCP stream and a dialled one say which they are.
+                    "class _Stream:\n    \"\"\"One stream, both directions, and what it has proved.\"\"\"\n\n    #: A TCP stream: this host or the peer may have opened it.\n    dialled = False",
+                    "    #: Only a page dials a listener (ADR 0039).\n    dialled = True",
+                    // The rule, ahead of the lower-address tie-break.
+                    "        if new.dialled or older.dialled:\n            return new.dialled and older.dialled\n        local = self.local_address",
+                    // Both kinds go through it, from one table.
+                    "if not self._new_stream_wins(stream, older, derived):",
+                    "            self._streams.add(stream)\n            if self._hold(stream, address):",
+                ],
+            ),
+            (
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt",
+                &links,
+                &[
+                    // The rule, ahead of the lower-address tie-break.
+                    "val held = byAddress[address] \
+                     if (held != null && (dialled || held in dialledHandles)) { \
+                     if (!(dialled && held in dialledHandles)) { \
+                     return Announcement(firstForAddress = false, superseded = null, refused = true) } \
+                     } else if (byAddress.containsKey(address) &&",
+                    "if (dialled) dialledHandles.add(handle)",
+                ],
+            ),
+            (
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt",
+                &sockets,
+                &[
+                    // A TCP stream and a dialled one say which they are.
+                    "open val dialled: Boolean get() = false",
+                    "override val dialled: Boolean get() = true",
+                    // Both kinds go through it, from one table.
+                    "val announcement = links.announce(stream, address, outbound, local, stream.dialled)",
+                    "!announce(held, address, outbound = false) ->",
+                    // The caps leave out the dialled stream about to be superseded.
+                    "val replacing = links.handleFor(address)?.takeIf { it.dialled }",
+                ],
+            ),
+        ];
         for (path, code, needed) in managers {
             for line in needed {
                 assert!(
@@ -21952,9 +21988,16 @@ mod tests {
                 &[
                     "is PeerStreamPreamble.Outcome.Announce -> outcome.address",
                     "if (!announce(stream, address, outbound)) {",
-                    "PeerStreamDialPolicy.admitsInbound(host, inboundHosts, reserved, limits)",
-                    "val announcement = links.announce(stream, address, outbound, local) \
+                    "PeerStreamDialPolicy.admitsInbound(host, hosts, open, limits)",
+                    "val announcement = links.announce(stream, address, outbound, local, stream.dialled) \
                      if (announcement.refused) {",
+                    // A dialled stream's address is the one the listener's
+                    // verifier derived (ADR 0039), never a claimed one.
+                    "WebrtcDirectEventKind.PROVED -> WebrtcDirectListener.Event.Proved( \
+                     stream, event.address ?: \"\",",
+                    "sockets.dialProved(listener, stream, address, remoteIp, \
+                     accepting = state == TransportState.RUNNING)",
+                    "!announce(held, address, outbound = false) ->",
                     "if (!deliver(stream, address, body)) {",
                     "links.remove(stream)?.let { address -> try { host.peerDisconnected(address)",
                     "if (announcement.firstForAddress) { try { host.peerConnected(address)",

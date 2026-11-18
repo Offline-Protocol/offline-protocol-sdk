@@ -1512,6 +1512,28 @@ export interface FastLinkChangedEvent extends BaseEvent {
 }
 
 /**
+ * A WebRTC Direct listener's dial code (ADR 0039), from `openWebrtcDirect`.
+ *
+ * A page running the browser node on the same Wi-Fi network dials this
+ * device from `code`, and its stream joins the peer-stream slot like any
+ * other. Put `code` after your page's URL behind `#` (for example
+ * `https://example.app/dial#op-direct=1&...`) and show that as a QR code or
+ * text: a fragment never reaches a web server. `code` carries the listener's
+ * ICE password and admits whoever holds it for as long as the listener is
+ * open, so show it only to the people meant to dial, and never log it.
+ */
+export interface WebrtcDirectCode {
+  /** The dial code fragment, `op-direct=1&...`, without the `#`. */
+  code: string;
+  /** The private IPv4 address the listener is bound to on the Wi-Fi network. */
+  host: string;
+  /** The listener's UDP port. */
+  port: number;
+  /** This device's address (`off1…`), which the dialling page proves it reached. */
+  address: string;
+}
+
+/**
  * Relay promoted event
  */
 /**

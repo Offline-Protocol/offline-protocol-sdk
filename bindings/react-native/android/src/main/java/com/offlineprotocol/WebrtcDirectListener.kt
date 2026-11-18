@@ -1,0 +1,343 @@
+package com.offlineprotocol
+
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
+
+/**
+ * The platform's half of a WebRTC Direct listener (ADR 0039): one UDP socket,
+ * the clock, and the pump between them and the engine's sans-I/O listener.
+ *
+ * Kept apart from [PeerStreamSockets] because none of it is a stream rule: it
+ * moves datagrams and fires timers, and hands every event to [sink], whose one
+ * table decides what the core hears. The FFI's contract (the `webrtc_direct_*`
+ * block in the UDL) is what it holds:
+ *
+ * - every datagram the socket receives goes to the listener, unfiltered,
+ *   because the listener answers only an authenticated check;
+ * - after every call into the listener, every datagram it queued is sent and
+ *   every event it queued is handled;
+ * - `webrtc_direct_tick` runs again within the milliseconds it returned, and
+ *   after any other call, since a datagram or a send can bring the next
+ *   deadline forward.
+ *
+ * Every call into [engine] is made under [lock], so the listener is never
+ * entered from two threads at once and its events are handled in the order it
+ * queued them. A handler that calls back in (a refusal closing a stream, a
+ * supersede) runs on the thread already holding the lock and only marks the
+ * pump to go round again, so events are never handled inside one another.
+ * The lock is taken before a stream's lock in [PeerStreamSockets], never
+ * after it.
+ *
+ * The dial code carries the listener's ICE password. It is returned to the
+ * caller and never logged or put in a diagnostic, and [Code.toString] leaves
+ * it out, so a stray string template cannot leak it either.
+ */
+internal class WebrtcDirectListener(
+    private val engine: Engine,
+    private val sink: Sink,
+    private val diagnostic: (level: String, message: String, context: Map<String, Any?>) -> Unit,
+    /** The socket stopped without a [close] of ours (the interface went away). */
+    private val onSocketLost: (WebrtcDirectListener) -> Unit = {},
+) : PeerStreamSockets.Dials {
+
+    /** The engine's `webrtc_direct_*` methods, in this module's types. */
+    interface Engine {
+        fun open(localIp: String, localPort: Int): Code
+        fun close()
+        fun datagramReceived(sourceIp: String, sourcePort: Int, data: ByteArray)
+        fun nextDatagram(): Datagram?
+        fun nextEvent(): Event?
+        fun send(stream: Long, body: ByteArray)
+        fun closeStream(stream: Long)
+        /** Milliseconds until the next tick is due, or null when nothing is timed. */
+        fun tick(): Long?
+    }
+
+    /** What the listener's events mean to the stream table. */
+    interface Sink {
+        fun proved(listener: WebrtcDirectListener, stream: Long, address: String, remoteIp: String)
+        fun body(stream: Long, data: ByteArray)
+        fun closed(stream: Long)
+    }
+
+    /**
+     * A dial code. [fragment] is what a page dials: the application shows it
+     * after `#` in a URL or as a QR code, so it never reaches a web server.
+     */
+    class Code(val fragment: String, val host: String, val port: Int, val address: String) {
+        /** Leaves [fragment] out: it carries the ICE password. */
+        override fun toString(): String = "WebrtcDirectCode(host=$host, port=$port, address=$address)"
+    }
+
+    class Datagram(val destinationIp: String, val destinationPort: Int, val data: ByteArray)
+
+    sealed class Event {
+        abstract val stream: Long
+
+        class Proved(
+            override val stream: Long,
+            val address: String,
+            val remoteIp: String,
+            val remotePort: Int,
+        ) : Event()
+
+        class Body(override val stream: Long, val data: ByteArray) : Event()
+
+        class Closed(override val stream: Long) : Event()
+    }
+
+    companion object {
+        /**
+         * The address a listener on a network with [addresses] binds: its
+         * first private IPv4 address (RFC 1918), else its first IPv4
+         * link-local one, else null. A code may name only a private or
+         * link-local address, and a page reaches IPv4 on every network this
+         * runs on; an IPv6 link-local address would also need its zone,
+         * which no code carries.
+         */
+        fun listenAddress(addresses: List<InetAddress>): Inet4Address? {
+            val v4 = addresses.filterIsInstance<Inet4Address>()
+            return v4.firstOrNull { it.isSiteLocalAddress } ?: v4.firstOrNull { it.isLinkLocalAddress }
+        }
+    }
+
+    private val lock = Any()
+    private var pumping = false
+    private var again = false
+    @Volatile private var closed = false
+    private var socket: DatagramSocket? = null
+    private var timer: ScheduledFuture<*>? = null
+
+    // Daemon, so a listener dropped without close() does not pin the process.
+    private val clock: ScheduledExecutorService =
+        ScheduledThreadPoolExecutor(1) { r ->
+            Thread(r, "offline-webrtc-direct-timer").apply { isDaemon = true }
+        }.apply { removeOnCancelPolicy = true }
+
+    /** The code the engine returned, once open. */
+    var code: Code? = null
+        private set
+
+    /** The address and port the socket is bound to, once open. */
+    var boundAddress: InetAddress? = null
+        private set
+
+    /**
+     * Opens the engine's listener on [socket], which the caller bound to one
+     * private or link-local address (never a wildcard: a code names one
+     * address, and a socket on every interface would admit checks from
+     * networks the code was never shown on), and starts receiving. On a throw
+     * the socket is closed and nothing is left open.
+     */
+    fun open(socket: DatagramSocket): Code {
+        val local = socket.localSocketAddress as? InetSocketAddress
+        val ip = local?.address
+        if (ip == null || ip.isAnyLocalAddress || local.port == 0) {
+            socket.close()
+            throw IllegalArgumentException("a WebRTC Direct listener needs a socket bound to one address")
+        }
+        val opened = try {
+            synchronized(lock) {
+                check(!closed) { "this WebRTC Direct listener was closed" }
+                // The address without a zone, which the engine refuses; the
+                // real port, never 0, because the code names it.
+                engine.open(ip.hostAddress?.substringBefore('%') ?: "", local.port).also {
+                    this.socket = socket
+                    code = it
+                    boundAddress = ip
+                }
+            }
+        } catch (e: Exception) {
+            closed = true
+            socket.close()
+            clock.shutdownNow()
+            throw e
+        }
+        // The address and port, never the fragment.
+        diagnostic("info", "WebRTC Direct listener open", mapOf(
+            "host" to opened.host,
+            "port" to opened.port,
+            "address" to opened.address,
+        ))
+        thread(isDaemon = true, name = "offline-webrtc-direct-receive") { receive(socket) }
+        pump()
+        return opened
+    }
+
+    /**
+     * Closes the engine's listener, hands its last events (a `Closed` for
+     * every proved stream) to the sink, then closes the socket. Idempotent.
+     */
+    fun close() {
+        val toClose = synchronized(lock) {
+            if (closed) return
+            if (code == null) {
+                // Never opened: the engine's listener, if any, is another's.
+                closed = true
+                clock.shutdownNow()
+                return
+            }
+            engine.close()
+            // The Closed events, and anything the close queued to send, while
+            // the socket is still open.
+            pumpLocked(tick = false)
+            closed = true
+            timer?.cancel(false)
+            timer = null
+            socket.also { socket = null }
+        }
+        clock.shutdownNow()
+        toClose?.close()
+        diagnostic("info", "WebRTC Direct listener closed", emptyMap())
+    }
+
+    val isOpen: Boolean get() = !closed && code != null
+
+    // MARK: - PeerStreamSockets.Dials
+
+    override fun send(stream: Long, body: ByteArray) {
+        synchronized(lock) {
+            check(!closed) { "the WebRTC Direct listener is closed" }
+            try {
+                engine.send(stream, body)
+            } finally {
+                // The Closed for a stream the send ended, and the datagrams
+                // the send queued, go out now.
+                pumpLocked(tick = true)
+            }
+        }
+    }
+
+    override fun close(stream: Long) {
+        synchronized(lock) {
+            if (closed) return
+            engine.closeStream(stream)
+            pumpLocked(tick = true)
+        }
+    }
+
+    // MARK: - The socket
+
+    private fun receive(socket: DatagramSocket) {
+        // A WebRTC datagram fits a path MTU; the buffer is the UDP maximum
+        // so that nothing larger is truncated into a different packet.
+        val buffer = ByteArray(65_535)
+        val packet = DatagramPacket(buffer, buffer.size)
+        while (true) {
+            try {
+                packet.setLength(buffer.size)
+                socket.receive(packet)
+            } catch (e: Exception) {
+                if (!closed) {
+                    diagnostic("warning", "WebRTC Direct socket lost", mapOf(
+                        "error" to e.javaClass.simpleName,
+                    ))
+                    onSocketLost(this)
+                }
+                return
+            }
+            val source = packet.address?.hostAddress?.substringBefore('%') ?: continue
+            val data = packet.data.copyOfRange(packet.offset, packet.offset + packet.length)
+            synchronized(lock) {
+                if (closed) return
+                try {
+                    engine.datagramReceived(source, packet.port, data)
+                } catch (_: Exception) {
+                    // No listener (a close raced the socket): about one
+                    // datagram, not the socket.
+                }
+                pumpLocked(tick = true)
+            }
+        }
+    }
+
+    // MARK: - The pump
+
+    /** Sends what the listener queued, hands its events on, fires its timers, then arms the clock. */
+    fun pump() {
+        synchronized(lock) {
+            if (closed) return
+            pumpLocked(tick = true)
+        }
+    }
+
+    private fun pumpLocked(tick: Boolean) {
+        if (pumping) {
+            again = true
+            return
+        }
+        pumping = true
+        var delay: Long?
+        try {
+            while (true) {
+                again = false
+                flush()
+                delay = if (tick && !closed) engine.tick() else null
+                if (!flush() && !again) break
+            }
+        } finally {
+            pumping = false
+        }
+        if (tick) arm(delay)
+    }
+
+    private fun flush(): Boolean {
+        var moved = false
+        while (true) {
+            val datagram = engine.nextDatagram() ?: break
+            moved = true
+            sendTo(datagram)
+        }
+        while (true) {
+            val event = engine.nextEvent() ?: break
+            moved = true
+            try {
+                when (event) {
+                    is Event.Proved -> sink.proved(this, event.stream, event.address, event.remoteIp)
+                    is Event.Body -> sink.body(event.stream, event.data)
+                    is Event.Closed -> sink.closed(event.stream)
+                }
+            } catch (e: Exception) {
+                diagnostic("error", "WebRTC Direct event handling failed", mapOf(
+                    "error" to e.javaClass.simpleName,
+                ))
+            }
+            // A handler's own calls (a close, a send) queue datagrams.
+            while (true) {
+                val datagram = engine.nextDatagram() ?: break
+                sendTo(datagram)
+            }
+        }
+        return moved
+    }
+
+    private fun sendTo(datagram: Datagram) {
+        val socket = socket ?: return
+        try {
+            val to = InetAddress.getByName(datagram.destinationIp)
+            socket.send(DatagramPacket(datagram.data, datagram.data.size, to, datagram.destinationPort))
+        } catch (_: Exception) {
+            // An unreachable page, a full buffer: about one datagram. The
+            // page retransmits, and consent ends a stream that stays silent.
+        }
+    }
+
+    private fun arm(delay: Long?) {
+        timer?.cancel(false)
+        timer = null
+        if (delay == null || closed) return
+        timer = try {
+            clock.schedule({ pump() }, delay, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
