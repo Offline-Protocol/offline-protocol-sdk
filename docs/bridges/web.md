@@ -1051,9 +1051,11 @@ tab the phone suspends.
 
 [`examples/web-two-tabs`](../../examples/web-two-tabs) is the first page to
 open in two tabs, [`examples/web-lobby`](../../examples/web-lobby) a
-two-player game between devices over WebRTC with durable nodes, and
+two-player game between devices over WebRTC with durable nodes,
 [`examples/web-coordination`](../../examples/web-coordination) devices that
-subscribe to each other's live state.
+subscribe to each other's live state, and
+[`examples/web-direct`](../../examples/web-direct) a page that dials a native
+app from the code it shows (W16).
 
 ## What is not built yet
 
