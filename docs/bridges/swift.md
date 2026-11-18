@@ -327,6 +327,109 @@ Both CI caches that hold iOS objects, the `Swift Package` job's and the
 release's, add the podspec's hash to their key, so a changed target starts
 from a cold cache there.
 
+## S10. A stream a page dialled is a row in the one stream table, in the foreground only
+
+**Invariants:** a stream a page dialled to this device's WebRTC Direct
+listener ([ADR 0039](../adr/0039-a-browser-dials-a-native-device-from-a-code.md),
+[stream framing](../spec/stream-framing.md#dialling-a-listener-from-a-browser))
+is held in the same table as the TCP streams of S8, under the same caps and
+the same one-announced-stream-per-address rule, so the core hears one
+announcement and, later, one loss per address whichever kind carries it. Of
+two dialled streams proving one address the newer is kept; against a TCP
+stream the existing one stays, in both directions. A dialled stream counts as
+inbound, from the address its page's first check came from. A stream proving
+this device's own address is refused. The dial code is returned to the
+application and never logged. The listener's socket is bound to the Wi-Fi
+interface and to its one private IPv4 address, never a wildcard. The listener
+lives only while the application is in the foreground.
+
+`WifiDirectManager.openWebrtcDirect()` (React Native `openWebrtcDirect()`)
+opens the listener while the transport runs and returns the code;
+`closeWebrtcDirect()` closes it, and so do `stop()`, `pause()`, the
+application leaving the foreground, and the Wi-Fi interface going away or
+losing the bound address, since its code then names an address no page can
+reach. Opening again closes the previous listener first, its streams reported
+lost: the socket, certificate and credentials are fresh on every open. The
+listener itself (admission by authenticated check only, DTLS, the channel,
+the preamble and the framing) is the engine's `webrtc_direct_*`.
+`WebrtcDirectListener` moves only what the UDL contract gives it: every
+datagram the socket receives, unfiltered; every datagram and event the engine
+queued, after every call; and a tick on a timer re-armed from the tick's own
+return. The socket's read source, the timer and every call into the engine
+run on `linkQueue`, the queue the stream table already lives on (S8), so the
+engine's listener is never entered from two threads at once, and a handler
+that calls back in (a refusal, a supersede) only marks the pump to go round
+again, so events are handled in order and never inside one another.
+
+- **One table.** `PeerStreamSession.dialProved` puts the stream in the same
+  `PeerStreamLinks` as the TCP streams, through the same announcement path,
+  and `dialReceived` and `ended` deliver and report through the same calls.
+  The manager's rows (`Held`, with `Stream` and `DialledStream` under it)
+  share one set, which is what the caps count. A table per kind would let a
+  page and a TCP peer each announce the same address, and the first close
+  would tell the core a reachable peer is gone, which a copied preamble
+  ([R16](../security/threat-model.md#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier))
+  is enough to cause.
+- **The newer dialled stream wins.** `PeerStreamLinks.announce` decides it
+  ahead of the lower-address rule of S8. Only the page dials, so that rule
+  has no race to settle here, and under it a device whose address is the
+  lower would keep the older dialled stream: a page that reloaded, or came
+  back after a Wi-Fi drop, would be refused until the dead stream's consent
+  ran out, up to 15 s, while the page, which closed its old link before
+  dialling again (W3, W16), waits on a stream this device will not hold. The superseded stream is closed with `webrtc_direct_close_stream`,
+  out of the table first, so its `Closed` reports nothing. Against a TCP
+  stream the existing one stays, so neither kind can take an address from
+  the other. `every_peer_stream_manager_keeps_the_newer_dialled_stream` pins
+  the lines, beside Android's (K10) and Python's (P18).
+- **The caps cover both kinds**: 16 streams, 12 inbound and 4 from one
+  remote address, the chapter's mobile values, through
+  `PeerStreamDialPolicy.admitsDialled`. A dial past a cap is closed and never
+  announced. A dialled stream it would supersede is not counted, so a page at
+  the cap can still reload. Counted as outbound, dialled streams would let
+  one machine hold the per-address bound twice over. The TCP listener and the
+  dials count the dialled rows too.
+- **A BSD datagram socket, not Network framework.** The engine names a
+  destination for every datagram, to whichever page sent the check, from the
+  one port the code names. An `NWListener` over UDP hands over one
+  `NWConnection` per remote and cannot send to a remote it has made none
+  for; a second connection binds a port of its own unless reuse is forced,
+  and an answer from any port but the code's is not the candidate the page
+  checked, so its ICE agent drops it and the dial never completes. The
+  socket is bound with `IP_BOUND_IF` to the interface Network framework
+  reports as Wi-Fi and to the address `WebrtcDirectListener.listenAddress`
+  picks from it (private IPv4, else IPv4 link-local). Unbound, its answers
+  could follow the default route, which on a Wi-Fi with no internet is
+  cellular, and a wildcard address cannot go in a code and would admit
+  checks from networks the code was never shown on.
+- **Foreground only** (ADR 0039 decision 8). A suspended application's socket
+  answers no page, and its streams would wait out their 15 s consent instead
+  of ending, so the manager closes the listener on
+  `UIApplication.didEnterBackgroundNotification` and in `pause()`, whichever
+  comes first, each held stream reported lost once. Nothing reopens it: the
+  application opens it again on return and shows the new code.
+- **Local network permission.** Answering a page on the LAN is local network
+  traffic, so on iOS 14 and later the application needs
+  `NSLocalNetworkUsageDescription` and the user's consent, as for S8. No
+  Bonjour service is involved, so nothing is added to `NSBonjourServices`.
+  Without consent iOS refuses the listener's answers to the page and the
+  dial times out with nothing said on the page's side, so the first send
+  the socket refuses is reported as a diagnostic naming
+  `NSLocalNetworkUsageDescription`.
+- **The code never reaches a log.** It carries the listener's ICE password
+  and admits whoever holds it while the listener is open
+  ([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)).
+  Diagnostics carry the host, port and address only, and
+  `WebrtcDirectDialCode`'s description, debug description and mirror leave
+  the fragment out, so a stray interpolation or `dump` cannot leak it. The
+  generated `WebrtcDirectCode`, which prints every field, never leaves the
+  manager's adapter. This is the fast link's passphrase rule (ADR 0038)
+  applied to a code.
+
+`WebrtcDirectDialledStreamsTests` pins the table's rules and the caps, and
+`WebrtcDirectListenerTests` the socket, the pump, the clock, the close and
+the code, on a fake engine over loopback sockets. A page dialling a phone is
+covered only by a device run (C9).
+
 ## Testing
 
 ```bash

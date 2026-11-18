@@ -4679,8 +4679,10 @@ export class OfflineProtocol {
    *
    * Needs the `wifiDirect` transport running, MLS initialized, and the
    * device on a Wi-Fi network with a private IPv4 address. The listener
-   * closes when the transport stops or the device leaves that network.
-   * Android only for now: on iOS it rejects.
+   * closes when the transport stops or the device leaves that network. On
+   * iOS it lives only in the foreground: it closes when the app leaves it or
+   * the transport pauses, so open it again on return, and the app needs
+   * `NSLocalNetworkUsageDescription` (the user's local network permission).
    */
   async openWebrtcDirect(): Promise<WebrtcDirectCode> {
     return await OfflineProtocolNativeModule.openWebrtcDirect();

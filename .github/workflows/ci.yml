@@ -1783,7 +1783,7 @@ jobs:
             -Xcc -IGenerated \
             InternetManager.swift NostrManager.swift TransportManager.swift \
             BleManager.swift WifiDirectManager.swift PeerStreamFraming.swift \
-            PeerStreamSession.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
+            PeerStreamSession.swift WebrtcDirectListener.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
             BleHelloPolicy.swift BleMessageNotificationPolicy.swift BleWriteStallPolicy.swift BleScanPolicy.swift \

@@ -25,6 +25,14 @@
 //   refused peer is disconnected and reports nothing.
 // - Every message is one frame whose prefix equals the rest of the message;
 //   anything else disconnects the peer.
+// - A stream a page dialled to the WebRTC Direct listener (ADR 0039) arrives
+//   proved (`dialProved`): the listener ran the preamble with the one
+//   verifier. It is a row in the same `PeerStreamLinks`, announced, fed and
+//   ended through the same calls as a TCP stream, so the host hears one
+//   announcement and one loss per address whichever kind carries it. It is
+//   refused when it proves our own address or the caps say no; of two
+//   dialled streams the newer wins, and against a TCP stream the existing
+//   one stays.
 //
 
 import Foundation
@@ -55,6 +63,7 @@ final class PeerStreamSession<Handle: Hashable> {
     private let disconnect: (Handle) -> Void
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private let isOutbound: (Handle) -> Bool
+    private let isDialled: (Handle) -> Bool
     private let preambleTimeout: TimeInterval
 
     /// The peers that proved an address. Thread-safe on its own lock, and read
@@ -85,13 +94,17 @@ final class PeerStreamSession<Handle: Hashable> {
     ///     decides which of two streams for one address is kept. A property
     ///     of the handle rather than of an event, so no event order can get
     ///     it wrong.
+    ///   - isDialled: whether the handle is a stream a page dialled to the
+    ///     WebRTC Direct listener, which `PeerStreamLinks` orders apart. A
+    ///     property of the handle for the same reason.
     init(
         host: PeerStreamHost,
         preambleTimeout: TimeInterval = 10.0,
         send: @escaping (Data, Handle) throws -> Void,
         disconnect: @escaping (Handle) -> Void,
         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
-        isOutbound: @escaping (Handle) -> Bool
+        isOutbound: @escaping (Handle) -> Bool,
+        isDialled: @escaping (Handle) -> Bool = { _ in false }
     ) {
         self.host = host
         self.preambleTimeout = preambleTimeout
@@ -99,6 +112,7 @@ final class PeerStreamSession<Handle: Hashable> {
         self.disconnect = disconnect
         self.schedule = schedule
         self.isOutbound = isOutbound
+        self.isDialled = isDialled
     }
 
     // MARK: - Thread-safe reads
@@ -164,7 +178,56 @@ final class PeerStreamSession<Handle: Hashable> {
             body = unframed
         }
 
-        switch link.preamble.accept(body) {
+        take(link.preamble.accept(body), from: handle, link, host)
+    }
+
+    /// A stream a page dialled to the WebRTC Direct listener proved
+    /// `address`: the listener verified its preamble with the one verifier,
+    /// and sent ours when the channel opened. The checks a TCP stream's
+    /// preamble and the listener's admission make, in that order: our own
+    /// address is refused (a copied preamble of ours, played back through a
+    /// page), then `admits` decides the caps, then the one-stream-per-address
+    /// rule. `admits` is handed the dialled stream this one would supersede,
+    /// or nil, so that a page reloading at the cap is never refused for its
+    /// own old stream.
+    ///
+    /// True when the stream holds the address. False when it was refused, in
+    /// which case it was disconnected and nothing was announced.
+    func dialProved(_ handle: Handle, address: String, admits: (_ replacing: Handle?) -> Bool) -> Bool {
+        let link = Link(preamble: PeerStreamPreamble(proved: address))
+        link.sentPreamble = true
+        linkStates[handle] = link
+        guard let host = host else {
+            refuse(handle, link, reason: "no host")
+            return false
+        }
+        if address == host.peerStreamLocalAddress() {
+            refuse(handle, link, reason: "the stream proves this device's own address")
+            return false
+        }
+        let replacing = links.handle(for: address).flatMap { isDialled($0) ? $0 : nil }
+        guard admits(replacing) else {
+            refuse(handle, link, reason: "at stream limit")
+            return false
+        }
+        take(.announce(address), from: handle, link, host)
+        return !link.refused
+    }
+
+    /// One body from a dialled stream, which the listener already cut out of
+    /// its frame. Delivered under the address the stream holds, through the
+    /// same path as a TCP stream's, and dropped once it holds none.
+    func dialReceived(_ body: Data, from handle: Handle) {
+        guard let link = linkStates[handle], !link.refused, let host = host else { return }
+        take(link.preamble.accept(body), from: handle, link, host)
+    }
+
+    /// What the position rule made of one body, for either kind of stream.
+    private func take(
+        _ outcome: PeerStreamPreamble.Outcome, from handle: Handle, _ link: Link,
+        _ host: PeerStreamHost
+    ) {
+        switch outcome {
         case .refuse(let reason):
             refuse(handle, link, reason: reason)
         case .announce(let address):
@@ -176,11 +239,13 @@ final class PeerStreamSession<Handle: Hashable> {
             guard sendPreambleIfNeeded(handle, link) else { return }
             let announcement = links.announce(
                 handle, address: address, outbound: isOutbound(handle),
-                localAddress: host.peerStreamLocalAddress())
+                localAddress: host.peerStreamLocalAddress(), dialled: isDialled(handle))
             if announcement.refused {
                 // The losing kind of a second stream for a held address. The
                 // far end computes the same rule and keeps the same stream,
                 // so this closes with no report and the held one is untouched.
+                // A dial against a held stream of the other kind, or a TCP
+                // stream against a held dial, closes the same way.
                 link.refused = true
                 disconnect(handle)
                 host.peerStreamDiagnostic("info", "Peer stream refused: another stream holds the address", ["address": address])
@@ -365,6 +430,25 @@ struct PeerStreamDialPolicy {
     static func admitsInbound<Host: Equatable>(from host: Host, inboundFrom hosts: [Host], open: Int) -> Bool {
         return open < maxStreams && hosts.count < maxInbound
             && hosts.filter { $0 == host }.count < maxInboundPerHost
+    }
+
+    /// Whether a stream a page dialled to the WebRTC Direct listener from
+    /// `host` is held, under the same caps as an accepted connection: it is
+    /// inbound, from the address the page's first check came from. Counted
+    /// as outbound, dialled streams would let one machine hold the per-host
+    /// bound twice over. `replacing` is the host of the dialled stream this
+    /// one would supersede, if any, which is not counted against it: a page
+    /// that reloads at the cap is never refused for its own old stream.
+    static func admitsDialled(
+        from host: String, inboundFrom hosts: [String?], open: Int, replacing: String?
+    ) -> Bool {
+        var hosts = hosts
+        var open = open
+        if let replacing = replacing, let index = hosts.firstIndex(of: replacing) {
+            hosts.remove(at: index)
+            open -= 1
+        }
+        return admitsInbound(from: host, inboundFrom: hosts, open: open)
     }
 
     /// The record each advertised address is dialed at, from every peer

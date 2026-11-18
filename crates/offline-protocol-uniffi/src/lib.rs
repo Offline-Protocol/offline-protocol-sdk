@@ -21708,8 +21708,12 @@ mod tests {
             rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt");
         let sockets =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt");
+        // The Swift sources likewise.
+        let swift_links = rn_source_code_only("ios/PeerStreamFraming.swift");
+        let swift_session = rn_source_code_only("ios/PeerStreamSession.swift");
+        let swift_manager = rn_source_code_only("ios/WifiDirectManager.swift");
 
-        let managers: [(&str, &str, &[&str]); 3] = [
+        let managers: [(&str, &str, &[&str]); 6] = [
             (
                 "bindings/python/offline_protocol_sdk/peer_stream_manager.py",
                 &python,
@@ -21749,6 +21753,43 @@ mod tests {
                     "!announce(held, address, outbound = false) ->",
                     // The caps leave out the dialled stream about to be superseded.
                     "val replacing = links.handleFor(address)?.takeIf { it.dialled }",
+                ],
+            ),
+            (
+                "bindings/react-native/ios/PeerStreamFraming.swift",
+                &swift_links,
+                &[
+                    // The rule, ahead of the lower-address tie-break.
+                    "if let held = byAddress[address], dialled || dialledHandles.contains(held) { \
+                     if !(dialled && dialledHandles.contains(held)) { \
+                     return Announcement(firstForAddress: false, superseded: nil, refused: true) } \
+                     } else if byAddress[address] != nil,",
+                    "if dialled { dialledHandles.insert(handle) }",
+                ],
+            ),
+            (
+                "bindings/react-native/ios/PeerStreamSession.swift",
+                &swift_session,
+                &[
+                    // Both kinds go through it, from one table.
+                    "localAddress: host.peerStreamLocalAddress(), dialled: isDialled(handle))",
+                    "take(.announce(address), from: handle, link, host) return !link.refused",
+                    // The caps leave out the dialled stream about to be superseded.
+                    "let replacing = links.handle(for: address).flatMap { isDialled($0) ? $0 : nil } \
+                     guard admits(replacing) else {",
+                ],
+            ),
+            (
+                "bindings/react-native/ios/WifiDirectManager.swift",
+                &swift_manager,
+                &[
+                    // A TCP stream and a dialled one say which they are.
+                    "var dialled: Bool { false }",
+                    "override var dialled: Bool { true }",
+                    "isOutbound: { $0.outbound }, isDialled: { $0.dialled }",
+                    // Into the one table, under the inbound caps.
+                    "let held = peers.dialProved(row, address: address) { replacing in \
+                     PeerStreamDialPolicy.admitsDialled(",
                 ],
             ),
         ];
@@ -21940,7 +21981,8 @@ mod tests {
                     "case .announce(let address): \
                      guard sendPreambleIfNeeded(handle, link) else { return } \
                      let announcement = links.announce( handle, address: address, \
-                     outbound: isOutbound(handle), localAddress: host.peerStreamLocalAddress())",
+                     outbound: isOutbound(handle), localAddress: host.peerStreamLocalAddress(), \
+                     dialled: isDialled(handle))",
                     // The losing kind of a duplicate announces nothing and
                     // reports nothing: the held stream keeps the address.
                     "if announcement.refused { link.refused = true disconnect(handle)",
@@ -21958,6 +22000,12 @@ mod tests {
                 ][..],
                 &[
                     "return try verifyIdentityAssertion(assertion: [UInt8](assertion))",
+                    // A dialled stream's address is the one the listener's
+                    // verifier derived (ADR 0039), never a claimed one, and
+                    // it is announced through the same path.
+                    "case .proved: return .proved( stream: event.stream, address: event.address ?? \"\",",
+                    "let held = peers.dialProved(row, address: address) {",
+                    "take(.announce(address), from: handle, link, host)",
                     "return Data(try protocolInstance.identityAssertion(signedData: []))",
                     "switch PeerStreamFraming.unframe(message, \
                      preamble: link.preamble.awaitingPreamble)",
@@ -22092,9 +22140,11 @@ mod tests {
         // that survived a restart, and a reconnect then met state that said
         // its preamble was already sent.
         assert!(
-            ios_manager
-                .contains("static func == (lhs: Stream, rhs: Stream) -> Bool { lhs === rhs }"),
-            "ios/WifiDirectManager.swift: a Stream must compare by identity"
+            ios_manager.contains("static func == (lhs: Held, rhs: Held) -> Bool { lhs === rhs }")
+                && ios_manager.contains("private final class Stream: Held {")
+                && ios_manager.contains("private final class DialledStream: Held {"),
+            "ios/WifiDirectManager.swift: a stream table row (Held, and Stream and DialledStream \
+             under it) must compare by identity"
         );
         // A service-instance record (`sid`) is never a peer hint: the stream
         // chapter's MUST, which the Python browser already keeps. Taking one
