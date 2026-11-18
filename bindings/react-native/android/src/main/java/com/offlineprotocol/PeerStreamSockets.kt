@@ -472,10 +472,16 @@ internal class PeerStreamSockets(
         }
     }
 
-    /** Ends every stream on [carrier], reporting each announced one lost. */
+    /**
+     * Ends every socket stream on [carrier], reporting each announced one
+     * lost. A dialled stream is not the carrier's: it ends with its listener
+     * ([closeDials]), which may be bound to this device's own hotspot and
+     * outlive the Wi-Fi network going, and whose owner closes it first when
+     * it was bound to that network.
+     */
     fun closeCarrier(carrier: Carrier) {
         for (stream in openStreams.toList()) {
-            if (stream.carrier == carrier) endStream(stream)
+            if (stream.carrier == carrier && !stream.dialled) endStream(stream)
         }
     }
 

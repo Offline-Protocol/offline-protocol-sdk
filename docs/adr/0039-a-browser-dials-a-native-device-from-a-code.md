@@ -131,7 +131,10 @@ after its first check.
    proved an address, a body arrived, a stream ended. The bridge keeps its
    stream table and its one-stream-per-address rule, and calls
    `wifi_direct_*` as it does for TCP. The socket is the platform's so that
-   it can be bound to the Wi-Fi network, as ADR 0028 does for Android dials.
+   it can be bound to the Wi-Fi network, as ADR 0028 does for Android dials,
+   or, when the phone shares its own hotspot and is on no Wi-Fi network, to
+   that hotspot's interface address, so a device that joined the hotspot
+   can dial with no other network at all.
 
 10. **WebRTC comes from str0m, with the platform's own crypto where it has
     one.** On Apple platforms str0m uses Apple's crypto; elsewhere it uses

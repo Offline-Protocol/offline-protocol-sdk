@@ -290,15 +290,37 @@ two dialled streams proving one address the newer is kept; against a TCP
 stream the existing one stays, in both directions. A dialled stream counts
 as inbound, from the address its page's first check came from. A stream
 proving this device's own address is refused. The dial code is returned to
-the application and never logged. The listener's socket is bound to the
-Wi-Fi network and to that network's one private IPv4 address, never a
-wildcard and never the default network.
+the application and never logged. The listener's socket is bound to one
+private IPv4 address, never a wildcard and never the default network: the
+Wi-Fi network's, with the socket bound to that network too, when this device
+is a client of one; otherwise that of the hotspot this device shares, so a
+laptop or phone that joined it can dial with no other network at all. A
+hotspot (a tethering interface) is told apart from cellular, a VPN or the
+Wi-Fi client with no privileged `TetheringManager`: each of those is a
+`Network` that is not a local network, and a tethering interface is either
+no `Network` at all (before Android 15) or a local one
+(`NET_CAPABILITY_LOCAL_NETWORK`, as Android 16 on a Samsung reports its
+hotspot), so an interface of a `Network` that is not local is never chosen.
+Binding a VPN's or the cellular
+interface's private address would show a code no page nearby can reach. A
+Wi-Fi Direct group interface is never chosen: a dialled stream counts as a
+LAN stream, so a listener there would let anyone on a fast link's group past
+its host's admission of the invitee alone (ADR 0038).
 
 `WifiDirectManager.openWebrtcDirect()` (React Native `openWebrtcDirect()`)
 opens the listener while the transport runs and returns the code;
-`closeWebrtcDirect()` closes it, and so do `stop()` and the Wi-Fi network
-going away or losing the bound address, since its code then names an address
-no page can reach. Opening again closes the previous listener first, its
+`closeWebrtcDirect()` closes it, and so do `stop()` and the network it is
+bound to going away or losing the bound address, since its code then names an
+address no page can reach. For the Wi-Fi network the LAN carrier's network
+callback says so. For a hotspot a check on the transport thread every two
+seconds, while such a listener is open, reads its interface: no public
+broadcast says a tethering interface went (`WIFI_AP_STATE_CHANGED` is hidden,
+covers the Wi-Fi hotspot alone and is silent when a restart picks a new
+subnet), and a socket bound to an address that went does not fail its
+receive, so without the check the listener would stay open on a dead code
+until each stream's consent ran out. A dialled stream ends with its
+listener, never with the LAN carrier: a hotspot listener outlives the Wi-Fi
+network going. Opening again closes the previous listener first, its
 streams reported lost: the socket, certificate and credentials are fresh on
 every open. The listener itself (admission by authenticated check only,
 DTLS, the channel, the preamble and the framing) is the engine's

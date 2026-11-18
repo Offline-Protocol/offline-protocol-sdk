@@ -391,6 +391,28 @@ class WebrtcDirectDialledStreamsTest {
     }
 
     @Test
+    fun `the Wi-Fi network going ends its TCP streams and leaves the dials to their listener`() {
+        // A listener on this device's own hotspot outlives the Wi-Fi client
+        // network; one bound to that network is closed first by its owner.
+        val host = Host("peer-z")
+        val sockets = PeerStreamSockets(host, fast)
+        tcpPeer(listen(sockets), "peer-t")
+        assertEquals("connected:peer-t", host.next())
+        val dials = FakeDials()
+        assertTrue(dials.prove(sockets, 1, "peer-m"))
+        assertEquals("connected:peer-m", host.next())
+
+        sockets.closeCarrier(PeerStreamSockets.Carrier.LAN)
+        assertEquals("lost:peer-t", host.next())
+        assertNull(host.quiet())
+        assertTrue(dials.closed.isEmpty())
+        assertTrue(sockets.holds("peer-m"))
+
+        sockets.closeDials()
+        assertEquals("lost:peer-m", host.next())
+    }
+
+    @Test
     fun `closeAll ends dials beside TCP streams, each loss once`() {
         val host = Host("peer-z")
         val sockets = PeerStreamSockets(host, fast)
