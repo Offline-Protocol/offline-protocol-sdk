@@ -41,6 +41,7 @@ zeroize = "1"
 tracing = { version = "0.1", features = ["log"] }
 log = "0.4"
 uniffi = "0.32"
+offline-protocol-webrtc-direct = { path = "../../crates/offline-protocol-webrtc-direct", optional = true }
 libfuzzer-sys = "0.4"
 
 [build-dependencies]
@@ -49,6 +50,7 @@ uniffi = { version = "0.32", features = ["build"] }
 [features]
 default = ["capi"]
 capi = []
+webrtc-direct = ["dep:offline-protocol-webrtc-direct"]
 
 [[bin]]
 name = "call"

@@ -244,8 +244,9 @@ jobs:
 
           # Without the C binding: a cdylib exports every C symbol, so the
           # dispatcher behind them could not be stripped (the `capi` feature).
+          # With the WebRTC Direct listener (ADR 0039, decision 10).
           cargo build --profile mobile --locked --target ${{ matrix.target }} --package offline-protocol-uniffi \
-            --no-default-features
+            --no-default-features --features webrtc-direct
 
           mkdir -p jniLibs/${{ matrix.abi }}
           SO_ROOT="target/${{ matrix.target }}/mobile"
@@ -347,8 +348,11 @@ jobs:
         with:
           shared-key: release-desktop-macos-${{ matrix.arch }}
 
+      # The wheels are built from this library, and ship the WebRTC Direct
+      # listener (ADR 0039, decision 10), so it is built with the feature. The
+      # desktop C archive is the same file and carries it too.
       - name: Build cdylib
-        run: cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi
+        run: cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi --features webrtc-direct
 
       - name: Collect artifact
         run: |
@@ -414,12 +418,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
+      # The wheels are built from this library, and ship the WebRTC Direct
+      # listener (ADR 0039, decision 10), so it is built with the feature. The
+      # desktop C archive is the same file and carries it too.
       - name: Build cdylib
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
-          cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi
+          cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi --features webrtc-direct
 
       - name: Collect artifact
         run: |
@@ -456,8 +463,11 @@ jobs:
         with:
           shared-key: release-desktop-windows
 
+      # The wheels are built from this library, and ship the WebRTC Direct
+      # listener (ADR 0039, decision 10), so it is built with the feature. The
+      # desktop C archive is the same file and carries it too.
       - name: Build cdylib
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc --package offline-protocol-uniffi
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --package offline-protocol-uniffi --features webrtc-direct
 
       - name: Collect artifact
         shell: bash

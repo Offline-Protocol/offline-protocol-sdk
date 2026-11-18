@@ -147,7 +147,7 @@ chacha20poly1305 = "0.10"
 #   "all dependencies must have a version requirement specified when packaging"
 # Keep these in lockstep with `workspace.package.version` above — a crate can
 # only be published once its dependencies exist on the registry at the named
-# version, so all eleven move together.
+# version, so all twelve move together.
 offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.33.0" }
 offline-protocol-sealed = { path = "crates/offline-protocol-sealed", version = "0.33.0" }
 offline-protocol-leaf = { path = "crates/offline-protocol-leaf", version = "0.33.0" }
@@ -159,6 +159,7 @@ offline-protocol-services = { path = "crates/offline-protocol-services", version
 offline-protocol-data = { path = "crates/offline-protocol-data", version = "0.33.0" }
 offline-protocol-telemetry-wire = { path = "crates/offline-protocol-telemetry-wire", version = "0.33.0" }
 offline-protocol = { path = "crates/offline-protocol", version = "0.33.0" }
+offline-protocol-webrtc-direct = { path = "crates/offline-protocol-webrtc-direct", version = "0.33.0" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

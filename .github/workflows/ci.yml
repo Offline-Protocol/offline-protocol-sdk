@@ -1975,8 +1975,10 @@ jobs:
           source bindings/react-native/scripts/shared/xcframework.sh
           IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)"
           export IPHONEOS_DEPLOYMENT_TARGET
+          # With the WebRTC Direct listener, as the release builds it, so the
+          # minimum-OS gate below covers what ships.
           cargo build --profile mobile --locked --target "$TARGET" \
-            --package offline-protocol-uniffi
+            --package offline-protocol-uniffi --features webrtc-direct
           ARCHIVE="target/$TARGET/mobile/liboffline_protocol_uniffi.a"
           CEILING="$IPHONEOS_DEPLOYMENT_TARGET"
           if [ "$TARGET" = aarch64-apple-ios-sim ]; then

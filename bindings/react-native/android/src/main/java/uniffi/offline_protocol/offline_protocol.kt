@@ -1327,6 +1327,22 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting(
@@ -1880,6 +1896,22 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes(`ptr`: Long,`publicKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream(`ptr`: Long,`stream`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received(`ptr`: Long,`sourceIp`: RustBuffer.ByValue,`sourcePort`: Short,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open(`ptr`: Long,`localIp`: RustBuffer.ByValue,`localPort`: Short,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send(`ptr`: Long,`stream`: Long,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended(`ptr`: Long,`linkId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_hosting(`ptr`: Long,`linkId`: RustBuffer.ByValue,`host`: RustBuffer.ByValue,`port`: Short,uniffi_out_err: UniffiRustCallStatus, 
@@ -2730,6 +2762,30 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() and 0xFFFF) != 24438) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close() and 0xFFFF) != 52913) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream() and 0xFFFF) != 41353) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received() and 0xFFFF) != 8160) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram() and 0xFFFF) != 44469) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event() and 0xFFFF) != 64868) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open() and 0xFFFF) != 32102) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send() and 0xFFFF) != 6566) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick() and 0xFFFF) != 49) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended() and 0xFFFF) != 54290) {
@@ -5081,6 +5137,22 @@ public interface OfflineProtocolInterface {
     fun `verifySignature`(`publicKey`: List<kotlin.UByte>, `data`: List<kotlin.UByte>, `signature`: List<kotlin.UByte>): kotlin.Boolean
     
     fun `verifySignatureBytes`(`publicKey`: kotlin.ByteArray, `data`: kotlin.ByteArray, `signature`: kotlin.ByteArray): kotlin.Boolean
+    
+    fun `webrtcDirectClose`()
+    
+    fun `webrtcDirectCloseStream`(`stream`: kotlin.ULong)
+    
+    fun `webrtcDirectDatagramReceived`(`sourceIp`: kotlin.String, `sourcePort`: kotlin.UShort, `data`: List<kotlin.UByte>)
+    
+    fun `webrtcDirectNextDatagram`(): WebrtcDirectDatagram?
+    
+    fun `webrtcDirectNextEvent`(): WebrtcDirectEvent?
+    
+    fun `webrtcDirectOpen`(`localIp`: kotlin.String, `localPort`: kotlin.UShort): WebrtcDirectCode
+    
+    fun `webrtcDirectSend`(`stream`: kotlin.ULong, `body`: List<kotlin.UByte>)
+    
+    fun `webrtcDirectTick`(): kotlin.UInt?
     
     fun `wifiDirectFastLinkEnded`(`linkId`: kotlin.String, `reason`: kotlin.String)
     
@@ -7775,6 +7847,117 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         FfiConverterByteArray.lower(`publicKey`),
         FfiConverterByteArray.lower(`data`),
         FfiConverterByteArray.lower(`signature`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `webrtcDirectClose`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    override fun `webrtcDirectCloseStream`(`stream`: kotlin.ULong)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream(
+        it,
+        
+        FfiConverterULong.lower(`stream`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `webrtcDirectDatagramReceived`(`sourceIp`: kotlin.String, `sourcePort`: kotlin.UShort, `data`: List<kotlin.UByte>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received(
+        it,
+        
+        FfiConverterString.lower(`sourceIp`),
+        FfiConverterUShort.lower(`sourcePort`),
+        FfiConverterSequenceUByte.lower(`data`),_status)
+}
+    }
+    
+    
+
+    override fun `webrtcDirectNextDatagram`(): WebrtcDirectDatagram? {
+            return FfiConverterOptionalTypeWebrtcDirectDatagram.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `webrtcDirectNextEvent`(): WebrtcDirectEvent? {
+            return FfiConverterOptionalTypeWebrtcDirectEvent.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `webrtcDirectOpen`(`localIp`: kotlin.String, `localPort`: kotlin.UShort): WebrtcDirectCode {
+            return FfiConverterTypeWebrtcDirectCode.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open(
+        it,
+        
+        FfiConverterString.lower(`localIp`),
+        FfiConverterUShort.lower(`localPort`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `webrtcDirectSend`(`stream`: kotlin.ULong, `body`: List<kotlin.UByte>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send(
+        it,
+        
+        FfiConverterULong.lower(`stream`),
+        FfiConverterSequenceUByte.lower(`body`),_status)
+}
+    }
+    
+    
+
+    override fun `webrtcDirectTick`(): kotlin.UInt? {
+            return FfiConverterOptionalUInt.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick(
+        it,
+        _status)
 }
     }
     )
@@ -11126,6 +11309,155 @@ public object FfiConverterTypeTransportMetrics: FfiConverterRustBuffer<Transport
 
 
 
+data class WebrtcDirectCode (
+    var `fragment`: kotlin.String
+    , 
+    var `host`: kotlin.String
+    , 
+    var `port`: kotlin.UShort
+    , 
+    var `address`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWebrtcDirectCode: FfiConverterRustBuffer<WebrtcDirectCode> {
+    override fun read(buf: ByteBuffer): WebrtcDirectCode {
+        return WebrtcDirectCode(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WebrtcDirectCode) = (
+            FfiConverterString.allocationSize(value.`fragment`) +
+            FfiConverterString.allocationSize(value.`host`) +
+            FfiConverterUShort.allocationSize(value.`port`) +
+            FfiConverterString.allocationSize(value.`address`)
+    )
+
+    override fun write(value: WebrtcDirectCode, buf: ByteBuffer) {
+            FfiConverterString.write(value.`fragment`, buf)
+            FfiConverterString.write(value.`host`, buf)
+            FfiConverterUShort.write(value.`port`, buf)
+            FfiConverterString.write(value.`address`, buf)
+    }
+}
+
+
+
+data class WebrtcDirectDatagram (
+    var `destinationIp`: kotlin.String
+    , 
+    var `destinationPort`: kotlin.UShort
+    , 
+    var `data`: List<kotlin.UByte>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWebrtcDirectDatagram: FfiConverterRustBuffer<WebrtcDirectDatagram> {
+    override fun read(buf: ByteBuffer): WebrtcDirectDatagram {
+        return WebrtcDirectDatagram(
+            FfiConverterString.read(buf),
+            FfiConverterUShort.read(buf),
+            FfiConverterSequenceUByte.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WebrtcDirectDatagram) = (
+            FfiConverterString.allocationSize(value.`destinationIp`) +
+            FfiConverterUShort.allocationSize(value.`destinationPort`) +
+            FfiConverterSequenceUByte.allocationSize(value.`data`)
+    )
+
+    override fun write(value: WebrtcDirectDatagram, buf: ByteBuffer) {
+            FfiConverterString.write(value.`destinationIp`, buf)
+            FfiConverterUShort.write(value.`destinationPort`, buf)
+            FfiConverterSequenceUByte.write(value.`data`, buf)
+    }
+}
+
+
+
+data class WebrtcDirectEvent (
+    var `kind`: WebrtcDirectEventKind
+    , 
+    var `stream`: kotlin.ULong
+    , 
+    var `address`: kotlin.String?
+    , 
+    var `remoteIp`: kotlin.String?
+    , 
+    var `remotePort`: kotlin.UShort?
+    , 
+    var `data`: List<kotlin.UByte>?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWebrtcDirectEvent: FfiConverterRustBuffer<WebrtcDirectEvent> {
+    override fun read(buf: ByteBuffer): WebrtcDirectEvent {
+        return WebrtcDirectEvent(
+            FfiConverterTypeWebrtcDirectEventKind.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUShort.read(buf),
+            FfiConverterOptionalSequenceUByte.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WebrtcDirectEvent) = (
+            FfiConverterTypeWebrtcDirectEventKind.allocationSize(value.`kind`) +
+            FfiConverterULong.allocationSize(value.`stream`) +
+            FfiConverterOptionalString.allocationSize(value.`address`) +
+            FfiConverterOptionalString.allocationSize(value.`remoteIp`) +
+            FfiConverterOptionalUShort.allocationSize(value.`remotePort`) +
+            FfiConverterOptionalSequenceUByte.allocationSize(value.`data`)
+    )
+
+    override fun write(value: WebrtcDirectEvent, buf: ByteBuffer) {
+            FfiConverterTypeWebrtcDirectEventKind.write(value.`kind`, buf)
+            FfiConverterULong.write(value.`stream`, buf)
+            FfiConverterOptionalString.write(value.`address`, buf)
+            FfiConverterOptionalString.write(value.`remoteIp`, buf)
+            FfiConverterOptionalUShort.write(value.`remotePort`, buf)
+            FfiConverterOptionalSequenceUByte.write(value.`data`, buf)
+    }
+}
+
+
+
 data class WifiDirectMessage (
     var `recipientId`: kotlin.String
     , 
@@ -12007,6 +12339,41 @@ public object FfiConverterTypeTransportType: FfiConverterRustBuffer<TransportTyp
     override fun allocationSize(value: TransportType) = 4UL
 
     override fun write(value: TransportType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class WebrtcDirectEventKind {
+    
+    PROVED,
+    BODY,
+    CLOSED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWebrtcDirectEventKind: FfiConverterRustBuffer<WebrtcDirectEventKind> {
+    override fun read(buf: ByteBuffer) = try {
+        WebrtcDirectEventKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WebrtcDirectEventKind) = 4UL
+
+    override fun write(value: WebrtcDirectEventKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -13395,6 +13762,70 @@ public object FfiConverterOptionalTypeTransportMetrics: FfiConverterRustBuffer<T
         } else {
             buf.put(1)
             FfiConverterTypeTransportMetrics.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWebrtcDirectDatagram: FfiConverterRustBuffer<WebrtcDirectDatagram?> {
+    override fun read(buf: ByteBuffer): WebrtcDirectDatagram? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWebrtcDirectDatagram.read(buf)
+    }
+
+    override fun allocationSize(value: WebrtcDirectDatagram?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWebrtcDirectDatagram.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WebrtcDirectDatagram?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWebrtcDirectDatagram.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWebrtcDirectEvent: FfiConverterRustBuffer<WebrtcDirectEvent?> {
+    override fun read(buf: ByteBuffer): WebrtcDirectEvent? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWebrtcDirectEvent.read(buf)
+    }
+
+    override fun allocationSize(value: WebrtcDirectEvent?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWebrtcDirectEvent.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WebrtcDirectEvent?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWebrtcDirectEvent.write(value, buf)
         }
     }
 }

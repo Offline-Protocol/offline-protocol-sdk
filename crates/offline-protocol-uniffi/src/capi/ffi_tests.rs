@@ -746,9 +746,17 @@ fn the_builds_without_the_c_binding_turn_off_only_the_c_binding() {
     // `--no-default-features` turns off EVERY default, not just `capi`. With
     // `capi` the only default that is the same thing; a second default would
     // silently vanish from the Android libraries. So each such command must
-    // add back every default except `capi`, which today is none.
+    // add back every default except `capi`, which today is none. A feature
+    // that is off by default (`webrtc-direct`) may be turned on beside them:
+    // which build carries it is `build_profile_tests`' to hold.
     let defaults = default_features();
     assert!(defaults.contains("capi"), "{defaults:?}");
+    let opt_in: BTreeSet<String> =
+        manifest_section(&read(&crate_dir().join("Cargo.toml")), "features")
+            .into_keys()
+            .filter(|f| f != "default" && !defaults.contains(f))
+            .collect();
+    assert!(opt_in.contains("webrtc-direct"), "{opt_in:?}");
     let wanted: BTreeSet<String> = defaults.into_iter().filter(|f| f != "capi").collect();
     for (path, why) in [
         (".github/workflows/release.yml", "the Android release build"),
@@ -781,6 +789,7 @@ fn the_builds_without_the_c_binding_turn_off_only_the_c_binding() {
                 .filter(|w| w[0] == "--features")
                 .flat_map(|w| w[1].trim_matches('"').split(','))
                 .map(str::to_owned)
+                .filter(|f| !opt_in.contains(f))
                 .collect();
             assert_eq!(
                 added, wanted,

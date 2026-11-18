@@ -16,6 +16,11 @@ mod build_profile_tests;
 #[cfg(feature = "capi")]
 pub mod capi;
 mod host_log;
+mod webrtc_direct;
+
+pub use webrtc_direct::{
+    WebrtcDirectCode, WebrtcDirectDatagram, WebrtcDirectEvent, WebrtcDirectEventKind,
+};
 
 use offline_protocol::{
     AppState as CoreAppState, CustodyConfig as CoreCustodyConfig, CustodyStats as CoreCustodyStats,
@@ -2792,6 +2797,10 @@ pub struct OfflineProtocol {
     /// and any host object that refers to this instance, still exists.
     /// Taken after [`Self::inner`], never before it.
     file_stores: Mutex<FileStoreState>,
+    /// The WebRTC Direct listener slot (ADR 0039). Its own lock, never held
+    /// while [`Self::inner`] is taken: `webrtc_direct_open` reads the
+    /// identity before taking it.
+    webrtc_direct: webrtc_direct::WebrtcDirect,
 }
 
 /// The transport callbacks an app registered, kept so they can be re-applied
@@ -2949,6 +2958,7 @@ impl OfflineProtocol {
             },
             transport_callbacks: Arc::new(RwLock::new(TransportCallbacks::default())),
             file_stores: Mutex::new(FileStoreState::default()),
+            webrtc_direct: webrtc_direct::WebrtcDirect::new(),
         })
     }
 
@@ -8028,6 +8038,74 @@ impl OfflineProtocol {
         }
     }
 
+    /// Opens a WebRTC Direct listener on the platform's socket and returns
+    /// its dial code (ADR 0039). See the interface definition for the
+    /// platform's half of the contract.
+    ///
+    /// # Errors
+    ///
+    /// [`ProtocolError::InvalidState`] from a library built without the
+    /// `webrtc-direct` feature, [`ProtocolError::MlsNotInitialized`] before
+    /// `initialize_mls`, [`ProtocolError::InvalidArgument`] for an address a
+    /// code cannot name, and [`ProtocolError::TransportError`] when no
+    /// certificate or credentials could be made.
+    pub fn webrtc_direct_open(
+        &self,
+        local_ip: String,
+        local_port: u16,
+    ) -> Result<WebrtcDirectCode, ProtocolError> {
+        self.webrtc_direct.open(&local_ip, local_port, || {
+            let address = self
+                .local_address()
+                .ok_or(ProtocolError::MlsNotInitialized)?;
+            let preamble = self.identity_assertion(Vec::new())?;
+            Ok(webrtc_direct::Identity { address, preamble })
+        })
+    }
+
+    /// Closes the WebRTC Direct listener; `Closed` events follow for its
+    /// proved streams.
+    pub fn webrtc_direct_close(&self) {
+        self.webrtc_direct.close();
+    }
+
+    /// One datagram the listener's socket received.
+    pub fn webrtc_direct_datagram_received(
+        &self,
+        source_ip: String,
+        source_port: u16,
+        data: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        self.webrtc_direct
+            .datagram_received(&source_ip, source_port, &data)
+    }
+
+    /// The next datagram to send from the listener's socket.
+    pub fn webrtc_direct_next_datagram(&self) -> Option<WebrtcDirectDatagram> {
+        self.webrtc_direct.next_datagram()
+    }
+
+    /// The next listener event.
+    pub fn webrtc_direct_next_event(&self) -> Option<WebrtcDirectEvent> {
+        self.webrtc_direct.next_event()
+    }
+
+    /// Sends one message body on a proved stream.
+    pub fn webrtc_direct_send(&self, stream: u64, body: Vec<u8>) -> Result<(), ProtocolError> {
+        self.webrtc_direct.send(stream, &body)
+    }
+
+    /// Ends one stream.
+    pub fn webrtc_direct_close_stream(&self, stream: u64) {
+        self.webrtc_direct.close_stream(stream);
+    }
+
+    /// Fires the listener's due timers; milliseconds until the next call is
+    /// needed, or `None` when nothing is timed.
+    pub fn webrtc_direct_tick(&self) -> Option<u32> {
+        self.webrtc_direct.tick()
+    }
+
     /// Unblock a previously blocked user.
     pub fn unblock_user(&self, user_id: String) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
@@ -8961,6 +9039,7 @@ mod tests {
     mod csharp_bridge_guards;
     mod file_stores;
     mod flutter_bridge_guards;
+    mod webrtc_direct;
 
     use super::*;
     use std::collections::HashMap;

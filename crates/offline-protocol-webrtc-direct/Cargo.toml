@@ -55,3 +55,10 @@ serde_json = { workspace = true }
 # `default-features = false` beside `workspace = true`, and the defaults add
 # the telemetry pipe's thread and TLS stack and the file stores.
 offline-protocol = { path = "../offline-protocol", version = "0.33.0", default-features = false }
+
+# aws-lc-sys assembles its x86-64 Windows code with NASM, which neither the
+# GitHub Windows runners nor most Windows machines have, and without it the
+# build fails. Its checked-in prebuilt objects stand in, but only when asked
+# for: this turns that on for Windows only, wherever the crate is built.
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+aws-lc-rs = { version = "1.16", default-features = false, features = ["prebuilt-nasm"] }

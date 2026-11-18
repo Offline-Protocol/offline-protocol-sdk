@@ -137,7 +137,8 @@ after its first check.
     one.** On Apple platforms str0m uses Apple's crypto; elsewhere it uses
     aws-lc-rs. The FFI crate builds it behind the feature `webrtc-direct`.
     The iOS, Android and Python packages the release ships turn the feature
-    on. A library built without it refuses `webrtc_direct_open`.
+    on, and so do the desktop libraries, since the wheels are built from
+    them. A library built without it refuses `webrtc_direct_open`.
 
 ### Why not libp2p's WebRTC Direct as specified
 

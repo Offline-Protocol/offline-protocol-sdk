@@ -42,6 +42,9 @@ zeroize = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 log = "0.4"
 uniffi = "0.32"
+# The WebRTC Direct listener behind `webrtc_direct_*` (ADR 0039), only with
+# the `webrtc-direct` feature below.
+offline-protocol-webrtc-direct = { workspace = true, optional = true }
 
 # The platform loggers the host logger writes to. Only the one for the
 # target being built is compiled; a desktop build writes to stderr instead.
@@ -62,6 +65,11 @@ offline-protocol-telemetry-wire = { workspace = true }
 # The identity assertion's length floor, which the Android Hello bound
 # mirrors and a source guard pins.
 offline-protocol-sealed = { workspace = true }
+# The page in the `webrtc_direct_*` tests: a str0m client set up the way a
+# browser is after it reads a dial code. Those tests compile only with the
+# `webrtc-direct` feature, and then the listener has selected str0m's crypto
+# backend for the target (features unify), so none is named here.
+str0m = { version = "0.25", default-features = false }
 
 [build-dependencies]
 uniffi = { version = "0.32", features = ["build"] }
@@ -88,3 +96,10 @@ default = ["capi"]
 # application links the static library with dead stripping, which drops the
 # unreferenced exports, so the iOS builds keep the default.
 capi = []
+# The WebRTC Direct listener (ADR 0039, decision 10): a page on the same
+# network dials this device from a code it shows. Off by default, because it
+# adds about 1.5 MB to the iOS library and 2.5 MB to the Android one; the iOS,
+# Android and Python packages the release ships turn it on. Without it every
+# `webrtc_direct_*` method still exists, so the bindings are one artifact set
+# whichever way the library was built, and `webrtc_direct_open` refuses.
+webrtc-direct = ["dep:offline-protocol-webrtc-direct"]

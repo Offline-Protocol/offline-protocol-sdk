@@ -87,12 +87,12 @@ mechanisms below and breaks one of these is not a conforming server.
   definition has two kinds of method: what an application calls, and what
   the platform layer that drives a radio, a relay socket or the run loop
   calls. The second kind (every `ble_*`, `internet_*`, `wifi_direct_*`,
-  `reticulum_*` and `nostr_*` operation, every callback installer, the
-  lifecycle, the storage attach, the telemetry pipe and the host feeds) is
-  the server's own and is not reachable from a client under any name. A
-  client that could inject an inbound frame or announce a peer would hold the
-  same authority the threat model's boundary 2 exists to keep on the far
-  side of a dedicated entry point.
+  `webrtc_direct_*`, `reticulum_*` and `nostr_*` operation, every callback
+  installer, the lifecycle, the storage attach, the telemetry pipe and the
+  host feeds) is the server's own and is not reachable from a client under
+  any name. A client that could inject an inbound frame or announce a peer
+  would hold the same authority the threat model's boundary 2 exists to
+  keep on the far side of a dedicated entry point.
 - **Nothing here is a second implementation of anything.** Method names,
   parameter names, result shapes, enum spellings, event tags and error
   variants are the interface definition's. The server maps a JSON request to
@@ -569,6 +569,7 @@ this chapter asserts it.
 | `ble_peer_discovered`, `ble_peer_lost`, `ble_peer_rssi`, `ble_node_hash`, `set_peer_rssi_events`, `ble_status_changed`, `ble_fragment_received`, `ble_get_next_fragment`, `ble_return_fragment`, `ble_get_peer_count`, `ble_set_peer_mtu`, `ble_clear_peer_mtu`, `ble_undersized_mtu_reports`, `ble_fragment_fallback_count`, `ble_recipient_not_among_peers_count`, `protocol_lock_diagnostics` | The Bluetooth LE driver's feed and drain, its signal readings and the switch the binding flips for them, and the host's lock diagnostics |
 | `internet_status_changed`, `internet_message_received`, `internet_get_next_message`, `internet_confirm_sent`, `internet_send_failed`, `internet_send_failed_with_reason`, `internet_peer_presence`, `internet_presence_watchlist`, `internet_relay_capabilities`, `internet_group_report_received`, `internet_address_declared`, `internet_address_declaration_refused` | The relay client's feed and drain, including the dedicated entry points the threat model's boundary 2 requires |
 | `wifi_direct_status_changed`, `wifi_direct_message_received`, `wifi_direct_get_next_message`, `wifi_direct_peer_connected`, `wifi_direct_peer_disconnected`, `wifi_direct_set_fast_link_roles`, `wifi_direct_next_fast_link_directive`, `wifi_direct_fast_link_hosting`, `wifi_direct_fast_link_ended` | The peer-stream driver's feed and drain, and the networks it brings up or joins for a fast link, whose directives carry a passphrase |
+| `webrtc_direct_open`, `webrtc_direct_close`, `webrtc_direct_datagram_received`, `webrtc_direct_next_datagram`, `webrtc_direct_next_event`, `webrtc_direct_send`, `webrtc_direct_close_stream`, `webrtc_direct_tick` | The WebRTC Direct listener's socket feed and drain ([ADR 0039](../adr/0039-a-browser-dials-a-native-device-from-a-code.md)), driven by the process that owns the UDP socket and the peer-stream driver its streams feed. Its dial code carries the listener's ICE password, which admits a dial |
 | `reticulum_status_changed`, `reticulum_message_received`, `reticulum_get_next_message`, `reticulum_confirm_sent`, `reticulum_send_failed`, `reticulum_send_failed_with_reason`, `reticulum_address_declared`, `reticulum_address_declaration_refused`, `reticulum_gateway_capabilities`, `reticulum_peer_presence`, `reticulum_presence_watchlist` | The gateway client's feed and drain |
 | `nostr_status_changed`, `nostr_message_received`, `nostr_message_received_at`, `nostr_get_next_message`, `nostr_confirm_sent`, `nostr_send_failed`, `nostr_send_failed_with_reason`, `nostr_get_public_key`, `nostr_get_subscription_filter`, `nostr_get_next_query`, `nostr_query_event_received`, `nostr_query_completed` | The Nostr client's feed and drain |
 | `update_transport_metrics`, `remove_transport`, `set_battery_level`, `set_battery_state` | Facts about the host that only the host process knows |
