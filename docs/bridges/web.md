@@ -10,7 +10,9 @@ reaches any device by its address and resolves usernames, mobile ones
 included (W12), and browsers behind one network address find each other in
 a nearby room (W13). In Chromium a page can also link to a phone or a board
 over Bluetooth LE, as a central the person points at a device, and through
-that device reach another page linked to it (W14).
+that device reach another page linked to it (W14). A page can also dial the
+native app on its network from a code the app shows, with no server and no
+second code (W16).
 
 Read [the shared contract](README.md) first. This document covers what is
 specific to a page that runs the engine.
@@ -735,6 +737,66 @@ identity included) does the same.
 `bindings/web/src`: a file left out still loads online, where everyone
 works.
 
+### W16. A page dials a native device from the code it shows
+
+A page cannot open the TCP socket a phone's peer streams use, so a native
+app that wants pages on its network to reach it opens a WebRTC Direct
+listener and shows a code
+([ADR 0039](../adr/0039-a-browser-dials-a-native-device-from-a-code.md),
+[the dial code](../spec/stream-framing.md#dialling-a-listener-from-a-browser)).
+`parseDirectCode(url)` reads one, from a whole URL or its fragment, and
+throws naming the field it refused. `carrier.dial(code)` opens a link and
+resolves to a connection like the one `offer()` and `answer()` resolve to,
+with the same `connection` events. Everything after the channel opens is
+W3 and W9 unchanged: the preamble, the chunks, the buffering and the
+deadlines.
+
+**The page edits no description of its own.** It builds the listener's
+description from the code and sets its own offer exactly as the browser
+made it. The listener's ICE username and password come from the code, and
+the page's from the browser. libwebrtc is removing the edit to a local ICE
+username and password that libp2p's first WebRTC Direct relies on, and a
+dial built on that edit stops working the day a browser refuses it. A test
+holds the page's local description to the one the browser generated.
+
+**The code's address is a claim.** The link opens with the code's `a` as
+the address the preamble must prove, and the engine closes a link whose
+preamble proves another and announces nothing. Without the claim, a page
+that opened a swapped code would announce whoever answered.
+
+**A dial closes the page's earlier dialled connection to the same
+address.** The engine keeps its first link per address (W3), and the
+listener keeps its newest dialled stream, because only the page dials. A
+page that kept its old link while the listener kept the new one would leave
+each end closing the link the other kept.
+
+**A dial uses no ICE server**, even on a carrier the application gave some
+(W9). The listener is on the local network or nowhere, and a server would
+learn only who dials whom. A dial that has not opened in 15 seconds
+rejects. A certificate that does not match the code fails DTLS, and the
+dial rejects with the connection `failed`.
+
+**The page comes from the application's origin, never from the
+listener.** The node needs a secure context (see what the host owes), and
+a page a phone served over plain HTTP would not be one. So a page that
+must dial with no internet is one the browser cached while online (W15).
+Once it has read a code, a page should remove it from the address bar with
+`history.replaceState`. The code admits dials for as long as its listener
+is open
+([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)).
+
+Chrome's Local Network Access does not gate WebRTC yet (November 2026).
+When it does, a page from a public origin will ask the person before its
+first dial to a private address. If the person refuses, the browser drops
+the candidate silently and the dial times out, so a page should say that a
+dial with no answer may need the permission.
+
+Measured against a str0m listener on one Mac: Chromium 156, Firefox 157 and
+WebKit 27.2 in Playwright connected in 33 to 154 ms with default settings.
+Real Safari on an iPhone 16 (iOS 27.2), on one Wi-Fi network, connected in
+82 to 250 ms, or 1.2 to 3.0 s before the listener stopped waiting for a
+nomination (ADR 0039, decision 5). It moved 1 MiB in 0.2 to 1.6 s each way.
+
 ## Services and subscriptions
 
 The worker exposes the service registry and service subscriptions
@@ -775,6 +837,10 @@ group info does.
   `NostrSignaller` room and the relays it names), and the joining address
   shown to the people involved before anything is shared with it (R27, R28).
 - Its own STUN or TURN servers, if links must cross networks (W9).
+- For a dial (W16), a way to get the native app's code into the page: a QR
+  code the person scans, which opens the page with the code in its
+  fragment, or a paste. The page reads the code, dials it, removes it from
+  the address bar, and shows the address it linked to.
 - Its own Nostr relays, if the node is to reach devices it has no link to
   (W12), and its own STUN server and an `admit` decision for a nearby room
   (W13). The SDK names no relay and no STUN server.
@@ -840,6 +906,17 @@ start there, because Firefox answers it by asking the user.
   off and Firefox with `media.peerconnection.ice.obfuscate_host_addresses`
   off, so the candidates are addresses a runner can reach. WebKit has no such
   switch and gathers `.local` names.
+- `direct.html`: a node dials the crate's example listener, a full native
+  engine behind `offline-protocol-webrtc-direct`, from a code the runner
+  hands it. The listener binds the machine's own private address, not
+  loopback, which Firefox does not dial. The checks are: the page's local description is the one the
+  browser generated; a session and an encrypted message both ways; a 100 KiB
+  message in chunks; a second dial of the same code replaces the first at
+  both ends with one loss reported; and a loss when the listener closes.
+  Then three refusals: a code with a wrong certificate hash fails DTLS, a
+  wrong password gets no answer and leaves the listener holding no dial,
+  and a wrong `a` closes the link with nothing announced (W16). Each check
+  was confirmed by breaking the code it covers.
 - `nostr-signal.html`: two nodes that share only a room code meet through
   a Nostr relay, link over WebRTC and send an ephemeral direct message. A
   join to a room nobody hosts gives up at its deadline, and a call to a
@@ -945,6 +1022,13 @@ two-player game between devices over WebRTC with durable nodes, and
 subscribe to each other's live state.
 
 ## What is not built yet
+
+- **A dial from a phone's browser to an app on the same phone.** The code
+  names the phone's Wi-Fi address, so it should work, but no page or
+  device run tests it.
+- **A dial over IPv6 or across a hotspot.** The code carries IPv6, and the
+  device checklist runs a phone's hotspot. Neither is in CI, which dials one
+  machine's private IPv4 address (W16).
 
 - **A TURN server.** The carrier takes the application's own (W9); the
   project runs none, and no page tests one.
