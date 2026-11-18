@@ -36,6 +36,7 @@ CORE_DATA = REPO / "crates" / "offline-protocol-core" / "tests" / "data"
 SEALED_DATA = REPO / "crates" / "offline-protocol-sealed" / "tests" / "data"
 TRANSPORT_DATA = REPO / "crates" / "offline-protocol-transport" / "tests" / "data"
 PROTOCOL_DATA = REPO / "crates" / "offline-protocol" / "tests" / "data"
+WEBRTC_DIRECT_DATA = REPO / "crates" / "offline-protocol-webrtc-direct" / "tests" / "data"
 
 
 # --------------------------------------------------------------------------
@@ -1934,6 +1935,494 @@ def build_app_membership_vectors() -> dict:
     }
 
 
+# --------------------------------------------------------------------------
+# The WebRTC Direct dial code, from docs/spec/stream-framing.md "The dial code".
+# --------------------------------------------------------------------------
+
+DIAL_KEYS = ["op-direct", "h", "p", "c", "u", "w", "a"]
+DIAL_VERSION = "1"
+DIAL_MAX_FRAGMENT = 512
+DIAL_CERTHASH_LEN = 43
+DIAL_UFRAG_LEN = (4, 32)
+DIAL_PASSWORD_LEN = (22, 64)
+_DIAL_ALNUM = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+_DIAL_B64URL = _DIAL_ALNUM | {"-", "_"}
+
+
+def _b64url(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _hex_of_b64url(text: str) -> str:
+    import base64
+
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).hex()
+
+
+def _dial_ipv4(text: str):
+    """Dotted decimal, four parts, no leading zeros: the 4 bytes or None."""
+    parts = text.split(".")
+    if len(parts) != 4:
+        return None
+    out = []
+    for part in parts:
+        if not (1 <= len(part) <= 3) or not all(c in "0123456789" for c in part):
+            return None
+        if len(part) > 1 and part[0] == "0":
+            return None
+        value = int(part)
+        if value > 255:
+            return None
+        out.append(value)
+    return bytes(out)
+
+
+def _rfc5952(packed: bytes) -> str:
+    """RFC 5952 text: lowercase, no leading zeros, the longest run of two or
+    more zero groups compressed (the first on a tie), and an IPv4-mapped
+    address in its mixed notation (section 5)."""
+    if packed[:12] == bytes(10) + b"\xff\xff":
+        return "::ffff:" + ".".join(str(b) for b in packed[12:])
+    groups = [int.from_bytes(packed[i : i + 2], "big") for i in range(0, 16, 2)]
+    best_start, best_len = -1, 0
+    i = 0
+    while i < 8:
+        if groups[i] == 0:
+            j = i
+            while j < 8 and groups[j] == 0:
+                j += 1
+            if j - i > best_len:
+                best_start, best_len = i, j - i
+            i = j
+        else:
+            i += 1
+    text = [format(g, "x") for g in groups]
+    if best_len < 2:
+        return ":".join(text)
+    head = ":".join(text[:best_start])
+    tail = ":".join(text[best_start + best_len :])
+    return head + "::" + tail
+
+
+def _dial_ipv6(text: str):
+    """An IPv6 literal in its one RFC 5952 spelling: the 16 bytes or None."""
+    import ipaddress
+
+    try:
+        packed = ipaddress.IPv6Address(text).packed
+    except ValueError:
+        return None
+    return packed if _rfc5952(packed) == text else None
+
+
+def _dial_host(text: str):
+    """("ok", text) or ("refuse", reason): private or link-local, never
+    loopback, never a name."""
+    if ":" in text:
+        b = _dial_ipv6(text)
+        if b is None:
+            return ("refuse", "host_not_literal")
+        if b == bytes(15) + b"\x01":
+            return ("refuse", "host_loopback")
+        unique_local = (b[0] & 0xFE) == 0xFC  # fc00::/7
+        link_local = b[0] == 0xFE and (b[1] & 0xC0) == 0x80  # fe80::/10
+        return ("ok", text) if unique_local or link_local else ("refuse", "host_not_local")
+    b = _dial_ipv4(text)
+    if b is None:
+        return ("refuse", "host_not_literal")
+    if b[0] == 127:
+        return ("refuse", "host_loopback")
+    private = b[0] == 10 or (b[0] == 172 and 16 <= b[1] <= 31) or b[:2] == bytes([192, 168])
+    link_local = b[:2] == bytes([169, 254])
+    return ("ok", text) if private or link_local else ("refuse", "host_not_local")
+
+
+def _dial_address(text: str) -> bool:
+    """A canonical address: the one rendering of a version-1, 20-byte hash."""
+    prefix = ADDRESS_HRP + "1"
+    if not text.startswith(prefix) or len(text) < len(prefix) + 6:
+        return False
+    if any(c not in CHARSET for c in text[len(prefix) :]):
+        return False
+    data = [CHARSET.index(c) for c in text[len(prefix) : -6]]
+    payload = convertbits(data, 5, 8, False)
+    if payload is None or len(payload) != 1 + ADDRESS_HASH_LEN or payload[0] != ADDRESS_VERSION:
+        return False
+    return address_from_hash(bytes(payload[1:])) == text
+
+
+def parse_dial_code(text: str):
+    """The dialler's reading, from the chapter: ("accept", values) or
+    ("refuse", reason, key). The fragment-wide rules (length, `%`) come before
+    any key is read, so a value is never decoded to be checked."""
+    fragment = text.split("#", 1)[1] if "#" in text else text
+    if len(fragment) > DIAL_MAX_FRAGMENT:
+        return ("refuse", "too_long", None)
+    if "%" in fragment:
+        return ("refuse", "percent_encoded", None)
+    values = {}
+    for part in fragment.split("&"):
+        if "=" not in part:
+            return ("refuse", "malformed", None)
+        key, value = part.split("=", 1)
+        if key not in DIAL_KEYS:
+            continue
+        if key in values:
+            return ("refuse", "repeated_key", key)
+        values[key] = value
+    for key in DIAL_KEYS:
+        if key not in values:
+            return ("refuse", "missing_key", key)
+    if values["op-direct"] != DIAL_VERSION:
+        return ("refuse", "unsupported_version", None)
+    host = _dial_host(values["h"])
+    if host[0] == "refuse":
+        return ("refuse", host[1], None)
+    port = values["p"]
+    if not (1 <= len(port) <= 5) or not all(c in "0123456789" for c in port):
+        return ("refuse", "port", None)
+    if not (1 <= int(port) <= 65535):
+        return ("refuse", "port", None)
+    c = values["c"]
+    if len(c) != DIAL_CERTHASH_LEN or any(ch not in _DIAL_B64URL for ch in c):
+        return ("refuse", "certhash", None)
+    import base64
+
+    certhash = base64.urlsafe_b64decode(c + "=")
+    if len(certhash) != 32:
+        return ("refuse", "certhash", None)
+    for key, (lo, hi), reason in (("u", DIAL_UFRAG_LEN, "ufrag"), ("w", DIAL_PASSWORD_LEN, "password")):
+        v = values[key]
+        if not (lo <= len(v) <= hi) or any(ch not in _DIAL_ALNUM for ch in v):
+            return ("refuse", reason, None)
+    if not _dial_address(values["a"]):
+        return ("refuse", "address", None)
+    return (
+        "accept",
+        {
+            "host": host[1],
+            "port": int(port),
+            "certhash_hex": certhash.hex(),
+            "ufrag": values["u"],
+            "password": values["w"],
+            "address": values["a"],
+        },
+    )
+
+
+def build_webrtc_direct_dial_vectors() -> dict:
+    """The dial code, from docs/spec/stream-framing.md "The dial code".
+
+    Every expectation below is stated by hand and then checked against
+    `parse_dial_code`, the chapter's rules written out a second time, so a
+    case that says one thing and the rules another fails here before it can
+    reach a file.
+    """
+    # A certificate hash whose text uses both characters base64url adds, so
+    # a dialler decoding with the standard alphabet refuses a good code.
+    n = 0
+    while True:
+        certhash = hashlib.sha256(f"webrtc-direct dial vector certificate {n}".encode()).digest()
+        cert_text = _b64url(certhash)
+        if "-" in cert_text and "_" in cert_text:
+            break
+        n += 1
+    assert len(cert_text) == DIAL_CERTHASH_LEN
+
+    # The listener the stream-framing preamble proves, so a dial from these
+    # codes is answered by the peer those vectors announce.
+    address = derive_address(bytes.fromhex(RFC8032_TV1_PK))
+    base = {
+        "op-direct": DIAL_VERSION,
+        "h": "192.168.1.23",
+        "p": "50123",
+        "c": cert_text,
+        "u": "AbCdEfGhIjKlMnOp",
+        "w": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "a": address,
+    }
+    assert len(base["u"]) == 16 and len(base["w"]) == 32
+
+    def join(values: dict, order=None, extra=()) -> str:
+        parts = [f"{k}={values[k]}" for k in (order or DIAL_KEYS) if k in values]
+        return "&".join(parts + list(extra))
+
+    def edit(**changes) -> dict:
+        values = dict(base)
+        for key, value in changes.items():
+            key = key.replace("_", "-")
+            if value is None:
+                del values[key]
+            else:
+                values[key] = value
+        return values
+
+    def expect(values: dict) -> dict:
+        return {
+            "host": values["h"],
+            "port": int(values["p"]),
+            "certhash_hex": _hex_of_b64url(values["c"]),
+            "ufrag": values["u"],
+            "password": values["w"],
+            "address": values["a"],
+        }
+
+    def written(e: dict) -> str:
+        """The fragment a listener writes for these values: `op-direct`
+        first, then the table's order."""
+        return join(
+            {
+                "op-direct": DIAL_VERSION,
+                "h": e["host"],
+                "p": str(e["port"]),
+                "c": _b64url(bytes.fromhex(e["certhash_hex"])),
+                "u": e["ufrag"],
+                "w": e["password"],
+                "a": e["address"],
+            }
+        )
+
+    def padded(length: int) -> str:
+        """The base fragment with an unknown key filling it to `length`."""
+        head = join(base) + "&pad="
+        assert length > len(head)
+        return head + "y" * (length - len(head))
+
+    canonical = join(base)
+    accept = []
+
+    def acc(name: str, note: str, text: str, values: dict) -> None:
+        e = expect(values)
+        accept.append({"name": name, "note": note, "input": text, "expect": e, "fragment": written(e)})
+
+    acc("ipv4, bare", "The fragment alone, as a listener writes it.", canonical, base)
+    acc("ipv4, with its #", "As `location.hash` returns it.", "#" + canonical, base)
+    acc(
+        "ipv4, in a whole URL",
+        "Everything after the first `#` is the code; the page before it is not read.",
+        "https://example.test/page#" + canonical,
+        base,
+    )
+    acc(
+        "a query string is not the code",
+        "The query names a public host and a port of 1. A dialler reads the "
+        "fragment only, so neither is seen and nothing is repeated.",
+        "https://example.test/page?op-direct=1&h=8.8.8.8&p=1#" + canonical,
+        base,
+    )
+    for host, note in (
+        ("fe80::1c2b:3aff:fe4d:5e6f", "IPv6 link-local, fe80::/10, no zone."),
+        ("fd12:3456:789a::1", "IPv6 unique local, fc00::/7."),
+        ("fc00::1", "The first address of fc00::/7."),
+        ("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "The last address of fc00::/7."),
+        ("febf:ffff::1", "Inside fe80::/10 at its upper edge."),
+        ("10.0.0.1", "RFC 1918, 10/8."),
+        ("172.16.0.1", "RFC 1918, the low edge of 172.16/12."),
+        ("172.31.255.254", "RFC 1918, the high edge of 172.16/12."),
+        ("192.168.0.1", "RFC 1918, 192.168/16."),
+        ("169.254.7.7", "IPv4 link-local, 169.254/16."),
+    ):
+        acc(f"host {host}", note, join(edit(h=host)), edit(h=host))
+    acc(
+        "keys in reverse order",
+        "Keys are looked up by name; only a listener's writing has an order.",
+        join(base, order=list(reversed(DIAL_KEYS))),
+        base,
+    )
+    acc(
+        "unknown keys are ignored",
+        "One between known keys and one with an empty value at the end.",
+        join(base, order=DIAL_KEYS[:3]) + "&x-future=whatever&" + join(base, order=DIAL_KEYS[3:]) + "&z=",
+        base,
+    )
+    for port in ("1", "65535"):
+        acc(f"port {port}", "The port range is inclusive at both ends.", join(edit(p=port)), edit(p=port))
+    for name, key, value, note in (
+        ("ufrag of 4", "u", "aB3d", "The shortest username fragment."),
+        ("ufrag of 32", "u", "Z9" * 16, "The longest username fragment."),
+        ("password of 22", "w", "p" * 11 + "Q" * 11, "The shortest password."),
+        ("password of 64", "w", "7" * 32 + "x" * 32, "The longest password."),
+    ):
+        acc(name, note, join(edit(**{key: value})), edit(**{key: value}))
+    acc(
+        "a fragment of exactly 512 characters",
+        "The limit is inclusive: 512 is read, 513 is not. Filled with an unknown key.",
+        padded(DIAL_MAX_FRAGMENT),
+        base,
+    )
+    acc(
+        "a long page URL before a 512-character fragment",
+        "The limit is on the fragment, not on the URL it follows.",
+        "https://example.test/" + "q" * 600 + "#" + padded(DIAL_MAX_FRAGMENT),
+        base,
+    )
+
+    refuse = []
+
+    def ref(name: str, note: str, text: str, reason: str, key=None) -> None:
+        case = {"name": name, "note": note, "input": text, "reason": reason}
+        if key is not None:
+            case["key"] = key
+        refuse.append(case)
+
+    for key in DIAL_KEYS:
+        ref(f"no {key}", "Every key is required.", join(edit(**{key: None})), "missing_key", key)
+    for key in DIAL_KEYS:
+        ref(
+            f"{key} twice",
+            "Refused even with the same value, so no code carries two values of which each reader picks a different one.",
+            canonical + f"&{key}={base[key]}",
+            "repeated_key",
+            key,
+        )
+    for version in ("2", "01"):
+        ref(f"version {version}", "Only `1` is this version.", join(edit(op_direct=version)), "unsupported_version")
+    for host, note in (
+        ("8.8.8.8", "A public IPv4 address."),
+        ("172.15.255.255", "Just below 172.16/12."),
+        ("172.32.0.1", "Just above 172.16/12."),
+        ("100.64.0.1", "Shared address space (RFC 6598) is not private."),
+        ("2001:db8::1", "A global IPv6 address."),
+        ("fec0::1", "The retired site-local range, outside fe80::/10."),
+        ("fbff::1", "Just below fc00::/7."),
+        ("::ffff:192.168.1.1", "A private IPv4 address mapped into IPv6 is an IPv6 address, and not a local one."),
+    ):
+        ref(f"host {host}", note, join(edit(h=host)), "host_not_local")
+    for host in ("127.0.0.1", "127.8.9.10", "::1"):
+        ref(f"host {host}", "Loopback, which some browsers do not dial.", join(edit(h=host)), "host_loopback")
+    for host, note in (
+        ("printer.local", "A name, which the browser would resolve."),
+        ("localhost", "A name, even one that means loopback."),
+        ("", "No host at all."),
+        ("FE80::1", "RFC 5952 text is lower case."),
+        ("fe80:0:0:0:0:0:0:1", "RFC 5952 text compresses the zero run."),
+        ("[fe80::1]", "No brackets."),
+        ("192.168.001.1", "Dotted decimal has no leading zeros."),
+        ("192.168.1", "Dotted decimal has four parts."),
+    ):
+        ref(f"host {host!r}", note, join(edit(h=host)), "host_not_literal")
+    ref(
+        "host with a zone",
+        "No zone: its `%` is refused before the host is read.",
+        join(edit(h="fe80::1%en0")),
+        "percent_encoded",
+    )
+    for port, note in (
+        ("0", "Port 0 is not a port."),
+        ("65536", "One over the range."),
+        ("+80", "Decimal digits only."),
+        ("", "No port at all."),
+    ):
+        ref(f"port {port!r}", note, join(edit(p=port)), "port")
+    for name, text, note in (
+        ("certhash one character short", cert_text[:42], "42 characters."),
+        ("certhash one character long", cert_text + "A", "44 characters."),
+        ("certhash padded", cert_text[:42] + "=", "43 characters, the last a pad: no padding."),
+        (
+            "certhash in the standard alphabet",
+            cert_text.replace("-", "+").replace("_", "/"),
+            "The same hash in standard base64, not base64url.",
+        ),
+    ):
+        ref(name, note, join(edit(c=text)), "certhash")
+    for name, key, reason, value, note in (
+        ("ufrag one under its bounds", "u", "ufrag", "abc", "3 characters, under 4."),
+        ("ufrag one over its bounds", "u", "ufrag", "a" * 33, "33 characters, over 32."),
+        ("ufrag outside its alphabet", "u", "ufrag", "abcd-efg", "`-` is not in A-Z a-z 0-9."),
+        ("password one under its bounds", "w", "password", "p" * 21, "21 characters, under 22."),
+        ("password one over its bounds", "w", "password", "p" * 65, "65 characters, over 64."),
+        ("password outside its alphabet", "w", "password", "p" * 22 + "+", "`+` is not in A-Z a-z 0-9."),
+    ):
+        ref(name, note, join(edit(**{key: value})), reason)
+    ref(
+        "a percent-encoded value",
+        "%41 is `A`, so a dialler that decoded would read a valid username "
+        "fragment. None decodes: the `%` refuses the code.",
+        join(edit(u="%41bCdEfGh")),
+        "percent_encoded",
+    )
+    bad_check = address[:-1] + ("q" if address[-1] != "q" else "p")
+    for name, text, note in (
+        ("address with a checksum error", bad_check, "The last character changed."),
+        ("address in upper case", address.upper(), "Upper case is not the canonical rendering."),
+    ):
+        ref(name, note, join(edit(a=text)), "address")
+    ref(
+        "a fragment of 513 characters",
+        "One over the limit. Filled with an unknown key, so the length is the only rule broken.",
+        padded(DIAL_MAX_FRAGMENT + 1),
+        "too_long",
+    )
+
+    # Every input is ASCII, so a count in code points and a count in UTF-16
+    # units (what a page's `length` gives) agree on the limit.
+    for case in accept + refuse:
+        assert case["input"].isascii(), case["name"]
+    names = [c["name"] for c in accept + refuse]
+    assert len(names) == len(set(names)), "vector names are unique"
+
+    # The hand-stated expectations against the chapter's rules written out.
+    for case in accept:
+        got = parse_dial_code(case["input"])
+        assert got == ("accept", case["expect"]), (case["name"], got)
+        assert parse_dial_code(case["fragment"]) == got, case["name"]
+    for case in refuse:
+        got = parse_dial_code(case["input"])
+        assert got == ("refuse", case["reason"], case.get("key")), (case["name"], got)
+
+    return {
+        "_comment": [
+            "Frozen conformance vectors for the WebRTC Direct dial code, from",
+            "docs/spec/stream-framing.md, \"The dial code\".",
+            "",
+            "Computed from the table in that chapter, not by running the code",
+            "they pin: every expectation is stated by hand and checked against",
+            "the chapter's rules written out a second time in the generator.",
+            "",
+            "`accept` cases give the input and every value a dialler must read,",
+            "with the certificate hash as hex, and `fragment`, the code a",
+            "listener writes for those values (`op-direct` first, then the",
+            "table's order). `refuse` cases give the input and the rule it",
+            "breaks. Each breaks exactly one rule, so `reason` is the same",
+            "whatever order a dialler checks in, except that the two",
+            "fragment-wide rules (over 512 characters, any `%`) are checked",
+            "before any key is read: a value is never decoded to be checked.",
+            "A dialler is held to refusing; one that names why it refused",
+            "names `reason` (and `key`, for a missing or repeated key).",
+            "",
+            "Inputs come as a bare fragment, a `#fragment` and a whole URL,",
+            "because the code is read from all three. Every input is ASCII,",
+            "so a length in characters and in UTF-16 units agree.",
+        ],
+        "format": "op-direct=1&h=<host>&p=<port>&c=<certhash>&u=<ufrag>&w=<password>&a=<address>",
+        "keys": DIAL_KEYS,
+        "version": DIAL_VERSION,
+        "max_fragment_len": DIAL_MAX_FRAGMENT,
+        "certhash_text_len": DIAL_CERTHASH_LEN,
+        "ufrag_len": list(DIAL_UFRAG_LEN),
+        "password_len": list(DIAL_PASSWORD_LEN),
+        "reasons": {
+            "too_long": "The fragment is over max_fragment_len characters.",
+            "percent_encoded": "The fragment contains `%`.",
+            "missing_key": "A key the table defines is absent (`key` names it).",
+            "repeated_key": "A key the table defines appears twice (`key` names it).",
+            "unsupported_version": "`op-direct` is not `1`.",
+            "host_not_literal": "`h` is not an IPv4 dotted-decimal or RFC 5952 IPv6 literal.",
+            "host_loopback": "`h` is a loopback address.",
+            "host_not_local": "`h` is neither private (RFC 1918, fc00::/7) nor link-local (169.254/16, fe80::/10).",
+            "port": "`p` is not decimal from 1 to 65535.",
+            "certhash": "`c` is not 43 characters of base64url with no padding.",
+            "ufrag": "`u` is not 4 to 32 characters of A-Z a-z 0-9.",
+            "password": "`w` is not 22 to 64 characters of A-Z a-z 0-9.",
+            "address": "`a` is not a canonical address.",
+        },
+        "accept": accept,
+        "refuse": refuse,
+    }
+
+
 FILES = [
     (CORE_DATA / "wire-v1.vectors.json", build_wire_vectors),
     (CORE_DATA / "address-v1.vectors.json", build_address_vectors),
@@ -1945,6 +2434,7 @@ FILES = [
     (SEALED_DATA / "identity-assertion-v1.vectors.json", build_identity_assertion_vectors),
     (SEALED_DATA / "app-membership-v1.vectors.json", build_app_membership_vectors),
     (TRANSPORT_DATA / "stream-framing-v1.vectors.json", build_stream_framing_vectors),
+    (WEBRTC_DIRECT_DATA / "webrtc-direct-dial-v1.vectors.json", build_webrtc_direct_dial_vectors),
     (PROTOCOL_DATA / "custody-receipt-v1.vectors.json", build_custody_receipt_vectors),
 ]
 

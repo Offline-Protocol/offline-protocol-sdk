@@ -3100,6 +3100,7 @@ dependencies = [
  "offline-protocol-core",
  "offline-protocol-mls",
  "offline-protocol-transport",
+ "serde_json",
  "str0m",
  "subtle",
  "thiserror 2.0.20",

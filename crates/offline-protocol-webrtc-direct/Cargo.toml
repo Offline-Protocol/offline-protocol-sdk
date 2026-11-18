@@ -43,3 +43,7 @@ str0m = { version = "0.25", default-features = false, features = ["apple-crypto"
 
 [target.'cfg(not(target_vendor = "apple"))'.dependencies]
 str0m = { version = "0.25", default-features = false, features = ["aws-lc-rs"] }
+
+[dev-dependencies]
+# Reads the dial-code conformance vectors in tests/data.
+serde_json = { workspace = true }

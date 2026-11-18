@@ -398,7 +398,12 @@ alphabet, `%` included, and never decodes one. A dialler looks keys up by
 name and does not depend on their order; a listener writes `op-direct` first,
 so that a person or a scanner can recognise the code. A key a dialler does
 not know is ignored, and a repeated key, a missing key or a fragment over
-512 characters is refused.
+512 characters is refused. The fragment is read as `&`-separated parts,
+each `key=value`: a part with no `=`, or an empty part such as a trailing
+`&` leaves, refuses the code, and so does a `%` anywhere in it, an unknown
+key's value included. A hash is refused unless it is the one canonical
+base64url spelling of its 32 bytes (the spare low bits of its last
+character are zero), so that one certificate has one code.
 
 An IPv4 code with a 44-character address is about 185 characters. With a
 page URL of up to 60 characters, it fits a version 11 QR code at error
@@ -574,16 +579,23 @@ bodies cross the FFI whole, so nothing below the FFI reads a prefix for them.
 Each replays this file in its own suite: `PeerStreamFramingTest` on Android,
 `PeerStreamFramingTests` on iOS, and `test_peer_stream_manager.py` in Python.
 
-`webrtc-direct-dial-v1.vectors.json`, beside it and from the same generator,
-pins [the dial code](#the-dial-code). It carries codes a dialler must accept
-(IPv4, IPv6, keys out of order, an unknown key) with the values it must
-read, and codes it must refuse: each missing key, a repeated key, another
-version, a public, loopback or named host, a port of 0, a hash one
-character short, a username or password one character outside its bounds or
-its alphabet, a percent-encoded value, and a fragment over 512 characters.
-The listener's code builder in `offline-protocol-webrtc-direct` and the
-page's `parseDirectCode` both replay it, so the two implementations of the
-format cannot drift apart unnoticed.
+`crates/offline-protocol-webrtc-direct/tests/data/webrtc-direct-dial-v1.vectors.json`,
+from the same generator, pins [the dial code](#the-dial-code). It lives in
+the crate that implements the code rather than beside the framing vectors,
+so a packaged build of that crate carries its own vectors. It carries codes
+a dialler must accept (IPv4, IPv6, keys out of order, an unknown key, each
+range's edges, a fragment of exactly 512 characters, and the code given as
+a bare fragment, as a `#fragment` and inside a whole URL) with the values
+it must read and the fragment a listener writes for them, and codes it
+must refuse, each breaking one rule: each missing key, each repeated key,
+another version, a public, loopback or named host, a host not in its one
+RFC 5952 spelling, a port of 0, a hash one character short, a username or
+password one character outside its bounds or its alphabet, a
+percent-encoded value, and a fragment over 512 characters. Each refusal
+names the rule it breaks. The listener's code in `offline-protocol-webrtc-direct`
+(`tests/dial_code_vectors.rs`, through `DialCode::parse` and
+`DialCode::to_fragment`) and the page's `parseDirectCode` both replay it,
+so the two implementations of the format cannot drift apart unnoticed.
 
 A vector that fails means the framing moved, which needs a versioned preamble
 and a new file. Editing an expected value to make a test pass converts a

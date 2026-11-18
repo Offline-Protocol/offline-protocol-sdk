@@ -121,13 +121,14 @@ are computed independently of that code.
 | `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json` | [Custody](custody.md) | Both |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) | Both |
 | `crates/offline-protocol-transport/tests/data/stream-framing-v1.vectors.json` | [Peer-stream framing](stream-framing.md) | Both |
+| `crates/offline-protocol-webrtc-direct/tests/data/webrtc-direct-dial-v1.vectors.json` | [Peer-stream framing](stream-framing.md#the-dial-code) | Both |
 
 ### How they are computed
 
 `tools/spec-vectors/generate.py` is a second implementation of these encodings,
 written from the chapters and forbidden from importing, linking against or
 shelling out to the Rust crates it pins. Running it with `--check` regenerates
-the ten files it owns (every row above except document replication and the
+the twelve files it owns (every row above except document replication and the
 Bluetooth LE fragment framing) and fails on any difference, which is what CI
 does.
 

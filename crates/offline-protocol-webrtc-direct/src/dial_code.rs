@@ -5,6 +5,9 @@
 //! code", and this module is the listener's half of it: [`DialCode::to_fragment`]
 //! writes a code and [`DialCode::parse`] reads one under every rule the
 //! table states. The page's `parseDirectCode` is the other implementation.
+//! Both replay `tests/data/webrtc-direct-dial-v1.vectors.json`, which
+//! `tools/spec-vectors/generate.py` computes from the chapter and not from
+//! this module.
 //!
 //! # Invariants
 //!
