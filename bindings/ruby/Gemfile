@@ -3,5 +3,5 @@ source "https://rubygems.org"
 # The generated binding calls the library through ffi and has no other
 # dependency. minitest and rake drive the consumer check (docs/bridges/ruby.md).
 gem "ffi", "~> 1.17"
-gem "minitest", "~> 6.0"
+gem "minitest", "~> 6.1"
 gem "rake", "~> 13.0"
