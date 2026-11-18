@@ -4,12 +4,14 @@
 //
 // Usage: node test/run.mjs <base-url> <relay-url> <timeout-ms> <page>...
 // BROWSERS narrows the engines (default: chromium firefox webkit). STUN_URL,
-// when set, is passed to every page as `stun`.
+// when set, is passed to every page as `stun`. LISTENER names the example
+// WebRTC Direct listener that direct.html dials (test/direct-listener.mjs).
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, firefox, webkit } from "playwright";
+import { attachListener, privateAddress } from "./direct-listener.mjs";
 
 const [base, relay, timeoutArg, ...pages] = process.argv.slice(2);
 const timeout = Number(timeoutArg);
@@ -40,6 +42,23 @@ const options = {
   webkit: {},
 };
 
+// Pages that run in each engine's default settings, in a browser of their
+// own, rather than with the switches above. A dial must work with the
+// browser's mDNS host candidates left on: the listener learns the page's
+// address from its first check, which is the point of the design (W16).
+const DEFAULT_SETTINGS = new Set(["test/direct.html"]);
+
+// Pages the runner drives from outside, each with what it needs.
+const directHost = privateAddress();
+const harnesses = {
+  "test/direct.html": (page) =>
+    attachListener(page, {
+      binary: process.env.LISTENER ?? "../../target/debug/examples/listener",
+      host: directHost,
+      verbose: Boolean(process.env.VERBOSE),
+    }),
+};
+
 const results = [];
 for (const name of names) {
   // A persistent profile, as a person's browser is: OPFS on disk, and the
@@ -49,10 +68,18 @@ for (const name of names) {
     headless: true,
     ...options[name],
   });
+  let plain = null;
   try {
     for (const path of pages) {
       console.log(`== ${name} ${path}`);
-      const page = await context.newPage();
+      let page;
+      if (DEFAULT_SETTINGS.has(path)) {
+        plain ??= await engines[name].launch({ headless: true });
+        page = await (await plain.newContext()).newPage();
+      } else {
+        page = await context.newPage();
+      }
+      const cleanup = (await harnesses[path]?.(page)) ?? (() => {});
       page.on("console", (message) => console.log("[page]", message.text()));
       page.on("pageerror", (error) => console.log("[page exception]", error.message));
       let title = "TIMEOUT";
@@ -71,9 +98,11 @@ for (const name of names) {
       console.log(await page.locator("#log").textContent().catch(() => ""));
       console.log(title);
       results.push({ name, path, title });
+      cleanup();
       await page.close();
     }
   } finally {
+    await plain?.close();
     await context.close();
     rmSync(profile, { recursive: true, force: true });
   }

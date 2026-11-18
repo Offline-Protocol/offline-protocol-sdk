@@ -217,6 +217,9 @@ jobs:
               - *engine
               - 'crates/offline-protocol-web/**'
               - 'bindings/web/**'
+              # direct.html dials this crate's example listener, and
+              # direct-code.html replays its dial-code vectors (W16).
+              - 'crates/offline-protocol-webrtc-direct/**'
               # The browser job reloads the lobby offline (W15).
               - 'examples/web-lobby/**'
               # The browser job opens the coordination example in two frames.
@@ -1278,6 +1281,8 @@ jobs:
       # entropy, OPFS store and glue work in a browser, and only a run in more
       # than one engine catches what one engine forgives (Firefox's
       # persist() waits for the user, so awaiting it hung every durable start).
+      # Then a node dialling the WebRTC Direct crate's example listener on
+      # the runner's private address, which the script builds first (W16).
       # Then the lobby example, reloaded offline from its service worker (W15).
       - name: Run the browser tests
         run: bash bindings/web/scripts/test-browser.sh

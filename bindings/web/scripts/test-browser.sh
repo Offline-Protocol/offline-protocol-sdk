@@ -24,6 +24,26 @@ STUN_PORT="${STUN_PORT:-8767}"
 [ -f pkg/build-id.js ] || bash scripts/build.sh
 [ -d node_modules/playwright ] || npm ci
 
+# The native end direct.html dials: the WebRTC Direct crate's example
+# listener, a full engine on this machine's private address (W16). Built
+# every run, as cargo does nothing when it is current; its path comes from
+# cargo, so a CARGO_TARGET_DIR is honoured.
+LISTENER="$(cd ../.. && cargo build --locked -p offline-protocol-webrtc-direct --example listener \
+  --message-format=json-render-diagnostics \
+  | node -e '
+let out = "";
+process.stdin.on("data", (d) => (out += d)).on("end", () => {
+  for (const line of out.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    const m = JSON.parse(line);
+    if (m.reason === "compiler-artifact" && m.target.name === "listener" && m.executable) {
+      console.log(m.executable);
+    }
+  }
+});')"
+[ -x "$LISTENER" ] || { echo "error: could not build the example WebRTC Direct listener" >&2; exit 1; }
+export LISTENER
+
 python3 test/serve.py "$PORT" ../.. >/dev/null 2>&1 &
 server=$!
 node test/nostr-relay.mjs "$RELAY_PORT" >/dev/null 2>&1 &

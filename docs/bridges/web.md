@@ -744,12 +744,21 @@ app that wants pages on its network to reach it opens a WebRTC Direct
 listener and shows a code
 ([ADR 0039](../adr/0039-a-browser-dials-a-native-device-from-a-code.md),
 [the dial code](../spec/stream-framing.md#dialling-a-listener-from-a-browser)).
-`parseDirectCode(url)` reads one, from a whole URL or its fragment, and
-throws naming the field it refused. `carrier.dial(code)` opens a link and
-resolves to a connection like the one `offer()` and `answer()` resolve to,
-with the same `connection` events. Everything after the channel opens is
-W3 and W9 unchanged: the preamble, the chunks, the buffering and the
-deadlines.
+`parseDirectCode(url)` reads one, from a whole URL, a `#fragment` or a
+bare fragment, under every rule of the format, and throws an error whose
+`reason` names the rule it broke (the vectors' names) and whose `key` names
+a missing or repeated key. It returns the host, the port, the certificate
+hash as 32 bytes, the ICE username and password, and the address.
+`carrier.dial(code)` takes the code's text or what `parseDirectCode`
+returned, and resolves to `{ address, close() }` once the data channel is
+open, a connection like the one `offer()` and `answer()` resolve to, with
+the same `connection` events. Everything after the channel opens is W3 and
+W9 unchanged: the preamble, the chunks, the buffering and the deadlines.
+
+`parseDirectCode` checks the address's text form (bech32m, `off`, one
+spelling) so a damaged code is refused when it is read, naming the field.
+It derives nothing and is not trusted: the engine parses the address again
+when the link opens, and the preamble must prove it.
 
 **The page edits no description of its own.** It builds the listener's
 description from the code and sets its own offer exactly as the browser
@@ -768,13 +777,20 @@ that opened a swapped code would announce whoever answered.
 address.** The engine keeps its first link per address (W3), and the
 listener keeps its newest dialled stream, because only the page dials. A
 page that kept its old link while the listener kept the new one would leave
-each end closing the link the other kept.
+each end closing the link the other kept. The close reaches the listener
+ahead of the new dial, so a dial again from a page that is still open costs
+each end one reported loss and one announcement. The listener's newer-wins
+rule is for a page that went without closing (a reload, a Wi-Fi drop), whose
+dead stream it replaces without a loss.
 
 **A dial uses no ICE server**, even on a carrier the application gave some
 (W9). The listener is on the local network or nowhere, and a server would
 learn only who dials whom. A dial that has not opened in 15 seconds
-rejects. A certificate that does not match the code fails DTLS, and the
-dial rejects with the connection `failed`.
+(`dial(code, { timeoutMs })`) rejects and closes, with the error's `state`
+`timeout`. A listener that does not admit the dial (a wrong password, a
+closed listener) answers nothing, so that is how such a dial ends. A
+certificate that does not match the code fails DTLS, and the dial rejects
+with `state` `failed`.
 
 **The page comes from the application's origin, never from the
 listener.** The node needs a secure context (see what the host owes), and
@@ -906,17 +922,30 @@ start there, because Firefox answers it by asking the user.
   off and Firefox with `media.peerconnection.ice.obfuscate_host_addresses`
   off, so the candidates are addresses a runner can reach. WebKit has no such
   switch and gathers `.local` names.
+- `direct-code.html`: `parseDirectCode` replays the dial-code conformance
+  vectors the listener's reader replays too: every accepted code reads to
+  the values its vector states, and every refused one is refused for the
+  rule it names. Then the rules no vector carries: a trailing `&`, an empty
+  part and a part with no `=` refuse the code, and so does a `%` in a value
+  no key reads (W16).
 - `direct.html`: a node dials the crate's example listener, a full native
-  engine behind `offline-protocol-webrtc-direct`, from a code the runner
-  hands it. The listener binds the machine's own private address, not
-  loopback, which Firefox does not dial. The checks are: the page's local description is the one the
-  browser generated; a session and an encrypted message both ways; a 100 KiB
-  message in chunks; a second dial of the same code replaces the first at
-  both ends with one loss reported; and a loss when the listener closes.
-  Then three refusals: a code with a wrong certificate hash fails DTLS, a
-  wrong password gets no answer and leaves the listener holding no dial,
-  and a wrong `a` closes the link with nothing announced (W16). Each check
-  was confirmed by breaking the code it covers.
+  engine behind `offline-protocol-webrtc-direct`, which the runner builds,
+  starts and relays to the page (`test/direct-listener.mjs`). The listener
+  binds the machine's own private IPv4 address (`DIRECT_HOST`, else en0's on
+  macOS, else the first private one), not loopback, which Firefox does not
+  dial, and the page runs in each engine's default settings, so the listener
+  learns the page's address from its first check. The checks are: the page's
+  local description is the one the browser generated, and the dial names no
+  ICE server although its carrier has one; a session and an encrypted
+  message both ways; a 100 KiB message each way in chunks; a second dial of
+  the same code replaces the first at both ends, each losing the first
+  stream once; and a loss when the listener closes. Then three refusals: a
+  code with a wrong certificate hash fails DTLS, a wrong password gets no
+  answer and the listener proves nothing, and a wrong `a` closes the link
+  with nothing announced (W16). Each check was confirmed by breaking the
+  code it covers: an edited local description, the carrier's ICE servers,
+  no expected address, the old connection kept on a dial again, and a
+  failure reported as a close.
 - `nostr-signal.html`: two nodes that share only a room code meet through
   a Nostr relay, link over WebRTC and send an ephemeral direct message. A
   join to a room nobody hosts gives up at its deadline, and a call to a

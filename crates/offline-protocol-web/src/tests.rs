@@ -448,6 +448,49 @@ fn a_link_whose_first_frame_is_not_a_preamble_closes_and_announces_nothing() {
     );
 }
 
+/// A link opened toward a dial code's address (W16) announces that address
+/// when its preamble proves it, and closes with nothing announced when the
+/// preamble proves anyone else: a swapped code must not announce whoever
+/// answered.
+#[test]
+fn a_link_opened_toward_an_address_announces_only_that_address() {
+    let (mut a, mut b, c) = (peer("alice"), peer("bob"), peer("carol"));
+    let b_preamble = std::iter::from_fn(|| b.node.next_outbound())
+        .find(|(link, _)| *link == b.link)
+        .map(|(_, data)| data)
+        .expect("b's preamble");
+
+    // Expecting carol, proved bob: closed, nothing announced.
+    let wrong = a.node.open_link_expecting(Some(&c.address)).expect("link");
+    let reason = a
+        .node
+        .link_received(wrong, &b_preamble)
+        .expect("a preamble proving another address was accepted");
+    assert!(reason.contains(&c.address), "{reason}");
+    a.node.process().expect("process");
+    while let Some(json) = a.node.poll_event() {
+        assert!(!json.contains("neighbor_discovered"), "{json}");
+    }
+    assert_eq!(
+        a.node.link_received(wrong, &b_preamble).as_deref(),
+        Some("unknown link")
+    );
+
+    // Expecting bob, proved bob: announced.
+    let right = a.node.open_link_expecting(Some(&b.address)).expect("link");
+    assert_eq!(a.node.link_received(right, &b_preamble), None);
+    let mut announced = false;
+    while let Some(json) = a.node.poll_event() {
+        announced |= json.contains("neighbor_discovered") && json.contains(&b.address);
+    }
+    assert!(announced, "the expected address was not announced");
+
+    // A claim no preamble could prove is refused before a link exists.
+    let upper = b.address.to_uppercase();
+    assert!(a.node.open_link_expecting(Some(&upper)).is_err());
+    assert!(a.node.open_link_expecting(Some("off1nope")).is_err());
+}
+
 #[test]
 fn closing_an_announced_link_reports_the_peer_lost() {
     let (mut a, mut b) = (peer("alice"), peer("bob"));
@@ -623,6 +666,17 @@ fn the_browser_tests_run_in_ci() {
     assert!(
         script.contains("node test/offline.mjs"),
         "test-browser.sh no longer runs test/offline.mjs"
+    );
+    // direct.html dials the example listener the script builds; without the
+    // build the page fails, and without the path filter a change to the
+    // listener never runs the page that dials it (W16).
+    assert!(
+        script.contains("-p offline-protocol-webrtc-direct --example listener"),
+        "test-browser.sh no longer builds the example WebRTC Direct listener"
+    );
+    assert!(
+        ci.contains("- 'crates/offline-protocol-webrtc-direct/**'"),
+        "ci.yml's web filter no longer names the WebRTC Direct crate"
     );
 }
 

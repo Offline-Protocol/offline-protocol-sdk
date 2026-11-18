@@ -31,10 +31,18 @@
 //   would have left hanging. The page hears every state as a `connection`
 //   event too, so it can warn at "disconnected" (5 s after the last
 //   answered check in Chrome) rather than look connected until the close.
-// - A connection reports nothing until offer() or answer() has handed the
-//   page its object. A call that fails, or whose connection closed while it
-//   gathered, rejects and reports nothing: an event naming an object the
-//   page never received is one it cannot match to anything.
+// - A connection reports nothing until offer(), answer() or dial() has
+//   handed the page its object. A call that fails, or whose connection
+//   closed while it gathered, rejects and reports nothing: an event naming
+//   an object the page never received is one it cannot match to anything.
+// - A dial (W16) edits no description of the page's own: it builds the
+//   listener's description from the code and sets the browser's offer
+//   unchanged. libwebrtc is removing the edit to a local ICE username and
+//   password, and a dial built on it would stop working the day a browser
+//   refuses it. Everything after its channel opens is the same Connection
+//   as a signalled one.
+
+import { checkedDirectCode } from "./direct-code.js";
 
 const CODE_PREFIX = "op1.";
 const CHANNEL_ID = 0;
@@ -42,6 +50,8 @@ const CHUNK_BYTES = 16 * 1024;
 const GATHER_MS = 5000;
 // How long a connection may stay "disconnected" before it is closed.
 const DISCONNECTED_MS = 15000;
+// How long a dial waits for its channel to open (W16).
+const DIAL_MS = 15000;
 // The longest delay a browser timer honours; a longer one fires at once.
 const MAX_TIMER_MS = 0x7fffffff;
 // Above this many bytes buffered on the channel, sends wait for it to drain.
@@ -102,6 +112,33 @@ function gathered(pc) {
   });
 }
 
+/// The listener's description, built from its code alone
+/// (docs/spec/stream-framing.md, "The page's side"). `mid` is the offer's.
+function listenerAnswer(code, mid) {
+  const family = code.host.includes(":") ? "IP6" : "IP4";
+  const fingerprint = Array.from(code.certhash, (b) => b.toString(16).padStart(2, "0").toUpperCase()).join(":");
+  return [
+    "v=0",
+    `o=- 0 0 IN ${family} ${code.host}`,
+    "s=-",
+    "t=0 0",
+    "a=ice-lite",
+    `m=application ${code.port} UDP/DTLS/SCTP webrtc-datachannel`,
+    `c=IN ${family} ${code.host}`,
+    `a=mid:${mid}`,
+    "a=ice-options:ice2",
+    `a=ice-ufrag:${code.ufrag}`,
+    `a=ice-pwd:${code.password}`,
+    `a=fingerprint:sha-256 ${fingerprint}`,
+    "a=setup:passive",
+    "a=sctp-port:5000",
+    "a=max-message-size:16384",
+    `a=candidate:1467250027 1 UDP 1467250027 ${code.host} ${code.port} typ host`,
+    "a=end-of-candidates",
+    "",
+  ].join("\r\n");
+}
+
 /// One connection toward one other device.
 class Connection {
   #node;
@@ -122,11 +159,16 @@ class Connection {
   #disconnectedMs;
   // Closes the connection once it has been "disconnected" too long.
   #stale = null;
+  // The address the other end's preamble must prove, for a dial (W16).
+  #expect;
+  // { resolve, reject } while a dial waits for its channel to open.
+  #dialling = null;
 
-  constructor(node, iceServers, disconnectedMs, onClose) {
+  constructor(node, iceServers, disconnectedMs, onClose, { expect } = {}) {
     this.#node = node;
     this.#disconnectedMs = disconnectedMs;
     this.#onClose = onClose;
+    this.#expect = expect;
     this.#pc = new RTCPeerConnection({ iceServers });
     this.#channel = this.#pc.createDataChannel("offline-protocol", {
       negotiated: true,
@@ -204,11 +246,51 @@ class Connection {
     await this.#pc.setRemoteDescription(await decode(answerCode, "answer"));
   }
 
+  /// Dials a listener from its checked code. Resolves once the channel is
+  /// open; rejects, closing the connection, when it closes first or has not
+  /// opened within `timeoutMs`.
+  async dial(code, timeoutMs) {
+    const opened = new Promise((resolve, reject) => {
+      this.#dialling = { resolve, reject };
+    });
+    const timer = setTimeout(() => {
+      this.#settleDial(dialError(`the dial was not answered within ${timeoutMs} ms`, "timeout"));
+      this.close();
+    }, Math.min(timeoutMs, MAX_TIMER_MS));
+    try {
+      const offer = await this.#pc.createOffer();
+      // Exactly as the browser made it: the page edits no local description.
+      await this.#pc.setLocalDescription(offer);
+      const mid = /^a=mid:(\S+)/m.exec(offer.sdp)?.[1];
+      if (mid === undefined) throw new Error("the browser's offer has no data channel section");
+      await this.#pc.setRemoteDescription({ type: "answer", sdp: listenerAnswer(code, mid) });
+    } catch (error) {
+      this.#settleDial(error);
+      this.close();
+    }
+    try {
+      await opened;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Settles a waiting dial once: resolved with no error, else rejected.
+  #settleDial(error) {
+    const dialling = this.#dialling;
+    if (dialling === null) return;
+    this.#dialling = null;
+    if (error) dialling.reject(error);
+    else dialling.resolve();
+  }
+
   async #opened() {
+    this.#settleDial(null);
     try {
       this.#link = await this.#node.openLink({
         send: (bytes) => this.#send(bytes),
         close: () => this.close({ engine: true }),
+        expect: this.#expect,
       });
     } catch {
       // The engine's link ceiling, or a node that ended.
@@ -268,6 +350,15 @@ class Connection {
   close({ engine = false } = {}) {
     if (this.#closed) return;
     this.#closed = true;
+    // Read before the close below makes every connection "closed". A
+    // certificate that does not match a dial's code fails DTLS, which the
+    // browser reports as "failed".
+    const failed = this.#pc.connectionState === "failed";
+    this.#settleDial(
+      failed
+        ? dialError("the connection failed (a certificate that does not match the code fails DTLS)", "failed")
+        : dialError("the connection closed before its channel opened", "closed"),
+    );
     this.#recovered();
     for (const done of [...this.#draining]) done();
     if (this.#link !== null && !engine) this.#node.closeLink(this.#link);
@@ -278,15 +369,24 @@ class Connection {
   }
 }
 
+// A rejected dial's error: `state` is "failed" (DTLS or ICE failed),
+// "closed" (closed before its channel opened) or "timeout".
+function dialError(message, state) {
+  const error = new Error(`the dial did not open: ${message}`);
+  error.state = state;
+  return error;
+}
+
 /// WebRTC links for one node. Each connection takes two codes: the side that
 /// offers shows an offer code and reads back an answer code; the other side
-/// reads the offer and shows its answer.
+/// reads the offer and shows its answer. A native device's WebRTC Direct
+/// listener takes one code, which `dial()` reads (W16).
 ///
 /// Every change of a connection's state is a `connection` event with
 /// `{ state, connection }` as its detail: `state` is "connected",
 /// "disconnected" (no answer to the last checks; it may recover, and is
 /// closed if it has not within `disconnectedMs`) or "closed" (once, at the
-/// end), and `connection` is the object `offer()` or `answer()`
+/// end), and `connection` is the object `offer()`, `answer()` or `dial()`
 /// resolved to, so a page with several devices can tell them apart. A call
 /// that rejects reports nothing.
 export class WebRtcCarrier extends EventTarget {
@@ -294,6 +394,8 @@ export class WebRtcCarrier extends EventTarget {
   #iceServers;
   #disconnectedMs;
   #connections = new Set();
+  // address -> the dialled Connection toward it (W16).
+  #dialled = new Map();
 
   /// `iceServers` is RTCPeerConnection's list, for networks where devices
   /// cannot reach each other directly: a STUN server for addresses behind a
@@ -331,6 +433,59 @@ export class WebRtcCarrier extends EventTarget {
     const connection = this.#track(this.#connection());
     const code = await this.#code(connection, () => connection.answer(offerCode));
     return this.#hand(connection, { code, close: () => connection.close() });
+  }
+
+  /// Dials a native device's WebRTC Direct listener from the code it shows
+  /// (W16): the code's text (a whole URL, a `#fragment` or a bare
+  /// fragment) or what `parseDirectCode` returned for it. Resolves to
+  /// `{ address, close() }` once the data channel is open, where `address`
+  /// is the code's `a`; from there the connection is the same as one
+  /// `offer()` makes, with the same `connection` events.
+  ///
+  /// The link's preamble must prove the code's address: the engine closes a
+  /// link that proves anyone else and announces nothing. A dial closes this
+  /// carrier's earlier dialled connection to the same address first. The
+  /// engine keeps its first link per address (W3) and the listener its
+  /// newest dialled stream, so a page that kept the old link would leave
+  /// each end closing the link the other kept. No ICE server is used,
+  /// whatever the carrier was given: the listener is on the local network
+  /// or nowhere.
+  ///
+  /// Rejects, closing the connection, when the code is refused (see
+  /// `parseDirectCode`), when the connection fails (a certificate that does
+  /// not match the code fails DTLS; the error's `state` is "failed"), or
+  /// when the channel has not opened within `timeoutMs` (default 15000;
+  /// `state` "timeout"). A listener that does not admit the dial (a wrong
+  /// password, a closed listener, a browser that withheld the candidate)
+  /// answers nothing, so that is how such a dial ends.
+  async dial(code, { timeoutMs = DIAL_MS } = {}) {
+    if (typeof timeoutMs !== "number" || !(timeoutMs > 0)) {
+      throw new Error("timeoutMs must be a positive number of milliseconds");
+    }
+    const checked = checkedDirectCode(code);
+    const { address } = checked;
+    this.#dialled.get(address)?.close();
+    const connection = this.#track(
+      new Connection(
+        this.#node,
+        [],
+        this.#disconnectedMs,
+        (c) => {
+          this.#connections.delete(c);
+          if (this.#dialled.get(address) === c) this.#dialled.delete(address);
+        },
+        { expect: address },
+      ),
+    );
+    this.#dialled.set(address, connection);
+    try {
+      await connection.dial(checked, timeoutMs);
+    } catch (error) {
+      connection.close();
+      throw error;
+    }
+    if (connection.closed) throw dialError("the connection closed before its channel opened", "closed");
+    return this.#hand(connection, { address, close: () => connection.close() });
   }
 
   /// Closes every connection.
