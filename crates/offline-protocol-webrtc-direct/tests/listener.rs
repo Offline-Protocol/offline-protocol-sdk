@@ -1,224 +1,26 @@
 //! The listener against a page, in memory.
 //!
-//! "The page" is a str0m client set up the way a browser is after it builds
-//! the listener's description from a code: full ICE and controlling, the
-//! listener's credentials and certificate hash from the code, DTLS client,
-//! SCTP client, channel 0 negotiated, and its own identity assertion first
-//! on the channel. Datagrams cross an in-memory network under a simulated
+//! "The page" is the str0m client in `common`, set up the way a browser is
+//! after it builds the listener's description from a code. Datagrams cross an in-memory network under a simulated
 //! clock, so every run is deterministic and no socket is opened.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
+use common::{identity, is_nominating_check, is_stun, listener_addr, Identity, Page, PageSetup};
 use offline_protocol_core::time::{Duration, Instant};
-use offline_protocol_mls::storage::InMemoryStorage;
-use offline_protocol_mls::{verify_identity_assertion, MlsManager};
-use offline_protocol_transport::stream_framing::{frame, PeerStreamReader, StreamEvent};
 use offline_protocol_webrtc_direct::{
     DialCode, Listener, ListenerConfig, ListenerError, ListenerEvent, StreamId, MAX_CHUNK_BYTES,
     MAX_PENDING_DIALS, MAX_QUEUED_BYTES,
 };
-use str0m::channel::{ChannelConfig, ChannelId, Reliability};
-use str0m::config::Fingerprint;
-use str0m::ice::StunMessage;
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceCreds, Input, Output, Rtc, RtcConfig};
+use str0m::Input;
 
 const LATENCY: Duration = Duration::from_millis(1);
-
-struct Identity {
-    assertion: Vec<u8>,
-    address: String,
-}
-
-fn identity(name: &str) -> Identity {
-    let manager = MlsManager::new(name, Arc::new(InMemoryStorage::new())).unwrap();
-    let assertion = manager.identity_assertion(&[]).unwrap();
-    let address = verify_identity_assertion(&assertion).unwrap().to_string();
-    Identity { assertion, address }
-}
-
-fn listener_addr() -> SocketAddr {
-    "192.168.1.10:40000".parse().unwrap()
-}
-
-fn page_addr(index: usize) -> SocketAddr {
-    format!("192.168.1.{}:{}", 20 + index, 50000 + index)
-        .parse()
-        .unwrap()
-}
-
-fn is_nominating_check(bytes: &[u8]) -> bool {
-    StunMessage::parse(bytes)
-        .map(|m| m.is_binding_request() && m.use_candidate())
-        .unwrap_or(false)
-}
-
-fn is_stun(bytes: &[u8]) -> bool {
-    StunMessage::parse(bytes).is_ok()
-}
-
-/// How the page deviates from a browser that has the right code.
-#[derive(Clone, Default)]
-struct PageSetup {
-    wrong_password: bool,
-    wrong_certhash: bool,
-    /// Sent in place of the page's real assertion.
-    preamble: Option<Vec<u8>>,
-}
-
-struct Page {
-    addr: SocketAddr,
-    identity: Identity,
-    rtc: Rtc,
-    channel: ChannelId,
-    timeout: Instant,
-    open: bool,
-    failed: bool,
-    reader: PeerStreamReader,
-    outbound: VecDeque<Vec<u8>>,
-    preamble: Vec<u8>,
-    proved: Option<String>,
-    bodies: Vec<Vec<u8>>,
-    largest_message: usize,
-    messages: usize,
-}
-
-impl Page {
-    fn new(index: usize, code: &DialCode, setup: &PageSetup, now: Instant) -> Self {
-        let identity = identity(&format!("page-{index}"));
-        let addr = page_addr(index);
-        let mut rtc = RtcConfig::new()
-            .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
-            .build(now);
-        rtc.add_local_candidate(Candidate::host(addr, "udp").unwrap());
-        rtc.add_remote_candidate(
-            Candidate::host(SocketAddr::new(code.host, code.port), "udp").unwrap(),
-        );
-        let mut certhash = code.certhash;
-        if setup.wrong_certhash {
-            certhash[0] ^= 0x01;
-        }
-        let mut password = code.password.clone();
-        if setup.wrong_password {
-            password = password.chars().rev().collect();
-        }
-        let mut api = rtc.direct_api();
-        api.set_remote_ice_credentials(IceCreds {
-            ufrag: code.ufrag.clone(),
-            pass: password,
-        });
-        api.set_ice_controlling(true);
-        api.set_remote_fingerprint(Fingerprint {
-            hash_func: "sha-256".to_string(),
-            bytes: certhash.to_vec(),
-        });
-        api.start_dtls(true).unwrap();
-        api.start_sctp(true);
-        let channel = api.create_data_channel(ChannelConfig {
-            label: String::new(),
-            ordered: true,
-            reliability: Reliability::Reliable,
-            negotiated: Some(0),
-            protocol: String::new(),
-        });
-        let verify =
-            Box::new(|body: &[u8]| verify_identity_assertion(body).ok().map(|a| a.to_string()));
-        let preamble = frame(setup.preamble.as_ref().unwrap_or(&identity.assertion)).unwrap();
-        Page {
-            addr,
-            identity,
-            rtc,
-            channel,
-            timeout: now,
-            open: false,
-            failed: false,
-            reader: PeerStreamReader::new(verify).expecting(code.address.clone()),
-            outbound: VecDeque::new(),
-            preamble,
-            proved: None,
-            bodies: Vec::new(),
-            largest_message: 0,
-            messages: 0,
-        }
-    }
-
-    fn send(&mut self, body: &[u8]) {
-        for chunk in frame(body).unwrap().chunks(MAX_CHUNK_BYTES) {
-            self.outbound.push_back(chunk.to_vec());
-        }
-    }
-
-    fn pump(&mut self, wire: &mut Vec<Vec<u8>>) {
-        if self.failed {
-            return;
-        }
-        loop {
-            loop {
-                match self.rtc.poll_output() {
-                    Ok(Output::Timeout(at)) => {
-                        self.timeout = at;
-                        break;
-                    }
-                    Ok(Output::Transmit(t)) => wire.push(t.contents.to_vec()),
-                    Ok(Output::Event(event)) => self.on_event(event),
-                    Err(_) => {
-                        self.failed = true;
-                        return;
-                    }
-                }
-            }
-            if !self.flush() {
-                return;
-            }
-        }
-    }
-
-    fn on_event(&mut self, event: Event) {
-        match event {
-            Event::ChannelOpen(id, _) if id == self.channel => {
-                self.open = true;
-                let preamble = self.preamble.clone();
-                for chunk in preamble.chunks(MAX_CHUNK_BYTES) {
-                    self.outbound.push_front(chunk.to_vec());
-                }
-            }
-            Event::ChannelData(data) if data.id == self.channel => {
-                self.largest_message = self.largest_message.max(data.data.len());
-                self.messages += 1;
-                for event in self.reader.feed(&data.data) {
-                    match event {
-                        StreamEvent::Announced(address) => self.proved = Some(address),
-                        StreamEvent::Message { body, .. } => self.bodies.push(body),
-                        StreamEvent::Closed(reason) => panic!("the page refused: {reason}"),
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn flush(&mut self) -> bool {
-        if !self.open {
-            return false;
-        }
-        let Some(mut channel) = self.rtc.channel(self.channel) else {
-            return false;
-        };
-        let mut wrote = false;
-        while let Some(chunk) = self.outbound.front() {
-            if !channel.write(true, chunk).unwrap() {
-                break;
-            }
-            self.outbound.pop_front();
-            wrote = true;
-        }
-        wrote
-    }
-}
 
 type Filter = Box<dyn FnMut(usize, &[u8]) -> bool>;
 
@@ -378,7 +180,9 @@ impl Net {
         self.events
             .iter()
             .filter_map(|(_, e)| match e {
-                ListenerEvent::Proved { stream, address } => Some((*stream, address.clone())),
+                ListenerEvent::Proved {
+                    stream, address, ..
+                } => Some((*stream, address.clone())),
                 _ => None,
             })
             .collect()
@@ -434,6 +238,13 @@ fn a_page_dials_and_both_preambles_verify() {
         net.proved(),
         vec![(stream, net.pages[page].identity.address.clone())],
         "the listener proves the page's derived address, once"
+    );
+    assert!(
+        net.events.iter().any(|(_, e)| matches!(
+            e,
+            ListenerEvent::Proved { remote, .. } if *remote == net.pages[page].addr
+        )),
+        "the event names where the dial came from"
     );
     assert_eq!(
         net.pages[page].proved.as_deref(),

@@ -3097,6 +3097,7 @@ dependencies = [
  "base64 0.22.1",
  "crc",
  "getrandom 0.2.16",
+ "offline-protocol",
  "offline-protocol-core",
  "offline-protocol-mls",
  "offline-protocol-transport",

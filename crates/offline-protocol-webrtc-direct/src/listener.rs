@@ -95,6 +95,10 @@ pub enum ListenerEvent {
         stream: StreamId,
         /// The address the preamble proved, derived and never claimed.
         address: String,
+        /// Where the dial's first admitted check came from. A bridge counts
+        /// streams per remote IP against its caps with it; it is never an
+        /// identity.
+        remote: SocketAddr,
     },
     /// One message body from a proved stream, undecoded.
     Body {
@@ -193,6 +197,8 @@ struct Dial {
     /// The page's own ICE username, the second half of every STUN USERNAME
     /// it sends. A check is routed by it, never by its source alone.
     remote_ufrag: String,
+    /// The source of the first admitted check.
+    remote: SocketAddr,
     first_check: Instant,
     last_check: Instant,
     rtc_timeout: Instant,
@@ -477,6 +483,7 @@ impl Listener {
             rtc,
             channel,
             remote_ufrag: remote_ufrag.to_string(),
+            remote: source,
             first_check: now,
             last_check: now,
             rtc_timeout: now,
@@ -656,6 +663,7 @@ impl Dial {
                             out.events.push_back(ListenerEvent::Proved {
                                 stream: self.stream,
                                 address,
+                                remote: self.remote,
                             });
                         }
                         StreamEvent::Message { body, .. } => {

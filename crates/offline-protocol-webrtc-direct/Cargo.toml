@@ -45,5 +45,13 @@ str0m = { version = "0.25", default-features = false, features = ["apple-crypto"
 str0m = { version = "0.25", default-features = false, features = ["aws-lc-rs"] }
 
 [dev-dependencies]
-# Reads the dial-code conformance vectors in tests/data.
+# Reads the dial-code conformance vectors in tests/data, and writes the
+# example listener's output lines.
 serde_json = { workspace = true }
+# The full engine behind the example listener (examples/listener) and its
+# test (tests/example_engine.rs). A dev-dependency only: the listener never
+# reaches the engine, the bridge above it does. Declared here rather than
+# inherited, as offline-protocol-web declares it, because cargo ignores
+# `default-features = false` beside `workspace = true`, and the defaults add
+# the telemetry pipe's thread and TLS stack and the file stores.
+offline-protocol = { path = "../offline-protocol", version = "0.33.0", default-features = false }
