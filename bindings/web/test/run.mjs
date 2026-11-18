@@ -5,13 +5,14 @@
 // Usage: node test/run.mjs <base-url> <relay-url> <timeout-ms> <page>...
 // BROWSERS narrows the engines (default: chromium firefox webkit). STUN_URL,
 // when set, is passed to every page as `stun`. LISTENER names the example
-// WebRTC Direct listener that direct.html dials (test/direct-listener.mjs).
+// WebRTC Direct listener that direct.html dials, and DIRECT_LISTENER=python
+// has it dial the Python host instead (test/direct-listener.mjs).
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, firefox, webkit } from "playwright";
-import { attachListener, privateAddress } from "./direct-listener.mjs";
+import { attachListener, listenerCommand, privateAddress } from "./direct-listener.mjs";
 
 const [base, relay, timeoutArg, ...pages] = process.argv.slice(2);
 const timeout = Number(timeoutArg);
@@ -53,7 +54,7 @@ const directHost = privateAddress();
 const harnesses = {
   "test/direct.html": (page) =>
     attachListener(page, {
-      binary: process.env.LISTENER ?? "../../target/debug/examples/listener",
+      command: listenerCommand(),
       host: directHost,
       verbose: Boolean(process.env.VERBOSE),
     }),

@@ -614,6 +614,92 @@ again.
 The kernel's flag is the defect, and a kernel without it never takes this
 path: the refusal never comes.
 
+## P18. A dialled stream is a row in the one stream table, and the newer of two wins
+
+**Invariants:** a stream a page dialled to this host's WebRTC Direct listener
+([ADR 0039](../adr/0039-a-browser-dials-a-native-device-from-a-code.md),
+[stream framing](../spec/stream-framing.md#dialling-a-listener-from-a-browser))
+is held in the same table as the TCP streams of P9, under the same caps and
+the same one-announced-stream-per-address rule, so the core sees one
+announcement and, later, one loss per address whichever kind carries it. Of
+two dialled streams proving one address the newer is kept; against a stream
+of the other kind the existing one stays. A dialled stream counts as
+inbound, from the address its first check came from. A stream proving this
+host's own address is refused. The dial code is returned to the
+application and never logged. The listener's socket is bound to the one
+private or link-local address the application names, never a wildcard.
+
+`PeerStreamManager.open_webrtc_direct(host, port=0)` opens the listener once
+the transport is running and returns the code's fragment; the whole
+`WebrtcDirectCode` is `webrtc_direct_code` while it is open, and
+`close_webrtc_direct()` (or `stop()`) closes it. Opening again closes the
+previous listener first: its streams are reported lost and its code dies,
+because the certificate, credentials and port are fresh on every open. The
+listener itself (admission by authenticated check only, DTLS, the data
+channel, the preamble and the framing) is the FFI's `webrtc_direct_*`, and
+this binding moves only what the UDL contract gives it: every datagram the
+socket receives, unfiltered; every datagram and event the listener queued,
+after every call; and a `webrtc_direct_tick` on an asyncio timer re-armed
+from its own return. `_WebrtcDirectListener` holds that loop, apart from the
+manager, because none of it is a stream rule. Everything runs on the event
+loop, and a handler that calls back into the listener (a refusal closing a
+stream) only marks the pump to go round again, so events are handled in
+order and never inside one another.
+
+- **One table.** A dialled stream is a `_DialledStream` row in the
+  manager's `_streams` and `_by_peer`, beside the TCP `_Stream`s, and both
+  go through `_hold` and `_new_stream_wins`. A table per kind would let a
+  page and a TCP peer each announce the same address, and the first close
+  would tell the core a reachable peer is gone, which a copied preamble
+  ([R16](../security/threat-model.md#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier))
+  is enough to cause.
+- **The newer dialled stream wins.** Only the page dials, so the
+  lower-address tie-break of P9 has no race to settle here, and under it a
+  host whose address is the lower would keep the older dialled stream: a
+  page that reloaded, or came back after a Wi-Fi drop, would be refused
+  until the dead stream's consent ran out, up to 15 s, while the page,
+  which closed its old link before dialling again (W3, W16), waits on a
+  stream this host will not hold. The superseded stream is closed with
+  `webrtc_direct_close_stream`, out of the table first, so its `Closed`
+  reports nothing, and the core is not told a second time. Against a TCP
+  stream the existing one stays, in both directions, so neither kind can
+  take an address from the other. `every_peer_stream_manager_keeps_the_newer_dialled_stream`
+  pins the lines the rule is made of, and a mobile manager that gains a
+  listener adds its row there.
+- **The caps cover both kinds.** A proved dial is refused, closed and never
+  announced when the table already holds `max_streams` (sixty-four), or its
+  page's address already holds `max_streams_per_host` (eight) inbound
+  streams, TCP or dialled. A stream it would supersede is not counted, so a
+  page at the cap can still reload. Counted as outbound, dialled streams
+  would let one machine hold the per-host bound twice over. The listener
+  bounds what comes before a proof itself (four pending dials, ten seconds
+  to prove).
+- **A dial proving this host's address is refused**: a copied preamble or a
+  loop, and announcing it would make the engine route to itself.
+- **The code is never logged.** It carries the listener's ICE password, and
+  anyone holding it can dial while the listener is open
+  ([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)).
+  The diagnostics name the address and port only, and a test fails if the
+  password reaches the log or a diagnostic.
+- **The socket is bound to the given address.** A code names one address,
+  and a socket on every interface would take checks from networks the code
+  was never shown on. An IPv6 zone is stripped before the FFI, which refuses
+  one, and the socket's own scope is added back to a link-local destination.
+
+`test_peer_stream_webrtc_direct.py` drives the bridge through a fake
+listener that yields scripted events, over a real UDP socket, and asserts
+exactly the `wifi_direct_*` calls: one announcement and one loss, a
+supersede that is silent, a TCP stream and a dial each keeping an address
+against the other, the caps, the per-host count, the own-address refusal,
+the listener's close and the code kept out of the log. Each was confirmed by
+breaking the rule it covers (the older dialled stream kept, a second
+announcement, a dialled stream counted as outbound, the own-address check
+removed, either kind taking an address from the other, the fragment logged).
+One test opens the real library's listener on a private address of this
+machine and checks the code and that junk gets no reply. A page dialling
+the Python host end to end is `direct.html` with `DIRECT_LISTENER=python`
+([web bridge](web.md)), which runs in Chromium, Firefox and WebKit.
+
 ## Testing
 
 ```bash

@@ -945,7 +945,12 @@ start there, because Firefox answers it by asking the user.
   with nothing announced (W16). Each check was confirmed by breaking the
   code it covers: an edited local description, the carrier's ICE servers,
   no expected address, the old connection kept on a dial again, and a
-  failure reported as a close.
+  failure reported as a close. With `DIRECT_LISTENER=python` the runner
+  starts the Python host instead (`test/direct_python_host.py`, the Python
+  package's `PeerStreamManager` behind its WebRTC Direct listener, run by
+  `bindings/python/.venv`), which prints the same lines and takes the same
+  commands, so the same page checks the Python bridge
+  ([Python bridge P18](python.md#p18-a-dialled-stream-is-a-row-in-the-one-stream-table-and-the-newer-of-two-wins)).
 - `nostr-signal.html`: two nodes that share only a room code meet through
   a Nostr relay, link over WebRTC and send an ephemeral direct message. A
   join to a room nobody hosts gives up at its deadline, and a call to a

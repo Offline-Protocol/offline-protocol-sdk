@@ -21681,6 +21681,53 @@ mod tests {
         }
     }
 
+    /// Every peer-stream manager that holds streams a page dialled to its
+    /// WebRTC Direct listener keeps the newer of two for one address, and
+    /// the existing stream against a stream of the other kind.
+    ///
+    /// Only the page dials, so the lower-address rule has no race to settle
+    /// here, and under it a listener whose address is the lower would keep
+    /// the older dialled stream: a page that reloaded, or came back after a
+    /// Wi-Fi drop, would be refused until the dead stream's consent ran out,
+    /// up to 15 s, while the page (which keeps its first link and closed
+    /// the old one) waits on a stream the listener will not hold. Nothing
+    /// fails on either side; the page just cannot reconnect. A hand-mirrored
+    /// policy (docs/bridges C5, ADR 0039 decision 6, the stream framing
+    /// chapter's "What a receiver owes"), pinned as the lines the rule is
+    /// made of. A manager that gains a listener adds its row here.
+    #[test]
+    fn every_peer_stream_manager_keeps_the_newer_dialled_stream() {
+        let python_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/python/offline_protocol_sdk/peer_stream_manager.py");
+        let python = std::fs::read_to_string(&python_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", python_path.display()));
+
+        let managers: [(&str, &str, &[&str]); 1] = [(
+            "bindings/python/offline_protocol_sdk/peer_stream_manager.py",
+            &python,
+            &[
+                // A TCP stream and a dialled one say which they are.
+                "class _Stream:\n    \"\"\"One stream, both directions, and what it has proved.\"\"\"\n\n    #: A TCP stream: this host or the peer may have opened it.\n    dialled = False",
+                "    #: Only a page dials a listener (ADR 0039).\n    dialled = True",
+                // The rule, ahead of the lower-address tie-break.
+                "        if new.dialled or older.dialled:\n            return new.dialled and older.dialled\n        local = self.local_address",
+                // Both kinds go through it, from one table.
+                "if not self._new_stream_wins(stream, older, derived):",
+                "            self._streams.add(stream)\n            if self._hold(stream, address):",
+            ],
+        )];
+        for (path, code, needed) in managers {
+            for line in needed {
+                assert!(
+                    code.contains(line),
+                    "{path}: of two dialled streams for one address the newer must win, and \
+                     against a stream of the other kind the existing one stays, in the one \
+                     stream table. Expected to find:\n  {line}"
+                );
+            }
+        }
+    }
+
     /// A peer-stream redial ladder starts over only after a stream that
     /// carried its peer (a body after the preamble, or the address held
     /// through the keepalive window), on iOS and Android alike.
