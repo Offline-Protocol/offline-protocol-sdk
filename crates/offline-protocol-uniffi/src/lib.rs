@@ -21805,6 +21805,43 @@ mod tests {
         }
     }
 
+    /// An open WebRTC Direct listener holds the Android stream layer up, and
+    /// closing it reports the layer only after its streams were reported lost.
+    ///
+    /// A phone sharing its hotspot, on no Wi-Fi network and with Wi-Fi P2P
+    /// off, has neither carrier up. A page dialled its listener there and
+    /// proved its address, the phone counted it nearby, and no MLS session
+    /// ever formed: the core holds a link usable only while the layer is up
+    /// (stream framing, "Position among the transports"), and the layer was
+    /// reported for P2P and the LAN alone. On a Wi-Fi network the LAN held it
+    /// up and hid it. `PeerStreamLayerTest` pins the rule and the order in
+    /// `PeerStreamLayer`; these are the manager lines that feed it, which no
+    /// JVM test reaches. iOS and Python report the layer up from start to
+    /// stop, so a listener open while they run is always under an up layer.
+    #[test]
+    fn android_webrtc_direct_listener_holds_the_stream_layer_up() {
+        let manager =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        for line in [
+            // The listener is one of the things the layer is up for.
+            "carriers = { PeerStreamLayer.Carriers(p2p = p2pUp, lan = lanUp, listener = webrtc != null) },",
+            // Reported before the code is returned, also when the open fails.
+            "try { return openWebrtcDirectListener(choice, wifi?.first) } finally { \
+             confinement.runSync { reportLayer() } }",
+            // Every close reports after its streams ended, on the transport thread.
+            "fun closeWebrtcDirect(): Boolean = confinement.runSync { \
+             layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } } }",
+            "layer.afterEnding { synchronized(webrtcLock) { if (webrtc === only) closeWebrtcDirectLocked() } }",
+        ] {
+            assert!(
+                manager.contains(line),
+                "WifiDirectManager.kt: an open WebRTC Direct listener must hold the stream layer \
+                 up, reported on the transport thread after its streams were reported lost. \
+                 Expected to find:\n  {line}"
+            );
+        }
+    }
+
     /// A peer-stream redial ladder starts over only after a stream that
     /// carried its peer (a body after the preamble, or the address held
     /// through the keepalive window), on iOS and Android alike.

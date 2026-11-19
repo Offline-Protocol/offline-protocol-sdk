@@ -366,6 +366,20 @@ never inside one another.
   its answers would follow the default network, which on a Wi-Fi with no
   internet is cellular, and a wildcard address cannot go in a code and
   would admit checks from networks the code was never shown on.
+- **An open listener holds the stream layer up.** The core holds a link
+  usable only while the layer is up
+  ([stream framing](../spec/stream-framing.md#position-among-the-transports)),
+  and a phone sharing its hotspot, on no Wi-Fi network and
+  with Wi-Fi P2P off, has neither carrier up. Reported for P2P and the LAN
+  alone, a page dialled such a phone, proved its address and was counted
+  nearby, and no key package ever went out, so no MLS session formed; on a
+  Wi-Fi network the LAN carrier held the layer up and hid it.
+  `PeerStreamLayer` reports the layer up while P2P, the LAN or a listener
+  is, once per edge, on the transport thread: before an open returns its
+  code, and after a close (by the application, the hotspot check, the
+  socket dying) has ended its streams, so each dialled peer is reported
+  lost while the core still holds it, as the LAN going does. `stop()`
+  reports the layer down itself, once, after every stream.
 - **The code never reaches a log.** It carries the listener's ICE password
   and admits whoever holds it while the listener is open
   ([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)).
@@ -378,7 +392,9 @@ The listener lives while the application keeps it open, in the background
 too; iOS will close it when the application leaves the foreground (ADR 0039
 decision 8). `WebrtcDirectDialledStreamsTest` pins the table's rules and
 `WebrtcDirectListenerTest` the pump, the clock, the close and the code, both
-on a fake engine. A page dialling a phone is covered only by a device run
+on a fake engine; `PeerStreamLayerTest` pins the layer rule and its order,
+and `android_webrtc_direct_listener_holds_the_stream_layer_up` the manager
+lines that feed it. A page dialling a phone is covered only by a device run
 (C9).
 
 ## Testing

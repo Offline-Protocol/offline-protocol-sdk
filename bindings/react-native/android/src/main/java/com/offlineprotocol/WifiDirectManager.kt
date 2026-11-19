@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.*
 import android.os.Build
@@ -312,11 +313,21 @@ class WifiDirectManager(
     // State tracking. Volatile: written on the transport thread, read by the
     // socket thread that decides whether a client reconnects.
     @Volatile private var isGroupOwner = false
-    // Whether the core was last told the stream layer is up: while either
-    // carrier is ([reportLayer]). Wi-Fi P2P going off with no LAN reports it
-    // down; coming back on has to report it up again, or the core keeps the
-    // slot down while streams prove peers over it.
-    @Volatile private var layerUp = false
+    // What the core was last told of the stream layer: up while either
+    // carrier is or a WebRTC Direct listener is open ([reportLayer]). Wi-Fi
+    // P2P going off with no LAN reports it down; coming back on has to
+    // report it up again, or the core keeps the slot down while streams
+    // prove peers over it. Transport thread only.
+    private val layer = PeerStreamLayer(
+        carriers = { PeerStreamLayer.Carriers(p2p = p2pUp, lan = lanUp, listener = webrtc != null) },
+        report = { up ->
+            try {
+                protocol.wifiDirectStatusChanged(up)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying protocol", e)
+            }
+        },
+    )
     // Whether Wi-Fi P2P is on, and whether this device is on a Wi-Fi network
     // it can find LAN peers on.
     @Volatile private var p2pUp = false
@@ -656,8 +667,10 @@ class WifiDirectManager(
         endFastLinkOnStop()
 
         // Before the streams: the listener's Closed events end its dialled
-        // streams through the table, each reported lost once.
-        closeWebrtcDirect()
+        // streams through the table, each reported lost once. Not through
+        // [closeWebrtcDirect], which reports the layer: stop reports it down
+        // itself, once, after every stream below has ended.
+        synchronized(webrtcLock) { closeWebrtcDirectLocked() }
 
         lan?.stop()
         lan = null
@@ -692,7 +705,7 @@ class WifiDirectManager(
         p2pUp = false
         lanUp = false
         lanAddresses = emptySet()
-        layerUp = false
+        layer.stopped()
         try {
             protocol.wifiDirectStatusChanged(false)
         } catch (e: Exception) {
@@ -2108,19 +2121,11 @@ class WifiDirectManager(
     }
 
     /**
-     * Tells the core the stream layer is up while either carrier is, once
-     * per edge. Runs on the transport thread: it is an FFI call.
+     * Tells the core the stream layer is up while either carrier is or a
+     * WebRTC Direct listener is open, once per edge ([PeerStreamLayer]).
+     * Runs on the transport thread: it is an FFI call.
      */
-    private fun reportLayer() {
-        val up = p2pUp || lanUp
-        if (up == layerUp) return
-        layerUp = up
-        try {
-            protocol.wifiDirectStatusChanged(up)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error notifying protocol", e)
-        }
-    }
+    private fun reportLayer() = layer.reportEdge()
 
     // MARK: - WebRTC Direct (ADR 0039)
 
@@ -2246,6 +2251,10 @@ class WifiDirectManager(
      * the Wi-Fi network goes or loses the address, or when the hotspot's
      * interface goes down or loses it ([webrtcHotspotCheck]).
      *
+     * An open listener holds the stream layer up ([PeerStreamLayer]): on a
+     * hotspot neither carrier may be up, and a link proved while the layer
+     * is down is one the core cannot use, so no MLS session would form.
+     *
      * Blocks for the open (a certificate is made), so never on the main
      * thread. Throws when the transport is not running, the device has no
      * private address on a Wi-Fi network or a hotspot of its own, or the
@@ -2261,6 +2270,23 @@ class WifiDirectManager(
         val wifi = confinement.runSync { lan?.wifiNetwork() }
         val wifiAddresses = wifi?.second?.linkAddresses?.map { it.address }
         val choice = WebrtcDirectAddress.choose(wifiAddresses, WebrtcDirectAddress::interfaces, ::knownNetworks)
+        // The layer is reported after the lock is let go (the transport
+        // thread takes it) and before the code is returned: up, so a page
+        // cannot dial a listener whose streams the core holds unusable; down
+        // when this open closed the only thing holding it up and then failed,
+        // after that listener's streams were reported lost.
+        try {
+            return openWebrtcDirectListener(choice, wifi?.first)
+        } finally {
+            confinement.runSync { reportLayer() }
+        }
+    }
+
+    /** Replaces the listener with one bound to [choice], under [webrtcLock]; see [openWebrtcDirect]. */
+    private fun openWebrtcDirectListener(
+        choice: WebrtcDirectAddress.Choice,
+        wifiNetwork: Network?,
+    ): WebrtcDirectListener.Code {
         val ip = choice.ip
         synchronized(webrtcLock) {
             closeWebrtcDirectLocked()
@@ -2268,7 +2294,7 @@ class WifiDirectManager(
             try {
                 if (choice is WebrtcDirectAddress.Choice.WifiClient) {
                     // Non-null: the choice was made from its addresses.
-                    wifi?.first?.bindSocket(socket)
+                    wifiNetwork?.bindSocket(socket)
                 }
                 socket.bind(InetSocketAddress(ip, 0))
             } catch (e: Exception) {
@@ -2323,19 +2349,26 @@ class WifiDirectManager(
 
     /**
      * Closes the WebRTC Direct listener, if one is open. Every dialled stream
-     * ends and each that held an address is reported lost once; the code
-     * admits nothing again. False when none was open.
+     * ends and each that held an address is reported lost once, and then,
+     * when nothing else holds the stream layer up, the layer is reported
+     * down ([PeerStreamLayer]); the code admits nothing again. False when
+     * none was open. Blocks for the transport thread, so never on the main
+     * thread.
      */
-    fun closeWebrtcDirect(): Boolean = synchronized(webrtcLock) { closeWebrtcDirectLocked() }
+    fun closeWebrtcDirect(): Boolean = confinement.runSync {
+        layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } }
+    }
 
+    /** [closeWebrtcDirect], if [only] is still the listener. Transport thread. */
     private fun closeWebrtcDirect(only: WebrtcDirectListener) {
-        synchronized(webrtcLock) { if (webrtc === only) closeWebrtcDirectLocked() }
+        layer.afterEnding { synchronized(webrtcLock) { if (webrtc === only) closeWebrtcDirectLocked() } }
     }
 
     /**
      * Closes a listener bound to the Wi-Fi network unless the network still
      * gives this device its address ([addresses] null: the network went). A
-     * hotspot listener is left to [webrtcHotspotCheck].
+     * hotspot listener is left to [webrtcHotspotCheck]. Its caller,
+     * [lanNetworkChanged], reports the layer after this and the LAN streams.
      */
     private fun closeWifiWebrtcDirectUnlessHeld(addresses: Set<InetAddress>?) {
         synchronized(webrtcLock) {
