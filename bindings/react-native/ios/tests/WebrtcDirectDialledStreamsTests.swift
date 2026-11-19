@@ -190,6 +190,24 @@ final class WebrtcDirectDialledStreamsTests: XCTestCase {
         XCTAssertNil(session.handle(for: "peer-z"))
     }
 
+    /// The manager keeps a refused dial out of its own table, so nothing
+    /// calls `ended` for it: the listener's close finds no row. Whatever the
+    /// session kept for it would stay until `endAll`, a row per dial for
+    /// anyone with the code.
+    func testARefusedDialLeavesNothingBehindWithoutAnEnd() {
+        prove("in1", as: "peer-b")
+        XCTAssertFalse(dial("dial1", as: "peer-z"), "this device's own address")
+        XCTAssertFalse(dial("dial2", as: "peer-c", admit: false), "past a cap")
+        XCTAssertFalse(dial("dial3", as: "peer-b"), "a TCP stream holds the address")
+        XCTAssertEqual(disconnected, ["dial1", "dial2", "dial3"])
+        for handle in ["dial1", "dial2", "dial3"] {
+            XCTAssertNil(session.provedAddress(of: handle), "\(handle) is forgotten without an end")
+        }
+        XCTAssertEqual(session.provedAddress(of: "in1"), "peer-b")
+        XCTAssertEqual(session.handle(for: "peer-b"), "in1")
+        XCTAssertEqual(host.events, ["connected:peer-b"], "a refusal reports nothing")
+    }
+
     func testADialPastACapIsClosedAndAnnouncesNothing() {
         XCTAssertFalse(dial("dial1", as: "peer-b", admit: false))
         XCTAssertEqual(disconnected, ["dial1"])

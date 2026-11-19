@@ -123,8 +123,9 @@ final class PeerStreamSession<Handle: Hashable> {
     }
 
     /// The address `handle`'s preamble proved, until the stream ends, or nil.
-    /// Whether or not the stream went on to hold it: one refused as the
-    /// losing duplicate proved its address all the same. The owner's queue.
+    /// Whether or not a TCP stream went on to hold it: one refused as the
+    /// losing duplicate proved its address all the same. A refused dial is
+    /// forgotten at once (`dialProved`). The owner's queue.
     func provedAddress(of handle: Handle) -> String? {
         linkStates[handle]?.preamble.address
     }
@@ -192,11 +193,29 @@ final class PeerStreamSession<Handle: Hashable> {
     /// own old stream.
     ///
     /// True when the stream holds the address. False when it was refused, in
-    /// which case it was disconnected and nothing was announced.
+    /// which case it was disconnected, nothing was announced, and the
+    /// session already holds nothing for it: no `ended` follows a refusal.
+    /// The owner keeps a refused dial out of its own table, so the
+    /// listener's later close of it finds nothing to end, and a state kept
+    /// here would stay until `endAll`. Anyone with the code could grow the
+    /// table without bound by dialling at the cap, or by replaying a page's
+    /// preamble against an address another stream holds.
     func dialProved(_ handle: Handle, address: String, admits: (_ replacing: Handle?) -> Bool) -> Bool {
         let link = Link(preamble: PeerStreamPreamble(proved: address))
         link.sentPreamble = true
         linkStates[handle] = link
+        let held = admitDialled(handle, link, address: address, admits: admits)
+        if !held {
+            // Reports nothing: a refused dial never held its address in
+            // `links`, and `refuse` already reported any it had.
+            ended(handle)
+        }
+        return held
+    }
+
+    private func admitDialled(
+        _ handle: Handle, _ link: Link, address: String, admits: (_ replacing: Handle?) -> Bool
+    ) -> Bool {
         guard let host = host else {
             refuse(handle, link, reason: "no host")
             return false

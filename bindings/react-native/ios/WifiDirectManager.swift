@@ -1223,7 +1223,8 @@ extension WifiDirectManager: WebrtcDirectSink {
     /// A page's preamble verified on the listener's `stream`: the caps, then
     /// the one-stream-per-address rule, then the announcement, as for a TCP
     /// stream (`PeerStreamSession.dialProved`). A refused stream is closed
-    /// through the listener and nothing is announced.
+    /// through the listener, nothing is announced, and neither this table nor
+    /// the session keeps it, so its later `Closed` finds nothing to end.
     func webrtcDirectProved(
         _ listener: WebrtcDirectListener, stream id: UInt64, address: String, remoteIp: String
     ) {
