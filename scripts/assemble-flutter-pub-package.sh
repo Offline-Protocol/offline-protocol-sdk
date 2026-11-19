@@ -26,7 +26,7 @@
 #
 # Usage:
 #   bash scripts/assemble-flutter-pub-package.sh \
-#     --output "$RUNNER_TEMP/flutter-pub-package" --version 0.33.0
+#     --output "$RUNNER_TEMP/flutter-pub-package" --version 0.34.0
 #
 # Environment:
 #   PACKAGE_SOURCE_ROOT  optional, defaults to the repository root

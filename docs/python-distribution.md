@@ -83,17 +83,17 @@ advertises `docker0` as well, which breaks LAN peering; the
 ```bash
 export OFFLINE_PROTOCOL_STORE_KEY="$(cat ~/.offline-protocol/store-key)"
 export OP_LISTEN="192.168.1.10:7878"   # this host's LAN address
-docker pull ghcr.io/offline-protocol/offline-protocol-service:0.33.0
+docker pull ghcr.io/offline-protocol/offline-protocol-service:0.34.0
 docker run --rm -it \
   --network host \
   -e OFFLINE_PROTOCOL_STORE_KEY \
   -e OP_LISTEN \
   -v offline-protocol-data:/var/lib/offline-protocol \
-  ghcr.io/offline-protocol/offline-protocol-service:0.33.0
+  ghcr.io/offline-protocol/offline-protocol-service:0.34.0
 ```
 
 In production, pin the image by digest, which
-`docker buildx imagetools inspect ghcr.io/offline-protocol/offline-protocol-service:0.33.0`
+`docker buildx imagetools inspect ghcr.io/offline-protocol/offline-protocol-service:0.34.0`
 prints. The [container README](../bindings/python/docker/README.md) covers
 Compose, the grants a host must give the container, and LAN networking.
 
