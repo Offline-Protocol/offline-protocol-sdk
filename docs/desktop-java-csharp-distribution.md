@@ -43,7 +43,7 @@ Python hosts can use `pip install` instead ([python-distribution.md](python-dist
 
 ```kotlin
 dependencies {
-    implementation("com.offlineprotocol:offline-protocol-java:0.33.0")
+    implementation("com.offlineprotocol:offline-protocol-java:0.34.0")
 }
 ```
 
