@@ -531,6 +531,11 @@ class PeerStreamManager(TransportManager):
         #: Opens one listener at a time: two overlapping opens would each
         #: close the other's and leave a socket no one closes.
         self._webrtc_lock = asyncio.Lock()
+        #: Counts the application's closes. An open records it on entry and
+        #: refuses to install its listener if it moved: a close that runs
+        #: while an open is in flight finds no listener to close, and the
+        #: open would otherwise install one the application believes closed.
+        self._webrtc_closes = 0
         #: listener stream id -> the dialled stream, from its proof until
         #: this side closes it or the listener reports it closed. A stream
         #: not here is not attributed: its bodies and its end are ignored.
@@ -1257,23 +1262,35 @@ class PeerStreamManager(TransportManager):
         reported lost, and its code dies: the certificate, credentials and
         port are fresh on every open.
 
+        A :meth:`close_webrtc_direct` (or :meth:`stop`) called before this
+        returns wins: the new listener is closed and this raises, so a code
+        is never live after the application closed the listener.
+
         Raises :class:`TransportError` when the transport is not running,
-        the address cannot be bound, or the core refuses it (public,
-        loopback or wildcard addresses, which no code may name, or a
-        library built without the ``webrtc-direct`` feature).
+        the listener is closed while it opens, the address cannot be bound,
+        or the core refuses it (public, loopback or wildcard addresses,
+        which no code may name, or a library built without the
+        ``webrtc-direct`` feature).
         """
+        closes = self._webrtc_closes
         async with self._webrtc_lock:
             if self._state != TransportState.RUNNING:
                 raise TransportError(
                     "start the peer-stream transport before opening a WebRTC Direct listener"
                 )
-            self.close_webrtc_direct()
+            self._close_webrtc_listener()
             listener = _WebrtcDirectListener(self)
             code = await listener.open(host, port)
             if self._state != TransportState.RUNNING:
                 # Stopped while the socket was being bound.
                 listener.close()
                 raise TransportError("the peer-stream transport stopped while the listener opened")
+            if self._webrtc_closes != closes:
+                # Closed while the socket was being bound, or while this
+                # open waited for another: the application believes no code
+                # admits a dial (R35), so this one never goes live.
+                listener.close()
+                raise TransportError("the WebRTC Direct listener was closed while it opened")
             self._webrtc = listener
             listener.pump()
             # The address and port, never the fragment: it carries the
@@ -1288,7 +1305,14 @@ class PeerStreamManager(TransportManager):
     def close_webrtc_direct(self) -> None:
         """Close the WebRTC Direct listener, if one is open. Every dialled
         stream ends and each that held an address is reported lost once;
-        the code admits nothing again."""
+        the code admits nothing again. An :meth:`open_webrtc_direct` still
+        in flight raises instead of installing its listener."""
+        self._webrtc_closes += 1
+        self._close_webrtc_listener()
+
+    def _close_webrtc_listener(self) -> None:
+        """Close the installed listener, if any, without touching an open in
+        flight: what an open calls to replace the previous listener."""
         listener = self._webrtc
         if listener is None:
             return
@@ -1559,7 +1583,9 @@ class _WebrtcDirectListener(asyncio.DatagramProtocol):
         logger.warning("WebRTC Direct socket lost: %s", exc)
         self._transport = None
         if self._manager._webrtc is self:
-            self._manager.close_webrtc_direct()
+            # Not the application's close: an open waiting to replace this
+            # listener still goes ahead.
+            self._manager._close_webrtc_listener()
         else:
             self.close()
 

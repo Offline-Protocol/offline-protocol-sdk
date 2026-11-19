@@ -469,6 +469,48 @@ class TestListenerLifecycle:
             await manager.stop()
         assert fake_listener.close_calls == 0
 
+    async def test_a_close_while_the_open_binds_wins(self, protocol, fake_listener, fake_verifier):
+        # The application closes while the socket is being bound, when no
+        # listener is installed yet: the open must not install one after,
+        # or a code the application believes dead admits dials (R35).
+        manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
+        await manager.start()
+        loop = asyncio.get_running_loop()
+        binding = asyncio.Event()
+        release = asyncio.Event()
+        transports: list[asyncio.DatagramTransport] = []
+        bind = loop.create_datagram_endpoint
+
+        async def gated_bind(*args, **kwargs):
+            binding.set()
+            await release.wait()
+            transport, protocol_ = await bind(*args, **kwargs)
+            transports.append(transport)
+            return transport, protocol_
+
+        loop.create_datagram_endpoint = gated_bind  # type: ignore[method-assign]
+        try:
+            opening = asyncio.create_task(manager.open_webrtc_direct("127.0.0.1"))
+            await binding.wait()
+            manager.close_webrtc_direct()
+            release.set()
+            with pytest.raises(TransportError, match="closed while it opened"):
+                await opening
+            assert manager.webrtc_direct_code is None
+            assert manager.get_metrics()["webrtc_direct_port"] is None
+            # The core's listener was opened and closed again, and the socket
+            # with it.
+            assert len(fake_listener.opened) == 1
+            assert fake_listener.close_calls == 1
+            assert len(transports) == 1 and transports[0].is_closing()
+            # A later open is the application's own and goes ahead.
+            del loop.create_datagram_endpoint
+            assert await manager.open_webrtc_direct("127.0.0.1") == FRAGMENT
+        finally:
+            if "create_datagram_endpoint" in vars(loop):
+                del loop.create_datagram_endpoint
+            await manager.stop()
+
     async def test_a_body_the_listener_refuses_is_dropped(self, host, protocol, fake_listener):
         fake_listener.prove(1, PEER_ADDRESS)
         deliver(host)

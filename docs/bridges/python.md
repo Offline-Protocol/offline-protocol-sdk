@@ -627,7 +627,8 @@ of the other kind the existing one stays. A dialled stream counts as
 inbound, from the address its first check came from. A stream proving this
 host's own address is refused. The dial code is returned to the
 application and never logged. The listener's socket is bound to the one
-private or link-local address the application names, never a wildcard.
+private or link-local address the application names, never a wildcard. A
+close the application makes before an open returns wins over that open.
 
 `PeerStreamManager.open_webrtc_direct(host, port=0)` opens the listener once
 the transport is running and returns the code's fragment; the whole
@@ -681,6 +682,19 @@ order and never inside one another.
   ([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)).
   The diagnostics name the address and port only, and a test fails if the
   password reaches the log or a diagnostic.
+- **A close during an open wins.** `close_webrtc_direct()` is synchronous
+  and `open_webrtc_direct` awaits the bind, so a close can run while an open
+  is in flight, when no listener is installed for it to close. The open
+  records `_webrtc_closes` on entry, and when a close has counted since, it
+  closes the listener it just opened and raises `TransportError`. Without
+  that, the open installs the listener after the close returned, and the
+  application believes its code is dead while the code still admits dials
+  ([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener):
+  closing the listener ends every use of the code). Only the application's
+  close counts: an open replacing the previous listener, and a socket the
+  interface took away, close through `_close_webrtc_listener`, which leaves
+  the count alone, so neither fails an open. iOS and Android serialise open
+  and close, so this is the Python bridge's alone.
 - **The socket is bound to the given address.** A code names one address,
   and a socket on every interface would take checks from networks the code
   was never shown on. An IPv6 zone is stripped before the FFI, which refuses
@@ -691,10 +705,12 @@ listener that yields scripted events, over a real UDP socket, and asserts
 exactly the `wifi_direct_*` calls: one announcement and one loss, a
 supersede that is silent, a TCP stream and a dial each keeping an address
 against the other, the caps, the per-host count, the own-address refusal,
-the listener's close and the code kept out of the log. Each was confirmed by
-breaking the rule it covers (the older dialled stream kept, a second
-announcement, a dialled stream counted as outbound, the own-address check
-removed, either kind taking an address from the other, the fragment logged).
+the listener's close, a close during an open's bind winning and the code
+kept out of the log. Each was confirmed by breaking the rule it covers (the
+older dialled stream kept, a second announcement, a dialled stream counted
+as outbound, the own-address check removed, either kind taking an address
+from the other, the open installing its listener after a close, the
+fragment logged).
 One test opens the real library's listener on a private address of this
 machine and checks the code and that junk gets no reply. A page dialling
 the Python host end to end is `direct.html` with `DIRECT_LISTENER=python`
