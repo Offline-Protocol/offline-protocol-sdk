@@ -114,7 +114,9 @@ jobs:
             # The crates the FFI library links, short of the FFI crate. Named
             # one by one because `offline-protocol-leaf` and
             # `offline-protocol-web` are not on the engine. A new crate edits
-            # the root Cargo.toml, which every list here already includes.
+            # the root Cargo.toml only in the commit that adds it, so it is
+            # named here too: a later change to it alone would otherwise skip
+            # every job that builds the shipped libraries.
             engine: &engine
               - *cargo
               - 'crates/offline-protocol-core/**'
@@ -127,6 +129,9 @@ jobs:
               - 'crates/offline-protocol-data/**'
               - 'crates/offline-protocol-telemetry-wire/**'
               - 'crates/offline-protocol/**'
+              # The WebRTC Direct listener, which the shipped libraries build
+              # with the `webrtc-direct` feature (ADR 0039).
+              - 'crates/offline-protocol-webrtc-direct/**'
 
             ffi: &ffi
               - *engine
