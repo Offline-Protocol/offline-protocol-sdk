@@ -5,10 +5,12 @@ import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 /**
@@ -35,6 +37,17 @@ import kotlin.concurrent.thread
  * pump to go round again, so events are never handled inside one another.
  * The lock is taken before a stream's lock in [PeerStreamSockets], never
  * after it.
+ *
+ * Only the listener's own threads take [lock]: the receive thread, and
+ * [clock]'s one thread, which runs the timer and every [send] and
+ * [close] (of a stream) a caller hands it, in the order they were handed.
+ * The pump hands the sink every event it finds, and the sink calls the core
+ * (a body can mean an MLS decrypt under the core's lock), so a caller that
+ * took the lock itself would run those deliveries, or wait out the receive
+ * thread's. The caller that sends is the transport thread, which Wi-Fi P2P's
+ * broadcasts share: a TCP stream's send only queues a frame for its writer,
+ * and a dialled stream's must not cost more. The exception is [close] of the
+ * whole listener, which reports every stream's loss before it returns.
  *
  * The dial code carries the listener's ICE password. It is returned to the
  * caller and never logged or put in a diagnostic, and [Code.toString] leaves
@@ -107,16 +120,28 @@ internal class WebrtcDirectListener(
             val v4 = addresses.filterIsInstance<Inet4Address>()
             return v4.firstOrNull { it.isSiteLocalAddress } ?: v4.firstOrNull { it.isLinkLocalAddress }
         }
+
+        /**
+         * The most bytes [send] holds waiting for [clock], the engine's own
+         * bound on what a stream queues behind its channel: more than that
+         * reaching the engine would close the stream when it landed, and
+         * without a bound a stalled pump would queue the outbox in memory.
+         */
+        const val MAX_HANDED_BYTES = 8L * 1024 * 1024
     }
 
     private val lock = Any()
     private var pumping = false
     private var again = false
     @Volatile private var closed = false
+    /** Bytes handed to [send] that [clock] has not yet given the engine. */
+    private val handedBytes = AtomicLong(0)
     private var socket: DatagramSocket? = null
     private var timer: ScheduledFuture<*>? = null
 
-    // Daemon, so a listener dropped without close() does not pin the process.
+    // The listener's own thread: the timer, and every send and stream close
+    // a caller hands it. Daemon, so a listener dropped without close() does
+    // not pin the process.
     private val clock: ScheduledExecutorService =
         ScheduledThreadPoolExecutor(1) { r ->
             Thread(r, "offline-webrtc-direct-timer").apply { isDaemon = true }
@@ -203,25 +228,68 @@ internal class WebrtcDirectListener(
 
     // MARK: - PeerStreamSockets.Dials
 
+    /**
+     * Hands [body] to [clock] and returns: the caller never runs the pump
+     * or waits on [lock]. Throws when the listener is closed, or when
+     * [MAX_HANDED_BYTES] are already waiting. A send the engine refuses once
+     * it is given one (the stream ended, or past its bound, which also
+     * closes the stream and so reports the loss once) drops the body; the
+     * core retries either way.
+     */
     override fun send(stream: Long, body: ByteArray) {
-        synchronized(lock) {
-            check(!closed) { "the WebRTC Direct listener is closed" }
-            try {
-                engine.send(stream, body)
-            } finally {
-                // The Closed for a stream the send ended, and the datagrams
-                // the send queued, go out now.
-                pumpLocked(tick = true)
+        check(!closed) { "the WebRTC Direct listener is closed" }
+        val size = body.size.toLong()
+        if (handedBytes.addAndGet(size) > MAX_HANDED_BYTES) {
+            handedBytes.addAndGet(-size)
+            throw IllegalStateException("too much is waiting for the WebRTC Direct listener")
+        }
+        try {
+            clock.execute {
+                handedBytes.addAndGet(-size)
+                synchronized(lock) {
+                    if (closed) return@execute
+                    try {
+                        engine.send(stream, body)
+                    } catch (_: Exception) {
+                        diagnostic("warning", "WebRTC Direct body dropped: the stream refused it", mapOf(
+                            "stream" to stream,
+                            "size" to body.size,
+                        ))
+                    }
+                    // The Closed for a stream the send ended, and the
+                    // datagrams the send queued, go out now.
+                    pumpLocked(tick = true)
+                }
             }
+        } catch (e: RejectedExecutionException) {
+            // Closed since the check above.
+            handedBytes.addAndGet(-size)
+            throw IllegalStateException("the WebRTC Direct listener is closed", e)
         }
     }
 
+    /**
+     * Ends [stream]. Inside the pump (a handler's refusal or supersede) at
+     * once, so its `Closed` is handled in the same pump; from any other
+     * thread handed to [clock], after every send handed before it.
+     */
     override fun close(stream: Long) {
-        synchronized(lock) {
-            if (closed) return
-            engine.closeStream(stream)
-            pumpLocked(tick = true)
+        if (closed) return
+        if (Thread.holdsLock(lock)) {
+            closeStreamLocked(stream)
+            return
         }
+        try {
+            clock.execute { synchronized(lock) { closeStreamLocked(stream) } }
+        } catch (_: RejectedExecutionException) {
+            // The listener closed, and every stream with it.
+        }
+    }
+
+    private fun closeStreamLocked(stream: Long) {
+        if (closed) return
+        engine.closeStream(stream)
+        pumpLocked(tick = true)
     }
 
     // MARK: - The socket

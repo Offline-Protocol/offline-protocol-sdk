@@ -329,10 +329,21 @@ contract gives it: every datagram the socket receives, unfiltered; every
 datagram and event the engine queued, after every call; and a tick on a
 timer re-armed from the tick's own return. Every call into the engine is
 made under that class's one lock, so the engine's listener is never entered
-from two threads at once (the receive thread, the timer, the transport
-thread's sends), and a handler that calls back in (a refusal, a supersede)
-only marks the pump to go round again, so events are handled in order and
-never inside one another.
+from two threads at once, and a handler that calls back in (a refusal, a
+supersede) only marks the pump to go round again, so events are handled in
+order and never inside one another. Only the listener's own threads take
+that lock: the receive thread, and one thread that runs the timer and every
+send and stream close handed to it, in the order they were handed. The
+pump after a call hands every queued event to the table, and a body reaches
+the core, which can mean an MLS decrypt under the core's lock; a send that
+ran it on the transport thread, which Wi-Fi P2P's broadcasts share, or
+waited there on the receive thread's deliveries, would stall both, where a
+TCP stream's send only queues a frame for its writer. So a send returns
+once handed. A send the engine then refuses (the stream ended, or past its
+8 MiB bound, which also closes the stream, whose `Closed` reports the loss
+once) is dropped and the core retries; more than that bound waiting to be
+handed is refused at once. Closing the listener is the exception: it runs
+on the caller's thread and reports every dialled loss before it returns.
 
 - **One table.** `PeerStreamSockets.dialProved` puts the stream in the same
   `PeerStreamLinks` and the same admission count as the sockets, and

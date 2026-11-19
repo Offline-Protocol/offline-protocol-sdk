@@ -123,18 +123,36 @@ class WebrtcDirectListenerTest {
         diagnostics.add("$level $message $context")
     }
 
-    /** A listener over [fake] whose events go into a stream table on [host]. */
-    private fun open(fake: FakeEngine, host: Host): Pair<WebrtcDirectListener, DatagramSocket> {
+    /** The thread each event reached the sink on, in order. */
+    private val deliveredOn = Collections.synchronizedList(mutableListOf<Thread>())
+
+    /**
+     * A listener over [fake] whose events go into a stream table on [host].
+     * [beforeBody] runs on the delivering thread ahead of each body.
+     */
+    private fun open(
+        fake: FakeEngine,
+        host: Host,
+        beforeBody: () -> Unit = {},
+    ): Pair<WebrtcDirectListener, DatagramSocket> {
         val sockets = PeerStreamSockets(object : PeerStreamSockets.Host by host {
             override fun diagnostic(level: String, message: String, context: Map<String, Any?>) =
                 record(level, message, context)
         })
         val sink = object : WebrtcDirectListener.Sink {
             override fun proved(listener: WebrtcDirectListener, stream: Long, address: String, remoteIp: String) {
+                deliveredOn.add(Thread.currentThread())
                 sockets.dialProved(listener, stream, address, remoteIp, accepting = true)
             }
-            override fun body(stream: Long, data: ByteArray) = sockets.dialBody(stream, data)
-            override fun closed(stream: Long) = sockets.dialClosed(stream)
+            override fun body(stream: Long, data: ByteArray) {
+                deliveredOn.add(Thread.currentThread())
+                beforeBody()
+                sockets.dialBody(stream, data)
+            }
+            override fun closed(stream: Long) {
+                deliveredOn.add(Thread.currentThread())
+                sockets.dialClosed(stream)
+            }
         }
         val socket = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
         cleanup.add(socket)
@@ -146,6 +164,15 @@ class WebrtcDirectListenerTest {
     }
 
     private var sinkSockets: PeerStreamSockets? = null
+
+    /** Waits up to three seconds for [condition]. */
+    private fun eventually(what: String, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 3_000
+        while (!condition()) {
+            if (System.currentTimeMillis() > deadline) throw AssertionError(what)
+            Thread.sleep(5)
+        }
+    }
 
     private fun client(): DatagramSocket =
         DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).also {
@@ -259,7 +286,69 @@ class WebrtcDirectListenerTest {
         l.pump()
         assertEquals("message:peer-m:3", host.next())
         assertEquals(PeerStreamSockets.SendResult.QUEUED, sinkSockets!!.send("peer-m", ByteArray(4)))
-        assertTrue(fake.calls.contains("send:2:4"))
+        eventually("the send reaches the engine") { fake.calls.contains("send:2:4") }
+    }
+
+    // --- the caller's thread ---------------------------------------------------------
+
+    @Test
+    fun `a send hands its pump to the listener and runs no delivery on the calling thread`() {
+        val fake = FakeEngine()
+        val host = Host("peer-a")
+        val (l, _) = open(fake, host)
+        fake.prove(1, "peer-m")
+        l.pump()
+        assertEquals("connected:peer-m", host.next())
+
+        // Queued in the engine, as a body is between a datagram and its pump.
+        fake.events.addLast(WebrtcDirectListener.Event.Body(1, ByteArray(3)))
+        deliveredOn.clear()
+        // The transport thread's send: the pump after it delivers the body,
+        // and the body can mean an MLS decrypt under the core's lock.
+        assertEquals(PeerStreamSockets.SendResult.QUEUED, sinkSockets!!.send("peer-m", ByteArray(4)))
+        assertEquals("message:peer-m:3", host.next())
+        eventually("the send reaches the engine") { fake.calls.contains("send:1:4") }
+        assertFalse(
+            "a delivery ran on the thread that sent",
+            deliveredOn.any { it === Thread.currentThread() },
+        )
+    }
+
+    @Test
+    fun `a send and a stream close do not wait behind a delivery`() {
+        val fake = FakeEngine()
+        val host = Host("peer-a")
+        val inDelivery = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        fake.onDatagram = { engine, _, _, _ -> engine.events.addLast(WebrtcDirectListener.Event.Body(1, ByteArray(2))) }
+        val (l, socket) = open(fake, host, beforeBody = {
+            inDelivery.countDown()
+            release.await(10, TimeUnit.SECONDS)
+        })
+        fake.prove(1, "peer-m")
+        fake.prove(2, "peer-n")
+        l.pump()
+        assertEquals(setOf("connected:peer-m", "connected:peer-n"), setOf(host.next(), host.next()))
+
+        // The receive thread is inside a delivery, holding the listener.
+        val page = client()
+        page.send(DatagramPacket(ByteArray(1), 1, InetAddress.getLoopbackAddress(), socket.localPort))
+        assertTrue(inDelivery.await(3, TimeUnit.SECONDS))
+        try {
+            val started = System.nanoTime()
+            assertEquals(PeerStreamSockets.SendResult.QUEUED, sinkSockets!!.send("peer-m", ByteArray(4)))
+            l.close(2)
+            val tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            assertTrue("the caller waited $tookMs ms behind a delivery", tookMs < 1_000)
+            assertFalse("the send reached the engine inside the delivery", fake.calls.contains("send:1:4"))
+        } finally {
+            release.countDown()
+        }
+        // Then, in the order they were handed, after the delivery.
+        assertEquals("message:peer-m:2", host.next())
+        eventually("the send and the close reach the engine") { fake.calls.contains("closeStream:2") }
+        assertTrue(fake.calls.indexOf("send:1:4") in 0 until fake.calls.indexOf("closeStream:2"))
+        assertEquals("lost:peer-n", host.next())
     }
 
     @Test

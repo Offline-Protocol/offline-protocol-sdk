@@ -134,12 +134,17 @@ internal class PeerStreamSockets(
      * stream and frames what is sent; this table decides what the host hears.
      */
     interface Dials {
-        /** One body on [stream], framed by the listener. Throws when refused. */
+        /**
+         * One body on [stream], framed by the listener. Throws when refused.
+         * Never runs the listener's event deliveries on the calling thread,
+         * which is the transport thread.
+         */
         fun send(stream: Long, body: ByteArray)
 
         /**
          * Ends [stream]. The listener reports it closed afterwards, and by
          * then the table has let it go, so that report announces nothing.
+         * Called from outside the listener's pump, it does not wait on it.
          */
         fun close(stream: Long)
     }
@@ -680,13 +685,22 @@ internal class PeerStreamSockets(
             ended.set(true)
         }
 
-        fun send(body: ByteArray): SendResult = try {
-            dials.send(id, body)
-            SendResult.QUEUED
-        } catch (_: Exception) {
-            // Ended, or more than the listener's bound queued behind the
-            // channel, which also closes it: dropped, and the core retries.
-            SendResult.QUEUE_FULL
+        /**
+         * Hands [body] to the listener, which gives it to the engine on its
+         * own thread: like a TCP stream's [Stream.enqueue], this never waits
+         * on the pump. Refused here once the stream ended; one the engine
+         * refuses later is dropped there, and its end reported by `Closed`.
+         */
+        fun send(body: ByteArray): SendResult {
+            if (ended.get()) return SendResult.QUEUE_FULL
+            return try {
+                dials.send(id, body)
+                SendResult.QUEUED
+            } catch (_: Exception) {
+                // The listener closed, or too much is waiting for it:
+                // dropped, and the core retries.
+                SendResult.QUEUE_FULL
+            }
         }
 
         override fun abort() {
