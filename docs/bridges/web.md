@@ -1046,8 +1046,9 @@ one thread, so the MLS suite's concurrent-writers check runs its writers in
 turns there.
 
 CI's `web-binding` job runs both. [The two-device checklist](web-devices.md)
-covers what one machine cannot: a phone's browser, a local network, and a
-tab the phone suspends.
+covers what one machine cannot: a phone's browser, a local network, a
+tab the phone suspends, and a real phone's WebRTC Direct listener on its
+Wi-Fi network or its own hotspot.
 
 [`examples/web-two-tabs`](../../examples/web-two-tabs) is the first page to
 open in two tabs, [`examples/web-lobby`](../../examples/web-lobby) a
@@ -1062,10 +1063,20 @@ app from the code it shows (W16).
 - **A dial from a phone's browser to an app on the same phone.** The code
   names the phone's Wi-Fi address, so it should work, but no page or
   device run tests it.
-- **A dial over IPv6 or across a hotspot.** The code carries IPv6, and the
-  device checklist runs a phone's hotspot. Neither is in CI, which dials one
-  machine's private IPv4 address (W16).
-
+- **A dial over IPv6.** The code carries IPv6, and no device run or page
+  dials one. CI dials one machine's private IPv4 address (W16).
+- **A dial to a phone's own hotspot in CI.** An Android phone sharing its
+  hotspot, on no Wi-Fi network, binds its listener to the hotspot's
+  interface
+  ([K10](kotlin.md#k10-a-stream-a-page-dialled-is-a-row-in-the-one-stream-table)),
+  and Safari on an iPhone that joined it has dialled it with no internet
+  ([the checklist](web-devices.md#a-page-dials-a-native-app)). No CI job
+  shares a hotspot, so only that manual run covers it.
+- **An iPhone listening on its own hotspot.** The iOS listener binds the
+  Wi-Fi interface only
+  ([S10](swift.md#s10-a-stream-a-page-dialled-is-a-row-in-the-one-stream-table-in-the-foreground-only)),
+  so an iPhone sharing its hotspot and on no Wi-Fi network has no address
+  to put in a code.
 - **A TURN server.** The carrier takes the application's own (W9); the
   project runs none, and no page tests one.
 - **Signalling through the Offline Protocol relay.** Nostr carries it (W11);

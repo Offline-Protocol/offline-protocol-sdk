@@ -39,6 +39,34 @@ Questions about a release, or about upgrading to one? Ask in the
   never. Platforms declare what they can do through four new peer-stream
   driver calls, `wifi_direct_set_fast_link_roles` and its siblings; a custom
   platform that declares nothing is never asked to host or join.
+- **A browser page can dial a native app on the same Wi-Fi network, or on
+  the phone's own hotspot, from one code the app shows: WebRTC Direct**
+  ([ADR 0039](docs/adr/0039-a-browser-dials-a-native-device-from-a-code.md)).
+  No internet, server or relay is involved, and Safari, Firefox and Chromium
+  all dial. The app opens a listener with `openWebrtcDirect()` (React
+  Native; `closeWebrtcDirect()` closes it) or `open_webrtc_direct(host,
+  port=0)` (Python's `PeerStreamManager`; `close_webrtc_direct()`), and
+  shows the code it returns as a QR code or text behind `#` in the page's
+  URL. The page dials it with `carrier.dial(code)`, after reading it with
+  `parseDirectCode` ([web bridge W16](docs/bridges/web.md#w16-a-page-dials-a-native-device-from-the-code-it-shows)).
+  The stream fills the peer-stream slot like any other: the same preamble
+  proves the address, and MLS seals the content. The page never edits its
+  own session description, so the dial keeps working when libwebrtc stops
+  accepting the edit libp2p's first WebRTC Direct relies on. The code
+  carries the listener's ICE password and admits whoever holds it for as
+  long as the listener is open
+  ([R35](docs/security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)),
+  so show it only to the people meant to dial, never log it, and close the
+  listener when done; on iOS it lives only while the app is in the
+  foreground. Custom platforms drive the sans-I/O listener through the FFI's
+  `webrtc_direct_*` methods, behind the `webrtc-direct` feature, which the
+  iOS, Android, desktop and Python release builds turn on; a library built
+  without it refuses `webrtc_direct_open`. On two phones, Safari linked to
+  the Android app in 56 to 209 ms and delivered 256 KiB in 1.7 to 1.8 s, on
+  the home Wi-Fi and on the Android phone's hotspot with no internet alike;
+  Chromium, Firefox and WebKit on a laptop linked to the iPhone app in 167
+  to 326 ms ([device runs](docs/bridges/web-devices.md#webrtc-direct)). It adds about
+  1.54 MB to the iOS library and 2.47 MB to the Android one.
 
 - **Native iOS and Android applications get the SDK's built-in storage.**
   `OfflineProtocolReferenceStorage` opens the Keychain or Keystore MLS store and
