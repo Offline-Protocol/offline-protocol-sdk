@@ -100,6 +100,7 @@ export const PROTOCOL_EVENT_TYPES = [
   'user_groups',
   'user_unblocked',
   'username_resolved',
+  'webrtc_direct_closed',
   'welcome_send_attempted',
   'welcome_send_expired',
   'welcome_send_failed',

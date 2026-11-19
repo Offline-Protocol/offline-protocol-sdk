@@ -21826,12 +21826,12 @@ mod tests {
             // The listener is one of the things the layer is up for.
             "carriers = { PeerStreamLayer.Carriers(p2p = p2pUp, lan = lanUp, listener = webrtc != null) },",
             // Reported before the code is returned, also when the open fails.
-            "try { return openWebrtcDirectListener(choice, wifi?.first) } finally { \
+            "try { return openWebrtcDirectListener(choice, wifi?.first, onClosed) } finally { \
              confinement.runSync { reportLayer() } }",
             // Every close reports after its streams ended, on the transport thread.
             "fun closeWebrtcDirect(): Boolean = confinement.runSync { \
              layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } } }",
-            "layer.afterEnding { synchronized(webrtcLock) { if (webrtc === only) closeWebrtcDirectLocked() } }",
+            "layer.afterEnding { synchronized(webrtcLock) { if (webrtc === only) closeWebrtcDirectLocked(reason) } }",
         ] {
             assert!(
                 manager.contains(line),
@@ -21839,6 +21839,167 @@ mod tests {
                  up, reported on the transport thread after its streams were reported lost. \
                  Expected to find:\n  {line}"
             );
+        }
+    }
+
+    /// The application hears, once and with a reason, every close of its
+    /// WebRTC Direct listener it did not ask for, on both platforms.
+    ///
+    /// The bridges closed the listener themselves (the Wi-Fi network or the
+    /// hotspot went, the socket failed, the transport stopped or paused, the
+    /// application left the foreground) and said so only in a diagnostic,
+    /// so an application kept showing a code whose listener was gone and
+    /// every page that dialled it timed out with nothing to say why. Each
+    /// listener reports a close that names a reason once, and one that names
+    /// none (the application's own, or an open replacing it) not at all:
+    /// `WebrtcDirectListenerTest` and `WebrtcDirectListenerTests` pin that.
+    /// These are the lines that feed it, which no JVM or Swift test reaches:
+    /// each close path names its reason, the application's own close and
+    /// the replacing open name none, and the module turns the report into
+    /// the event. The reason tokens are the TypeScript union, both platforms
+    /// together.
+    #[test]
+    fn every_bridge_close_of_a_webrtc_direct_listener_reaches_the_application() {
+        use std::collections::BTreeSet;
+
+        let types = rn_source_code_only("src/types.ts");
+        let union: BTreeSet<String> = types
+            .split_once("export type WebrtcDirectClosedReason =")
+            .expect("types.ts must declare WebrtcDirectClosedReason")
+            .1
+            .split_once(';')
+            .expect("unterminated WebrtcDirectClosedReason")
+            .0
+            .split('|')
+            .map(|member| member.trim().trim_matches('\'').to_string())
+            .filter(|member| !member.is_empty())
+            .collect();
+        assert!(
+            types.contains(
+                "export interface WebrtcDirectClosedEvent extends BaseEvent { \
+                 type: 'webrtc_direct_closed'; reason: WebrtcDirectClosedReason; }"
+            ),
+            "types.ts must declare WebrtcDirectClosedEvent with its tag and reason"
+        );
+
+        let kotlin_listener = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/WebrtcDirectListener.kt",
+        );
+        let kotlin_manager =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let kotlin_module = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        let swift_listener = rn_source_code_only("ios/WebrtcDirectListener.swift");
+        let swift_manager = rn_source_code_only("ios/WifiDirectManager.swift");
+        let swift_module = rn_source_code_only("ios/OfflineProtocolModule.swift");
+
+        // The tokens each platform declares, by the constant that names them.
+        let declared = |source: &str, prefix: &str| -> Vec<(String, String)> {
+            source
+                .split(prefix)
+                .skip(1)
+                .filter_map(|rest| {
+                    let (name, rest) = rest.split_once(" = \"")?;
+                    let (value, _) = rest.split_once('"')?;
+                    Some((name.to_string(), value.to_string()))
+                })
+                .filter(|(name, _)| name != "EVENT_TYPE" && name != "EventType")
+                .collect()
+        };
+        let kotlin = declared(&kotlin_listener, "const val CLOSED_");
+        let swift = declared(&swift_listener, "static let closed");
+        assert!(
+            kotlin.len() >= 4 && swift.len() >= 5,
+            "a token scan matched nothing"
+        );
+        let both: BTreeSet<String> = kotlin
+            .iter()
+            .chain(swift.iter())
+            .map(|(_, value)| value.clone())
+            .collect();
+        assert_eq!(
+            both, union,
+            "the reasons the bridges report must be exactly types.ts WebrtcDirectClosedReason"
+        );
+        for (name, value) in &kotlin {
+            assert!(
+                kotlin_manager.contains(&format!("WebrtcDirectListener.CLOSED_{name}")),
+                "WifiDirectManager.kt never closes a listener for `{value}`"
+            );
+        }
+        for (name, value) in &swift {
+            assert!(
+                swift_manager.contains(&format!("WebrtcDirectListener.closed{name}")),
+                "WifiDirectManager.swift never closes a listener for `{value}`"
+            );
+        }
+        assert!(
+            kotlin_listener.contains("const val CLOSED_EVENT_TYPE = \"webrtc_direct_closed\"")
+                && swift_listener.contains("static let closedEventType = \"webrtc_direct_closed\""),
+            "both listeners must name the tag types.ts declares"
+        );
+
+        for (path, code, needed) in [
+            (
+                "WifiDirectManager.kt",
+                &kotlin_manager,
+                &[
+                    "synchronized(webrtcLock) { closeWebrtcDirectLocked(WebrtcDirectListener.CLOSED_STOPPED) }",
+                    "closeWebrtcDirect(listener, WebrtcDirectListener.CLOSED_HOTSPOT)",
+                    "transportHandler.post { closeWebrtcDirect(lost, WebrtcDirectListener.CLOSED_SOCKET) }",
+                    "closeWebrtcDirectLocked(WebrtcDirectListener.CLOSED_NETWORK)",
+                    // The listener carries the application's report, and is
+                    // told the reason, or none.
+                    "WebrtcDirectListener(webrtcEngine, webrtcSink, ::emitDiagnostic, onClosed) { lost ->",
+                    "listener.close(reason) sockets.closeDials()",
+                    // The application's own close and the replacing open name none.
+                    "layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } }",
+                    "synchronized(webrtcLock) { closeWebrtcDirectLocked() val socket = DatagramSocket(null)",
+                ][..],
+            ),
+            (
+                "OfflineProtocolModule.kt",
+                &kotlin_module,
+                &[
+                    "manager.openWebrtcDirect { reason -> emitWebrtcDirectClosedEvent(reason) }",
+                    "sendEvent(EVENT_NAME, eventParams(WebrtcDirectListener.closedEventJson(reason)))",
+                ][..],
+            ),
+            (
+                "WifiDirectManager.swift",
+                &swift_manager,
+                &[
+                    "closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedStopped)",
+                    "closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedPaused)",
+                    "self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedSocket)",
+                    "self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedNetwork)",
+                    "self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedBackground)",
+                    "onClosed: onClosed, onSocketLost:",
+                    "listener.close(reason: reason) for row in dialled.values { endDialled(row) }",
+                    // The application's own close and the replacing open name none.
+                    "onLinkQueueSync { closed = closeWebrtcDirectOnLinkQueue() }",
+                    "onLinkQueueSync { closeWebrtcDirectOnLinkQueue() guard state == .running, !isPaused",
+                ][..],
+            ),
+            (
+                "OfflineProtocolModule.swift",
+                &swift_module,
+                &[
+                    "manager.openWebrtcDirect(onClosed: { [weak self] reason in \
+                     self?.emitWebrtcDirectClosedEvent(reason: reason) })",
+                    "body: [\"eventJson\": WebrtcDirectListener.closedEventJson(reason: reason)]",
+                ][..],
+            ),
+        ] {
+            for line in needed {
+                assert!(
+                    code.contains(line),
+                    "{path}: every close of a WebRTC Direct listener the application did not ask \
+                     for must reach it once as `webrtc_direct_closed` with its reason. Expected \
+                     to find:\n  {line}"
+                );
+            }
         }
     }
 

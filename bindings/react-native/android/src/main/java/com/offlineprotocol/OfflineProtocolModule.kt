@@ -1628,7 +1628,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             return
         }
         try {
-            val code = manager.openWebrtcDirect()
+            val code = manager.openWebrtcDirect { reason -> emitWebrtcDirectClosedEvent(reason) }
             promise.resolve(Arguments.createMap().apply {
                 putString("code", code.fragment)
                 putString("host", code.host)
@@ -1637,6 +1637,21 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             })
         } catch (e: Exception) {
             rejectBridgePromise(promise, e, "ERROR_WEBRTC_DIRECT", "Failed to open a WebRTC Direct listener", mapProtocolErrors = true)
+        }
+    }
+
+    /**
+     * Forwards the bridge's own close of the listener the application opened
+     * (its network or hotspot went, its socket failed, the transport stopped)
+     * as the `webrtc_direct_closed` event, once per listener. Without it the
+     * application kept showing a code whose listener was gone. Not for a
+     * close the application asked for: [closeWebrtcDirect] or the next open.
+     */
+    private fun emitWebrtcDirectClosedEvent(reason: String) {
+        try {
+            sendEvent(EVENT_NAME, eventParams(WebrtcDirectListener.closedEventJson(reason)))
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Failed to emit WebRTC Direct closed event", e)
         }
     }
 

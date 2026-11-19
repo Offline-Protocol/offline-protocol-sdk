@@ -134,6 +134,7 @@ class WebrtcDirectListenerTest {
         fake: FakeEngine,
         host: Host,
         beforeBody: () -> Unit = {},
+        onClosed: (String) -> Unit = {},
     ): Pair<WebrtcDirectListener, DatagramSocket> {
         val sockets = PeerStreamSockets(object : PeerStreamSockets.Host by host {
             override fun diagnostic(level: String, message: String, context: Map<String, Any?>) =
@@ -156,7 +157,7 @@ class WebrtcDirectListenerTest {
         }
         val socket = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
         cleanup.add(socket)
-        val l = WebrtcDirectListener(fake.engine, sink, ::record)
+        val l = WebrtcDirectListener(fake.engine, sink, ::record, onClosed)
         listener = l
         l.open(socket)
         sinkSockets = sockets
@@ -375,6 +376,70 @@ class WebrtcDirectListenerTest {
             throw AssertionError("a closed listener took a send")
         } catch (_: IllegalStateException) {
         }
+    }
+
+    @Test
+    fun `a close that names a reason reports it once, after the listener closed`() {
+        // The application hears the bridge's own close (the network went,
+        // the socket failed, the transport stopped) and stops showing a code
+        // whose listener is gone. Once, so a second close cannot repeat it.
+        val reported = Collections.synchronizedList(mutableListOf<String>())
+        val fake = FakeEngine()
+        val host = Host("peer-a")
+        var l: WebrtcDirectListener? = null
+        val (opened, _) = open(fake, host, onClosed = { reason ->
+            assertFalse("reported while still open", l!!.isOpen)
+            reported.add(reason)
+        })
+        l = opened
+        fake.prove(1, "peer-m")
+        opened.pump()
+        assertEquals("connected:peer-m", host.next())
+
+        opened.close(WebrtcDirectListener.CLOSED_NETWORK)
+        opened.close(WebrtcDirectListener.CLOSED_SOCKET)
+        assertEquals(listOf("network"), reported)
+        assertEquals("lost:peer-m", host.next())
+    }
+
+    @Test
+    fun `a close the application asked for reports nothing`() {
+        // Its own closeWebrtcDirect, or an open replacing the listener,
+        // names no reason: the application already knows.
+        val reported = Collections.synchronizedList(mutableListOf<String>())
+        val (l, _) = open(FakeEngine(), Host("peer-a"), onClosed = { reported.add(it) })
+        l.close()
+        l.close(WebrtcDirectListener.CLOSED_STOPPED)
+        assertEquals(emptyList<String>(), reported)
+
+        // Never opened: there is no listener the application was shown.
+        val never = WebrtcDirectListener(FakeEngine().engine, object : WebrtcDirectListener.Sink {
+            override fun proved(listener: WebrtcDirectListener, stream: Long, address: String, remoteIp: String) {}
+            override fun body(stream: Long, data: ByteArray) {}
+            override fun closed(stream: Long) {}
+        }, ::record, onClosed = { reported.add(it) })
+        never.close(WebrtcDirectListener.CLOSED_STOPPED)
+        assertEquals(emptyList<String>(), reported)
+    }
+
+    @Test
+    fun `the closed event carries the tag apps match on and its reason`() {
+        // Pinned literally: apps switch on these (src/types.ts
+        // WebrtcDirectClosedEvent and WebrtcDirectClosedReason).
+        assertEquals("webrtc_direct_closed", WebrtcDirectListener.CLOSED_EVENT_TYPE)
+        assertEquals(
+            listOf("network", "hotspot", "socket", "stopped"),
+            listOf(
+                WebrtcDirectListener.CLOSED_NETWORK,
+                WebrtcDirectListener.CLOSED_HOTSPOT,
+                WebrtcDirectListener.CLOSED_SOCKET,
+                WebrtcDirectListener.CLOSED_STOPPED,
+            ),
+        )
+        val event = org.json.JSONObject(WebrtcDirectListener.closedEventJson("hotspot"))
+        assertEquals("webrtc_direct_closed", event.getString("type"))
+        assertEquals("hotspot", event.getString("reason"))
+        assertEquals(2, event.length())
     }
 
     @Test

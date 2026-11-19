@@ -349,8 +349,21 @@ opens the listener while the transport runs and returns the code;
 application leaving the foreground, and the Wi-Fi interface going away or
 losing the bound address, since its code then names an address no page can
 reach. Opening again closes the previous listener first, its streams reported
-lost: the socket, certificate and credentials are fresh on every open. The
-listener itself (admission by authenticated check only, DTLS, the channel,
+lost: the socket, certificate and credentials are fresh on every open.
+
+The application hears every close it did not ask for, once, as the React
+Native `webrtc_direct_closed` event with a reason: `background` (it left the
+foreground), `paused`, `stopped`, `network` (the Wi-Fi interface went or lost
+the bound address) or `socket` (the socket failed). A close of its own
+(`closeWebrtcDirect()`) or by the next open reports nothing. Before the event
+a diagnostic was the only signal, so an application that came back to the
+foreground kept showing a code whose listener was gone, and every page that
+dialled it timed out with nothing to say why. The report is the listener's
+own (`openWebrtcDirect(onClosed:)`, which `WebrtcDirectListener` calls once,
+after its first close that names a reason), so a listener closed twice, or
+one an open replaced, cannot report twice or late.
+
+The listener itself (admission by authenticated check only, DTLS, the channel,
 the preamble and the framing) is the engine's `webrtc_direct_*`.
 `WebrtcDirectListener` moves only what the UDL contract gives it: every
 datagram the socket receives, unfiltered; every datagram and event the engine

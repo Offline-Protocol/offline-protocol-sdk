@@ -144,6 +144,11 @@ final class WebrtcDirectListener {
     private weak var sink: WebrtcDirectSink?
     private let queue: DispatchQueue
     private let diagnostic: (_ level: String, _ message: String, _ context: [String: Any]) -> Void
+    /// The application's report of a `close(reason:)` that names a reason
+    /// (one of the `closed*` tokens): at most once, after the close. A close
+    /// with no reason (the application's own, or an open replacing this
+    /// listener) reports nothing, since the application asked for it.
+    private let onClosed: (_ reason: String) -> Void
     /// The socket failed without a `close()` of ours (the interface went).
     private let onSocketLost: (WebrtcDirectListener) -> Void
 
@@ -172,12 +177,14 @@ final class WebrtcDirectListener {
         sink: WebrtcDirectSink,
         queue: DispatchQueue,
         diagnostic: @escaping (_ level: String, _ message: String, _ context: [String: Any]) -> Void,
+        onClosed: @escaping (_ reason: String) -> Void = { _ in },
         onSocketLost: @escaping (WebrtcDirectListener) -> Void = { _ in }
     ) {
         self.engine = engine
         self.sink = sink
         self.queue = queue
         self.diagnostic = diagnostic
+        self.onClosed = onClosed
         self.onSocketLost = onSocketLost
     }
 
@@ -190,6 +197,38 @@ final class WebrtcDirectListener {
         } else if socket >= 0 {
             Darwin.close(socket)
         }
+    }
+
+    // MARK: - Why the bridge closed it
+
+    // The `reason` of `webrtc_direct_closed` (`src/types.ts`
+    // WebrtcDirectClosedReason, which Android's `hotspot` completes). Without
+    // the event an application kept showing a code whose listener was gone,
+    // and every page that dialled it timed out with nothing to say why.
+
+    /// The application left the foreground.
+    static let closedBackground = "background"
+    /// The transport paused.
+    static let closedPaused = "paused"
+    /// The Wi-Fi network went, or lost the bound address.
+    static let closedNetwork = "network"
+    /// The socket failed without a close of ours.
+    static let closedSocket = "socket"
+    /// The transport stopped.
+    static let closedStopped = "stopped"
+
+    /// The bridge event tag apps match on (`src/types.ts` WebrtcDirectClosedEvent).
+    static let closedEventType = "webrtc_direct_closed"
+
+    /// The `webrtc_direct_closed` payload for `reason`, as event JSON.
+    static func closedEventJson(reason: String) -> String {
+        let payload: [String: Any] = ["type": closedEventType, "reason": reason]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+           let json = String(data: data, encoding: .utf8) {
+            return json
+        }
+        // Two strings always serialise, and a token needs no escaping.
+        return "{\"type\":\"\(closedEventType)\",\"reason\":\"\(reason)\"}"
     }
 
     // MARK: - Open and close
@@ -246,8 +285,10 @@ final class WebrtcDirectListener {
 
     /// Closes the engine's listener, hands its last events (a `closed` for
     /// every proved stream) to the sink while the socket can still send what
-    /// the close queued, then closes the socket. Idempotent.
-    func close() {
+    /// the close queued, then closes the socket. Idempotent: only the first
+    /// close of an open listener reports, and only when it names a `reason`
+    /// (see `onClosed`).
+    func close(reason: String? = nil) {
         guard !closed else { return }
         guard code != nil else {
             // Never opened: the engine's listener, if any, is another's.
@@ -263,6 +304,7 @@ final class WebrtcDirectListener {
         readSource = nil
         socket = -1
         diagnostic("info", "WebRTC Direct listener closed", [:])
+        if let reason = reason { onClosed(reason) }
     }
 
     // MARK: - Streams

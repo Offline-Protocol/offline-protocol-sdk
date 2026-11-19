@@ -1,5 +1,6 @@
 package com.offlineprotocol
 
+import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
@@ -57,6 +58,13 @@ internal class WebrtcDirectListener(
     private val engine: Engine,
     private val sink: Sink,
     private val diagnostic: (level: String, message: String, context: Map<String, Any?>) -> Unit,
+    /**
+     * The application's report of a [close] that names a reason (one of the
+     * `CLOSED_*` tokens): at most once, after the close. A close with no
+     * reason (the application's own, or an open replacing this listener)
+     * reports nothing, since the application asked for it.
+     */
+    private val onClosed: (reason: String) -> Unit = {},
     /** The socket stopped without a [close] of ours (the interface went away). */
     private val onSocketLost: (WebrtcDirectListener) -> Unit = {},
 ) : PeerStreamSockets.Dials {
@@ -128,6 +136,29 @@ internal class WebrtcDirectListener(
          * without a bound a stalled pump would queue the outbox in memory.
          */
         const val MAX_HANDED_BYTES = 8L * 1024 * 1024
+
+        // Why the bridge closed a listener the application opened: the
+        // `reason` of `webrtc_direct_closed` (`src/types.ts`
+        // WebrtcDirectClosedReason, which iOS's `paused` and `background`
+        // complete). Without the event an application kept showing a code
+        // whose listener was gone, and every page that dialled it timed out
+        // with nothing to say why.
+
+        /** The Wi-Fi network the listener is bound to went, or lost the bound address. */
+        const val CLOSED_NETWORK = "network"
+        /** This device's own hotspot went down, or lost the bound address. */
+        const val CLOSED_HOTSPOT = "hotspot"
+        /** The socket failed without a close of ours. */
+        const val CLOSED_SOCKET = "socket"
+        /** The transport stopped. */
+        const val CLOSED_STOPPED = "stopped"
+
+        /** The bridge event tag apps match on (`src/types.ts` WebrtcDirectClosedEvent). */
+        const val CLOSED_EVENT_TYPE = "webrtc_direct_closed"
+
+        /** The `webrtc_direct_closed` payload for [reason], as event JSON. */
+        fun closedEventJson(reason: String): String =
+            JSONObject().put("type", CLOSED_EVENT_TYPE).put("reason", reason).toString()
     }
 
     private val lock = Any()
@@ -199,9 +230,11 @@ internal class WebrtcDirectListener(
 
     /**
      * Closes the engine's listener, hands its last events (a `Closed` for
-     * every proved stream) to the sink, then closes the socket. Idempotent.
+     * every proved stream) to the sink, then closes the socket. Idempotent:
+     * only the first close of an open listener reports, and only when it
+     * names a [reason] (see [onClosed]).
      */
-    fun close() {
+    fun close(reason: String? = null) {
         val toClose = synchronized(lock) {
             if (closed) return
             if (code == null) {
@@ -222,6 +255,7 @@ internal class WebrtcDirectListener(
         clock.shutdownNow()
         toClose?.close()
         diagnostic("info", "WebRTC Direct listener closed", emptyMap())
+        if (reason != null) onClosed(reason)
     }
 
     val isOpen: Boolean get() = !closed && code != null

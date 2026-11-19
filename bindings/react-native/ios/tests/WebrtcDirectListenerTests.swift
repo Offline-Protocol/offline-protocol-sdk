@@ -124,16 +124,23 @@ final class WebrtcDirectListenerTests: XCTestCase {
     private var diagnostics: [String] = []
     private var listener: WebrtcDirectListener!
     private var client: Int32 = -1
+    /// Every reason the listener reported to `onClosed`, with whether it was
+    /// still open then and what the sink had seen by then.
+    private var reported: [(reason: String, open: Bool, seen: [String])] = []
 
     override func setUp() {
         super.setUp()
         engine = FakeEngine()
         sink = Sink()
         diagnostics = []
+        reported = []
         listener = WebrtcDirectListener(
             engine: engine, sink: sink, queue: queue,
             diagnostic: { [unowned self] level, message, context in
                 self.diagnostics.append("\(level) \(message) \(context)")
+            },
+            onClosed: { [unowned self] reason in
+                self.reported.append((reason, self.listener.isOpen, self.sink.seen))
             })
         client = -1
     }
@@ -345,6 +352,58 @@ final class WebrtcDirectListenerTests: XCTestCase {
         XCTAssertThrowsError(try queue.sync { try listener.send(stream: 1, body: Data("x".utf8)) })
         queue.sync { listener.closeStream(1) }
         XCTAssertEqual(queue.sync { engine.closedStreams }, [])
+    }
+
+    // MARK: - Why the bridge closed it
+
+    /// The application hears the bridge's own close (the network went, the
+    /// application left the foreground, the transport stopped) and stops
+    /// showing a code whose listener is gone. Once, after the streams ended.
+    func testACloseThatNamesAReasonReportsItOnceAfterTheListenerClosed() throws {
+        queue.sync {
+            engine.events = [.proved(stream: 1, address: "off1a", remoteIp: "127.0.0.1", remotePort: 1)]
+        }
+        try open()
+        queue.sync {
+            listener.close(reason: WebrtcDirectListener.closedNetwork)
+            listener.close(reason: WebrtcDirectListener.closedSocket)
+        }
+        let reports = queue.sync { reported }
+        XCTAssertEqual(reports.map(\.reason), ["network"])
+        XCTAssertEqual(reports.first?.open, false, "reported while still open")
+        XCTAssertEqual(reports.first?.seen.last, "closed:1", "reported before its streams ended")
+    }
+
+    /// Its own `closeWebrtcDirect`, or an open replacing the listener, names
+    /// no reason: the application already knows.
+    func testACloseTheApplicationAskedForReportsNothing() throws {
+        try open()
+        queue.sync {
+            listener.close()
+            listener.close(reason: WebrtcDirectListener.closedStopped)
+        }
+        XCTAssertTrue(queue.sync { reported.isEmpty })
+    }
+
+    /// Never opened: there is no listener the application was shown.
+    func testAListenerNeverOpenedReportsNothing() {
+        queue.sync { listener.close(reason: WebrtcDirectListener.closedStopped) }
+        XCTAssertTrue(queue.sync { reported.isEmpty })
+    }
+
+    /// Pinned literally: apps switch on these (`src/types.ts`
+    /// WebrtcDirectClosedEvent and WebrtcDirectClosedReason).
+    func testTheClosedEventCarriesTheTagAppsMatchOnAndItsReason() throws {
+        XCTAssertEqual(WebrtcDirectListener.closedEventType, "webrtc_direct_closed")
+        XCTAssertEqual(
+            [WebrtcDirectListener.closedBackground, WebrtcDirectListener.closedPaused,
+             WebrtcDirectListener.closedNetwork, WebrtcDirectListener.closedSocket,
+             WebrtcDirectListener.closedStopped],
+            ["background", "paused", "network", "socket", "stopped"])
+        let json = WebrtcDirectListener.closedEventJson(reason: "background")
+        let event = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
+        XCTAssertEqual(event, ["type": "webrtc_direct_closed", "reason": "background"])
     }
 
     // MARK: - The code

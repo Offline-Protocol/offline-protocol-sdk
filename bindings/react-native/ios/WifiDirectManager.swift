@@ -431,7 +431,7 @@ public class WifiDirectManager: NSObject, TransportManager {
             old.streams.forEach { $0.abort() }
             // Its streams were forgotten and reported lost above, so the
             // `closed` it reports for each finds nothing.
-            closeWebrtcDirectOnLinkQueue()
+            closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedStopped)
         }
 
         try? protocolInstance.wifiDirectStatusChanged(isConnected: false)
@@ -455,7 +455,7 @@ public class WifiDirectManager: NSObject, TransportManager {
             // A WebRTC Direct listener lives only in the foreground (ADR 0039
             // decision 8): suspended, its socket answers no page, and its
             // streams would wait out their consent instead of ending now.
-            closeWebrtcDirectOnLinkQueue()
+            closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedPaused)
         }
     }
 
@@ -1083,7 +1083,10 @@ extension WifiDirectManager: WebrtcDirectSink {
     /// foreground (ADR 0039 decision 8): it closes when the application
     /// leaves it, when the transport pauses or stops, and when the Wi-Fi
     /// network goes or loses the bound address, since its code then names an
-    /// address no page can reach.
+    /// address no page can reach. Each of those closes, and a socket failure,
+    /// is reported to `onClosed` once with its reason
+    /// (`WebrtcDirectListener.closedNetwork` and the others); a close of the
+    /// application's own (`closeWebrtcDirect`) or by the next open is not.
     ///
     /// Blocks for the open (a certificate is made), so never on the main
     /// thread. Throws when the transport is not running or paused, the device
@@ -1091,7 +1094,9 @@ extension WifiDirectManager: WebrtcDirectSink {
     /// (no identity yet, or a library built without `webrtc-direct`). The
     /// code's fragment carries the ICE password: the caller shows it, and
     /// nothing here logs it.
-    public func openWebrtcDirect() throws -> WebrtcDirectDialCode {
+    public func openWebrtcDirect(
+        onClosed: @escaping (_ reason: String) -> Void = { _ in }
+    ) throws -> WebrtcDirectDialCode {
         guard state == .running else { throw TransportError.notRunning }
         guard !isPaused else {
             throw TransportError.invalidState("a WebRTC Direct listener opens only in the foreground")
@@ -1117,12 +1122,13 @@ extension WifiDirectManager: WebrtcDirectSink {
                     diagnostic: { [weak self] level, message, context in
                         self?.emitDiagnostic(level, message, context: context)
                     },
+                    onClosed: onClosed,
                     onSocketLost: { [weak self] lost in
                         // Its streams end now rather than at their consent
                         // timeout.
                         self?.linkQueue.async { [weak self] in
                             guard let self = self, self.webrtc === lost else { return }
-                            self.closeWebrtcDirectOnLinkQueue()
+                            self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedSocket)
                         }
                     })
                 let code = try listener.open(socket: socket)
@@ -1146,9 +1152,12 @@ extension WifiDirectManager: WebrtcDirectSink {
         return closed
     }
 
+    /// Closes the listener, if one is open. `reason` is nil for a close the
+    /// application asked for (its own, or an open replacing the listener),
+    /// and otherwise the token the listener reports to the application once.
     /// linkQueue only.
     @discardableResult
-    fileprivate func closeWebrtcDirectOnLinkQueue() -> Bool {
+    fileprivate func closeWebrtcDirectOnLinkQueue(reason: String? = nil) -> Bool {
         webrtcPath?.cancel()
         webrtcPath = nil
         if let observer = webrtcBackground {
@@ -1159,7 +1168,7 @@ extension WifiDirectManager: WebrtcDirectSink {
         webrtc = nil
         // The listener reports every proved stream closed, and each ends
         // through the table as it is; any it did not report end here.
-        listener.close()
+        listener.close(reason: reason)
         for row in dialled.values { endDialled(row) }
         return true
     }
@@ -1192,7 +1201,7 @@ extension WifiDirectManager: WebrtcDirectSink {
                 && WebrtcDirectListener.ipv4Addresses(ofInterface: interface).contains(ip)
             guard !held else { return }
             self.emitDiagnostic("info", "WebRTC Direct listener closed: the Wi-Fi network went", context: [:])
-            self.closeWebrtcDirectOnLinkQueue()
+            self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedNetwork)
         }
         path.start(queue: linkQueue)
         webrtcPath = path
@@ -1202,7 +1211,7 @@ extension WifiDirectManager: WebrtcDirectSink {
             self?.linkQueue.async { [weak self, weak listener] in
                 guard let self = self, let listener = listener, self.webrtc === listener else { return }
                 self.emitDiagnostic("info", "WebRTC Direct listener closed: the application left the foreground", context: [:])
-                self.closeWebrtcDirectOnLinkQueue()
+                self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedBackground)
             }
         }
     }

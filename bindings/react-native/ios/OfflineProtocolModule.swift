@@ -2211,11 +2211,26 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let code = try manager.openWebrtcDirect()
+            let code = try manager.openWebrtcDirect(onClosed: { [weak self] reason in
+                self?.emitWebrtcDirectClosedEvent(reason: reason)
+            })
             resolver(["code": code.fragment, "host": code.host, "port": Int(code.port), "address": code.address])
         } catch {
             rejecter("ERROR_WEBRTC_DIRECT", "Failed to open a WebRTC Direct listener: \(error.localizedDescription)", error)
         }
+    }
+
+    /// Forwards the bridge's own close of the listener the application opened
+    /// (it left the foreground, the transport paused or stopped, the Wi-Fi
+    /// network went, the socket failed) as the `webrtc_direct_closed` event,
+    /// once per listener. Without it the application kept showing a code
+    /// whose listener was gone. Not for a close the application asked for:
+    /// `closeWebrtcDirect` or the next open.
+    private func emitWebrtcDirectClosedEvent(reason: String) {
+        sendEventToJS(
+            Events.onEvent,
+            body: ["eventJson": WebrtcDirectListener.closedEventJson(reason: reason)]
+        )
     }
 
     @objc func closeWebrtcDirect(_ resolver: @escaping RCTPromiseResolveBlock,

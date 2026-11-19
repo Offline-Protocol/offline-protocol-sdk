@@ -58,7 +58,11 @@ Questions about a release, or about upgrading to one? Ask in the
   ([R35](docs/security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)),
   so show it only to the people meant to dial, never log it, and close the
   listener when done; on iOS it lives only while the app is in the
-  foreground. Custom platforms drive the sans-I/O listener through the FFI's
+  foreground. When the bridge closes the listener itself (its network or
+  hotspot went, the app left the foreground, the transport paused or
+  stopped, its socket failed), React Native emits one `webrtc_direct_closed`
+  event with the reason, so the app can stop showing a dead code. Custom
+  platforms drive the sans-I/O listener through the FFI's
   `webrtc_direct_*` methods, behind the `webrtc-direct` feature, which the
   iOS, Android, desktop and Python release builds turn on; a library built
   without it refuses `webrtc_direct_open`. On two phones, Safari linked to
