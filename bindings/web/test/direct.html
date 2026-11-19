@@ -175,18 +175,20 @@ await run(async (step) => {
   );
 
   step.name = "listener closes";
-  // A closed listener sends nothing, so the page learns of it as its checks
-  // go unanswered: "disconnected" after a few seconds (Firefox takes
-  // longest), then the carrier's disconnectedMs (15 s) before it closes.
+  // A closing listener ends each connection (its DTLS close_notify), so the
+  // page closes its link at once. Before it did, the page learned only as
+  // its checks went unanswered: "disconnected" after a few seconds, then
+  // the carrier's disconnectedMs (15 s), and held a dead link until then.
   const secondStates = states(carrier, second);
   const lostAt = events.length;
   const at = (await lines()).length;
+  const closedAt = performance.now();
   await window.directCommand("close");
   await listenerSaw("closed", () => true, at);
   await listenerSaw("lost", (l) => l.address === node.address, at);
-  await pageSaw("neighbor_lost", (e) => e.peer_id === listener, lostAt, 45000);
-  await until(() => secondStates.includes("closed"), "the connection to close");
-  log("closing the listener reported the page lost at both ends");
+  await until(() => secondStates.includes("closed"), "the connection to close", 5000);
+  await pageSaw("neighbor_lost", (e) => e.peer_id === listener, lostAt, 5000);
+  log(`closing the listener reported the page lost at both ends; the page closed after ${Math.round(performance.now() - closedAt)} ms`);
 
   // A fresh listener for the refusals: the closed one's code is dead.
   const fresh = await window.directListen(appId);

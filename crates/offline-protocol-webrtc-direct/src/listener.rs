@@ -110,7 +110,8 @@ pub enum ListenerEvent {
     /// A proved stream ended, for any reason, including the host's own
     /// [`Listener::close_stream`] and [`Listener::close`]. Emitted exactly
     /// once for every stream that was proved, and never for one that was
-    /// not.
+    /// not. What the listener queued to tell the page is in
+    /// [`Listener::poll_transmit`] by then.
     Closed {
         /// The stream.
         stream: StreamId,
@@ -408,7 +409,9 @@ impl Listener {
 
     /// Closes the listener: every stream ends, with
     /// [`ListenerEvent::Closed`] for each that was proved, and no datagram
-    /// is admitted again. The code is dead from here on.
+    /// is admitted again. The code is dead from here on. The host sends
+    /// what [`Listener::poll_transmit`] still yields before it closes the
+    /// socket: that is each page's channel closing.
     pub fn close(&mut self) {
         while !self.dials.is_empty() {
             self.end(0);
@@ -570,18 +573,21 @@ impl Listener {
         alive
     }
 
-    /// Removes dial `index`, and emits [`ListenerEvent::Closed`] if it was
-    /// proved.
+    /// Removes dial `index`, queues its connection's close for the page
+    /// (see [`Dial::close_connection`]), and emits [`ListenerEvent::Closed`]
+    /// if it was proved.
     ///
     /// The page's username is remembered, so its later checks are refused
-    /// rather than admitted as a new dial. Admitting them would answer the
-    /// page's consent checks from a fresh `Rtc` that never completes DTLS,
-    /// so the page would never learn its stream had ended, and it would
+    /// rather than admitted as a new dial. A page whose close was lost goes
+    /// on checking, and admitting those checks would answer them from a
+    /// fresh `Rtc` that never completes DTLS, so the page would never learn
+    /// its stream had ended, and it would
     /// hold a pending slot again every ten seconds. A page that dials again
     /// has a new username, because a browser makes new ICE credentials for
     /// every connection.
     fn end(&mut self, index: usize) {
-        let dial = self.dials.remove(index);
+        let mut dial = self.dials.remove(index);
+        dial.close_connection(&mut self.transmits);
         if self.ended.len() == REMEMBERED_ENDED_DIALS {
             self.ended.pop_front();
         }
@@ -606,6 +612,40 @@ impl Dial {
 
     fn next_timeout(&self) -> Instant {
         self.rtc_timeout.min(self.deadline())
+    }
+
+    /// Closes the connection and queues what that sends, so the page closes
+    /// its link now.
+    ///
+    /// Without it the page learned of an end only when its consent checks
+    /// went unanswered: "disconnected", then its own deadline, 15 to 20 s on
+    /// every engine. Until then it held a link it believed was up, sent into
+    /// it, and (for a stream the host refused at its caps) had already
+    /// announced the listener and sent its key package to nobody.
+    ///
+    /// str0m's close sends the DTLS close_notify (and asks SCTP to shut
+    /// down) without waiting for a reply, which is what a dial about to be
+    /// dropped needs. Closing only the channel is not enough: its SCTP
+    /// stream reset waits until the page acknowledges every byte already
+    /// sent on it, and no acknowledgement reaches a dropped dial. Only on an
+    /// open channel of a connection still alive: before the channel opens
+    /// the page holds no link, only a dial its own timeout ends, and a dead
+    /// connection sends nothing.
+    fn close_connection(&mut self, transmits: &mut VecDeque<Transmit>) {
+        if !self.open || !self.rtc.is_alive() || self.rtc.close().is_err() {
+            return;
+        }
+        // Until the close has drained; events are for a dial that is gone.
+        while let Ok(output) = self.rtc.poll_output() {
+            match output {
+                Output::Transmit(t) => transmits.push_back(Transmit {
+                    destination: t.destination,
+                    bytes: t.contents.to_vec(),
+                }),
+                Output::Event(_) => {}
+                Output::Timeout(_) => break,
+            }
+        }
     }
 
     fn enqueue(&mut self, framed: &[u8]) {

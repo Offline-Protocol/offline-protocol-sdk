@@ -76,6 +76,9 @@ pub struct Page {
     pub channel: ChannelId,
     pub timeout: Instant,
     pub open: bool,
+    /// The listener ended the connection (its DTLS close_notify) or the
+    /// channel: either closes a browser's link.
+    pub ended: bool,
     pub failed: bool,
     pub reader: PeerStreamReader,
     pub outbound: VecDeque<Vec<u8>>,
@@ -137,6 +140,7 @@ impl Page {
             channel,
             timeout: now,
             open: false,
+            ended: false,
             failed: false,
             reader: PeerStreamReader::new(verify).expecting(code.address.clone()),
             outbound: VecDeque::new(),
@@ -188,6 +192,8 @@ impl Page {
                     self.outbound.push_front(chunk.to_vec());
                 }
             }
+            Event::Closed => self.ended = true,
+            Event::ChannelClose(id) if id == self.channel => self.ended = true,
             Event::ChannelData(data) if data.id == self.channel => {
                 self.largest_message = self.largest_message.max(data.data.len());
                 self.messages += 1;

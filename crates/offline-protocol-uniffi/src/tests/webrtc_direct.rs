@@ -86,6 +86,9 @@ mod with_the_feature {
         channel: ChannelId,
         timeout: Instant,
         open: bool,
+        /// The device ended the connection (its DTLS close_notify) or the
+        /// channel: either closes a browser's link.
+        ended: bool,
         reader: PeerStreamReader,
         outbound: VecDeque<Vec<u8>>,
         preamble: Vec<u8>,
@@ -132,6 +135,7 @@ mod with_the_feature {
                 channel,
                 timeout: now,
                 open: false,
+                ended: false,
                 reader: PeerStreamReader::new(verify).expecting(code.address.clone()),
                 outbound: VecDeque::new(),
                 preamble: frame(&identity.identity_assertion(Vec::new()).unwrap()).unwrap(),
@@ -174,6 +178,8 @@ mod with_the_feature {
                         self.outbound.push_front(chunk.to_vec());
                     }
                 }
+                Event::Closed => self.ended = true,
+                Event::ChannelClose(id) if id == self.channel => self.ended = true,
                 Event::ChannelData(data) if data.id == self.channel => {
                     for event in self.reader.feed(&data.data) {
                         match event {
@@ -531,6 +537,16 @@ mod with_the_feature {
             "close yielded no Closed: {:?}",
             net.events
         );
+        // The close's datagrams outlive the listener, so the bridge sends
+        // them before it closes the socket and the page learns now rather
+        // than when its consent checks lapse. The page's reply is not
+        // delivered: there is no listener to take it.
+        net.pages[0].pump(&mut Vec::new());
+        assert!(
+            net.pages[0].ended,
+            "the page's connection is still up after the listener closed"
+        );
+        assert!(device.webrtc_direct_next_datagram().is_none());
         assert!(matches!(
             device.webrtc_direct_send(first, b"x".to_vec()),
             Err(ProtocolError::InvalidState(_))

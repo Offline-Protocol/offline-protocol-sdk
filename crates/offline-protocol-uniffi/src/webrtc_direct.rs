@@ -17,10 +17,14 @@
 //!   back. Otherwise a bridge that sent on stream 0 as the application
 //!   reopened the listener would write one peer's body onto another peer's
 //!   stream.
-//! - **A replaced or closed listener's events are still delivered.** Closing
-//!   a listener yields a `Closed` event for each proved stream, and the
-//!   bridge's stream table needs every one of them to report each loss. They
-//!   are moved out of the listener before it is dropped.
+//! - **A closed listener's events and datagrams are still delivered.**
+//!   Closing a listener yields a `Closed` event for each proved stream, and
+//!   the bridge's stream table needs every one of them to report each loss.
+//!   It also queues each open stream's channel close, which is how a page
+//!   learns at once that its stream ended rather than 15 to 20 s later when
+//!   its consent checks lapse. Both are moved out of the listener before it
+//!   is dropped. A replaced listener's datagrams are dropped instead: they
+//!   were for the socket its replacement does not use.
 //! - **This side never decides which streams the engine hears about.** It
 //!   moves datagrams and events between the platform and the listener; the
 //!   platform keeps the stream table and calls `wifi_direct_*` itself, as
@@ -151,7 +155,7 @@ mod imp {
 
     use offline_protocol_core::time::Instant;
     use offline_protocol_webrtc_direct::{
-        Listener, ListenerConfig, ListenerError, ListenerEvent, StreamId,
+        Listener, ListenerConfig, ListenerError, ListenerEvent, StreamId, Transmit,
     };
 
     use super::{
@@ -179,6 +183,9 @@ mod imp {
         streams: HashMap<u64, StreamId>,
         /// The next boundary id. Never reused (the second invariant).
         next_id: u64,
+        /// What a closed listener queued to send, until the bridge drains
+        /// it from the socket it is about to close (the third invariant).
+        closing: VecDeque<WebrtcDirectDatagram>,
     }
 
     impl State {
@@ -242,13 +249,15 @@ mod imp {
             }
         }
 
-        /// Closes the open listener, if any, keeping its events. Datagrams
-        /// it had not handed out are dropped: they were for the socket the
-        /// platform is closing, and a bridge that drains after every call,
-        /// as the contract asks, leaves none.
+        /// Closes the open listener, if any, keeping its events and the
+        /// datagrams it queued: its channels closing, for the bridge to send
+        /// before it closes the socket.
         fn close(&mut self) {
             if let Some(listener) = self.listener.as_mut() {
                 listener.close();
+                while let Some(transmit) = listener.poll_transmit() {
+                    self.closing.push_back(datagram(transmit));
+                }
             }
             self.collect();
             self.listener = None;
@@ -294,6 +303,9 @@ mod imp {
             // listener already open as it was.
             let mut state = self.lock();
             state.close();
+            // For the replaced listener's socket, which this one does not
+            // use: a page ignores a datagram from an address it never paired.
+            state.closing.clear();
             state.listener = Some(listener);
             Ok(code)
         }
@@ -317,12 +329,11 @@ mod imp {
         }
 
         pub(crate) fn next_datagram(&self) -> Option<WebrtcDirectDatagram> {
-            let transmit = self.lock().listener.as_mut()?.poll_transmit()?;
-            Some(WebrtcDirectDatagram {
-                destination_ip: transmit.destination.ip().to_string(),
-                destination_port: transmit.destination.port(),
-                data: transmit.bytes,
-            })
+            let mut state = self.lock();
+            if let Some(closing) = state.closing.pop_front() {
+                return Some(closing);
+            }
+            state.listener.as_mut()?.poll_transmit().map(datagram)
         }
 
         pub(crate) fn next_event(&self) -> Option<WebrtcDirectEvent> {
@@ -365,6 +376,14 @@ mod imp {
             // wakes a millisecond early and finds nothing due.
             let millis = wait.as_micros().div_ceil(1000);
             Some(u32::try_from(millis).unwrap_or(u32::MAX))
+        }
+    }
+
+    fn datagram(transmit: Transmit) -> WebrtcDirectDatagram {
+        WebrtcDirectDatagram {
+            destination_ip: transmit.destination.ip().to_string(),
+            destination_port: transmit.destination.port(),
+            data: transmit.bytes,
         }
     }
 

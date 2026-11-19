@@ -408,6 +408,9 @@ fn a_preamble_that_does_not_verify_closes_the_stream_with_no_event() {
         ..PageSetup::default()
     });
     assert!(net.run_until(Duration::from_secs(3), |net| net.pages[page].open));
+    // A page that misses the close the listener sends it, so it goes on
+    // checking: those checks must still never be answered.
+    net.listener_to_pages = false;
     let opened = net.now;
     assert_eq!(net.listener.pending_dials(), 1);
     assert!(
@@ -435,6 +438,25 @@ fn a_preamble_that_does_not_verify_closes_the_stream_with_no_event() {
     assert_eq!(net.sent.len(), sent, "the listener answered the ended dial");
     assert!(net.events.is_empty(), "{:?}", net.events);
     assert_eq!(net.listener.streams(), 0);
+}
+
+#[test]
+fn a_stream_the_host_closes_closes_the_pages_channel_at_once() {
+    let mut net = Net::new();
+    let (closing, stream) = net.dial();
+    let (staying, _) = net.dial();
+    // As a bridge closes a proved stream over its caps, or one a newer dial
+    // superseded: the page must hear it now, or it holds a link it believes
+    // is up and announces the listener to its engine for nothing.
+    net.listener.close_stream(stream);
+    net.collect();
+    assert_eq!(net.closed().len(), 1);
+    assert!(
+        net.run_until(Duration::from_millis(100), |net| net.pages[closing].ended),
+        "the page whose stream was closed still holds its connection"
+    );
+    assert!(!net.pages[staying].ended, "another page's connection ended");
+    assert_eq!(net.listener.streams(), 1);
 }
 
 #[test]
@@ -505,6 +527,14 @@ fn closing_the_listener_closes_every_proved_stream_once() {
     let mut closed: Vec<StreamId> = net.closed().into_iter().map(|(_, s)| s).collect();
     closed.sort();
     assert_eq!(closed, vec![first, second]);
+    // Each proved page learns within a round trip, not when its consent
+    // checks lapse 15 to 20 s later.
+    assert!(
+        net.run_until(Duration::from_millis(100), |net| {
+            net.pages[0].ended && net.pages[1].ended
+        }),
+        "a page whose listener closed still holds its connection"
+    );
     assert_eq!(net.listener.streams(), 0);
     assert_eq!(net.listener.pending_dials(), 0);
     assert_eq!(net.listener.next_timeout(), None);
