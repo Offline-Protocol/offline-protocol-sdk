@@ -574,6 +574,14 @@ jobs:
         # does not satisfy, so linting test targets fails on main today.
         run: cargo clippy --package offline-protocol --no-default-features --locked -- -D warnings
 
+      # The WebRTC Direct listener the iOS, Android and Python packages ship
+      # (ADR 0039). `webrtc-direct` is off by default and no workspace member
+      # turns it on, so the step above lints only the stub that refuses
+      # `webrtc_direct_open`, and the bridge to the listener would rot behind
+      # a `#[cfg]` that only the Swift Package job compiles, never linted.
+      - name: Clippy (WebRTC Direct)
+        run: cargo clippy --package offline-protocol-uniffi --features webrtc-direct --locked -- -D warnings
+
   docs:
     name: Rustdoc
     needs: changes
@@ -862,6 +870,17 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+      # The FFI crate's WebRTC Direct tests (`tests::webrtc_direct::with_the_feature`):
+      # a page dials the listener through the FFI, proves, carries bodies and
+      # closes. The workspace run above builds the crate without the feature,
+      # which compiles those tests out, so without this step they run nowhere.
+      # On every system in the matrix, because the listener's crypto backend
+      # follows the target (Apple's on macOS, aws-lc-rs elsewhere) and the
+      # shipped packages carry both. `--lib`: the crate builds no Rust
+      # library, so its unit tests are all the tests it has.
+      - name: Test (WebRTC Direct)
+        run: cargo test --package offline-protocol-uniffi --features webrtc-direct --lib --locked
 
       # The release profile (LTO, one codegen unit) over the sources the test
       # build above just compiled. What it adds is the profile, which moves
