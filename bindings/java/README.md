@@ -106,7 +106,7 @@ above.
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.offlineprotocol:offline-protocol-java:0.33.0")
+    implementation("com.offlineprotocol:offline-protocol-java:0.34.0")
 }
 ```
 

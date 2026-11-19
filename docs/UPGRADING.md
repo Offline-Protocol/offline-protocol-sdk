@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.33.x` line.
+current `v0.34.x` line.
 
 > **New integrator?** You probably do not need this file yet. Use the
 > [integrator map](integrator-map.md) to pick a platform and a quick start.
@@ -15,19 +15,19 @@ Use this table to **limit** what you read. The sections below are complete;
 most upgrades only need a subset plus the version-tagged sections in the
 introduction (v0.20.0, v0.21.0, …).
 
-**Current SDK line documented here:** `v0.33.x` (see [CHANGELOG](../CHANGELOG.md)).
+**Current SDK line documented here:** `v0.34.x` (see [CHANGELOG](../CHANGELOG.md)).
 
 ### By where you are today
 
 | You are on… | Goal | Read (in order) | Skip unless noted |
 |-------------|------|-----------------|-------------------|
 | **No SDK yet** | Integrate fresh | [integrator-map.md](integrator-map.md), platform guide in that map | This file |
-| **`v0.16.x` or earlier** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§1–§13](#1-initialize_mls-now-takes-two-storage-providers) (including §11.1–§11.3 and §12.1), then §14–§31 | Nothing |
-| **`v0.17.x`–`v0.19.x`** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: [Logging out and switching accounts](#logging-out-and-switching-accounts) in §10 (`v0.18.2`), §1.10 and §1.11 (`v0.19.0`), §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §12.1 (`v0.20.0`, React Native iOS), §14–§31 | The rest of §1–§13 (the `v0.17.0` storage split) |
-| **`v0.20.x`–`v0.22.x`** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §14 (`v0.21.0`), §15–§31 | §1–§13 apart from those; §12.1 (`v0.20.0`) |
-| **`v0.23.x`–`v0.26.x`** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §17 (`v0.24.0`), §18 (`v0.24.1`), §19 (`v0.25.0`), §20 and §21 (`v0.26.0`), §22–§31 | §1–§16 |
-| **`v0.27.x`–`v0.32.x`** | Reach `v0.33.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §26 (`v0.28.0`), §27 (`v0.29.0`), §28 (`v0.30.0`), §29 (`v0.31.0`), §30 (`v0.32.0`), [§31](#31-behaviour-that-changes-without-a-compile-error-v0330) (`v0.33.0`) | §1–§25 |
-| **`v0.33.x`** | Patch bump within series | [CHANGELOG](../CHANGELOG.md) `[Unreleased]` and the matching subsection in §31 only if the release note points here | Rest of this file |
+| **`v0.16.x` or earlier** | Reach `v0.34.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), [§1–§13](#1-initialize_mls-now-takes-two-storage-providers) (including §11.1–§11.3 and §12.1), then §14–§32 | Nothing |
+| **`v0.17.x`–`v0.19.x`** | Reach `v0.34.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: [Logging out and switching accounts](#logging-out-and-switching-accounts) in §10 (`v0.18.2`), §1.10 and §1.11 (`v0.19.0`), §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §12.1 (`v0.20.0`, React Native iOS), §14–§32 | The rest of §1–§13 (the `v0.17.0` storage split) |
+| **`v0.20.x`–`v0.22.x`** | Reach `v0.34.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §11.1 (`v0.20.1`), §11.2 (`v0.21.0`), §11.3 (`v0.22.0`), §14 (`v0.21.0`), §15–§32 | §1–§13 apart from those; §12.1 (`v0.20.0`) |
+| **`v0.23.x`–`v0.26.x`** | Reach `v0.34.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §17 (`v0.24.0`), §18 (`v0.24.1`), §19 (`v0.25.0`), §20 and §21 (`v0.26.0`), §22–§32 | §1–§16 |
+| **`v0.27.x`–`v0.33.x`** | Reach `v0.34.x` | [§0](#0-before-you-ship-downgrade-is-not-a-rollback), then every section tagged above your version: §26 (`v0.28.0`), §27 (`v0.29.0`), §28 (`v0.30.0`), §29 (`v0.31.0`), §30 (`v0.32.0`), §31 (`v0.33.0`), [§32](#32-behaviour-that-changes-without-a-compile-error-v0340) (`v0.34.0`) | §1–§25 |
+| **`v0.34.x`** | Patch bump within series | [CHANGELOG](../CHANGELOG.md) `[Unreleased]` and the matching subsection in §32 only if the release note points here | Rest of this file |
 
 In a range row, skip any listed section tagged at or below your exact version:
 on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
@@ -52,21 +52,22 @@ on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
 | `v0.31.0` | [§29](#29-behaviour-that-changes-without-a-compile-error-v0310) |
 | `v0.32.0` | [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) |
 | `v0.33.0` | [§31](#31-behaviour-that-changes-without-a-compile-error-v0330) |
+| `v0.34.0` | [§32](#32-behaviour-that-changes-without-a-compile-error-v0340) |
 
 Every other part of sections 1–13 covers the `v0.17.0` storage split, apart
 from paragraphs labelled inline with a later release, and §13 is the test
 checklist.
 
-### By platform (same target `v0.33.x`)
+### By platform (same target `v0.34.x`)
 
 | Surface | Always check | Usually check on jump | Rare |
 |---------|--------------|----------------------|------|
-| **React Native** | [§8](#8-react-native-bridge-fallbacks-now-match-the-sdk-defaults), [§11](#11-events-you-must-now-handle), [§12](#12-build-and-packaging), [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) (iOS), [§13](#13-upgrade-test-checklist) | §14 identity, §16 data layer, §20 telemetry, §25–§30 behaviour | §1–§7 if never on pre-0.17 |
-| **Native Swift / Kotlin** | [§1](#1-initialize_mls-now-takes-two-storage-providers), [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence) (custom storage), [§14](#14-your-identity-is-derived-not-chosen-v0210), [§12](#12-build-and-packaging) ([§12.3](#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework) for Swift package apps) | §11 events, version-tagged iOS/Android behaviour in §18, §25–§30 | RN-only §8–§9; hand-built XCFramework §12.2 |
-| **Python** | [python-distribution.md](python-distribution.md) (wheel tag vs glibc), [§1](#1-initialize_mls-now-takes-two-storage-providers) (`state_root`), [§14](#14-your-identity-is-derived-not-chosen-v0210) | §16 data layer, §25–§30 behaviour | RN-only §8–§9; mobile-only §12.1 |
-| **Rust app on crates** | [This release at a glance](#this-release-at-a-glance) Rust column, §15 API removals, §19 Reticulum crate | §25–§31 exhaustive `Event` / config field matches | Binding-only packaging |
+| **React Native** | [§8](#8-react-native-bridge-fallbacks-now-match-the-sdk-defaults), [§11](#11-events-you-must-now-handle), [§12](#12-build-and-packaging), [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) (iOS), [§13](#13-upgrade-test-checklist) | §14 identity, §16 data layer, §20 telemetry, §25–§32 behaviour | §1–§7 if never on pre-0.17 |
+| **Native Swift / Kotlin** | [§1](#1-initialize_mls-now-takes-two-storage-providers), [§2](#2-protocol-state-values-are-bytes-not-an-element-wise-sequence) (custom storage), [§14](#14-your-identity-is-derived-not-chosen-v0210), [§12](#12-build-and-packaging) ([§12.3](#123-native-ios-bump-the-swift-package-not-a-hand-built-xcframework) for Swift package apps) | §11 events, version-tagged iOS/Android behaviour in §18, §25–§32 | RN-only §8–§9; hand-built XCFramework §12.2 |
+| **Python** | [python-distribution.md](python-distribution.md) (wheel tag vs glibc), [§1](#1-initialize_mls-now-takes-two-storage-providers) (`state_root`), [§14](#14-your-identity-is-derived-not-chosen-v0210) | §16 data layer, §25–§32 behaviour | RN-only §8–§9; mobile-only §12.1 |
+| **Rust app on crates** | [This release at a glance](#this-release-at-a-glance) Rust column, §15 API removals, §19 Reticulum crate | §25–§32 exhaustive `Event` / config field matches | Binding-only packaging |
 | **C / C# / Java** | [desktop-java-csharp-distribution.md](desktop-java-csharp-distribution.md) (release natives), [§12](#12-build-and-packaging), [§14](#14-your-identity-is-derived-not-chosen-v0210) | Same as native for storage if you implement providers | RN sections |
-| **Web** | [bridges/web.md](bridges/web.md), §25–§31 behaviour that touches workers/events | §14 identity model | Mobile-only §12.1 |
+| **Web** | [bridges/web.md](bridges/web.md), §25–§32 behaviour that touches workers/events | §14 identity model | Mobile-only §12.1 |
 
 ### One-page checklist after code changes
 
@@ -154,6 +155,13 @@ twelve new subscription methods. A build that predates this release shows a
 neighbor's acknowledgements get a relay allowance of their own, and a React
 Native development build logs warnings for calls it used to pass silently
 ([§31](#31-behaviour-that-changes-without-a-compile-error-v0330)).
+`v0.34.0` breaks Rust code that names every case or every field: `Event`
+gains `FastLinkChanged`, and `offline-protocol-sealed`'s `KeyPackagePayload`
+gains `link_versions`. An exhaustive TypeScript `switch` over the event union
+needs a `fast_link_changed` case. A send that begins with `__FAST_LINK__` is
+refused with `InvalidArgument`, and a React Native or Flutter app with Wi-Fi
+Direct on now takes part in a fast link a peer asks for
+([§32](#32-behaviour-that-changes-without-a-compile-error-v0340)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -3106,6 +3114,62 @@ expect them. On Android the constructor gains `integratorLifecycleWarnings`,
 off by default, before `onDiagnostic`; a caller that passes `onDiagnostic`
 by position rather than as a trailing lambda or by name needs the new
 argument.
+
+## 32. Behaviour that changes without a compile error *(v0.34.0)*
+
+Nothing is removed from any binding. Two additions break Rust code that names
+every case or every field, and the engine's generated interface grows; the
+first paragraph lists them. Each paragraph after it says what to check.
+
+**Additions that break an exhaustive match, a full struct literal or a
+hand-written conformer.** `Event` gains `FastLinkChanged`, and `Event` is not
+`#[non_exhaustive]`, so a `match` with no `_` arm needs the case.
+`offline-protocol-sealed`'s `KeyPackagePayload` gains `link_versions`, so a
+struct literal that names every field needs it (`Vec::new()` advertises
+nothing, which is what an earlier build sends). An exhaustive TypeScript
+`switch` over the event union needs a `fast_link_changed` case. The engine
+gains six methods (`request_fast_link`, `close_fast_link` and four
+`wifi_direct_*fast_link*` driver calls), so a test fake that implements the
+generated `OfflineProtocolProtocol` (Swift) or `OfflineProtocolInterface`
+(Kotlin) by hand needs them.
+
+**A send that begins with `__FAST_LINK__` is refused.** The prefix is
+reserved for the fast link's frames
+([control messages](spec/control-messages.md#reserved-prefix-registry)), so
+every public send fails with `InvalidArgument` on content that starts with
+it, as it already does for the other reserved prefixes.
+
+**A React Native or Flutter app with Wi-Fi Direct on takes part in a peer's
+fast link.** `wifiDirect.fastLink` defaults to `'any'`: when the Wi-Fi Direct
+or peer-stream transport is running, an Android device hosts a Wi-Fi Direct
+group when a session peer asks for one, and joins a group a peer offers
+without being asked; an iPhone joins an offer it did not ask for, which shows
+the system's "Wants to Join Wi-Fi Network" prompt and takes the phone off its
+own Wi-Fi while the link lasts. An iPhone app without the Hotspot
+Configuration entitlement cannot join, and every join ends `failed`. An app
+that should link only when it asks sets `'requestedOnly'`, and one that
+should never link sets `'off'`
+([mobile permissions](mobile-permissions.md#fast-link)). An app with Wi-Fi
+Direct off declares nothing and is never asked.
+
+**A file transfer over a peer stream sends 64 KiB chunks, eight in flight.**
+It sent 32 KiB chunks, four in flight. Every peer-stream carrier gets it (a
+fast link, a Wi-Fi Direct group, a LAN, AWDL); Bluetooth, internet and Nostr
+are unchanged. A receiver on an earlier release takes the larger chunks.
+
+**React Native: a development build logs transport hints.** With
+`devTransportDiagnostics` (on under `__DEV__`, off in a release build unless
+set), a known native `diagnostic` event, such as a Wi-Fi Direct group still
+forming after one, two and four minutes on Android, becomes a one-time
+`console.warn` that links to [troubleshooting](troubleshooting.md). A test
+suite that fails on `console.warn` sets `devTransportDiagnostics: false` on
+`ProtocolConfig`.
+
+**A custom protocol-state store sees one fewer write at shutdown.** Dropping
+the engine wrote the Lamport clock even when `stop()` had just written the
+same value. It now writes only a value the store does not already hold, so
+an engine dropped after `stop()` makes no storage call. This is what stops a
+Python program panicking at interpreter exit.
 
 ---
 
