@@ -222,6 +222,25 @@ await run(async (step) => {
   await noProof();
   log("a wrong password got no answer");
 
+  step.name = "dial again during setup";
+  // A second dial of one address closes the first while the browser is
+  // still making its offer, a step the browser then never settles. The
+  // first dial must reject as closed, long before its own timeout. Both
+  // carry the wrong password, so neither reaches the listener.
+  const settles = (promise, ms, what) =>
+    Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} never settled`)), ms)),
+    ]);
+  const early = failedDial(withValue(code, "w", wrong), { timeoutMs: 60000 });
+  const late = failedDial(withValue(code, "w", wrong), { timeoutMs: 2000 });
+  const closedEarly = await settles(early, 5000, "the first of two dials");
+  if (closedEarly.state !== "closed") throw new Error(`the first dial ended ${closedEarly.state}: ${closedEarly.message}`);
+  const timedOut = await settles(late, 10000, "the second of two dials");
+  if (timedOut.state !== "timeout") throw new Error(`the second dial ended ${timedOut.state}: ${timedOut.message}`);
+  await noProof();
+  log("a second dial closed the first during its setup, and the first rejected at once");
+
   step.name = "wrong address";
   // A canonical address nobody here holds (a vector's).
   const stranger = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn";

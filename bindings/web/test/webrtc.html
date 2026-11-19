@@ -52,6 +52,26 @@ await run(async (step) => {
   } finally {
     RTCPeerConnection.prototype.setLocalDescription = setLocal;
   }
+  // Closed while the browser is still making the offer: the browser never
+  // settles that step, so the offer must reject on the close itself, well
+  // before the 5 s gathering bound.
+  const createOffer = RTCPeerConnection.prototype.createOffer;
+  RTCPeerConnection.prototype.createOffer = function (...args) {
+    RTCPeerConnection.prototype.createOffer = createOffer;
+    const making = createOffer.apply(this, args);
+    spare.close();
+    return making;
+  };
+  try {
+    await Promise.race([
+      rejects(spare.offer(), "an offer whose connection closed while the browser made it"),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("an offer closed while the browser made it never settled")), 3000),
+      ),
+    ]);
+  } finally {
+    RTCPeerConnection.prototype.createOffer = createOffer;
+  }
   await new Promise((resolve) => setTimeout(resolve, 100));
   if (reported.length) throw new Error(`rejected calls reported ${reported.join(", ")}`);
   log("rejected calls reported nothing");

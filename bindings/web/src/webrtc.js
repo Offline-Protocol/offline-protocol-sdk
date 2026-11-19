@@ -163,12 +163,20 @@ class Connection {
   #expect;
   // { resolve, reject } while a dial waits for its channel to open.
   #dialling = null;
+  // Rejects once the connection closes; see #step.
+  #ended;
+  #end;
 
   constructor(node, iceServers, disconnectedMs, onClose, { expect } = {}) {
     this.#node = node;
     this.#disconnectedMs = disconnectedMs;
     this.#onClose = onClose;
     this.#expect = expect;
+    this.#ended = new Promise((_, reject) => {
+      this.#end = reject;
+    });
+    // Nothing need be waiting on it when the connection closes.
+    this.#ended.catch(() => {});
     this.#pc = new RTCPeerConnection({ iceServers });
     this.#channel = this.#pc.createDataChannel("offline-protocol", {
       negotiated: true,
@@ -229,21 +237,31 @@ class Connection {
     return this.#closed;
   }
 
+  // `promise`, or a rejection once the connection closes. A browser
+  // abandons a description step whose connection closed while it ran, and
+  // never settles it ("if [[IsClosed]], abort these steps"), so a call that
+  // awaited the step alone would never settle either: a page that dialled
+  // one code twice, or closed its carrier, during a dial's setup was left
+  // with a dial() that never resolved or rejected.
+  #step(promise) {
+    return Promise.race([promise, this.#ended]);
+  }
+
   async offer() {
-    await this.#pc.setLocalDescription(await this.#pc.createOffer());
-    await gathered(this.#pc);
+    await this.#step(this.#pc.setLocalDescription(await this.#step(this.#pc.createOffer())));
+    await this.#step(gathered(this.#pc));
     return encode(this.#pc.localDescription);
   }
 
   async answer(offerCode) {
-    await this.#pc.setRemoteDescription(await decode(offerCode, "offer"));
-    await this.#pc.setLocalDescription(await this.#pc.createAnswer());
-    await gathered(this.#pc);
+    await this.#step(this.#pc.setRemoteDescription(await decode(offerCode, "offer")));
+    await this.#step(this.#pc.setLocalDescription(await this.#step(this.#pc.createAnswer())));
+    await this.#step(gathered(this.#pc));
     return encode(this.#pc.localDescription);
   }
 
   async accept(answerCode) {
-    await this.#pc.setRemoteDescription(await decode(answerCode, "answer"));
+    await this.#step(this.#pc.setRemoteDescription(await decode(answerCode, "answer")));
   }
 
   /// Dials a listener from its checked code. Resolves once the channel is
@@ -258,12 +276,12 @@ class Connection {
       this.close();
     }, Math.min(timeoutMs, MAX_TIMER_MS));
     try {
-      const offer = await this.#pc.createOffer();
+      const offer = await this.#step(this.#pc.createOffer());
       // Exactly as the browser made it: the page edits no local description.
-      await this.#pc.setLocalDescription(offer);
+      await this.#step(this.#pc.setLocalDescription(offer));
       const mid = /^a=mid:(\S+)/m.exec(offer.sdp)?.[1];
       if (mid === undefined) throw new Error("the browser's offer has no data channel section");
-      await this.#pc.setRemoteDescription({ type: "answer", sdp: listenerAnswer(code, mid) });
+      await this.#step(this.#pc.setRemoteDescription({ type: "answer", sdp: listenerAnswer(code, mid) }));
     } catch (error) {
       this.#settleDial(error);
       this.close();
@@ -360,6 +378,7 @@ class Connection {
         : dialError("the connection closed before its channel opened", "closed"),
     );
     this.#recovered();
+    this.#end(new Error("the connection closed"));
     for (const done of [...this.#draining]) done();
     if (this.#link !== null && !engine) this.#node.closeLink(this.#link);
     this.#channel.close();
