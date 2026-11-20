@@ -143,7 +143,7 @@ class WebrtcDirectListenerTest {
         val sink = object : WebrtcDirectListener.Sink {
             override fun proved(listener: WebrtcDirectListener, stream: Long, address: String, remoteIp: String) {
                 deliveredOn.add(Thread.currentThread())
-                sockets.dialProved(listener, stream, address, remoteIp, accepting = true)
+                sockets.dialProved(listener, stream, address, remoteIp, accepting = { true })
             }
             override fun body(stream: Long, data: ByteArray) {
                 deliveredOn.add(Thread.currentThread())

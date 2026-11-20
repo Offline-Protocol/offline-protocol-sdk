@@ -21827,10 +21827,10 @@ mod tests {
             "carriers = { PeerStreamLayer.Carriers(p2p = p2pUp, lan = lanUp, listener = webrtc != null) },",
             // Reported before the code is returned, also when the open fails,
             // and after a listener whose Wi-Fi network went while it opened
-            // was closed again.
-            "try { val code = openWebrtcDirectListener(choice, wifi?.first, onClosed) \
-             if (confinement.runSync { closeIfWifiWentWhileOpening(code) }) {",
-            "return code } finally { confinement.runSync { reportLayer() } }",
+            // was closed again, or that a close overtook.
+            "try { val listener = openWebrtcDirectListener(choice, wifi?.first, onClosed) \
+             confinement.runSync { confirmWebrtcDirectOpened(listener) }?.let { refusal ->",
+            "while it opened\") } finally { confinement.runSync { reportLayer() } }",
             // Every close reports after its streams ended, on the transport thread.
             "fun closeWebrtcDirect(): Boolean = confinement.runSync { \
              layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } } }",
@@ -21961,7 +21961,7 @@ mod tests {
                     // listener it replaced as stopped, since the stop found
                     // that one still in place.
                     "layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } }",
-                    "val code = previous?.holding { listener.open(socket) } ?: listener.open(socket)",
+                    "if (previous != null) previous.replacedBy { listener.open(socket) } else listener.open(socket)",
                     "previous?.retire(WebrtcDirectListener.CLOSED_STOPPED)",
                     "if (previous != null) { previous.retire() sockets.closeDials() }",
                 ][..],
@@ -22251,7 +22251,7 @@ mod tests {
                     "WebrtcDirectEventKind.PROVED -> WebrtcDirectListener.Event.Proved( \
                      stream, event.address ?: \"\",",
                     "sockets.dialProved(listener, stream, address, remoteIp, \
-                     accepting = state == TransportState.RUNNING)",
+                     accepting = { state == TransportState.RUNNING })",
                     "!announce(held, address, outbound = false) ->",
                     "if (!deliver(stream, address, body)) {",
                     "links.remove(stream)?.let { address -> try { host.peerDisconnected(address)",

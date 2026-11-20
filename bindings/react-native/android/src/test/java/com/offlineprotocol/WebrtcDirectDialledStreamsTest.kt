@@ -91,7 +91,7 @@ class WebrtcDirectDialledStreamsTest {
 
         fun prove(sockets: PeerStreamSockets, stream: Long, address: String, ip: String = PAGE_IP): Boolean {
             open.add(stream)
-            return sockets.dialProved(this, stream, address, ip, accepting = true)
+            return sockets.dialProved(this, stream, address, ip, accepting = { true })
         }
 
         /** What the listener does after the table closed streams: a Closed for each. */
@@ -362,7 +362,7 @@ class WebrtcDirectDialledStreamsTest {
         val sockets = PeerStreamSockets(host, fast)
         val dials = FakeDials()
         dials.open.add(1)
-        assertFalse(sockets.dialProved(dials, 1, "peer-m", PAGE_IP, accepting = false))
+        assertFalse(sockets.dialProved(dials, 1, "peer-m", PAGE_IP, accepting = { false }))
         assertEquals(listOf(1L), dials.closed.toList())
         assertNull(host.quiet())
         assertEquals(0, sockets.openCount)

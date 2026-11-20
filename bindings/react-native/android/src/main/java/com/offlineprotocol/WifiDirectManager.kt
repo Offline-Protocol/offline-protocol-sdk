@@ -2222,7 +2222,7 @@ class WifiDirectManager(
     /** The listener's events into the one stream table, beside the TCP streams. */
     private val webrtcSink = object : WebrtcDirectListener.Sink {
         override fun proved(listener: WebrtcDirectListener, stream: Long, address: String, remoteIp: String) {
-            sockets.dialProved(listener, stream, address, remoteIp, accepting = state == TransportState.RUNNING)
+            sockets.dialProved(listener, stream, address, remoteIp, accepting = { state == TransportState.RUNNING })
         }
 
         override fun body(stream: Long, data: ByteArray) = sockets.dialBody(stream, data)
@@ -2280,33 +2280,44 @@ class WifiDirectManager(
         // when this open closed the only thing holding it up and then failed,
         // after that listener's streams were reported lost.
         try {
-            val code = openWebrtcDirectListener(choice, wifi?.first, onClosed)
-            if (confinement.runSync { closeIfWifiWentWhileOpening(code) }) {
-                throw IllegalStateException("the Wi-Fi network went while the WebRTC Direct listener opened")
+            val listener = openWebrtcDirectListener(choice, wifi?.first, onClosed)
+            confinement.runSync { confirmWebrtcDirectOpened(listener) }?.let { refusal ->
+                throw IllegalStateException(refusal)
             }
-            return code
+            return listener.code ?: throw IllegalStateException("the WebRTC Direct listener closed while it opened")
         } finally {
             confinement.runSync { reportLayer() }
         }
     }
 
     /**
-     * Closes the listener whose [code] an open just returned, and says so,
-     * when it is bound to the Wi-Fi network and that network no longer
-     * gives this device its address. The network is read before the open
-     * and the listener published after, so a loss in between reached
-     * [closeWifiWebrtcDirectUnlessHeld] while [webrtc] was still the one it
-     * replaced (or none), and this open would otherwise hand out a code no
-     * page can reach, with no close to follow. Transport thread.
+     * Why the code of [listener], which an open just published, must not be
+     * returned, or null when it may. Transport thread.
+     *
+     * - **It is no longer the open listener.** A stop, a network loss, a
+     *   lost socket or another open closed or replaced it after it was
+     *   published, and a close with a reason has already told the
+     *   application. Returning its code then would hand out a code after
+     *   its close, with nothing to follow.
+     * - **Its Wi-Fi network went while it opened.** The network is read
+     *   before the open and the listener published after, so a loss in
+     *   between reached [closeWifiWebrtcDirectUnlessHeld] while [webrtc] was
+     *   still the one it replaced (or none). It is closed here as the
+     *   application's own close, so the throw is the one signal.
+     *
+     * Both closes take [webrtcLock], as this does, so none can land between
+     * the check and its answer.
      */
-    private fun closeIfWifiWentWhileOpening(code: WebrtcDirectListener.Code): Boolean {
+    private fun confirmWebrtcDirectOpened(listener: WebrtcDirectListener): String? {
         synchronized(webrtcLock) {
-            val listener = webrtc ?: return false
-            if (listener.code !== code || webrtcHotspot != null) return false
+            if (webrtc !== listener || !listener.isOpen) {
+                return "the WebRTC Direct listener closed while it opened"
+            }
+            if (webrtcHotspot != null) return null
             val addresses = lan?.wifiNetwork()?.second?.linkAddresses?.map { it.address }
-            if (addresses != null && listener.boundAddress in addresses) return false
+            if (addresses != null && listener.boundAddress in addresses) return null
             closeWebrtcDirectLocked()
-            return true
+            return "the Wi-Fi network went while the WebRTC Direct listener opened"
         }
     }
 
@@ -2315,7 +2326,7 @@ class WifiDirectManager(
         choice: WebrtcDirectAddress.Choice,
         wifiNetwork: Network?,
         onClosed: (reason: String) -> Unit,
-    ): WebrtcDirectListener.Code {
+    ): WebrtcDirectListener {
         val ip = choice.ip
         synchronized(webrtcLock) {
             // Bound before the listener open now is touched, so a failure
@@ -2338,10 +2349,12 @@ class WifiDirectManager(
             }
             // The engine replaces its listener only once the new one exists
             // (`webrtc_direct_open`), so a refused open leaves the one open
-            // now, and its code, live. Its lock is held across the open so
-            // its own threads cannot reach the engine as it swaps.
+            // now, and its code, live. Its lock is held across the open, and
+            // it stops entering the engine in that same hold, so its own
+            // threads cannot reach the engine (the new listener, once it
+            // swaps) as it swaps or after.
             val previous = webrtc
-            val code = previous?.holding { listener.open(socket) } ?: listener.open(socket)
+            if (previous != null) previous.replacedBy { listener.open(socket) } else listener.open(socket)
             // The engine closed the replaced listener: its socket and clock
             // stop here, and its streams end through the `Closed` events
             // the new one hands on, or below.
@@ -2367,7 +2380,7 @@ class WifiDirectManager(
                 transportHandler.removeCallbacks(webrtcHotspotCheck)
                 transportHandler.postDelayed(webrtcHotspotCheck, WEBRTC_HOTSPOT_CHECK_MS)
             }
-            return code
+            return listener
         }
     }
 

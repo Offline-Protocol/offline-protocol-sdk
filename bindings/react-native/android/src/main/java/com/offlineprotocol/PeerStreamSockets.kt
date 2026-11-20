@@ -395,12 +395,12 @@ internal class PeerStreamSockets(
      * one machine hold the per-address bound twice over.
      */
     fun dialProved(
-        dials: Dials, stream: Long, address: String, remoteIp: String, accepting: Boolean,
+        dials: Dials, stream: Long, address: String, remoteIp: String, accepting: () -> Boolean,
     ): Boolean {
         val local = try { host.localAddress() } catch (_: Exception) { null }
         val replacing = links.handleFor(address)?.takeIf { it.dialled }
         val refusal = when {
-            !accepting -> "not running"
+            !accepting() -> "not running"
             // A copied preamble of ours, played back through a page.
             address == local -> "the stream proves this device's own address"
             !reserve(outbound = false, remoteIp, replacing) -> "at stream limit"
@@ -422,7 +422,7 @@ internal class PeerStreamSockets(
         val why = when {
             // Re-checked after the add, as for a socket: a closeAll() that
             // snapshotted the set just before it cannot miss this stream.
-            !accepting -> "not running"
+            !accepting() -> "not running"
             admitsInbound?.invoke(address, held.carrier) == false -> "not invited onto this network"
             !announce(held, address, outbound = false) -> "another kind of stream holds the address"
             else -> null

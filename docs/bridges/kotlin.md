@@ -324,11 +324,16 @@ network going. Opening again replaces the previous listener once the new
 one is open, its streams reported lost: the socket, certificate and
 credentials are fresh on every open. The socket is bound before the open
 listener is touched and the engine swaps only on success, so an open that
-throws leaves the old code working; the replaced listener is retired under
-its own lock, since a pump of it after the swap would drain the new one's
-datagrams out of the old socket. An open that finds the Wi-Fi network gone
-once its listener is published closes it and throws, because the loss
-reached the bridge while the replaced listener was still in place.
+throws leaves the old code working. The replaced listener stops entering
+the engine in the same hold of its lock that the open ran under: a
+datagram, timer or send parked on that lock would otherwise run once it was
+let go and enter the new listener from a second thread, draining its
+datagrams out of the old socket. An open returns a code only for a listener
+still open once it is published. One that finds the Wi-Fi network gone
+closes it and throws, because the loss reached the bridge while the
+replaced listener was still in place, and one that a stop or a loss closed
+in between throws too: that close has already told the application, which
+would otherwise get the code after the event.
 
 The application hears every close it did not ask for, once, as the React
 Native `webrtc_direct_closed` event with a reason: `network` (the Wi-Fi
@@ -358,10 +363,10 @@ ran it on the transport thread, which Wi-Fi P2P's broadcasts share, or
 waited there on the receive thread's deliveries, would stall both, where a
 TCP stream's send only queues a frame for its writer. So a send returns
 once handed. A send the engine then refuses (the stream ended, or past its
-8 MiB bound, which also closes the stream, whose `Closed` reports the loss
-once) is dropped and the core retries; more than that bound waiting to be
-handed is refused at once. Closing the listener is the exception: it runs
-on the caller's thread and reports every dialled loss before it returns.
+8 MiB bound, which leaves the stream open) is dropped and the core retries;
+more than that bound waiting to be handed is refused at once. Closing the
+listener is the exception: it runs on the caller's thread and reports every
+dialled loss before it returns.
 
 - **One table.** `PeerStreamSockets.dialProved` puts the stream in the same
   `PeerStreamLinks` and the same admission count as the sockets, and

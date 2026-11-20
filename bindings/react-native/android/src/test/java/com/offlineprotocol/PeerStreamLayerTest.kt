@@ -64,7 +64,7 @@ class PeerStreamLayerTest {
     }
 
     private fun prove(stream: Long, address: String) {
-        assertTrue(sockets.dialProved(dials, stream, address, "10.228.161.${stream + 1}", accepting = true))
+        assertTrue(sockets.dialProved(dials, stream, address, "10.228.161.${stream + 1}", accepting = { true }))
     }
 
     @Test

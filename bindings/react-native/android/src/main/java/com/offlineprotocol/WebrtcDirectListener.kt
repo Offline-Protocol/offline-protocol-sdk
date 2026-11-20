@@ -191,7 +191,8 @@ internal class WebrtcDirectListener(
 
     /**
      * Opens the engine's listener on [socket], which the caller bound to one
-     * private or link-local address (never a wildcard: a code names one
+     * private address (never 169.254, which str0m refuses as a host
+     * candidate, and never a wildcard: a code names one
      * address, and a socket on every interface would admit checks from
      * networks the code was never shown on), and starts receiving. On a throw
      * the socket is closed and nothing is left open.
@@ -271,7 +272,9 @@ internal class WebrtcDirectListener(
      */
     fun retire(reason: String? = null) {
         val toClose = synchronized(lock) {
-            if (closed) return
+            // [replacedBy] marks a listener closed and leaves its socket for
+            // here, so the socket, not the flag, says whether this ran.
+            if (closed && socket == null) return
             closed = true
             timer?.cancel(false)
             timer = null
@@ -284,12 +287,23 @@ internal class WebrtcDirectListener(
     }
 
     /**
-     * Runs [block] holding this listener's lock, so its own receive thread
-     * and clock cannot reach the engine meanwhile: what an open replacing
-     * this listener runs under, since once the engine swaps, a pump of this
-     * one would drain the new listener's datagrams out of the old socket.
+     * Runs [block], the open of the listener replacing this one, holding
+     * this listener's lock, and when it returns marks this listener closed
+     * in the same hold. Its receive thread and clock cannot reach the
+     * engine while it swaps, and a datagram, timer or send parked on the
+     * lock meanwhile finds it closed when the lock is let go: once the
+     * engine swaps, a pump of this one would enter the new listener from a
+     * second thread and drain its datagrams out of the old socket. [retire]
+     * then stops the socket and clock. A [block] that throws leaves this
+     * listener open, as the engine leaves its listener.
      */
-    fun <T> holding(block: () -> T): T = synchronized(lock) { block() }
+    fun <T> replacedBy(block: () -> T): T = synchronized(lock) {
+        block().also {
+            closed = true
+            timer?.cancel(false)
+            timer = null
+        }
+    }
 
     val isOpen: Boolean get() = !closed && code != null
 
@@ -299,8 +313,8 @@ internal class WebrtcDirectListener(
      * Hands [body] to [clock] and returns: the caller never runs the pump
      * or waits on [lock]. Throws when the listener is closed, or when
      * [MAX_HANDED_BYTES] are already waiting. A send the engine refuses once
-     * it is given one (the stream ended, or past its bound, which also
-     * closes the stream and so reports the loss once) drops the body; the
+     * it is given one (the stream ended, or past its bound, which leaves
+     * the stream open) drops the body; the
      * core retries either way.
      */
     override fun send(stream: Long, body: ByteArray) {
@@ -479,7 +493,9 @@ internal class WebrtcDirectListener(
         timer = null
         if (delay == null || closed) return
         timer = try {
-            clock.schedule({ pump() }, delay, TimeUnit.MILLISECONDS)
+            // At least 1 ms: a tick that keeps answering 0 would otherwise
+            // spin the clock thread against the listener's lock.
+            clock.schedule({ pump() }, maxOf(delay, 1L), TimeUnit.MILLISECONDS)
         } catch (_: Exception) {
             null
         }
