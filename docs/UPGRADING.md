@@ -53,6 +53,7 @@ on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
 | `v0.32.0` | [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) |
 | `v0.33.0` | [§31](#31-behaviour-that-changes-without-a-compile-error-v0330) |
 | `v0.34.0` | [§32](#32-behaviour-that-changes-without-a-compile-error-v0340) |
+| unreleased | [§33](#33-the-mesh-appid-is-now-applabel-unreleased) |
 
 Every other part of sections 1–13 covers the `v0.17.0` storage split, apart
 from paragraphs labelled inline with a later release, and §13 is the test
@@ -1540,7 +1541,7 @@ identity this instance runs as. It never leaves the device.
 
 ```diff
   const protocol = new OfflineProtocol({
-    appId: 'my-app',
+    appLabel: 'my-app',
 -   userId: currentUserId,
 +   profile: currentUserId,
   });
@@ -1850,7 +1851,7 @@ tombstone: see the storage section below.
 
 ```typescript
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'default',
   data: { enabled: true },
 });
@@ -3170,6 +3171,53 @@ the engine wrote the Lamport clock even when `stop()` had just written the
 same value. It now writes only a value the store does not already hold, so
 an engine dropped after `stop()` makes no storage call. This is what stops a
 Python program panicking at interpreter exit.
+
+---
+
+## 33. The mesh `appId` is now `appLabel` *(unreleased)*
+
+The mesh value in `ProtocolConfig` was called `appId` (`app_id`), and it was
+easy to mistake for the App ID (`app_…`) the developer portal issues. It is now
+the **app label**: `appLabel` in TypeScript, Swift, Kotlin and Java,
+`app_label` in Rust, Python, Ruby and the C API. `TelemetryConfig.appId` keeps
+its name, because that one is the portal App ID.
+
+**Only the name changed. Keep your value.** The label selects the storage
+namespace with `profile`, is stamped on every frame and derives the Bluetooth
+app tag. The wire field is still `app_id`, so old and new builds talk to each
+other as long as they pass the same string. Changing the value of a shipped app
+gives every device fresh storage and a new identity, and splits old builds from
+new ones.
+
+```diff
+- new OfflineProtocol({ appId: 'app.muster', profile: 'default' })
++ new OfflineProtocol({ appLabel: 'app.muster', profile: 'default' })
+```
+
+**What keeps working, and what needs an edit:**
+
+| Surface | Old code |
+|---|---|
+| React Native, browser, Flutter | `appId` still works, with a one-time warning in development builds. Setting both names to different values throws. |
+| Python | `app_id=` still works on `ProtocolConfig`, `SendMessageOptions` and `MediaSendOptions`, with a `DeprecationWarning`. A local API server config file that still says `app_id` loads with a warning. |
+| Rust | `ProtocolConfig::new` and `builder` keep their arguments. Reading the field is now `config.app_label` (`config.app_id()` is deprecated). The send options' `app_id` fields are deprecated beside `app_label`. |
+| Swift | The generated `ProtocolConfig(appId:…)` is now `ProtocolConfig(appLabel:…)`. `OfflineProtocolReferenceStorage` and `OfflineProtocolDevelopmentCleartextConfig` keep deprecated `appId:` overloads. |
+| Kotlin | The generated `ProtocolConfig(appId = …)` is now `ProtocolConfig(appLabel = …)`; positional calls are unaffected. |
+| Java, C# | The field kept its position, so the positional Java constructor is unaffected. C#: `AppId =` becomes `AppLabel =`. |
+| C | The config JSON key is `app_label`. |
+| Ruby | `app_id:` becomes `app_label:`. |
+| Per-send override | The generated send options take `app_label` / `appLabel`. |
+
+**Events** carry the label under `app_label`, with `app_id` beside it holding
+the same value until the alias is removed. Read `app_label`.
+
+**Telemetry.** A new app may pass its portal App ID as its label, and then
+`enableTelemetry` needs only the key: when its config names no App ID and the
+label has the shape `app_…` (or the legacy `proj_…`), the label is used. An app
+that shipped with another label keeps it and passes the App ID as before.
+
+**The label carries no authority.** It is public: anyone nearby can read it and
+any app can use the same one. Nothing should decide whom to trust from it.
 
 ---
 

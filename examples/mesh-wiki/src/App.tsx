@@ -410,7 +410,7 @@ const App = () => {
   // Initialize protocol
   useEffect(() => {
     const proto = new OfflineProtocol({
-      appId: 'mesh-wiki',
+      appLabel: 'mesh-wiki',
       profile: userId,
       transports: {
         ble: {enabled: true},

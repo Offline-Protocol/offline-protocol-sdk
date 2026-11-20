@@ -107,7 +107,8 @@ the second has learned nothing.
 be absent: a device running one application loses nothing by omitting it. When
 present it MUST be readable and carries eight bytes, the first eight of
 `SHA-256("offline-protocol-ble-app-tag-v1" || 0x00 || app_id)`, where `app_id`
-is the application id of [the wire format](wire-format.md) as UTF-8. It proves
+is the application id of [the wire format](wire-format.md) as UTF-8 (the
+app label of the SDK's API). It proves
 nothing, and is read only to choose between instances, below.
 
 **Hello** is written by a central to say who it is on the link it opened. It

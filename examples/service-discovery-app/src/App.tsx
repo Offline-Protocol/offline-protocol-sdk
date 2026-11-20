@@ -210,7 +210,7 @@ const App = () => {
   // Initialize protocol
   useEffect(() => {
     const proto = new OfflineProtocol({
-      appId: 'service-discovery-demo',
+      appLabel: 'service-discovery-demo',
       profile: userId,
       transports: {
         ble: {enabled: true},

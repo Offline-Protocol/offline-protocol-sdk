@@ -110,7 +110,7 @@ permissions; you still own runtime prompts and API 37 local network.
 ```typescript
 import { requestMeshPermissionsForConfig, OfflineProtocol } from '@offline-protocol/mesh-sdk';
 
-const config = { appId: 'my-app', profile: 'default', transports: { ble: { enabled: true } } };
+const config = { appLabel: 'my-app', profile: 'default', transports: { ble: { enabled: true } } };
 await requestMeshPermissionsForConfig(config);
 
 const protocol = new OfflineProtocol(config);
@@ -128,7 +128,7 @@ See [mobile-permissions.md](../../docs/mobile-permissions.md#react-native-helper
 import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'user123',
   // Encryption is enabled by default - MLS is auto-initialized on start()
 });
@@ -173,7 +173,7 @@ peer phone running several SDK apps. Toggle with `devTransportDiagnostics` on
 your `diagnostic` listeners in every build. See
 [docs/troubleshooting.md](../../docs/troubleshooting.md#react-native-development-console-hints).
 
-Built-in secure and restartable-state stores are isolated by both `appId` and
+Built-in secure and restartable-state stores are isolated by both `appLabel` and
 `profile`. Changing either value selects a fresh storage namespace.
 
 Upgrading an install that predates namespacing keeps both halves of its state,
@@ -211,11 +211,11 @@ reinstall. To erase it:
 
 ```typescript
 await protocol.destroy();
-await protocol.wipePersistedState(appId, profile);
+await protocol.wipePersistedState(appLabel, profile);
 ```
 
 Wipe after destroy, never under a live instance (the native side rejects that),
-and pass the same `appId`/`profile` the protocol was created with — `destroy()`
+and pass the same `appLabel`/`profile` the protocol was created with — `destroy()`
 clears the config the namespace is derived from, which is why the identity is an
 argument. It is irreversible, it rotates the account's MLS and Nostr identities,
 and it leaves other accounts on the device untouched. Full semantics, including
@@ -228,7 +228,7 @@ The SDK provides automatic end-to-end encryption using MLS (RFC 9420):
 
 ```typescript
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'alice',
   encryption: {
     enabled: true,           // Auto-encrypt messages (default)
@@ -279,7 +279,7 @@ import {
 
 // 1. CREATE PROTOCOL INSTANCE
 const protocol = new OfflineProtocol({
-  appId: 'my-chat-app',
+  appLabel: 'my-chat-app',
   profile: 'alice-device-001',
 });
 
@@ -521,7 +521,7 @@ import { OfflineProtocol, forScenario } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol(
   forScenario('internetRelay', {
-    appId: 'my-app',
+    appLabel: 'my-app',
     profile: 'default',
     overrides: { transports: { internet: { serverAddress: 'wss://relay.example.com/ws' } } },
   })
@@ -540,7 +540,7 @@ See the [preset tables](../../docs/react-native-config-presets.md#scenario-table
 
 ```typescript
 interface ProtocolConfig {
-  appId: string;
+  appLabel: string;
   profile: string;
   transports?: TransportsConfig;
   binaryWireEnabled?: boolean;  // binary wire-codec kill switch (default: true)
@@ -906,11 +906,11 @@ interface MessageReceivedEvent {
   content_type?: string;
   media_metadata?: MediaMetadataEvent;
   forward_info?: ForwardInfo;
-  app_id: string; // the sender's application id; route on it, never authorize
+  app_label: string; // the sender's app label; route on it, never authorize
 }
 ```
 
-`app_id` is the id the sender stamped: its configured `appId`, or the `appId`
+`app_label` (also under its old name `app_id`) is the label the sender stamped: its configured `appLabel`, or the `appLabel`
 passed to a rich `sendMessage`. It is cleartext on the wire, so any carrier
 could have rewritten it.
 
@@ -1543,8 +1543,8 @@ Full dogfood guidance: [docs/troubleshooting.md § Several SDK apps](../../docs/
 
 Every app built on this SDK serves the same Bluetooth service, so a phone
 running two of them presents two instances of it. Each app reads a small tag
-derived from its `appId` to pick its own counterpart, and a peer running one
-SDK app is paired exactly as before. Keep `appId` the same across builds of one
+derived from its `appLabel` to pick its own counterpart, and a peer running one
+SDK app is paired exactly as before. Keep `appLabel` the same across builds of one
 app, or its builds will not recognise each other.
 
 - A phone running only other SDK apps still appears in `neighbor_discovered`:

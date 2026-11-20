@@ -64,7 +64,7 @@ The Rust side signs with the per-install Schnorr keypair (stable once `initializ
 **React Native (TypeScript)**:
 ```typescript
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'user123',
   transports: {
     ble: { enabled: true },
@@ -82,7 +82,7 @@ const protocol = new OfflineProtocol({
 **Kotlin (Android)**:
 ```kotlin
 val config = ProtocolConfig(
-    appId = "my-app",
+    appLabel = "my-app",
     profile = "user123",
     bleEnabled = true,
     nostrEnabled = true,
@@ -93,7 +93,7 @@ val config = ProtocolConfig(
 **Swift (iOS)**:
 ```swift
 let config = ProtocolConfig(
-    appId: "my-app",
+    appLabel: "my-app",
     profile: "user123",
     bleEnabled: true,
     nostrEnabled: true,

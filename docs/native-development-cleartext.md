@@ -14,7 +14,7 @@ Swift and Android ship the same posture through
 | Goal | Path |
 |------|------|
 | Production encrypted mesh | Default `ProtocolConfig`, then `OfflineProtocolReferenceStorage.initializeMls`, then `start()` |
-| Lab / simulator smoke test without MLS | `OfflineProtocolDevelopmentCleartextConfig.make(appId:profile:)` |
+| Lab / simulator smoke test without MLS | `OfflineProtocolDevelopmentCleartextConfig.make(appLabel:profile:)` |
 
 Never ship a build that uses the cleartext config to end users. Inbound plaintext
 from peers that run MLS is still rejected as a downgrade attempt even when
@@ -24,7 +24,7 @@ from peers that run MLS is still rejected as a downgrade attempt even when
 
 ```swift
 let config = OfflineProtocolDevelopmentCleartextConfig.make(
-    appId: "my-ios-app",
+    appLabel: "my-ios-app",
     profile: "default"
 )
 let mesh = try OfflineProtocol(config: config)
@@ -36,7 +36,7 @@ No `initializeMls` call is required when `encryptionEnabled` is `false`.
 
 ```kotlin
 val config = OfflineProtocolDevelopmentCleartextConfig.make(
-    appId = "my-android-app",
+    appLabel = "my-android-app",
     profile = "default",
 )
 val protocol = OfflineProtocol(config)

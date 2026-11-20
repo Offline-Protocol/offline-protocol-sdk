@@ -53,6 +53,24 @@ Questions about a release, or about upgrading to one? Ask in the
   to 326 ms ([device runs](docs/bridges/web-devices.md#webrtc-direct)). It adds about
   1.54 MB to the iOS library and 2.47 MB to the Android one.
 
+### Changed
+
+- **The mesh `appId` is now `appLabel`** (`app_label` in Rust, Python, Ruby
+  and the C API), so it is no longer mistaken for the App ID (`app_…`) the
+  developer portal issues for telemetry. Only the name changed: the value
+  still selects the storage namespace, is stamped on every frame as the wire
+  field `app_id` and derives the Bluetooth app tag, so a shipped app keeps
+  its value and old and new builds keep talking. React Native, the browser,
+  Flutter and Python still take `appId` (`app_id=`) with a deprecation
+  warning, and refuse both names set to different values; Rust keeps
+  deprecated `app_id` send options and a `ProtocolConfig::app_id()` getter;
+  Swift keeps deprecated `appId:` helper overloads. The generated Swift,
+  Kotlin, Ruby, C and C# config takes the new name. Events carry
+  `app_label`, with `app_id` beside it for now. The docs now say plainly
+  that the label is public and carries no authority. A new app may pass its
+  portal App ID as its label, and `enableTelemetry` then needs only the key.
+  Upgrading: [§33](docs/UPGRADING.md#33-the-mesh-appid-is-now-applabel-unreleased).
+
 ## [0.34.0] — 2026-11-19
 
 > **Two devices that meet over Bluetooth can bring up Wi-Fi between them.**

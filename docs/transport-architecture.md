@@ -478,7 +478,7 @@ Add configuration options in `bindings/react-native/src/types.ts`:
 
 ```typescript
 export interface ProtocolConfig {
-  appId: string;
+  appLabel: string;
   profile: string;
   transports?: {
     ble?: {

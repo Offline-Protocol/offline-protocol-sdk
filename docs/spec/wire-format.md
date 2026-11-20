@@ -131,6 +131,10 @@ well formed, and refusing it would let any peer make its own messages
 undeliverable. Clamping bounds the damage instead, which matters because an
 unclamped peer clock parks every later message behind it permanently.
 
+The SDK's public API calls this field the **app label** (`appLabel`,
+`app_label`) since 0.35; the wire name stays `app_id`, and renaming the API
+changed no byte on the wire. It is not the developer portal's App ID.
+
 `app_id` travels in the clear on both codecs, outside the sealed envelope, and
 no control-frame signature covers it, so any carrier can read or rewrite it
 ([R17](../security/threat-model.md#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)). A sender stamps its

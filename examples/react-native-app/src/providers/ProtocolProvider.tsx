@@ -860,7 +860,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     sendVideo: protocolSendVideo,
     cancelFileTransfer: protocolCancelFile,
   } = useOfflineProtocol({
-    appId: 'offline-messenger',
+    appLabel: 'offline-messenger',
     profile: currentUserId,
     transports: {
       ble: {
