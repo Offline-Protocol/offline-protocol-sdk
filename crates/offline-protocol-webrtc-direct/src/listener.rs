@@ -41,8 +41,15 @@ pub const MAX_CHUNK_BYTES: usize = 16 * 1024;
 /// The most the channel holds unacknowledged before writes wait.
 pub const HIGH_WATER_BYTES: usize = 1024 * 1024;
 
-/// A stream with more than this waiting behind the channel is closed, so a
+/// A body that would put more than this behind the channel is refused, so a
 /// stalled page holds the listener's memory to about 9 MiB per stream.
+///
+/// Refused, not closed: a burst the host hands over before the channel has
+/// drained anything says nothing about the page, as the TCP streams' writers
+/// hold, and closing on it would cut a healthy link the page does not redial
+/// by itself, with the core's retry offering the same burst again. A page
+/// that is gone stops its consent checks, and [`CONSENT_TIMEOUT`] ends its
+/// stream.
 pub const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
 
 /// The negotiated channel the stream runs on.
@@ -147,8 +154,8 @@ pub enum ListenerError {
     #[error("the body cannot be framed: {0}")]
     Frame(String),
     /// More than [`MAX_QUEUED_BYTES`] would wait behind the channel. The
-    /// stream is closed and [`ListenerEvent::Closed`] follows.
-    #[error("the stream's outbound queue is full, and the stream is closed")]
+    /// body is refused and the stream stays open.
+    #[error("the stream's outbound queue is full, and the body is refused")]
     Overflow,
     /// The listener is closed.
     #[error("the listener is closed")]
@@ -376,7 +383,8 @@ impl Listener {
     /// [`ListenerError::UnknownStream`] for a stream that is not proved or
     /// has ended, [`ListenerError::Frame`] for a body that cannot be one
     /// frame, and [`ListenerError::Overflow`] when the queue would pass
-    /// [`MAX_QUEUED_BYTES`], which also closes the stream.
+    /// [`MAX_QUEUED_BYTES`]. A refused body is not queued, and the stream
+    /// stays open.
     pub fn send(&mut self, stream: StreamId, body: &[u8]) -> Result<(), ListenerError> {
         if self.closed {
             return Err(ListenerError::Closed);
@@ -390,9 +398,8 @@ impl Listener {
         if self.dials[index].queued + framed.len() > MAX_QUEUED_BYTES {
             tracing::debug!(
                 stream = stream.0,
-                "webrtc direct: outbound queue full, closing"
+                "webrtc direct: outbound queue full, refusing a body"
             );
-            self.end(index);
             return Err(ListenerError::Overflow);
         }
         self.dials[index].enqueue(&framed);

@@ -348,7 +348,7 @@ mod imp {
                 Some(target) => listener.send(target, body),
                 None => Err(ListenerError::UnknownStream),
             };
-            // An overflow closes the stream, and its `Closed` event is due.
+            // The datagrams and events the send queued are collected either way.
             state.collect();
             result.map_err(send_error)
         }

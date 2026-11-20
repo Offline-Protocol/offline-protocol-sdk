@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "559ca5c397162e2a7842e55dda1604ec8190ef40ac024d86f11cb495b862531a"
+UDL_SHA256 = "1434037a4c4290f6b95ba740059bff529b3ede9b5ec7dfd33e9cfaaed8083e80"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',

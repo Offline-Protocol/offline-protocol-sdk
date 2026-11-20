@@ -482,7 +482,7 @@ fn a_stream_ends_after_fifteen_seconds_without_a_check() {
 }
 
 #[test]
-fn a_stream_closes_when_more_than_eight_mib_waits_behind_the_channel() {
+fn a_body_past_eight_mib_behind_the_channel_is_refused_and_the_stream_stays() {
     let mut net = Net::new();
     let (_, stream) = net.dial();
     net.listener_to_pages = false;
@@ -501,14 +501,24 @@ fn a_stream_closes_when_more_than_eight_mib_waits_behind_the_channel() {
         accepted * (body.len() + 4) >= MAX_QUEUED_BYTES,
         "refused after only {accepted} MiB"
     );
+    // A burst says nothing about the page: the stream stays, and once the
+    // page reads again, what was queued drains and sends are taken again.
     net.collect();
-    assert_eq!(net.closed().len(), 1);
-    assert_eq!(net.closed()[0].1, stream);
-    assert_eq!(net.listener.streams(), 0);
-    assert_eq!(
-        net.listener.send(stream, b"after"),
-        Err(ListenerError::UnknownStream)
-    );
+    assert!(net.closed().is_empty(), "{:?}", net.closed());
+    assert_eq!(net.listener.streams(), 1);
+    net.listener_to_pages = true;
+    let end = net.now + Duration::from_secs(10);
+    let mut taken = false;
+    while net.now < end {
+        if net.listener.send(stream, b"after").is_ok() {
+            taken = true;
+            break;
+        }
+        net.step();
+    }
+    assert!(taken, "the drained stream never took a body again");
+    net.collect();
+    assert!(net.closed().is_empty(), "{:?}", net.closed());
 }
 
 #[test]

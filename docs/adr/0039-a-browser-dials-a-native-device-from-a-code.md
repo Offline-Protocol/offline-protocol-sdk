@@ -113,8 +113,11 @@ after its first check.
    inbound and 4 from one remote address on mobile. An ICE-lite listener
    cannot send checks, so it ends a stream when the browser's consent checks
    have been silent for 15 s. Outbound frames are cut into chunks of at most
-   16 KiB under a 1 MiB buffered high-water mark. A stream with more than
-   8 MiB queued is closed, the bound the page already applies (W9).
+   16 KiB under a 1 MiB buffered high-water mark. A body that would put more
+   than 8 MiB in the queue is refused, and the stream stays: a burst the
+   host hands over before the channel drains says nothing about the page,
+   and closing on it would cut a link the page does not redial by itself.
+   A page that is gone stops its consent checks, which ends the stream.
 
 8. **The listener is opened and closed by the application, and is fresh
    each time.** Opening it makes a new certificate, a new username and

@@ -1590,7 +1590,8 @@ interface OfflineProtocol {
     // Sends one message body on a proved stream; the listener frames it.
     // Refused for a stream that is not proved or has ended, a body that
     // cannot be one frame, or one that would put more than 8 MiB behind the
-    // channel, which also closes the stream (a `Closed` event follows).
+    // channel. That last refusal leaves the stream open: the body is
+    // dropped, as a TCP stream's writer drops one past its bound.
     [Throws=ProtocolError]
     void webrtc_direct_send(u64 stream, sequence<u8> body);
 
