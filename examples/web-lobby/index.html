@@ -153,7 +153,7 @@ navigator.serviceWorker?.register("./sw.js", { updateViaCache: "none" }).then((r
 // the scope would still come from the cache: a new page driving an old
 // engine. Out of the scope, the worker comes from the network with it.
 const workerUrl = navigator.serviceWorker?.controller ? new URL("./engine-worker.js", import.meta.url) : undefined;
-const node = await OfflineNode.start({ appId: "web-pong-lobby", profile, workerUrl, signal: superseded.signal });
+const node = await OfflineNode.start({ appLabel: "web-pong-lobby", profile, workerUrl, signal: superseded.signal });
 started = true;
 const rtc = new WebRtcCarrier(node);
 $("me").textContent = node.address;

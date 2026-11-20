@@ -27,7 +27,7 @@ final sub = OfflineProtocol.events.listen((e) {
 });
 
 await OfflineProtocol.createFromConfig({
-  'appId': 'com.example.app',
+  'appLabel': 'com.example.app',
   'bleEnabled': true,
   'internetEnabled': true,
 });

@@ -69,7 +69,7 @@ class _HomePageState extends State<HomePage> {
     });
     try {
       final address = await OfflineProtocol.bootstrapSmokeTest(
-        appId: 'com.offlineprotocol.flutter.example',
+        appLabel: 'com.offlineprotocol.flutter.example',
         profile: 'default',
       );
       if (!mounted) return;

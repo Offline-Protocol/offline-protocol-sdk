@@ -39,6 +39,22 @@ class OfflineProtocol {
     return _eventPipeline!.stream;
   }
 
+  /// The app label from `appLabel` or `appId`, its name before 0.35. Only
+  /// the name changed: the value still selects the storage namespace and is
+  /// stamped on every message, so an app that shipped keeps its value. Two
+  /// names that disagree are refused rather than one silently winning.
+  static String _appLabel(String? appLabel, String? appId) {
+    if (appLabel != null && appId != null && appLabel != appId) {
+      throw ArgumentError('appLabel "$appLabel" and appId "$appId" disagree; '
+          'appId is the old name of appLabel, set only appLabel');
+    }
+    final label = appLabel ?? appId;
+    if (label == null || label.isEmpty) {
+      throw ArgumentError('appLabel is required');
+    }
+    return label;
+  }
+
   /// Minimal [ProtocolConfig] for local engine smoke tests.
   ///
   /// The core requires at least one transport flag; Internet is enabled so the
@@ -47,11 +63,14 @@ class OfflineProtocol {
   /// `BleManager.start()`). No relay is configured, so the Internet transport
   /// is not auto-started. Production apps should set flags explicitly.
   static Map<String, dynamic> smokeTestConfig({
-    required String appId,
+    String? appLabel,
+    @Deprecated('appId on the mesh is now appLabel. Your App ID (app_…) from '
+        'the dashboard is what turns on telemetry')
+    String? appId,
     required String profile,
   }) {
     return {
-      'appId': appId,
+      'appLabel': _appLabel(appLabel, appId),
       'profile': profile,
       'bleEnabled': false,
       'wifiDirectEnabled': false,
@@ -65,14 +84,17 @@ class OfflineProtocol {
   /// start native managers. Disable mesh features you do not ship in nested
   /// config sections the same way as on React Native.
   static Map<String, dynamic> minimalFootprintConfig({
-    required String appId,
+    String? appLabel,
+    @Deprecated('appId on the mesh is now appLabel. Your App ID (app_…) from '
+        'the dashboard is what turns on telemetry')
+    String? appId,
     required String profile,
     bool bleEnabled = true,
     bool wifiDirectEnabled = false,
     bool internetEnabled = false,
   }) {
     return {
-      'appId': appId,
+      'appLabel': _appLabel(appLabel, appId),
       'profile': profile,
       'bleEnabled': bleEnabled,
       'wifiDirectEnabled': wifiDirectEnabled,
@@ -368,10 +390,14 @@ class OfflineProtocol {
 
   /// Convenience: create (smoke config) → MLS → start → read address.
   static Future<String?> bootstrapSmokeTest({
-    required String appId,
+    String? appLabel,
+    @Deprecated('appId on the mesh is now appLabel. Your App ID (app_…) from '
+        'the dashboard is what turns on telemetry')
+    String? appId,
     required String profile,
   }) async {
-    await createFromConfig(smokeTestConfig(appId: appId, profile: profile));
+    await createFromConfig(
+        smokeTestConfig(appLabel: _appLabel(appLabel, appId), profile: profile));
     await initializeMlsWithSecureStorage();
     await start();
     return localAddress();

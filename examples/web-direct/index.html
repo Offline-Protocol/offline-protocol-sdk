@@ -120,7 +120,7 @@ function fail(reason) {
 
 let node;
 try {
-  node = await OfflineNode.start({ appId, storage: "memory", tabs: false });
+  node = await OfflineNode.start({ appLabel: appId, storage: "memory", tabs: false });
 } catch (error) {
   fail(`start: ${error.message}`);
   throw error;

@@ -5,8 +5,19 @@ export interface EngineEvent {
 }
 
 export interface StartOptions {
-  /** Scopes the node's traffic, its storage and the tab carrier's channel. */
-  appId: string;
+  /**
+   * The app label: scopes the node's traffic, its storage and the tab
+   * carrier's channel (required, here or under its old name `appId`). An app
+   * that shipped must keep its value. It is public and carries no authority:
+   * anyone can read it and any app can use the same one. It is not the App ID
+   * (`app_…`) the developer portal issues, though a new app may pass that.
+   */
+  appLabel?: string;
+  /**
+   * @deprecated appId on the mesh is now appLabel. Your App ID (app_…) from
+   * the dashboard is what turns on telemetry.
+   */
+  appId?: string;
   /** The local account name. Not the identity, which the node mints. */
   profile?: string;
   /**
@@ -119,7 +130,7 @@ export interface PageCarrier {
  * and the node carried on, or a Nostr relay the node cannot use (one the
  * browser will not dial, or one that closed this device's subscription). `fatal` carries why the node ended (its module
  * trapped, its worker failed, or it was terminated): every call in flight and
- * every later one rejects. Starting the node again with the same `appId` and
+ * every later one rejects. Starting the node again with the same `appLabel` and
  * `profile` is the same device when its storage is durable.
  */
 export class OfflineNode extends EventTarget {

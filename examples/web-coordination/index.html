@@ -195,7 +195,7 @@ const alertCounts = new Map();
 const asks = new Map();
 
 // In memory: every tab is its own device (see examples/web-two-tabs).
-const node = await OfflineNode.start({ appId: "web-coordination-demo", storage: "memory" });
+const node = await OfflineNode.start({ appLabel: "web-coordination-demo", storage: "memory" });
 $("me").textContent = node.address;
 $("name").value = `device ${node.address.slice(-4)}`;
 

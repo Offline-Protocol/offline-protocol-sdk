@@ -41,7 +41,7 @@ void main() {
 
   test('a failing transport does not skip the ones after it', () async {
     await OfflineProtocol.createFromConfig({
-      'appId': 'app',
+      'appLabel': 'app',
       'profile': 'profile',
       'wifiDirectEnabled': true,
       'transports': {
@@ -68,7 +68,7 @@ void main() {
   test('nothing is auto-enabled when no transport section asks for it',
       () async {
     await OfflineProtocol.createFromConfig(
-      OfflineProtocol.minimalFootprintConfig(appId: 'app', profile: 'p'),
+      OfflineProtocol.minimalFootprintConfig(appLabel: 'app', profile: 'p'),
     );
     await OfflineProtocol.start();
 
