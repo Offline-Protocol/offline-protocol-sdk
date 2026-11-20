@@ -398,6 +398,38 @@ fn a_fifth_pending_dial_gets_no_reply_and_keeps_no_state() {
     assert!(net.events.is_empty());
 }
 
+/// A check is routed to a dial by the page's own username, never by its
+/// source alone. str0m's `accepts` takes anything from a dial's nominated
+/// source, so routing by source would hand a second page sending from the
+/// first page's address to the first page's dial, where its checks would
+/// refresh that dial's consent and its DTLS hello would reach a connection
+/// already past its handshake.
+#[test]
+fn a_second_page_from_the_same_source_gets_its_own_dial() {
+    let mut net = Net::new();
+    let (first, stream) = net.dial();
+    assert_eq!(net.listener.pending_dials(), 0);
+    let shared = net.pages[first].addr;
+    net.add_page(PageSetup {
+        addr: Some(shared),
+        ..PageSetup::default()
+    });
+    // The simulated network hands every reply for that address to the first
+    // page, so the second never completes; what matters is where its checks
+    // went.
+    assert!(
+        net.run_until(Duration::from_secs(2), |net| net.listener.pending_dials()
+            == 1),
+        "the second page's check was taken by the first page's dial"
+    );
+    assert_eq!(net.listener.streams(), 1);
+    assert!(net.closed().is_empty(), "{:?}", net.closed());
+    assert_eq!(
+        net.proved().iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+        vec![stream]
+    );
+}
+
 /// A device on the path that saw one of the page's checks, without the
 /// code, can only send it again. From another source it gets no answer, so
 /// it can neither add a candidate to the page's dial nor move its send path;
