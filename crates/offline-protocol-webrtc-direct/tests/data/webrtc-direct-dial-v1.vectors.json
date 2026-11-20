@@ -646,6 +646,12 @@
       "reason": "port"
     },
     {
+      "name": "port '00080'",
+      "note": "No leading zero: one port, one spelling.",
+      "input": "op-direct=1&h=192.168.1.23&p=00080&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "port"
+    },
+    {
       "name": "port ''",
       "note": "No port at all.",
       "input": "op-direct=1&h=192.168.1.23&p=&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
@@ -667,6 +673,12 @@
       "name": "certhash padded",
       "note": "43 characters, the last a pad: no padding.",
       "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6=&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "certhash"
+    },
+    {
+      "name": "certhash with a spare bit set",
+      "note": "The last character's two spare bits are not zero: one hash, one spelling.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6h&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
       "reason": "certhash"
     },
     {

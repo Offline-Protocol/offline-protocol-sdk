@@ -1947,6 +1947,8 @@ DIAL_UFRAG_LEN = (4, 32)
 DIAL_PASSWORD_LEN = (22, 64)
 _DIAL_ALNUM = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
 _DIAL_B64URL = _DIAL_ALNUM | {"-", "_"}
+# The base64url alphabet in value order, for the last character's spare bits.
+_DIAL_B64URL_ORDER = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
 def _b64url(raw: bytes) -> str:
@@ -2081,12 +2083,16 @@ def parse_dial_code(text: str):
     if host[0] == "refuse":
         return ("refuse", host[1], None)
     port = values["p"]
-    if not (1 <= len(port) <= 5) or not all(c in "0123456789" for c in port):
+    if not (1 <= len(port) <= 5) or not all(c in "0123456789" for c in port) or port[0] == "0":
         return ("refuse", "port", None)
     if not (1 <= int(port) <= 65535):
         return ("refuse", "port", None)
     c = values["c"]
     if len(c) != DIAL_CERTHASH_LEN or any(ch not in _DIAL_B64URL for ch in c):
+        return ("refuse", "certhash", None)
+    # 43 characters carry 258 bits for 256: the last one's two spare bits
+    # are zero, so one hash has one spelling.
+    if _DIAL_B64URL_ORDER.index(c[-1]) & 0b11:
         return ("refuse", "certhash", None)
     import base64
 
@@ -2313,6 +2319,7 @@ def build_webrtc_direct_dial_vectors() -> dict:
         ("0", "Port 0 is not a port."),
         ("65536", "One over the range."),
         ("+80", "Decimal digits only."),
+        ("00080", "No leading zero: one port, one spelling."),
         ("", "No port at all."),
     ):
         ref(f"port {port!r}", note, join(edit(p=port)), "port")
@@ -2320,6 +2327,11 @@ def build_webrtc_direct_dial_vectors() -> dict:
         ("certhash one character short", cert_text[:42], "42 characters."),
         ("certhash one character long", cert_text + "A", "44 characters."),
         ("certhash padded", cert_text[:42] + "=", "43 characters, the last a pad: no padding."),
+        (
+            "certhash with a spare bit set",
+            cert_text[:42] + _DIAL_B64URL_ORDER[_DIAL_B64URL_ORDER.index(cert_text[42]) | 0b01],
+            "The last character's two spare bits are not zero: one hash, one spelling.",
+        ),
         (
             "certhash in the standard alphabet",
             cert_text.replace("-", "+").replace("_", "/"),

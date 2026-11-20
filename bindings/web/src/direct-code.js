@@ -224,7 +224,8 @@ function formatIpv6(bytes) {
 // The other values
 
 function checkPort(text) {
-  if (!/^[0-9]{1,5}$/.test(text)) throw refuse("port");
+  // No leading zero: one port, one spelling.
+  if (!/^[1-9][0-9]{0,4}$/.test(text)) throw refuse("port");
   const port = Number(text);
   if (port < 1 || port > 65535) throw refuse("port");
   return port;

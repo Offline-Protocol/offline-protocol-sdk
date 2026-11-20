@@ -375,8 +375,8 @@ https://<the application's page>#op-direct=1&h=<host>&p=<port>&c=<certhash>&u=<u
 |-----|-------|
 | `op-direct` | `1`, the version. A dialler refuses any other value as unsupported |
 | `h` | The listener's IP address: IPv4 dotted decimal, or IPv6 in RFC 5952 text with no brackets and no zone. It MUST be private (RFC 1918 or `fc00::/7`) or link-local (`169.254.0.0/16` or `fe80::/10`), and never a name |
-| `p` | The UDP port, decimal, 1 to 65535 |
-| `c` | SHA-256 of the listener's DER certificate, base64url with no padding: exactly 43 characters |
+| `p` | The UDP port, decimal with no leading zero, 1 to 65535: one port, one spelling |
+| `c` | SHA-256 of the listener's DER certificate, base64url with no padding: exactly 43 characters, the last one's two spare low bits zero, so one hash has one spelling |
 | `u` | The listener's ICE username fragment: 4 to 32 characters of `A-Z a-z 0-9`. A listener writes 16 |
 | `w` | The listener's ICE password: 22 to 64 characters of `A-Z a-z 0-9`. A listener writes 32, from a cryptographically secure generator |
 | `a` | The listener's canonical address (`off1…`), the claim the preamble must prove |

@@ -252,9 +252,14 @@ fn parse_host(text: &str) -> Result<IpAddr, DialCodeError> {
 }
 
 /// Decimal digits only: `u16::from_str` also takes a leading `+`, which is
-/// not in the alphabet.
+/// not in the alphabet. No leading zero, so one port has one spelling (and
+/// `0` itself is no port).
 fn parse_port(text: &str) -> Result<u16, DialCodeError> {
-    if text.is_empty() || text.len() > 5 || !text.bytes().all(|b| b.is_ascii_digit()) {
+    if text.is_empty()
+        || text.len() > 5
+        || text.starts_with('0')
+        || !text.bytes().all(|b| b.is_ascii_digit())
+    {
         return Err(DialCodeError::Port);
     }
     match text.parse::<u16>() {
@@ -460,7 +465,9 @@ mod tests {
 
     #[test]
     fn a_port_outside_one_to_65535_is_refused() {
-        for port in ["0", "65536", "", "+80", "-1", "8o", "123456"] {
+        for port in [
+            "0", "65536", "", "+80", "-1", "8o", "123456", "080", "00080",
+        ] {
             assert_eq!(
                 DialCode::parse(&with("p", Some(port))),
                 Err(DialCodeError::Port),
