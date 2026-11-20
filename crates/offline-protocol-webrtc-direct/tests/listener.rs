@@ -14,8 +14,8 @@ use std::net::SocketAddr;
 use common::{identity, is_nominating_check, is_stun, listener_addr, Identity, Page, PageSetup};
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_webrtc_direct::{
-    DialCode, Listener, ListenerConfig, ListenerError, ListenerEvent, StreamId, MAX_CHUNK_BYTES,
-    MAX_PENDING_DIALS, MAX_QUEUED_BYTES,
+    DialCode, Listener, ListenerConfig, ListenerError, ListenerEvent, StreamId, CONSENT_TIMEOUT,
+    MAX_CHUNK_BYTES, MAX_PENDING_DIALS, MAX_QUEUED_BYTES,
 };
 use str0m::net::{Protocol, Receive};
 use str0m::Input;
@@ -396,6 +396,63 @@ fn a_fifth_pending_dial_gets_no_reply_and_keeps_no_state() {
     }
     assert!(!net.sent.contains(&fifth), "the fifth dial was answered");
     assert!(net.events.is_empty());
+}
+
+/// A device on the path that saw one of the page's checks, without the
+/// code, can only send it again. From another source it gets no answer, so
+/// it can neither add a candidate to the page's dial nor move its send path;
+/// from the page's own source it never counts as consent, so a page that is
+/// gone is still ended on time.
+#[test]
+fn a_replayed_check_is_never_answered_elsewhere_or_taken_as_consent() {
+    let mut net = Net::new();
+    let (page, stream) = net.dial();
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(None::<Vec<u8>>));
+    let keep = captured.clone();
+    net.page_to_listener = Box::new(move |_, bytes| {
+        if is_stun(bytes) {
+            *keep.borrow_mut() = Some(bytes.to_vec());
+        }
+        true
+    });
+    net.run_for(Duration::from_secs(6));
+    let check = captured
+        .borrow()
+        .clone()
+        .expect("the page sent a consent check");
+
+    let elsewhere: SocketAddr = "192.168.1.99:45000".parse().unwrap();
+    net.listener.handle_datagram(net.now, elsewhere, &check);
+    net.collect();
+    assert!(
+        !net.sent.contains(&elsewhere),
+        "the listener answered a replayed check at another source"
+    );
+    assert_eq!(net.listener.streams(), 1);
+
+    // The page goes; only replays of its old check arrive, from its address.
+    net.page_to_listener = Box::new(|_, _| false);
+    let source = net.pages[page].addr;
+    let gone = net.now;
+    let mut ended = false;
+    while net.now.duration_since(gone) < Duration::from_secs(20) {
+        net.listener.handle_datagram(net.now, source, &check);
+        net.run_for(Duration::from_secs(1));
+        if net.closed().iter().any(|(_, s)| *s == stream) {
+            ended = true;
+            break;
+        }
+    }
+    assert!(
+        ended,
+        "replays of an old check kept a gone page's stream alive"
+    );
+    let (at, _) = net.closed()[0];
+    assert!(
+        at.duration_since(gone) <= CONSENT_TIMEOUT + Duration::from_secs(2),
+        "ended {:?} after the page went",
+        at.duration_since(gone)
+    );
 }
 
 #[test]

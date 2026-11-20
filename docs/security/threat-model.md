@@ -1546,7 +1546,13 @@ labels a stream with an address its holder cannot use. The ICE password is
 not an admission control for people. It decides which datagrams make the
 listener keep state: without it, a datagram costs one integrity check, gets
 no reply, and allocates nothing, so the listener is neither a memory sink nor
-a reflector for the rest of the network.
+a reflector for the rest of the network. A device on the path that saw one
+of a page's checks, without the code, can only send it again, since the
+transaction id is under its integrity. From another source the listener
+drops it, so a replay cannot add a candidate to the page's dial or move its
+send path to an address of the sender's choosing; from the page's own source
+it is answered as a retransmit but never counts as consent, so replays
+cannot keep a gone page's stream alive.
 
 **A swapped code:** someone who can replace the code a person scans or
 opens can send the page to a listener of their own. The claim is in the

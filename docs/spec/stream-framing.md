@@ -471,7 +471,12 @@ at once are told apart by that key.
    new dial would answer them from a connection that never completes, so
    the page would never learn its stream had ended. A page that dials
    again has a new username, because a browser makes new ICE credentials
-   for every connection.
+   for every connection. A check whose transaction id the dial has already
+   admitted from another source is dropped, and one it has admitted from
+   the same source is answered but does not count as consent (step 4): the
+   id is under the check's integrity, so only the page makes a new one, and
+   a device that saw a check could otherwise replay it from an address of
+   its choosing, or keep a gone page's stream alive.
 2. **Answering.** The listener is ICE-lite and controlled. It answers on
    the first pair an admitted check arrived on, without waiting for
    USE-CANDIDATE: it cannot run checks of its own, so that check is all the

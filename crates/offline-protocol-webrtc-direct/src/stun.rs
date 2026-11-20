@@ -22,6 +22,14 @@ pub(crate) const ATTR_MESSAGE_INTEGRITY: u16 = 0x0008;
 pub(crate) const ATTR_USE_CANDIDATE: u16 = 0x0025;
 pub(crate) const ATTR_FINGERPRINT: u16 = 0x8028;
 pub(crate) const INTEGRITY_LEN: usize = 20;
+pub(crate) const TRANSACTION_ID_LEN: usize = 12;
+
+/// The transaction id of a datagram [`parse_binding_request`] accepted.
+pub(crate) fn transaction_id(bytes: &[u8]) -> [u8; TRANSACTION_ID_LEN] {
+    let mut id = [0u8; TRANSACTION_ID_LEN];
+    id.copy_from_slice(&bytes[8..HEADER_LEN]);
+    id
+}
 
 /// A binding request as far as admission reads it. Borrowed from the
 /// datagram, so reading one allocates nothing.

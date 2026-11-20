@@ -62,6 +62,11 @@ const PASSWORD_CHARS: usize = 32;
 /// makes new credentials for every connection, so the bound only limits
 /// memory.
 const REMEMBERED_ENDED_DIALS: usize = 64;
+/// How many of a dial's latest check transaction ids it remembers. A
+/// browser sends a consent check every few seconds and retransmits one only
+/// while it goes unanswered, so this covers far more than the consent
+/// window.
+const REMEMBERED_CHECKS: usize = 32;
 
 const ICE_ALPHABET: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -207,6 +212,9 @@ struct Dial {
     remote_ufrag: String,
     /// The source of the first admitted check.
     remote: SocketAddr,
+    /// The transaction ids of its latest admitted checks, and where each
+    /// came from, newest last (see [`Listener::handle_datagram`]).
+    checks: VecDeque<([u8; stun::TRANSACTION_ID_LEN], SocketAddr)>,
     first_check: Instant,
     last_check: Instant,
     rtc_timeout: Instant,
@@ -328,7 +336,27 @@ impl Listener {
         if let Some(index) = found {
             let dial = &mut self.dials[index];
             if request.is_some() {
-                dial.last_check = now;
+                // A check's transaction id is under its integrity, so only
+                // the page makes a new one. A device on the path that saw
+                // a check, without the code, can only send it again: from
+                // another source that would add a candidate to the page's
+                // dial, and could move its send path to an address of the
+                // sender's choosing, so it is dropped; from the page's own
+                // source it is answered as the retransmit it may be, but
+                // never counts as consent, or a dead page's stream would
+                // live on while the replays lasted.
+                let id = stun::transaction_id(bytes);
+                match dial.checks.iter().find(|(seen, _)| *seen == id) {
+                    Some((_, from)) if *from != source => return,
+                    Some(_) => {}
+                    None => {
+                        if dial.checks.len() == REMEMBERED_CHECKS {
+                            dial.checks.pop_front();
+                        }
+                        dial.checks.push_back((id, source));
+                        dial.last_check = now;
+                    }
+                }
             }
             let fed = dial.rtc.handle_input(input).is_ok();
             self.run(index, fed);
@@ -494,6 +522,7 @@ impl Listener {
             channel,
             remote_ufrag: remote_ufrag.to_string(),
             remote: source,
+            checks: VecDeque::from([(stun::transaction_id(bytes), source)]),
             first_check: now,
             last_check: now,
             rtc_timeout: now,
