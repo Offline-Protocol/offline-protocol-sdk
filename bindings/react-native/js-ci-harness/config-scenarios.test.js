@@ -173,7 +173,7 @@ const test = (name, fn) => tests.push({ name, fn });
 
 let sdk;
 
-const ids = { appId: 'a', profile: 'p' };
+const ids = { appLabel: 'a', profile: 'p' };
 const RELAY = { transports: { internet: { serverAddress: 'wss://relay.example/ws' } } };
 const NOSTR = { transports: { nostr: { relayUrls: ['wss://n.example'] } } };
 
@@ -191,9 +191,9 @@ test('every documented forScenario example typechecks', () => {
 test('the typecheck refuses a wrong example (negative control)', () => {
   const errors = typecheckExamples([
     "import { forScenario } from '@offline-protocol/mesh-sdk';\n" +
-      "forScenario('localBle', { appId: 'a', profile: 'p', overrides: { appId: 'b' } });\n",
+      "forScenario('localBle', { appLabel: 'a', profile: 'p', overrides: { appLabel: 'b' } });\n",
   ]);
-  assert.notEqual(errors, null, 'appId in overrides must not typecheck');
+  assert.notEqual(errors, null, 'appLabel in overrides must not typecheck');
 });
 
 // ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ test('the scenario ids are the five documented ones', () => {
 
 test('localBle turns on BLE alone and leaves DORS to the core', () => {
   const config = sdk.forScenario('localBle', ids);
-  assert.equal(config.appId, 'a');
+  assert.equal(config.appLabel, 'a');
   assert.equal(config.profile, 'p');
   assert.equal(config.transports.ble.enabled, true);
   for (const key of ['wifiDirect', 'internet', 'nostr', 'reticulum']) {
@@ -399,10 +399,22 @@ test('connectInternetLater with internet off throws', () => {
   );
 });
 
-test('appId or profile inside overrides throws instead of being dropped', () => {
+test('the old appId parameter still names the label', () => {
+  assert.equal(sdk.forScenario('localBle', { appId: 'a', profile: 'p' }).appLabel, 'a');
+  assert.throws(
+    () => sdk.forScenario('localBle', { appLabel: 'a', appId: 'b', profile: 'p' }),
+    /disagree/
+  );
+});
+
+test('appLabel, appId or profile inside overrides throws instead of being dropped', () => {
   assert.throws(
     () => sdk.forScenario('localBle', { ...ids, overrides: { appId: 'other' } }),
     /pass appId as a parameter/
+  );
+  assert.throws(
+    () => sdk.forScenario('localBle', { ...ids, overrides: { appLabel: 'other' } }),
+    /pass appLabel as a parameter/
   );
   assert.throws(
     () => sdk.forScenario('localBle', { ...ids, overrides: { profile: 'other' } }),

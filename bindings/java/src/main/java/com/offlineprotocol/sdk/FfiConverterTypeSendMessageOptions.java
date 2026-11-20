@@ -26,7 +26,7 @@ public enum FfiConverterTypeSendMessageOptions implements FfiConverterRustBuffer
             FfiConverterOptionalTypeReplyContext.INSTANCE.allocationSize(value.replyContext()) +
             FfiConverterOptionalTypeMediaMetadata.INSTANCE.allocationSize(value.mediaMetadata()) +
             FfiConverterOptionalTypeForwardInfo.INSTANCE.allocationSize(value.forwardInfo()) +
-            FfiConverterOptionalString.INSTANCE.allocationSize(value.appId())
+            FfiConverterOptionalString.INSTANCE.allocationSize(value.appLabel())
       );
   }
 
@@ -38,6 +38,6 @@ public enum FfiConverterTypeSendMessageOptions implements FfiConverterRustBuffer
       FfiConverterOptionalTypeReplyContext.INSTANCE.write(value.replyContext(), buf);
       FfiConverterOptionalTypeMediaMetadata.INSTANCE.write(value.mediaMetadata(), buf);
       FfiConverterOptionalTypeForwardInfo.INSTANCE.write(value.forwardInfo(), buf);
-      FfiConverterOptionalString.INSTANCE.write(value.appId(), buf);
+      FfiConverterOptionalString.INSTANCE.write(value.appLabel(), buf);
   }
 }

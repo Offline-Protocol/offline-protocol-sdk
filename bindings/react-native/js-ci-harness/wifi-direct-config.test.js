@@ -107,7 +107,7 @@ const test = (name, fn) => tests.push({ name, fn });
 let OfflineProtocol;
 
 const newSdk = (config = {}) =>
-  new OfflineProtocol({ appId: 'harness', profile: 'harness-profile', ...config });
+  new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile', ...config });
 
 /** The single call to `method`, asserting it happened exactly once. */
 function onlyCall(method) {

@@ -101,7 +101,7 @@ class ProtocolEngineHost(
             "info",
             "Protocol core created",
             mapOf(
-                "appId" to config.appId,
+                "appLabel" to config.appLabel,
                 "userId" to config.profile,
                 "bleEnabled" to config.bleEnabled,
                 "wifiDirectEnabled" to config.wifiDirectEnabled,
@@ -121,7 +121,7 @@ class ProtocolEngineHost(
                 context,
                 proto,
                 config.profile,
-                config.appId,
+                config.appLabel,
                 advertiseNodeHash = bleAdvertiseNodeHash,
                 onDiagnostic,
             ).also { manager ->
@@ -133,7 +133,7 @@ class ProtocolEngineHost(
             onDiagnostic("warning", "BLE disabled in configuration", mapOf("userId" to config.profile))
         }
         if (config.internetEnabled) {
-            internetManager = InternetManager(context, proto, config.profile, config.appId, onDiagnostic)
+            internetManager = InternetManager(context, proto, config.profile, config.appLabel, onDiagnostic)
                 .also { manager ->
                     internetHandlers?.let { handlers ->
                         manager.serverMessageEmitter = handlers.serverMessageEmitter
@@ -296,7 +296,7 @@ class ProtocolEngineHost(
                 if (internetManager == null) {
                     val coreConfig = currentConfig
                         ?: throw IllegalStateException("Cannot enable Internet transport before initialize(config)")
-                    internetManager = InternetManager(context, proto, coreConfig.profile, coreConfig.appId, onDiagnostic)
+                    internetManager = InternetManager(context, proto, coreConfig.profile, coreConfig.appLabel, onDiagnostic)
                         .also { manager ->
                             internetHandlers?.let { handlers ->
                                 manager.serverMessageEmitter = handlers.serverMessageEmitter
@@ -321,7 +321,7 @@ class ProtocolEngineHost(
                         context,
                         proto,
                         currentConfig?.profile ?: "unknown",
-                        appId = currentConfig?.appId ?: "",
+                        appId = currentConfig?.appLabel ?: "",
                         onDiagnostic,
                     )
                     onDiagnostic("info", "WiFi Direct manager created on demand", emptyMap())
@@ -348,7 +348,7 @@ class ProtocolEngineHost(
                         context,
                         proto,
                         currentConfig?.profile ?: "unknown",
-                        currentConfig?.appId ?: "",
+                        currentConfig?.appLabel ?: "",
                         advertiseNodeHash = bleAdvertiseNodeHash,
                         onDiagnostic,
                     )
@@ -680,7 +680,7 @@ class ProtocolEngineHost(
     fun initializeMlsWithSecureStorage(context: Context) {
         val proto = requireProtocol()
         val config = currentConfig ?: throw IllegalStateException("Protocol config not initialized")
-        val adoption = OfflineProtocolReferenceStorage.initializeMls(proto, context, config.appId, config.profile)
+        val adoption = OfflineProtocolReferenceStorage.initializeMls(proto, context, config.appLabel, config.profile)
         adoption.warning?.let { onDiagnostic("error", it, emptyMap()) }
         onDiagnostic("info", "MLS initialized with split secure and app-container storage", emptyMap())
     }

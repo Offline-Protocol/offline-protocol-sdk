@@ -276,6 +276,21 @@ pub fn variant_error(at: &str, type_name: &str, variants: &[&str]) -> CallError 
     )
 }
 
+/// Field names a dictionary had before a rename, as `(type, old, new)`.
+///
+/// A config file written for an older release names the field the old way,
+/// and C reads it at runtime, so a plain rename would turn a working program
+/// into one refused at engine creation with no compile error first. The old
+/// key is read as the new one; both present with different values is refused
+/// rather than one silently winning. Encoding only ever writes the new name.
+const RENAMED_FIELDS: &[(&str, &str, &str)] = &[
+    // 0.35: the mesh app_id is the app label. Same value, so the storage
+    // namespace and the wire stamp are unchanged.
+    ("ProtocolConfig", "app_id", "app_label"),
+    ("SendMessageOptions", "app_id", "app_label"),
+    ("MediaSendOptions", "app_id", "app_label"),
+];
+
 /// The keys of one JSON object, taken one at a time, so whatever is left at
 /// the end is a key the declaration does not have.
 pub struct Fields<'a> {
@@ -287,10 +302,29 @@ pub struct Fields<'a> {
 impl<'a> Fields<'a> {
     /// `value` must be an object. `type_name` names it in errors.
     pub fn new(value: &Value, at: &str, type_name: &'a str) -> Decoded<Self> {
-        let map = value
+        let mut map = value
             .as_object()
             .cloned()
             .ok_or_else(|| invalid(at, &format!("expected an object shaped as {type_name}")))?;
+        for &(_, old, new) in RENAMED_FIELDS.iter().filter(|(t, ..)| *t == type_name) {
+            let Some(old_value) = map.remove(old) else {
+                continue;
+            };
+            match map.get(new) {
+                Some(new_value) if *new_value != old_value => {
+                    return Err(invalid(
+                        &format!("{at}.{old}"),
+                        &format!(
+                            "disagrees with {new}; {old} is the old name of {new}, set only {new}"
+                        ),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    map.insert(new.to_owned(), old_value);
+                }
+            }
+        }
         Ok(Self {
             at: at.to_owned(),
             type_name,

@@ -168,7 +168,7 @@ class InternetManager(TransportManager):
     max_reconnect_attempts:
         0 means infinite.
     app_id:
-        The configured application id (``ProtocolConfig.app_id``), stamped on
+        The configured app label (``ProtocolConfig.app_label``), stamped on
         every frame this manager synthesizes for the core. Keyword-only and
         required: it once defaulted to a fixed literal, so a manager built
         without it stamped a foreign id on every relay answer and legacy DM.

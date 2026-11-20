@@ -76,7 +76,7 @@ class MainActivity : AppCompatActivity() {
         // ProtocolConfig has 16 required fields (+ 19 with defaults). See
         // docs/configuration.md for what each one controls.
         val config = ProtocolConfig(
-            appId = "my-android-app",
+            appLabel = "my-android-app",
             profile = "user123",
             bleEnabled = true,
             wifiDirectEnabled = true,
@@ -123,7 +123,7 @@ class MainActivity : AppCompatActivity() {
         val adoption = OfflineProtocolReferenceStorage.initializeMls(
             protocol,
             this,
-            config.appId,
+            config.appLabel,
             config.profile,
         )
         adoption.warning?.let { Log.e("Mesh", it) }
@@ -205,11 +205,11 @@ service, is what makes it safe.
 delivery state have different lifetimes. The shipped
 **`OfflineProtocolReferenceStorage`** factory opens the same Keystore-backed MLS
 store and app-container state store the React Native module uses, for the
-account `(appId, profile)` names. You may substitute your own providers; they
+account `(appLabel, profile)` names. You may substitute your own providers; they
 must meet the obligations below.
 
 To sign a user out for good, stop the engine, release it, then call
-`OfflineProtocolReferenceStorage.wipe(context, appId, profile)`. It erases that
+`OfflineProtocolReferenceStorage.wipe(context, appLabel, profile)`. It erases that
 account's identity, sessions, outbox and protocol state, and nothing of any other
 account. A running engine keeps writing, and releasing an engine flushes its
 state, so an engine released after the wipe writes that state back. Call

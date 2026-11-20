@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * Behavioral tests for the per-send application id the rich sends hand to
- * the native module (`src/index.ts`).
+ * Behavioral tests for the per-send app label the rich sends hand to the
+ * native module (`src/index.ts`), and for `appId`, its deprecated old name,
+ * on the config and on each send.
  *
- * Only the rich native methods carry `app_id`, and `sendMessage` and
+ * Only the rich native methods carry `app_label`, and `sendMessage` and
  * `sendMedia` take the rich path only when one of a listed set of params is
- * present. An `appId` missing from that list would send an appId-only call
- * down the plain path, where the message goes out under the configured id
+ * present. A label missing from that list would send a label-only call
+ * down the plain path, where the message goes out under the configured label
  * and nothing reports it: the receiving instance simply routes it to the
  * wrong application. The Rust guard pins the spelling of the list; this
  * pins the behaviour.
@@ -118,7 +119,7 @@ let OfflineProtocol;
 let ContentType;
 
 function newSdk() {
-  return new OfflineProtocol({ appId: 'harness', profile: 'harness-profile' });
+  return new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile' });
 }
 
 /** The one send the SDK handed to native, whichever method it chose. */
@@ -140,15 +141,31 @@ const media = (params) => ({
 // sendMessage
 // ---------------------------------------------------------------------------
 
-test('an appId-only sendMessage takes the rich path and carries the id', async () => {
+test('an appLabel-only sendMessage takes the rich path and carries the label', async () => {
+  await newSdk().sendMessage({ recipient: RECIPIENT, content: 'hi', appLabel: 'other-app' });
+
+  const [method, args] = theSend();
+  assert.equal(method, 'sendMessageRich', 'only the rich native method carries app_label');
+  assert.equal(args[4].app_label, 'other-app');
+});
+
+test('the old appId name on a send still carries the label', async () => {
   await newSdk().sendMessage({ recipient: RECIPIENT, content: 'hi', appId: 'other-app' });
 
   const [method, args] = theSend();
-  assert.equal(method, 'sendMessageRich', 'only the rich native method carries app_id');
-  assert.equal(args[4].app_id, 'other-app');
+  assert.equal(method, 'sendMessageRich');
+  assert.equal(args[4].app_label, 'other-app');
 });
 
-test('a rich sendMessage without appId sends app_id null, not a stale value', async () => {
+test('appLabel and appId that disagree on a send are refused before native', async () => {
+  await assert.rejects(
+    newSdk().sendMessage({ recipient: RECIPIENT, content: 'hi', appLabel: 'a', appId: 'b' }),
+    /disagree/
+  );
+  assert.equal(calls.filter(([method]) => method.startsWith('send')).length, 0);
+});
+
+test('a rich sendMessage without a label sends app_label null, not a stale value', async () => {
   await newSdk().sendMessage({
     recipient: RECIPIENT,
     content: 'hi',
@@ -157,7 +174,7 @@ test('a rich sendMessage without appId sends app_id null, not a stale value', as
 
   const [method, args] = theSend();
   assert.equal(method, 'sendMessageRich');
-  assert.equal(args[4].app_id, null, 'null falls back to the configured id in the core');
+  assert.equal(args[4].app_label, null, 'null falls back to the configured label in the core');
 });
 
 test('a plain sendMessage stays on the plain native method', async () => {
@@ -170,18 +187,55 @@ test('a plain sendMessage stays on the plain native method', async () => {
 // sendMedia
 // ---------------------------------------------------------------------------
 
-test('an appId-only sendMedia takes the rich path and carries the id', async () => {
-  await newSdk().sendMedia(media({ appId: 'other-app' }));
+test('an appLabel-only sendMedia takes the rich path and carries the label', async () => {
+  await newSdk().sendMedia(media({ appLabel: 'other-app' }));
 
   const [method, args] = theSend();
-  assert.equal(method, 'sendMediaRich', 'only the rich native method carries app_id');
-  assert.equal(args[4].app_id, 'other-app');
+  assert.equal(method, 'sendMediaRich', 'only the rich native method carries app_label');
+  assert.equal(args[4].app_label, 'other-app');
+});
+
+test('the old appId name on a media send still carries the label', async () => {
+  await newSdk().sendMedia(media({ appId: 'other-app' }));
+
+  assert.equal(theSend()[1][4].app_label, 'other-app');
 });
 
 test('a plain sendMedia stays on the plain native method', async () => {
   await newSdk().sendMedia(media({}));
 
   assert.equal(theSend()[0], 'sendMedia');
+});
+
+// ---------------------------------------------------------------------------
+// The configured label
+// ---------------------------------------------------------------------------
+
+/** The config the SDK handed to native on create, parsed. */
+async function createdConfig(config) {
+  await new OfflineProtocol(config).start();
+  const created = calls.find(([method]) => method === 'create');
+  assert.ok(created, `no create call in ${JSON.stringify(calls.map(([m]) => m))}`);
+  const arg = created[1][0];
+  return typeof arg === 'string' ? JSON.parse(arg) : arg;
+}
+
+test('the config hands native appLabel', async () => {
+  const native = await createdConfig({ appLabel: 'app.muster', profile: 'p' });
+  assert.equal(native.appLabel, 'app.muster');
+});
+
+test('a config with only the old appId keeps its value', async () => {
+  const native = await createdConfig({ appId: 'app.muster', profile: 'p' });
+  assert.equal(native.appLabel, 'app.muster', 'a shipped app must keep its storage namespace');
+});
+
+test('a config that disagrees, or names no label, is refused', () => {
+  assert.throws(
+    () => new OfflineProtocol({ appLabel: 'a', appId: 'b', profile: 'p' }),
+    /disagree/
+  );
+  assert.throws(() => new OfflineProtocol({ profile: 'p' }), /appLabel is required/);
 });
 
 // ---------------------------------------------------------------------------

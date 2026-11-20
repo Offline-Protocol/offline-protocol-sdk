@@ -759,9 +759,9 @@ enum ProtocolEngineHostBridgeReactNative {
         }
     }
 
-    static func wipePersistedState(_ module: OfflineProtocolModule, _ appId: String, profile: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
+    static func wipePersistedState(_ module: OfflineProtocolModule, _ appLabel: String, profile: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_WIPE_STATE", errorMessage: "Refusing to wipe storage for the account this instance is running.") { host, env in
-            try ProtocolEngineHostBridge.wipePersistedState(host: host, env: env, arguments: ["appId": appId, "profile": profile])
+            try ProtocolEngineHostBridge.wipePersistedState(host: host, env: env, arguments: ["appLabel": appLabel, "profile": profile])
         }
     }
 

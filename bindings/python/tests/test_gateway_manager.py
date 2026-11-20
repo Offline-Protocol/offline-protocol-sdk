@@ -1042,7 +1042,7 @@ class TestProtocolManagerWiring:
         from offline_protocol_sdk.offline_protocol import OverflowPolicy, ProtocolConfig
 
         defaults = dict(
-            app_id="test-app",
+            app_label="test-app",
             profile="test-user",
             ble_enabled=False,
             wifi_direct_enabled=False,

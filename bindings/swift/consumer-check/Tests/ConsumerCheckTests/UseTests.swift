@@ -17,6 +17,6 @@ final class UseTests: XCTestCase {
     func testTheReferenceStateStoreIsSupported() throws {
         XCTAssertTrue(
             try referenceStateStoreIsSupported(
-                appId: "consumer-check", scratchProfile: UUID().uuidString))
+                appLabel: "consumer-check", scratchProfile: UUID().uuidString))
     }
 }

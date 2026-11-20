@@ -51,7 +51,7 @@ hands inbound bytes back.
 2. Build `ProtocolConfig` (see [configuration](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v@@VERSION@@/docs/configuration.md) on the main repo)
 3. `let engine = try OfflineProtocol(config: config)`
 4. `engine.setEventCallback(callback: …)` **before** `start()`
-5. `let adoption = try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)`
+5. `let adoption = try OfflineProtocolReferenceStorage.initializeMls(on: engine, appLabel: config.appId, profile: config.profile)`
    opens the built-in stores. Report `adoption.warning` when it is set: it is
    the only signal that this account started from a fresh MLS identity, with
    an empty outbox and an empty block list.

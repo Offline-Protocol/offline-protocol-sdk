@@ -79,34 +79,34 @@ public enum OfflineProtocolReferenceStorage {
     /// The Keychain-backed MLS store for one account.
     ///
     /// This does not report what happened to an earlier store on the device,
-    /// so a lost identity passes silently. Use `initializeMls(on:appId:profile:)`
+    /// so a lost identity passes silently. Use `initializeMls(on:appLabel:profile:)`
     /// unless you need the store on its own.
-    public static func makeSecureStorage(appId: String, profile: String) throws -> MlsStorageProvider {
-        try MlsSecureStorage(accountNamespace: StorageNamespace.account(appId: appId, profile: profile))
+    public static func makeSecureStorage(appLabel: String, profile: String) throws -> MlsStorageProvider {
+        try MlsSecureStorage(accountNamespace: StorageNamespace.account(appId: appLabel, profile: profile))
     }
 
     /// The app-container protocol-state store for one account.
     public static func makeProtocolStateStorage(
-        appId: String,
+        appLabel: String,
         profile: String
     ) throws -> ProtocolStateStorageProvider {
         try AppContainerProtocolStateStorage(
-            accountNamespace: StorageNamespace.account(appId: appId, profile: profile)
+            accountNamespace: StorageNamespace.account(appId: appLabel, profile: profile)
         )
     }
 
     /// Opens both stores for one account and hands them to `initializeMls`.
     ///
     /// Call it after `setEventCallback` and before `start()`, with the
-    /// `appId` and `profile` the engine was configured with. Report the
+    /// `appLabel` and `profile` the engine was configured with. Report the
     /// result's `warning` when it has one: it is the only signal that this
     /// account lost its earlier identity.
     public static func initializeMls(
         on mesh: OfflineProtocol,
-        appId: String,
+        appLabel: String,
         profile: String
     ) throws -> LegacyAdoption {
-        let namespace = StorageNamespace.account(appId: appId, profile: profile)
+        let namespace = StorageNamespace.account(appId: appLabel, profile: profile)
         let secure = try MlsSecureStorage(accountNamespace: namespace)
         let state = try AppContainerProtocolStateStorage(accountNamespace: namespace)
         try mesh.initializeMls(secureStorage: secure, protocolStateStorage: state)
@@ -125,8 +125,8 @@ public enum OfflineProtocolReferenceStorage {
     /// the rest as ciphertext nobody can open rather than readable state. Both
     /// are attempted even if the first fails, and the first error is rethrown.
     /// Idempotent: call again after an error.
-    public static func wipe(appId: String, profile: String) throws {
-        let namespace = StorageNamespace.account(appId: appId, profile: profile)
+    public static func wipe(appLabel: String, profile: String) throws {
+        let namespace = StorageNamespace.account(appId: appLabel, profile: profile)
         var firstError: Error?
         do {
             try MlsSecureStorage.wipeAccount(accountNamespace: namespace)
@@ -139,5 +139,27 @@ public enum OfflineProtocolReferenceStorage {
             firstError = firstError ?? error
         }
         if let firstError { throw firstError }
+    }
+
+    // The names these took before 0.35, when the app label was called appId.
+
+    @available(*, deprecated, message: "appId on the mesh is now appLabel. Your App ID (app_…) from the dashboard is what turns on telemetry")
+    public static func makeSecureStorage(appId: String, profile: String) throws -> MlsStorageProvider {
+        try makeSecureStorage(appLabel: appId, profile: profile)
+    }
+
+    @available(*, deprecated, message: "appId on the mesh is now appLabel. Your App ID (app_…) from the dashboard is what turns on telemetry")
+    public static func makeProtocolStateStorage(appId: String, profile: String) throws -> ProtocolStateStorageProvider {
+        try makeProtocolStateStorage(appLabel: appId, profile: profile)
+    }
+
+    @available(*, deprecated, message: "appId on the mesh is now appLabel. Your App ID (app_…) from the dashboard is what turns on telemetry")
+    public static func initializeMls(on mesh: OfflineProtocol, appId: String, profile: String) throws -> LegacyAdoption {
+        try initializeMls(on: mesh, appLabel: appId, profile: profile)
+    }
+
+    @available(*, deprecated, message: "appId on the mesh is now appLabel. Your App ID (app_…) from the dashboard is what turns on telemetry")
+    public static func wipe(appId: String, profile: String) throws {
+        try wipe(appLabel: appId, profile: profile)
     }
 }

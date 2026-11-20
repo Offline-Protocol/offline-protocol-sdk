@@ -43,7 +43,7 @@ def _config(
     wifi_direct_enabled: bool = False,
 ) -> ProtocolConfig:
     return ProtocolConfig(
-        app_id="test-app",
+        app_label="test-app",
         profile=profile,
         ble_enabled=ble_enabled,
         wifi_direct_enabled=wifi_direct_enabled,

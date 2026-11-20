@@ -412,7 +412,7 @@ IMPL["sendMessageRich"] = """
             replyContext = parseReplyContext(optionsMap?.get("reply_context") as? Map<String, Any?>),
             mediaMetadata = parseRichMediaMetadata(optionsMap?.get("media_metadata") as? Map<String, Any?>),
             forwardInfo = parseForwardInfo(optionsMap?.get("forward_info") as? Map<String, Any?>),
-            appId = optionsMap?.get("app_id") as? String,
+            appLabel = (optionsMap?.get("app_label") ?: optionsMap?.get("app_id")) as? String,
         )
         return host.sendMessageRich(requireString(map, "recipient"), requireString(map, "content"), sendOptions)
     }

@@ -33,7 +33,7 @@ GROUP_MLS_MSG = "__GRP_MLS_MSG__"
 
 def _config(profile: str) -> ProtocolConfig:
     return ProtocolConfig(
-        app_id="test-app",
+        app_label="test-app",
         profile=profile,
         ble_enabled=False,
         wifi_direct_enabled=False,

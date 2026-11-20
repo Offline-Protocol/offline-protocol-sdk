@@ -167,7 +167,7 @@ enum ProtocolConfigParser {
             ?? raw["control_freshness_enforced"] as? Bool
 
         var config = ProtocolConfig(
-            appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
+            appLabel: try AppLabelReader.read(raw),
             profile: raw["profile"] as? String ?? "",
             bleEnabled: raw["bleEnabled"] as? Bool ?? raw["ble_enabled"] as? Bool ?? true,
             wifiDirectEnabled: raw["wifiDirectEnabled"] as? Bool ?? raw["wifi_direct_enabled"] as? Bool ?? true,

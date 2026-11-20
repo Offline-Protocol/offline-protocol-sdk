@@ -94,7 +94,7 @@ const test = (name, fn) => tests.push({ name, fn });
 let OfflineProtocol;
 
 const newSdk = (config = {}) =>
-  new OfflineProtocol({ appId: 'harness', profile: 'harness-profile', ...config });
+  new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile', ...config });
 
 function onlyCall(method) {
   const matches = nativeCalls.filter((c) => c.method === method);

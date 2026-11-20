@@ -53,7 +53,7 @@ The SDK provides end-to-end encryption via the MLS protocol (RFC 9420). MLS prov
 import { OfflineProtocol } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'alice',
   // Encryption is enabled by default!
   // To disable: encryption: { enabled: false }
@@ -83,7 +83,7 @@ protocol.on('message_received', (event) => {
 
 ```typescript
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'alice',
   encryption: {
     // Enable automatic encryption (default: true)

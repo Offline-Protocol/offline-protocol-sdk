@@ -177,13 +177,14 @@ the redacted Rust `Debug`: `no_bridge_logs_a_fast_link_directive_whole`
 refuses a whole directive interpolated or passed to a log in either manager,
 so a diagnostic names the link id and kind and never the record.
 
-The per-send application id is pinned the same way, by
-`react_native_rich_sends_carry_the_app_id_end_to_end`. It is optional at every
+The per-send app label is pinned the same way, by
+`react_native_rich_sends_carry_the_app_label_end_to_end`. It is optional at every
 layer, so a layer that omits it compiles and drops it: the TypeScript params
 and event types, the rich-path predicate and options map in `index.ts` (only
-the rich native methods carry `app_id`, so an `appId`-only call that takes the
-plain path goes out under the configured id), and the `app_id` read in both
-bridges' `sendMessageRich` and `sendMediaRich`. The behaviour of the predicate
+the rich native methods carry `app_label`, so a label-only call that takes the
+plain path goes out under the configured label), and the `app_label` read
+(with `app_id`, its old name, as the fallback) in both bridges'
+`sendMessageRich` and `sendMediaRich`. The behaviour of the predicate
 is also pinned at runtime by `js-ci-harness/rich-send-app-id.test.js`.
 
 **The relay address-proof signing domain** is the fifth, and it is the one set

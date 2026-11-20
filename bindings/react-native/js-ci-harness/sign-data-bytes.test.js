@@ -164,7 +164,7 @@ const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 
 function newSdk() {
-  return new OfflineProtocol({ appId: 'harness', profile: 'harness-profile' });
+  return new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile' });
 }
 
 let OfflineProtocol;

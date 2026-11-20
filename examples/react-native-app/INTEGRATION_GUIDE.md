@@ -313,7 +313,7 @@ import { useOfflineProtocol } from './hooks/useOfflineProtocol';
 
 export default function App() {
   const { isStarted, start, stop, sendMessage } = useOfflineProtocol({
-    appId: 'my-app',
+    appLabel: 'my-app',
     profile: 'user123',
     transports: {
       ble: { enabled: true },
@@ -387,7 +387,7 @@ useEffect(() => {
 ```typescript
 const config: ProtocolConfig = {
   // Required
-  appId: 'my-app-id',
+  appLabel: 'my-app-id',
   profile: 'current-user-id',
 
   // Transport configuration
@@ -611,7 +611,7 @@ protocol.on('all', (event) => {
 **Problem:**
 ```typescript
 const config = {
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'user123',
 };
 // ...then treating 'user123' as this device's address:
@@ -625,7 +625,7 @@ from a key it generates for itself.
 **Solution:**
 ```typescript
 const config = {
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: getCurrentUserId(),  // one namespace per account on this device
 };
 

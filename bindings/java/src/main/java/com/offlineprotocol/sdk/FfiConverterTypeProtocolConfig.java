@@ -48,7 +48,7 @@ public enum FfiConverterTypeProtocolConfig implements FfiConverterRustBuffer<Pro
   @Override
   public long allocationSize(ProtocolConfig value) {
       return (
-            FfiConverterString.INSTANCE.allocationSize(value.appId()) +
+            FfiConverterString.INSTANCE.allocationSize(value.appLabel()) +
             FfiConverterString.INSTANCE.allocationSize(value.profile()) +
             FfiConverterBoolean.INSTANCE.allocationSize(value.bleEnabled()) +
             FfiConverterBoolean.INSTANCE.allocationSize(value.wifiDirectEnabled()) +
@@ -88,7 +88,7 @@ public enum FfiConverterTypeProtocolConfig implements FfiConverterRustBuffer<Pro
 
   @Override
   public void write(ProtocolConfig value, java.nio.ByteBuffer buf) {
-      FfiConverterString.INSTANCE.write(value.appId(), buf);
+      FfiConverterString.INSTANCE.write(value.appLabel(), buf);
       FfiConverterString.INSTANCE.write(value.profile(), buf);
       FfiConverterBoolean.INSTANCE.write(value.bleEnabled(), buf);
       FfiConverterBoolean.INSTANCE.write(value.wifiDirectEnabled(), buf);

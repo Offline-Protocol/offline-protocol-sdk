@@ -12,7 +12,7 @@ public sealed class ProtocolEngineTests
     internal const string Config =
         """
         {
-          "app_id": "com.offlineprotocol.csharp.tests",
+          "app_label": "com.offlineprotocol.csharp.tests",
           "profile": "csharp-tests",
           "ble_enabled": false,
           "wifi_direct_enabled": false,

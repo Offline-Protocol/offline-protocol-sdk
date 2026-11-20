@@ -1,7 +1,7 @@
 package com.offlineprotocol.sdk;
 
 public class ProtocolConfig {
-    private java.lang.String appId;
+    private java.lang.String appLabel;
     private java.lang.String profile;
     private boolean bleEnabled;
     private boolean wifiDirectEnabled;
@@ -38,7 +38,7 @@ public class ProtocolConfig {
     private boolean encryptServiceMessages;
 
     public ProtocolConfig(
-        java.lang.String appId, 
+        java.lang.String appLabel, 
         java.lang.String profile, 
         boolean bleEnabled, 
         boolean wifiDirectEnabled, 
@@ -75,7 +75,7 @@ public class ProtocolConfig {
         boolean encryptServiceMessages
     ) {
         
-        this.appId = appId;
+        this.appLabel = appLabel;
         
         this.profile = profile;
         
@@ -146,8 +146,8 @@ public class ProtocolConfig {
         this.encryptServiceMessages = encryptServiceMessages;
     }
     
-    public java.lang.String appId() {
-        return this.appId;
+    public java.lang.String appLabel() {
+        return this.appLabel;
     }
     
     public java.lang.String profile() {
@@ -285,8 +285,8 @@ public class ProtocolConfig {
     public boolean encryptServiceMessages() {
         return this.encryptServiceMessages;
     }
-    public void setAppId(java.lang.String appId) {
-        this.appId = appId;
+    public void setAppLabel(java.lang.String appLabel) {
+        this.appLabel = appLabel;
     }
     public void setProfile(java.lang.String profile) {
         this.profile = profile;
@@ -399,7 +399,7 @@ public class ProtocolConfig {
         if (_uniffiOther instanceof ProtocolConfig) {
             ProtocolConfig _uniffiThat = (ProtocolConfig) _uniffiOther;
             return (
-              java.util.Objects.equals(appId, _uniffiThat.appId) && 
+              java.util.Objects.equals(appLabel, _uniffiThat.appLabel) && 
               
               java.util.Objects.equals(profile, _uniffiThat.profile) && 
               
@@ -476,7 +476,7 @@ public class ProtocolConfig {
     @Override
     public int hashCode() {
         int _uniffiHash = 17;
-        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(appId);
+        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(appLabel);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(profile);
         _uniffiHash = 31 * _uniffiHash + java.lang.Boolean.hashCode(bleEnabled);
         _uniffiHash = 31 * _uniffiHash + java.lang.Boolean.hashCode(wifiDirectEnabled);

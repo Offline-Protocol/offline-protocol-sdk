@@ -9,6 +9,11 @@ from ._callback_reentrancy import make_handle_maps_reentrant as _make_reentrant
 
 _make_reentrant(_generated)
 
+# `app_id=` keeps working, deprecated, where the UDL renamed it `app_label`.
+from ._app_label_alias import install as _install_app_label_alias
+
+_install_app_label_alias(_generated)
+
 # Platform managers
 from .secure_storage import SecureStorage  # noqa: F401
 from .state_storage import AppStateStorage  # noqa: F401
@@ -46,4 +51,4 @@ __all__ += [
     "ProtocolManager",
 ]
 
-del _generated, _make_reentrant
+del _generated, _make_reentrant, _install_app_label_alias

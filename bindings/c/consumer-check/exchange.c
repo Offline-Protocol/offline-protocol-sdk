@@ -99,7 +99,7 @@ static void on_outbound(void *ctx) { ((struct device *)ctx)->notified++; }
 static void on_drop(void *ctx) { ((struct device *)ctx)->dropped++; }
 
 static const char *CONFIG_FORMAT =
-    "{\"app_id\":\"com.example.c\",\"profile\":\"%s\","
+    "{\"app_label\":\"com.example.c\",\"profile\":\"%s\","
     "\"ble_enabled\":false,\"wifi_direct_enabled\":true,\"internet_enabled\":false,"
     "\"reticulum_enabled\":false,\"nostr_enabled\":false,\"prefer_online\":false,"
     "\"initial_ttl\":8,\"encryption_enabled\":true,\"auto_key_exchange\":true,"

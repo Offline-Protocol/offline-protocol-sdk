@@ -16,7 +16,7 @@ class ConsumerCheckTest < Minitest::Test
   # the rest, so a Ruby caller leaves them out as a Python caller does.
   def config
     Sdk::ProtocolConfig.new(
-      app_id: "com.example.ruby", profile: "ruby-consumer",
+      app_label: "com.example.ruby", profile: "ruby-consumer",
       ble_enabled: false, wifi_direct_enabled: false, internet_enabled: true,
       reticulum_enabled: false, nostr_enabled: false, prefer_online: false,
       initial_ttl: 8, encryption_enabled: true, auto_key_exchange: true,

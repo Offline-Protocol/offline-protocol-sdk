@@ -8,7 +8,7 @@ import XCTest
 final class DevelopmentCleartextConfigTests: XCTestCase {
 
     func testDevelopmentCleartextMatchesReactNativePreset() {
-        let config = OfflineProtocolDevelopmentCleartextConfig.make(appId: "app", profile: "user")
+        let config = OfflineProtocolDevelopmentCleartextConfig.make(appLabel: "app", profile: "user")
         XCTAssertTrue(config.bleEnabled)
         XCTAssertFalse(config.wifiDirectEnabled)
         XCTAssertFalse(config.internetEnabled)

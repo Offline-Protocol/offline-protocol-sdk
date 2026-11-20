@@ -183,7 +183,7 @@ function serveRing(events, { delayMs = 0, reject = false } = {}) {
 
 /** An SDK whose app listens to everything, recording what it saw. */
 function listeningSdk() {
-  const sdk = new OfflineProtocol({ appId: 'harness', profile: 'harness-profile' });
+  const sdk = new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile' });
   const bus = buses[buses.length - 1];
   const seen = [];
   sdk.on('all', (event) => seen.push(event));

@@ -9153,7 +9153,7 @@ data class MediaSendOptions (
     , 
     var `fileId`: kotlin.String? = null 
     , 
-    var `appId`: kotlin.String? = null 
+    var `appLabel`: kotlin.String? = null 
     
 ){
     
@@ -9187,7 +9187,7 @@ public object FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer<MediaSend
             FfiConverterOptionalTypeReplyContext.allocationSize(value.`replyContext`) +
             FfiConverterOptionalTypeForwardInfo.allocationSize(value.`forwardInfo`) +
             FfiConverterOptionalString.allocationSize(value.`fileId`) +
-            FfiConverterOptionalString.allocationSize(value.`appId`)
+            FfiConverterOptionalString.allocationSize(value.`appLabel`)
     )
 
     override fun write(value: MediaSendOptions, buf: ByteBuffer) {
@@ -9197,7 +9197,7 @@ public object FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer<MediaSend
             FfiConverterOptionalTypeReplyContext.write(value.`replyContext`, buf)
             FfiConverterOptionalTypeForwardInfo.write(value.`forwardInfo`, buf)
             FfiConverterOptionalString.write(value.`fileId`, buf)
-            FfiConverterOptionalString.write(value.`appId`, buf)
+            FfiConverterOptionalString.write(value.`appLabel`, buf)
     }
 }
 
@@ -10157,7 +10157,7 @@ public object FfiConverterTypePendingQueueConfig: FfiConverterRustBuffer<Pending
 
 
 data class ProtocolConfig (
-    var `appId`: kotlin.String
+    var `appLabel`: kotlin.String
     , 
     var `profile`: kotlin.String
     , 
@@ -10281,7 +10281,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
     }
 
     override fun allocationSize(value: ProtocolConfig) = (
-            FfiConverterString.allocationSize(value.`appId`) +
+            FfiConverterString.allocationSize(value.`appLabel`) +
             FfiConverterString.allocationSize(value.`profile`) +
             FfiConverterBoolean.allocationSize(value.`bleEnabled`) +
             FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
@@ -10319,7 +10319,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
-            FfiConverterString.write(value.`appId`, buf)
+            FfiConverterString.write(value.`appLabel`, buf)
             FfiConverterString.write(value.`profile`, buf)
             FfiConverterBoolean.write(value.`bleEnabled`, buf)
             FfiConverterBoolean.write(value.`wifiDirectEnabled`, buf)
@@ -10670,7 +10670,7 @@ data class SendMessageOptions (
     , 
     var `forwardInfo`: ForwardInfo? = null 
     , 
-    var `appId`: kotlin.String? = null 
+    var `appLabel`: kotlin.String? = null 
     
 ){
     
@@ -10704,7 +10704,7 @@ public object FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer<SendMes
             FfiConverterOptionalTypeReplyContext.allocationSize(value.`replyContext`) +
             FfiConverterOptionalTypeMediaMetadata.allocationSize(value.`mediaMetadata`) +
             FfiConverterOptionalTypeForwardInfo.allocationSize(value.`forwardInfo`) +
-            FfiConverterOptionalString.allocationSize(value.`appId`)
+            FfiConverterOptionalString.allocationSize(value.`appLabel`)
     )
 
     override fun write(value: SendMessageOptions, buf: ByteBuffer) {
@@ -10714,7 +10714,7 @@ public object FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer<SendMes
             FfiConverterOptionalTypeReplyContext.write(value.`replyContext`, buf)
             FfiConverterOptionalTypeMediaMetadata.write(value.`mediaMetadata`, buf)
             FfiConverterOptionalTypeForwardInfo.write(value.`forwardInfo`, buf)
-            FfiConverterOptionalString.write(value.`appId`, buf)
+            FfiConverterOptionalString.write(value.`appLabel`, buf)
     }
 }
 

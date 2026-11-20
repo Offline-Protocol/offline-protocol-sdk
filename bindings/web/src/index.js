@@ -7,6 +7,29 @@ export { NearbyRoom, publicAddress } from "./nearby.js";
 export { BluetoothCarrier } from "./bluetooth.js";
 import { checkRelays } from "./nostr-relays.js";
 
+/// `appLabel`, or `appId`, its name before 0.35. Only the name changed: the
+/// value still scopes the node's traffic, its storage and the tab carrier's
+/// channel, so an app that shipped must keep passing the same string. Both
+/// names with different values is refused rather than one silently winning,
+/// since a wrong guess would start the app on fresh storage.
+let warnedAppId = false;
+function resolveAppLabel(appLabel, appId) {
+  if (appLabel !== undefined && appId !== undefined && appLabel !== appId) {
+    throw new Error(
+      `appLabel "${appLabel}" and appId "${appId}" disagree; appId is the old name of appLabel, set only appLabel`,
+    );
+  }
+  if (appLabel === undefined && appId !== undefined && !warnedAppId) {
+    warnedAppId = true;
+    console.warn(
+      "[OfflineProtocol] appId on the mesh is now appLabel. Your App ID (app_…) from the dashboard is what turns on telemetry.",
+    );
+  }
+  const label = appLabel ?? appId;
+  if (!label) throw new Error("appLabel is required");
+  return label;
+}
+
 export class OfflineNode extends EventTarget {
   #worker;
   #next = 1;
@@ -64,7 +87,8 @@ export class OfflineNode extends EventTarget {
   /// start rejects with the signal's reason. A start left to finish would
   /// hold the account at least until it had replayed the logs.
   static async start({
-    appId,
+    appLabel,
+    appId: oldAppId,
     profile = "default",
     storage = "durable",
     tabs = true,
@@ -74,7 +98,7 @@ export class OfflineNode extends EventTarget {
     wasm,
     signal,
   } = {}) {
-    if (!appId) throw new Error("appId is required");
+    const appId = resolveAppLabel(appLabel, oldAppId);
     signal?.throwIfAborted();
     if (nostr !== undefined) checkRelays(nostr?.relays);
     if (storage === "durable") {
@@ -404,7 +428,7 @@ export class OfflineNode extends EventTarget {
 
   /// Ends the worker at once, without stopping the engine: what a crash or a
   /// killed tab does. Everything the engine had acknowledged is durable, so
-  /// starting a node again with the same `appId` and `profile` is the same
+  /// starting a node again with the same `appLabel` and `profile` is the same
   /// device. The tab carrier's other ends are told now, as the worker can no
   /// longer tell them.
   terminate() {

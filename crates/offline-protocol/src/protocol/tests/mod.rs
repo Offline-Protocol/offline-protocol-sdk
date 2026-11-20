@@ -1090,7 +1090,7 @@ fn test_config_access() {
     let config = create_test_config();
     let protocol = OfflineProtocol::new(config.clone()).unwrap();
 
-    assert_eq!(protocol.config().app_id, config.app_id);
+    assert_eq!(protocol.config().app_label, config.app_label);
     assert_eq!(protocol.config().profile, config.profile);
 }
 
@@ -31793,7 +31793,8 @@ fn sample_media_rich_options(reply_to: &str) -> MediaSendOptions {
             forward_count: 2,
         }),
         file_id: None,
-        app_id: None,
+        app_label: None,
+        ..Default::default()
     }
 }
 
@@ -43290,6 +43291,32 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
     // Nothing was emitted, so the worker drains an empty ring and opens no
     // socket; disabling signals its stop.
     protocol.disable_telemetry();
+}
+
+/// A new app may pass its portal App ID as its app label, and then needs
+/// only the key to turn telemetry on. A label that is not an App ID gives
+/// telemetry nothing: it must never be uploaded as one, because the ingest
+/// would refuse every batch and the app would never learn why.
+#[cfg(feature = "telemetry-pipe")]
+#[test]
+fn telemetry_falls_back_to_a_label_that_is_a_portal_app_id() {
+    use crate::telemetry::{AppState, TelemetryHost, TelemetryOs};
+    let host = || TelemetryHost::new(TelemetryOs::Ios, 18).with_app_state(AppState::Active);
+    let key_only = || TelemetryConfig::default().with_api_key("mp_test_key");
+
+    let mut config = create_test_config();
+    config.app_label = "app_test".to_string();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol
+        .enable_telemetry(key_only(), host())
+        .expect("the label is the App ID");
+    protocol.disable_telemetry();
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    assert!(matches!(
+        protocol.enable_telemetry(key_only(), host()),
+        Err(Error::TelemetryConfigInvalid(ref field)) if field == "app_id"
+    ));
 }
 
 /// The handshake latency in the session summary must survive the trip from

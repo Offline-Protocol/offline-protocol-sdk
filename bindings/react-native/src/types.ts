@@ -837,14 +837,49 @@ export interface DataConfig {
   enabled?: boolean;
 }
 
-export interface ProtocolConfig {
-  /** Application identifier */
-  appId: string;
+/**
+ * Protocol configuration. The app label is required under one of its two
+ * names: `appLabel`, or `appId`, its deprecated old name. The type refuses a
+ * config with neither, so the mistake is a compile error rather than a throw
+ * from the constructor.
+ */
+export type ProtocolConfig = ProtocolConfigFields &
+  (
+    | { appLabel: string; appId?: string }
+    | { /** @deprecated The old name of `appLabel`. */ appId: string; appLabel?: undefined }
+  );
+
+/** Every {@link ProtocolConfig} field; the label's two names are both optional here. */
+export interface ProtocolConfigFields {
+  /**
+   * App label: keeps this app's peers together on the mesh (required, here
+   * or under its old name `appId`).
+   *
+   * With `profile` it selects the storage namespace, it is stamped on every
+   * message, and the BLE app tag is derived from it, so an app that shipped
+   * must never change it: a new value means fresh storage, a new identity,
+   * and old builds that no longer see new ones.
+   *
+   * It is public and carries no authority: anyone nearby can read it and
+   * any app can use the same one. Never decide whom to trust from it.
+   *
+   * It is not the App ID (`app_…`) the developer portal issues, which turns
+   * on telemetry. A new app may pass its App ID here, and then
+   * `enableTelemetry` needs only the key.
+   */
+  appLabel?: string;
+  /**
+   * The old name of `appLabel`.
+   *
+   * @deprecated appId on the mesh is now appLabel. Your App ID (app_…) from
+   * the dashboard is what turns on telemetry.
+   */
+  appId?: string;
   /**
    * Local profile selector: which stored identity this instance runs as.
    *
    * Never leaves the device and is not this device's identity. It picks a
-   * storage namespace — one per `(appId, profile)` — so an app hosting several
+   * storage namespace — one per `(appLabel, profile)` — so an app hosting several
    * accounts gives each its own value, and an app hosting one can pass a
    * constant such as `'default'`.
    *
@@ -1201,13 +1236,15 @@ export interface SendMessageParams {
   /** Forward attribution (optional). Sealed-only, like `replyContext`. */
   forwardInfo?: ForwardInfo;
   /**
-   * Application id to stamp on this message instead of the configured
-   * `appId` (optional). For one instance serving several applications
+   * App label to stamp on this message instead of the configured
+   * `appLabel` (optional). For one instance serving several applications
    * behind one identity; a single-app caller never sets it. It changes the
    * stamp on this message only, never the storage namespace or the BLE app tag.
    * Cleartext and unsigned on the wire, so it is routing metadata, never
-   * an authorization input. An invalid id is rejected as InvalidArgument.
+   * an authorization input. An invalid label is rejected as InvalidArgument.
    */
+  appLabel?: string;
+  /** @deprecated The old name of `appLabel`. */
   appId?: string;
 }
 
@@ -1289,13 +1326,15 @@ export interface SendMediaParams {
    */
   fileId?: string;
   /**
-   * Application id to stamp on every chunk of this transfer instead of the configured
-   * `appId` (optional). For one instance serving several applications
+   * App label to stamp on every chunk of this transfer instead of the configured
+   * `appLabel` (optional). For one instance serving several applications
    * behind one identity; a single-app caller never sets it. It changes the
    * stamp on every chunk of this transfer only, never the storage namespace or the BLE app tag.
    * Cleartext and unsigned on the wire, so it is routing metadata, never
-   * an authorization input. An invalid id is rejected as InvalidArgument.
+   * an authorization input. An invalid label is rejected as InvalidArgument.
    */
+  appLabel?: string;
+  /** @deprecated The old name of `appLabel`. */
   appId?: string;
 }
 
@@ -1398,11 +1437,13 @@ export interface MessageReceivedEvent extends BaseEvent {
   /** Forwarding attribution (present when this is a forwarded message). */
   forward_info?: ForwardInfo;
   /**
-   * Application id the sender stamped on this message: its configured id,
-   * or the per-send `appId` of a rich send. Routes a message to the right
+   * App label the sender stamped on this message: its configured label,
+   * or the per-send `appLabel` of a rich send. Routes a message to the right
    * application on an instance serving several. Cleartext and unsigned on
    * the wire, so route on it, never authorize on it.
    */
+  app_label: string;
+  /** @deprecated The same value as `app_label`, under its old name. */
   app_id: string;
 }
 
@@ -1721,10 +1762,12 @@ export interface FileReceivedEvent extends BaseEvent {
   /** Forwarding attribution (sealed chunk-0 extras). */
   forward_info?: ForwardInfo;
   /**
-   * Application id the sender stamped on the transfer, like
-   * `MessageReceivedEvent.app_id`. Absent only if the chunk-0 record was
+   * App label the sender stamped on the transfer, like
+   * `MessageReceivedEvent.app_label`. Absent only if the chunk-0 record was
    * evicted before completion.
    */
+  app_label?: string;
+  /** @deprecated The same value as `app_label`, under its old name. */
   app_id?: string;
 }
 
@@ -2822,9 +2865,11 @@ export interface MediaResendRequiredEvent extends BaseEvent {
   file_name: string;
   file_size: number;
   /**
-   * The per-send `appId` the transfer was started with, absent when it
+   * The per-send `appLabel` the transfer was started with, absent when it
    * used the configured one: the application to ask for the bytes.
    */
+  app_label?: string;
+  /** @deprecated The same value as `app_label`, under its old name. */
   app_id?: string;
 }
 
@@ -3642,8 +3687,10 @@ export type MlsVerbosity = 'off' | 'lifecycle' | 'diagnostic';
 /**
  * Configuration for `enableTelemetry`.
  *
- * `apiKey` and `appId` come from the developer portal and are required;
- * the platform (`os`, `osMajor`) is filled in by the native module, never
+ * `apiKey` and `appId` come from the developer portal and are required,
+ * except that `appId` may be left out when the protocol's `appLabel` is that
+ * App ID (`app_…`), which is then used. This `appId` really is the portal
+ * App ID, unlike the mesh `appLabel`. The platform (`os`, `osMajor`) is filled in by the native module, never
  * by the app. Every other field is optional and falls back to the Rust
  * default when omitted:
  *   appVersion         = '0.0.0'
@@ -3673,7 +3720,7 @@ export type MlsVerbosity = 'off' | 'lifecycle' | 'diagnostic';
  */
 export interface TelemetryConfig {
   apiKey: string;
-  appId: string;
+  appId?: string;
   appVersion?: string;
   debug?: boolean;
   flushIntervalMs?: number;
