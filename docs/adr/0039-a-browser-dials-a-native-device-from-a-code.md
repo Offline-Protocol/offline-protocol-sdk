@@ -101,10 +101,12 @@ after its first check.
    back after a Wi-Fi drop, would otherwise be refused for up to 15 s while
    the listener held the dead stream. Against a stream of another kind
    proving the same address, the existing stream stays. On its side, the
-   page keeps its first link as before (W3), so before dialling a code
-   again, it closes its earlier connection to that address. If the page kept
-   its old link while the listener kept the new one, each end would close
-   the link the other kept.
+   page keeps its first link as before (W3), so when a dial of a code again
+   opens its channel, the page closes its earlier connection to that address
+   before it links the new one. If the page kept its old link while the
+   listener kept the new one, each end would close the link the other kept.
+   It closes the old one then, not as the dial starts, so a dial that fails
+   costs nothing that was working.
 
 7. **Limits apply before an address is proved.** At most four dials may be
    pending (authenticated but not yet proved). A dial that has not proved an

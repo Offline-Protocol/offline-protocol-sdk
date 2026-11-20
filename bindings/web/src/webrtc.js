@@ -161,17 +161,20 @@ class Connection {
   #stale = null;
   // The address the other end's preamble must prove, for a dial (W16).
   #expect;
+  // Called once the channel opens, before the link is opened, for a dial.
+  #onOpen;
   // { resolve, reject } while a dial waits for its channel to open.
   #dialling = null;
   // Rejects once the connection closes; see #step.
   #ended;
   #end;
 
-  constructor(node, iceServers, disconnectedMs, onClose, { expect } = {}) {
+  constructor(node, iceServers, disconnectedMs, onClose, { expect, onOpen } = {}) {
     this.#node = node;
     this.#disconnectedMs = disconnectedMs;
     this.#onClose = onClose;
     this.#expect = expect;
+    this.#onOpen = onOpen;
     this.#ended = new Promise((_, reject) => {
       this.#end = reject;
     });
@@ -304,6 +307,9 @@ class Connection {
 
   async #opened() {
     this.#settleDial(null);
+    // Ahead of openLink: the node answers calls in the order they were
+    // made, so a link this closes is gone before this one is opened.
+    this.#onOpen?.(this);
     try {
       this.#link = await this.#node.openLink({
         send: (bytes) => this.#send(bytes),
@@ -413,8 +419,10 @@ export class WebRtcCarrier extends EventTarget {
   #iceServers;
   #disconnectedMs;
   #connections = new Set();
-  // address -> the dialled Connection toward it (W16).
+  // address -> the dialled Connection linked toward it (W16).
   #dialled = new Map();
+  // address -> a dialled Connection toward it whose channel has not opened.
+  #dialling = new Map();
 
   /// `iceServers` is RTCPeerConnection's list, for networks where devices
   /// cannot reach each other directly: a STUN server for addresses behind a
@@ -483,7 +491,11 @@ export class WebRtcCarrier extends EventTarget {
     }
     const checked = checkedDirectCode(code);
     const { address } = checked;
-    this.#dialled.get(address)?.close();
+    // A dial of this address still setting up is abandoned: it links
+    // nothing yet. A linked one is kept until this dial's channel opens, so
+    // a dial that fails (a stale code, a listener gone) costs nothing that
+    // was working.
+    this.#dialling.get(address)?.close();
     const connection = this.#track(
       new Connection(
         this.#node,
@@ -491,12 +503,24 @@ export class WebRtcCarrier extends EventTarget {
         this.#disconnectedMs,
         (c) => {
           this.#connections.delete(c);
+          if (this.#dialling.get(address) === c) this.#dialling.delete(address);
           if (this.#dialled.get(address) === c) this.#dialled.delete(address);
         },
-        { expect: address },
+        {
+          expect: address,
+          // The engine keeps its first link per address (W3) and the
+          // listener its newest dialled stream, so the earlier link is
+          // closed before this one opens: each end then keeps this one.
+          onOpen: (c) => {
+            if (this.#dialling.get(address) === c) this.#dialling.delete(address);
+            const held = this.#dialled.get(address);
+            if (held !== undefined && held !== c) held.close();
+            this.#dialled.set(address, c);
+          },
+        },
       ),
     );
-    this.#dialled.set(address, connection);
+    this.#dialling.set(address, connection);
     try {
       await connection.dial(checked, timeoutMs);
     } catch (error) {

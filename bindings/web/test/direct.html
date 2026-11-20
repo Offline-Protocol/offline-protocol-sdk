@@ -142,12 +142,12 @@ await run(async (step) => {
 
   step.name = "dial again";
   // The same code again, from the object parseDirectCode returned. The page
-  // closes its first connection before it dials (its engine keeps the first
-  // link per address), so each end loses the first stream once and holds
-  // the second. The page's close reaches the listener ahead of the new
-  // dial, so the listener reports that stream lost rather than superseding
-  // it; a stream it supersedes (a page that went without closing) is never
-  // reported at all. Either way the first stream ends exactly once there.
+  // closes its first connection once the second's channel opens, before it
+  // links the second (its engine keeps the first link per address), so each
+  // end loses the first stream once and holds the second. The page's close
+  // and the new dial's preamble reach the listener about together, so it
+  // reports that stream lost or supersedes it; a stream it supersedes is
+  // never reported at all. Either way the first stream ends exactly once.
   const before = (await lines()).length;
   const eventsBefore = events.length;
   const second = await carrier.dial(parseDirectCode(url));
@@ -173,6 +173,26 @@ await run(async (step) => {
   log(
     `a second dial replaced the first at both ends, the listener ${replaced.superseded === null ? "losing" : "superseding"} the first stream once`,
   );
+
+  step.name = "a failed dial again keeps the link";
+  // A dial of the linked address that fails (a wrong password, which the
+  // listener never answers) must not cost the link that works: the page
+  // closes its old link only once a new channel opens.
+  const keptStates = states(carrier, second);
+  const current = parseDirectCode(url).password;
+  const stalePassword = (current[0] === "A" ? "B" : "A") + current.slice(1);
+  let stale = null;
+  try {
+    await carrier.dial(withValue(listening.code, "w", stalePassword), { timeoutMs: 3000 });
+  } catch (error) {
+    stale = error;
+  }
+  if (stale?.state !== "timeout") throw new Error(`the stale dial ended ${stale?.state ?? "resolved"}`);
+  const kept = waitFor(node, "message_received", (e) => e.content === "echo:after a failed dial");
+  await node.sendMessage(listener, "after a failed dial");
+  await kept;
+  if (keptStates.includes("closed")) throw new Error("the failed dial closed the working link");
+  log("a dial again that failed left the working link up");
 
   step.name = "listener closes";
   // A closing listener ends each connection (its DTLS close_notify), so the

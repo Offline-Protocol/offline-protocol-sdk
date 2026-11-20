@@ -278,7 +278,9 @@ export class WebRtcCarrier extends EventTarget {
    * or what `parseDirectCode` returned. Resolves once the data channel is
    * open. The link's preamble must prove the code's `address`, or the
    * engine closes it and announces nothing. Closes this carrier's earlier
-   * dialled connection to the same address first, and uses no ICE server.
+   * dialled connection to the same address once the channel opens (a dial
+   * that fails leaves it as it was; one still setting up is abandoned at
+   * once), and uses no ICE server.
    * Rejects, closing the connection, on a refused code, on a connection
    * that fails (a certificate that does not match the code fails DTLS:
    * `state` "failed") or closes first (`state` "closed"), or when the

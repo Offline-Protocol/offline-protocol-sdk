@@ -773,15 +773,20 @@ the address the preamble must prove, and the engine closes a link whose
 preamble proves another and announces nothing. Without the claim, a page
 that opened a swapped code would announce whoever answered.
 
-**A dial closes the page's earlier dialled connection to the same
-address.** The engine keeps its first link per address (W3), and the
+**A dial that opens closes the page's earlier dialled connection to the
+same address.** The engine keeps its first link per address (W3), and the
 listener keeps its newest dialled stream, because only the page dials. A
 page that kept its old link while the listener kept the new one would leave
-each end closing the link the other kept. The close reaches the listener
-ahead of the new dial, so a dial again from a page that is still open costs
-each end one reported loss and one announcement. The listener's newer-wins
-rule is for a page that went without closing (a reload, a Wi-Fi drop), whose
-dead stream it replaces without a loss.
+each end closing the link the other kept. The old connection is closed when
+the new channel opens, before its link is opened, and not when the dial
+starts: a dial that then fails (a stale code, a listener that closed)
+would otherwise have cost a link that was working. A dial of the same
+address still setting up links nothing yet, so a newer dial abandons it at
+once. The close reaches the listener about when the new dial's preamble
+does, so a dial again from a page that is still open costs each end one
+reported loss (or, at the listener, a supersede) and one announcement. The
+listener's newer-wins rule is for a page that went without closing (a
+reload, a Wi-Fi drop), whose dead stream it replaces without a loss.
 
 **A dial uses no ICE server**, even on a carrier the application gave some
 (W9). The listener is on the local network or nowhere, and a server would

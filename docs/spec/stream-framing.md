@@ -256,10 +256,10 @@ remote instance, and a WebRTC link exists only because two people exchanged
 codes or a page dialled a listener's code, so two links to one address are a
 second tab with the same identity or a code used twice, and the first link
 is the one both ends already use. A page that dials a code again closes its
-earlier dialled link to that address first: it keeps its first link and the
-listener keeps its newest, so a page that kept the old link while the
-listener kept the new one would leave each end closing the link the other
-kept.
+earlier dialled link to that address once the new channel opens, before it
+links the new one: it keeps its first link and the listener keeps its
+newest, so a page that kept the old link while the listener kept the new
+one would leave each end closing the link the other kept.
 A WebRTC data channel is a peer stream like any other: reliable and ordered,
 with message boundaries the framing ignores. The browser cuts outbound bytes
 into chunks of at most 16 KiB, a size every browser accepts, and the reader
@@ -447,9 +447,11 @@ ICE server would learn only who is dialling whom. The page then:
 3. waits for the channel to open, then sends its preamble and reads the
    listener's, with `a` as the claim.
 
-Before dialling a code whose address it already has a dialled link to, the
-page closes that link (see
-[what a receiver owes](#what-a-receiver-owes)).
+When a dial of an address the page already has a dialled link to opens its
+channel, the page closes that link before it links the new one (see
+[what a receiver owes](#what-a-receiver-owes)). A dial that fails leaves the
+old link as it was, and a dial still setting up links nothing, so a newer
+dial of the same address may abandon it.
 
 ### The listener's side
 
