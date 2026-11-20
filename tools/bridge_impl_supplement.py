@@ -653,14 +653,15 @@ _m("mlsListSessions", """
 
 _m("wipePersistedState", """
         val map = mapFromAny(arguments)
-        val appId = (map["appLabel"] as? String) ?: requireString(map, "appId")
+        // `appId` is the old name of `appLabel`, still read (Flutter passes the app's map).
+        val appLabel = (map["appLabel"] as? String) ?: (map["appId"] as? String) ?: requireString(map, "appLabel")
         val profile = requireString(map, "profile")
         val context = ctx ?: throw IllegalStateException("Context required")
-        val namespace = StorageNamespace.account(appId, profile)
+        val namespace = StorageNamespace.account(appLabel, profile)
         val live = host.currentConfig
         if (live != null && StorageNamespace.account(live.appLabel, live.profile) == namespace) {
             throw IllegalStateException("Refusing to wipe storage for the running account; call destroy() first")
         }
-        OfflineProtocolReferenceStorage.wipe(context, appId, profile)
+        OfflineProtocolReferenceStorage.wipe(context, appLabel, profile)
         return null
 """)

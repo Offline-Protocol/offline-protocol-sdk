@@ -3,6 +3,7 @@ package com.offlineprotocol
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.offline_protocol.OverflowPolicy
@@ -25,7 +26,15 @@ class ProtocolConfigParserTest {
         assertEquals("app.muster", parse("""{"appLabel":"app.muster","userId":"alice"}""").appLabel)
         assertEquals("app.muster", parse("""{"appId":"app.muster","userId":"alice"}""").appLabel)
         assertEquals("app.muster", parse("""{"app_id":"app.muster","userId":"alice"}""").appLabel)
-        assertEquals("new", parse("""{"appLabel":"new","appId":"old","userId":"alice"}""").appLabel)
+        assertEquals("same", parse("""{"appLabel":"same","appId":"same","userId":"alice"}""").appLabel)
+    }
+
+    @Test
+    fun appLabelAndAnOldNameThatDisagreeAreRefused() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            parse("""{"appLabel":"new","appId":"old","userId":"alice"}""")
+        }
+        assertTrue(error.message.orEmpty(), error.message.orEmpty().contains("disagree"))
     }
 
     @Test

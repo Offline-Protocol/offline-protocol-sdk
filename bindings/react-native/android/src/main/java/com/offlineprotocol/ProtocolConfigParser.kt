@@ -26,6 +26,26 @@ internal object ProtocolConfigParser {
 
     private const val DEFAULT_INITIAL_TTL = 8
 
+    /**
+     * `appLabel` since 0.35; `appId` and `app_id` are its old names, still
+     * read. Two of them with different values is refused rather than one
+     * silently winning: a wrong pick moves the app to another storage
+     * namespace. Mirrors `ProtocolConfigParser.appLabel` on iOS.
+     */
+    internal fun appLabel(json: JSONObject): String {
+        val present = listOf("appLabel", "appId", "app_id").mapNotNull { key ->
+            (json.opt(key) as? String)?.let { key to it }
+        }
+        val first = present.firstOrNull() ?: return ""
+        present.firstOrNull { it.second != first.second }?.let { other ->
+            throw IllegalArgumentException(
+                "${first.first} \"${first.second}\" and ${other.first} \"${other.second}\" disagree; " +
+                    "appId is the old name of appLabel, set only appLabel",
+            )
+        }
+        return first.second
+    }
+
     fun parse(configJson: String): ParsedConfig {
         val json = JSONObject(configJson)
 
@@ -251,8 +271,7 @@ internal object ProtocolConfigParser {
                 ?: json.optBooleanCompat("controlFreshnessEnforced", "control_freshness_enforced")
 
         val config = ProtocolConfig(
-            // `appLabel` since 0.35; `appId` and `app_id` are its old names, still read.
-            appLabel = json.safeOptString("appLabel", json.safeOptString("appId", json.safeOptString("app_id"))),
+            appLabel = appLabel(json),
             profile = json.safeOptString("profile"),
             bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),

@@ -764,9 +764,9 @@ fun wifiDirectStatusChanged(module: OfflineProtocolModule, isConnected: Boolean,
     }
 }
 
-fun wipePersistedState(module: OfflineProtocolModule, appId: String, profile: String, promise: Promise) {
+fun wipePersistedState(module: OfflineProtocolModule, appLabel: String, profile: String, promise: Promise) {
     run(module, promise, "ERROR_WIPE_STATE", "Refusing to wipe storage for the account this instance is running.") { host, context ->
-        ProtocolEngineHostBridge.wipePersistedState(host, context, mapOf("appId" to appId, "profile" to profile))
+        ProtocolEngineHostBridge.wipePersistedState(host, context, mapOf("appLabel" to appLabel, "profile" to profile))
     }
 }
 

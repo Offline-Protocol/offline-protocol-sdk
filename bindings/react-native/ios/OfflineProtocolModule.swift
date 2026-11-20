@@ -2346,11 +2346,11 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// snapshots, sealed state records — so a wipe underneath a live instance
     /// races those writes and leaves a partially repopulated container. Call
     /// `destroy()` first.
-    @objc func wipePersistedState(_ appId: String,
+    @objc func wipePersistedState(_ appLabel: String,
                                   profile: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.wipePersistedState(self, appId, profile: profile, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.wipePersistedState(self, appLabel, profile: profile, resolver: resolver, rejecter: rejecter)
     }
 
     // MARK: - Transport Management

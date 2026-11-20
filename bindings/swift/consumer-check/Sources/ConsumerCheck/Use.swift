@@ -51,6 +51,16 @@ public func signOut(engine: inout OfflineProtocol?, config: ProtocolConfig) thro
 // supported. Here it is the built-in store, opened for a scratch account and
 // wiped after. Run it off the main thread: the suite blocks on writes of
 // several megabytes.
+// Code written before 0.35 named the app label `appId`. The deprecated
+// aliases keep it compiling; deprecated itself, so the check stays quiet.
+@available(*, deprecated, message: "compiles the pre-0.35 names of the app label")
+public func labelUnderItsOldName(config: ProtocolConfig) -> String {
+    var options = SendMessageOptions()
+    options.appId = config.appId
+    _ = try? OfflineProtocolReferenceStorage.makeSecureStorage(appId: config.appId, profile: config.profile)
+    return options.appId ?? config.appId
+}
+
 /// Lab-only config factory (compile-checked; do not use in production apps).
 public func labCleartextConfig(appLabel: String, profile: String) -> ProtocolConfig {
     OfflineProtocolDevelopmentCleartextConfig.make(appLabel: appLabel, profile: profile)

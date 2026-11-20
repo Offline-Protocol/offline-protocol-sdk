@@ -2192,8 +2192,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * `destroy()` first.
      */
     @ReactMethod
-    fun wipePersistedState(appId: String, profile: String, promise: Promise) {
-        ProtocolEngineHostBridgeReactNative.wipePersistedState(this, appId, profile, promise)
+    fun wipePersistedState(appLabel: String, profile: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.wipePersistedState(this, appLabel, profile, promise)
     }
 
     // ========================================================================

@@ -22685,7 +22685,7 @@ mod tests {
     /// field; and the received-event types must declare what the core now
     /// emits.
     #[test]
-    fn react_native_rich_sends_carry_the_app_id_end_to_end() {
+    fn react_native_rich_sends_carry_the_app_label_end_to_end() {
         let region = |label: &str, code: &str, from: &str, to: &str| -> String {
             let start = code
                 .find(from)

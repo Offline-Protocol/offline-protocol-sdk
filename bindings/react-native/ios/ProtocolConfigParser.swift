@@ -167,8 +167,7 @@ enum ProtocolConfigParser {
             ?? raw["control_freshness_enforced"] as? Bool
 
         var config = ProtocolConfig(
-            // `appLabel` since 0.35; `appId` and `app_id` are its old names, still read.
-            appLabel: raw["appLabel"] as? String ?? raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
+            appLabel: try AppLabelReader.read(raw),
             profile: raw["profile"] as? String ?? "",
             bleEnabled: raw["bleEnabled"] as? Bool ?? raw["ble_enabled"] as? Bool ?? true,
             wifiDirectEnabled: raw["wifiDirectEnabled"] as? Bool ?? raw["wifi_direct_enabled"] as? Bool ?? true,

@@ -53,6 +53,7 @@ let package = Package(
                 "ProtocolErrorBridge.swift",
                 "ReferenceStorage.swift",
                 "DevelopmentCleartextConfig.swift",
+                "AppLabelAliases.swift",
                 "ReticulumManager.swift",
                 "StorageConformance.swift",
                 "TransportBridge.swift",
@@ -65,6 +66,7 @@ let package = Package(
             ],
             sources: [
                 "AddressDeclarationPolicy.swift",
+                "AppLabelReader.swift",
                 "BleAppTag.swift",
                 "BleDensityPolicy.swift",
                 "PeerRssiFeedPolicy.swift",
@@ -133,6 +135,7 @@ let package = Package(
             ],
             sources: [
                 "AddressDeclarationPolicyTests.swift",
+                "AppLabelReaderTests.swift",
                 "BleAppTagTests.swift",
                 "BleDensityPolicyTests.swift",
                 "PeerRssiFeedPolicyTests.swift",

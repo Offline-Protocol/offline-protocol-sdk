@@ -837,7 +837,20 @@ export interface DataConfig {
   enabled?: boolean;
 }
 
-export interface ProtocolConfig {
+/**
+ * Protocol configuration. The app label is required under one of its two
+ * names: `appLabel`, or `appId`, its deprecated old name. The type refuses a
+ * config with neither, so the mistake is a compile error rather than a throw
+ * from the constructor.
+ */
+export type ProtocolConfig = ProtocolConfigFields &
+  (
+    | { appLabel: string; appId?: string }
+    | { /** @deprecated The old name of `appLabel`. */ appId: string; appLabel?: undefined }
+  );
+
+/** Every {@link ProtocolConfig} field; the label's two names are both optional here. */
+export interface ProtocolConfigFields {
   /**
    * App label: keeps this app's peers together on the mesh (required, here
    * or under its old name `appId`).
@@ -1749,7 +1762,7 @@ export interface FileReceivedEvent extends BaseEvent {
   /** Forwarding attribution (sealed chunk-0 extras). */
   forward_info?: ForwardInfo;
   /**
-   * Application id the sender stamped on the transfer, like
+   * App label the sender stamped on the transfer, like
    * `MessageReceivedEvent.app_label`. Absent only if the chunk-0 record was
    * evicted before completion.
    */
