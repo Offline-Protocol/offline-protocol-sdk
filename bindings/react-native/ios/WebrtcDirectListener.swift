@@ -330,7 +330,7 @@ final class WebrtcDirectListener {
 
     /// One body on a proved stream; the engine frames it. Throws when the
     /// engine refuses it (a stream that ended, or more than its bound
-    /// queued, which also closes the stream: a `closed` follows).
+    /// queued, which leaves the stream open).
     func send(stream: UInt64, body: Data) throws {
         guard !closed else {
             throw WebrtcDirectListenerError(message: "the WebRTC Direct listener is closed")
@@ -399,7 +399,9 @@ final class WebrtcDirectListener {
     private func arm(_ delay: UInt32?) {
         guard let timer = timer, !closed else { return }
         if let delay = delay {
-            timer.schedule(deadline: .now() + .milliseconds(Int(delay)))
+            // At least 1 ms: a tick that keeps answering 0 would otherwise
+            // hold linkQueue, which carries the whole stream table, in a spin.
+            timer.schedule(deadline: .now() + .milliseconds(Int(max(delay, 1))))
         } else {
             timer.schedule(deadline: .distantFuture)
         }

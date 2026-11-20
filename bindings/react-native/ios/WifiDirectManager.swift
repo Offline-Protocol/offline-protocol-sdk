@@ -531,7 +531,7 @@ public class WifiDirectManager: NSObject, TransportManager {
             }
             if let row = held as? DialledStream {
                 // The listener frames it. A refusal is a stream that ended or
-                // has more than its bound queued, which also closes it: the
+                // has more than its bound queued, which leaves it open: the
                 // body is dropped and the core retries it.
                 do {
                     try row.send(data)
@@ -1111,7 +1111,8 @@ extension WifiDirectManager: WebrtcDirectSink {
             WebrtcDirectListener.ipv4Addresses(ofInterface: wifi)) else {
             throw TransportError.notAvailable("the Wi-Fi network gave this device no private IPv4 address")
         }
-        var result: Result<WebrtcDirectDialCode, Error> = .failure(TransportError.notRunning)
+        var result: Result<(WebrtcDirectDialCode, WebrtcDirectListener), Error> =
+            .failure(TransportError.notRunning)
         onLinkQueueSync {
             // Stopped or paused while the interface was looked up; either
             // closed the listener open then, with its reason.
@@ -1149,12 +1150,34 @@ extension WifiDirectManager: WebrtcDirectSink {
                 }
                 webrtc = listener
                 watchWebrtcDirect(listener, interface: wifi, ip: ip)
-                result = .success(code)
+                result = .success((code, listener))
             } catch {
                 result = .failure(error)
             }
         }
-        return try result.get()
+        let (code, listener) = try result.get()
+        // The foreground was read before the interface lookup (up to two
+        // seconds) and the open, and the background observer exists only
+        // from the open on, so a move to the background in between was
+        // posted to no one. Read again now that the observer is in place
+        // (never on linkQueue: this takes the main queue). Closed as the
+        // application's own close, so the throw is its one signal.
+        if Self.applicationInBackground() {
+            onLinkQueueSync {
+                if webrtc === listener { closeWebrtcDirectOnLinkQueue() }
+            }
+            throw TransportError.invalidState("the application left the foreground while the WebRTC Direct listener opened")
+        }
+        // A stop, a network loss, the observer or another open may have
+        // closed or replaced this listener since it was published, and told
+        // the application so. A code is returned only for a listener still
+        // open, so the application never holds a code after its close.
+        var live = false
+        onLinkQueueSync { live = webrtc === listener && listener.isOpen }
+        guard live else {
+            throw TransportError.invalidState("the WebRTC Direct listener closed while it opened")
+        }
+        return code
     }
 
     /// Closes the WebRTC Direct listener, if one is open. Every dialled

@@ -276,12 +276,17 @@ final class WebrtcDirectListenerTests: XCTestCase {
         queue.sync { engine.nextTick = 20 }
         try open()
         waitUntil("several ticks") { queue.sync { engine.ticks } >= 4 }
-        queue.sync { engine.nextTick = nil }
-        // The tick that returned nil disarms the clock.
-        usleep(60_000)
-        let settled = queue.sync { engine.ticks }
+        // On the queue no tick runs, so exactly one deadline is armed here:
+        // it fires once more, returns nil, and that disarms the clock. Counted
+        // from this point rather than after a fixed sleep, because a loaded
+        // runner can fire a 20 ms deadline much later than 20 ms.
+        let armed = queue.sync { () -> Int in
+            engine.nextTick = nil
+            return engine.ticks
+        }
+        waitUntil("the armed tick") { queue.sync { engine.ticks } == armed + 1 }
         usleep(150_000)
-        XCTAssertEqual(queue.sync { engine.ticks }, settled)
+        XCTAssertEqual(queue.sync { engine.ticks }, armed + 1)
     }
 
     func testEventsReachTheSinkInOrderWithTheirStreamAndAddress() throws {

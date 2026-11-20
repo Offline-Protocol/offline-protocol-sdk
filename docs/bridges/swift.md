@@ -354,7 +354,11 @@ fresh on every open. The socket is bound before the open listener is touched
 and the engine swaps only on success, so an open that throws leaves the old
 code working. An open in the background throws: the observer that closes a
 listener when the application leaves the foreground never fires for one
-opened there.
+opened there. The foreground is read again once the observer is in place,
+since a move to the background during the interface lookup or the open was
+posted to no one, and an open whose listener a stop, a pause, a loss or the
+observer closed in between throws rather than return a code after that
+close's event.
 
 The application hears every close it did not ask for, once, as the React
 Native `webrtc_direct_closed` event with a reason: `background` (it left the
