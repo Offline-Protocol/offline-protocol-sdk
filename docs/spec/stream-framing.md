@@ -604,7 +604,9 @@ must refuse, each breaking one rule: each missing key, each repeated key,
 another version, a public, loopback or named host, a host not in its one
 RFC 5952 spelling, a port of 0, a hash one character short, a username or
 password one character outside its bounds or its alphabet, a
-percent-encoded value, and a fragment over 512 characters. Each refusal
+percent-encoded value, a part that is not `key=value` (a trailing `&`, an
+empty part, a part with no `=`, an empty code), a `%` in an unknown key's
+value, and a fragment over 512 characters. Each refusal
 names the rule it breaks. The listener's code in `offline-protocol-webrtc-direct`
 (`tests/dial_code_vectors.rs`, through `DialCode::parse` and
 `DialCode::to_fragment`) and the page's `parseDirectCode` both replay it,

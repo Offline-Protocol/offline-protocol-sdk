@@ -46,6 +46,7 @@
   "reasons": {
     "too_long": "The fragment is over max_fragment_len characters.",
     "percent_encoded": "The fragment contains `%`.",
+    "malformed": "A part of the fragment is not `key=value` (no `=`, or empty).",
     "missing_key": "A key the table defines is absent (`key` names it).",
     "repeated_key": "A key the table defines appears twice (`key` names it).",
     "unsupported_version": "`op-direct` is not `1`.",
@@ -556,6 +557,24 @@
       "reason": "host_not_local"
     },
     {
+      "name": "host ::ffff:127.0.0.1",
+      "note": "Loopback mapped into IPv6 is not ::1, and is not a local IPv6 address either.",
+      "input": "op-direct=1&h=::ffff:127.0.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host 0.0.0.0",
+      "note": "The unspecified IPv4 address names no host.",
+      "input": "op-direct=1&h=0.0.0.0&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host ::",
+      "note": "The unspecified IPv6 address names no host.",
+      "input": "op-direct=1&h=::&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
       "name": "host 127.0.0.1",
       "note": "Loopback, which some browsers do not dial.",
       "input": "op-direct=1&h=127.0.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
@@ -619,6 +638,12 @@
       "name": "host '192.168.1'",
       "note": "Dotted decimal has four parts.",
       "input": "op-direct=1&h=192.168.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host 'fe80::1.2.3.4'",
+      "note": "RFC 5952 writes an embedded IPv4 tail only for a mapped or compatible address.",
+      "input": "op-direct=1&h=fe80::1.2.3.4&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
       "reason": "host_not_literal"
     },
     {
@@ -740,6 +765,36 @@
       "note": "Upper case is not the canonical rendering.",
       "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=OFF1QYSLUVWL5922YCTZD0U9GPR06GN3K7LDFVGTWGVN",
       "reason": "address"
+    },
+    {
+      "name": "a trailing &",
+      "note": "It leaves an empty part.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&",
+      "reason": "malformed"
+    },
+    {
+      "name": "an empty part",
+      "note": "Two `&` with nothing between them.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&&x-future=1",
+      "reason": "malformed"
+    },
+    {
+      "name": "a part with no =",
+      "note": "An unknown key still needs its `=`.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&flag",
+      "reason": "malformed"
+    },
+    {
+      "name": "an empty code",
+      "note": "No part is `key=value`.",
+      "input": "",
+      "reason": "malformed"
+    },
+    {
+      "name": "a % in an unknown key's value",
+      "note": "An unknown key is ignored only when it is well formed: the `%` rule is fragment-wide.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&x-future=%41",
+      "reason": "percent_encoded"
     },
     {
       "name": "a fragment of 513 characters",

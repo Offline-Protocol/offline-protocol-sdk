@@ -2294,6 +2294,9 @@ def build_webrtc_direct_dial_vectors() -> dict:
         ("fec0::1", "The retired site-local range, outside fe80::/10."),
         ("fbff::1", "Just below fc00::/7."),
         ("::ffff:192.168.1.1", "A private IPv4 address mapped into IPv6 is an IPv6 address, and not a local one."),
+        ("::ffff:127.0.0.1", "Loopback mapped into IPv6 is not ::1, and is not a local IPv6 address either."),
+        ("0.0.0.0", "The unspecified IPv4 address names no host."),
+        ("::", "The unspecified IPv6 address names no host."),
     ):
         ref(f"host {host}", note, join(edit(h=host)), "host_not_local")
     for host in ("127.0.0.1", "127.8.9.10", "::1"):
@@ -2307,6 +2310,7 @@ def build_webrtc_direct_dial_vectors() -> dict:
         ("[fe80::1]", "No brackets."),
         ("192.168.001.1", "Dotted decimal has no leading zeros."),
         ("192.168.1", "Dotted decimal has four parts."),
+        ("fe80::1.2.3.4", "RFC 5952 writes an embedded IPv4 tail only for a mapped or compatible address."),
     ):
         ref(f"host {host!r}", note, join(edit(h=host)), "host_not_literal")
     ref(
@@ -2361,6 +2365,22 @@ def build_webrtc_direct_dial_vectors() -> dict:
         ("address in upper case", address.upper(), "Upper case is not the canonical rendering."),
     ):
         ref(name, note, join(edit(a=text)), "address")
+    # The shape of a part, which no key's rule reaches: every part is
+    # `key=value`, so a part with no `=`, or an empty one, refuses the code
+    # wherever it is, and the `%` rule covers a value no key reads.
+    for name, text, note in (
+        ("a trailing &", canonical + "&", "It leaves an empty part."),
+        ("an empty part", canonical + "&&x-future=1", "Two `&` with nothing between them."),
+        ("a part with no =", canonical + "&flag", "An unknown key still needs its `=`."),
+        ("an empty code", "", "No part is `key=value`."),
+    ):
+        ref(name, note, text, "malformed")
+    ref(
+        "a % in an unknown key's value",
+        "An unknown key is ignored only when it is well formed: the `%` rule is fragment-wide.",
+        canonical + "&x-future=%41",
+        "percent_encoded",
+    )
     ref(
         "a fragment of 513 characters",
         "One over the limit. Filled with an unknown key, so the length is the only rule broken.",
@@ -2418,6 +2438,7 @@ def build_webrtc_direct_dial_vectors() -> dict:
         "reasons": {
             "too_long": "The fragment is over max_fragment_len characters.",
             "percent_encoded": "The fragment contains `%`.",
+            "malformed": "A part of the fragment is not `key=value` (no `=`, or empty).",
             "missing_key": "A key the table defines is absent (`key` names it).",
             "repeated_key": "A key the table defines appears twice (`key` names it).",
             "unsupported_version": "`op-direct` is not `1`.",

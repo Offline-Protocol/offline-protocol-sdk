@@ -74,22 +74,12 @@ await run(async (step) => {
   }
   log(`${vectors.refuse.length} codes refused, each for the rule its vector names`);
 
-  step.name = "the shape of a part";
-  // The chapter's rules the vectors carry no case for: a part with no `=`,
-  // an empty part (a trailing `&`), and a `%` in a value no key reads.
+  step.name = "an unknown key with an empty value";
+  // The shape of a part (no `=`, an empty part, a `%` in a value no key
+  // reads) is in the shared vectors, which the Rust parser replays too. This
+  // is the one acceptance they do not state.
   const good = vectors.accept[0].fragment;
-  const cases = [
-    [`${good}&`, "malformed", "a trailing &"],
-    [`${good}&&x=1`, "malformed", "an empty part"],
-    [`${good}&flag`, "malformed", "a part with no ="],
-    ["", "malformed", "an empty code"],
-    [`${good}&x-future=%41`, "percent_encoded", "a % in an unknown key's value"],
-  ];
-  for (const [input, reason, what] of cases) {
-    const error = refusal(input);
-    if (error?.reason !== reason) throw new Error(`${what}: ${error ? `refused as ${error.reason}` : "accepted"}`);
-  }
   if (refusal(`${good}&x-future=`) !== null) throw new Error("an unknown key with an empty value was refused");
-  log("a malformed part is refused, and an unknown key is ignored only when well formed");
+  log("an unknown key is ignored when well formed, even with an empty value");
 });
 </script>
