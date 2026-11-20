@@ -1090,7 +1090,7 @@ fn test_config_access() {
     let config = create_test_config();
     let protocol = OfflineProtocol::new(config.clone()).unwrap();
 
-    assert_eq!(protocol.config().app_id, config.app_id);
+    assert_eq!(protocol.config().app_label, config.app_label);
     assert_eq!(protocol.config().profile, config.profile);
 }
 
@@ -31793,7 +31793,8 @@ fn sample_media_rich_options(reply_to: &str) -> MediaSendOptions {
             forward_count: 2,
         }),
         file_id: None,
-        app_id: None,
+        app_label: None,
+        ..Default::default()
     }
 }
 

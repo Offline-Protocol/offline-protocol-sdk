@@ -76,7 +76,7 @@ fn a_rich_send_stamps_its_own_app_id_and_a_plain_one_the_configured_id() {
             &id("bob"),
             "for the other app",
             SendMessageOptions {
-                app_id: other_app(),
+                app_label: other_app(),
                 ..Default::default()
             },
         )
@@ -117,12 +117,12 @@ fn an_invalid_app_id_fails_before_anything_is_queued_or_ticked() {
             &id("bob"),
             "hello",
             SendMessageOptions {
-                app_id: Some(bad.clone()),
+                app_label: Some(bad.clone()),
                 ..Default::default()
             },
         );
         assert!(
-            matches!(result, Err(Error::InvalidArgument(ref m)) if m.contains("app_id")),
+            matches!(result, Err(Error::InvalidArgument(ref m)) if m.contains("app_label")),
             "{bad:?} must fail as InvalidArgument, got {result:?}"
         );
     }
@@ -137,7 +137,7 @@ fn an_invalid_app_id_fails_before_anything_is_queued_or_ticked() {
             &id("bob"),
             "hello",
             SendMessageOptions {
-                app_id: other_app(),
+                app_label: other_app(),
                 ..Default::default()
             },
         )
@@ -153,7 +153,7 @@ fn a_parked_rich_send_flushes_under_its_own_app_id() {
             &id("bob"),
             "parked",
             SendMessageOptions {
-                app_id: other_app(),
+                app_label: other_app(),
                 ..Default::default()
             },
         )
@@ -267,7 +267,7 @@ fn every_media_chunk_carries_the_per_send_app_id_and_the_receiver_reports_it() {
             "photo.jpg",
             ContentType::Image,
             MediaSendOptions {
-                app_id: other_app(),
+                app_label: other_app(),
                 ..Default::default()
             },
         )
@@ -323,7 +323,7 @@ fn an_interrupted_transfer_names_its_app_id_after_a_restart() {
                 "named.bin",
                 ContentType::File,
                 MediaSendOptions {
-                    app_id: other_app(),
+                    app_label: other_app(),
                     ..Default::default()
                 },
             )
@@ -371,7 +371,7 @@ fn message_received_reports_the_stamped_app_id_and_the_ack_keeps_the_configured_
             &id("bob"),
             "hello other app",
             SendMessageOptions {
-                app_id: other_app(),
+                app_label: other_app(),
                 ..Default::default()
             },
         )
@@ -392,11 +392,12 @@ fn message_received_reports_the_stamped_app_id_and_the_ack_keeps_the_configured_
         unreachable!()
     };
     assert_eq!(app_id, OTHER_APP);
-    let json = serde_json::to_value(event).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&event.to_json().unwrap()).unwrap();
     assert_eq!(
-        json["app_id"], OTHER_APP,
+        json["app_label"], OTHER_APP,
         "the field crosses to the bindings"
     );
+    assert_eq!(json["app_id"], OTHER_APP, "and under its old name");
 
     // The acknowledgement is the engine's, not an application's.
     let acks: Vec<_> = bob_handle
@@ -476,4 +477,58 @@ fn a_delayed_decrypt_reports_the_app_id_of_the_frame_it_held() {
         })
         .expect("the held message surfaces once the welcome lands");
     assert_eq!(app_id, OTHER_APP);
+}
+
+#[test]
+#[allow(deprecated)]
+fn the_old_option_name_still_stamps_the_label() {
+    // `app_id` is the deprecated name of `app_label`: an app that has not
+    // moved yet must keep stamping exactly what it stamped before.
+    let (mut protocol, _handle) = parking_protocol();
+    let id_sent = protocol
+        .send_message_with(
+            &id("bob"),
+            "hello",
+            SendMessageOptions {
+                app_id: other_app(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let parked = &protocol.pending_encrypted_messages[&id("bob")];
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0].app_id.as_deref(), Some(OTHER_APP), "{id_sent}");
+}
+
+#[test]
+#[allow(deprecated)]
+fn both_names_set_to_different_labels_is_refused() {
+    let (mut protocol, handle) = parking_protocol();
+    let result = protocol.send_message_with(
+        &id("bob"),
+        "hello",
+        SendMessageOptions {
+            app_label: Some("one-app".to_string()),
+            app_id: Some("another-app".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(result, Err(Error::InvalidArgument(ref m)) if m.contains("disagree")),
+        "got {result:?}"
+    );
+    assert!(handle.sent_messages().is_empty());
+
+    // The same value under both names is no conflict.
+    protocol
+        .send_message_with(
+            &id("bob"),
+            "hello",
+            SendMessageOptions {
+                app_label: other_app(),
+                app_id: other_app(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 }

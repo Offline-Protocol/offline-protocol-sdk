@@ -1170,21 +1170,25 @@ pub struct SendMessageOptions {
     /// Send via this specific transport (bypassing DORS selection), like
     /// `send_message_via_transport`.
     pub via_transport: Option<TransportType>,
-    /// Application id stamped on this message, in place of the configured
-    /// [`crate::ProtocolConfig::app_id`].
+    /// App label stamped on this message, in place of the configured
+    /// [`crate::ProtocolConfig::app_label`].
     ///
     /// For an instance that serves several local applications behind one
-    /// identity: the receiver's `MessageReceived.app_id` reports it, so the
-    /// receiving instance can route the message to the right client. It
+    /// identity: the receiver's `MessageReceived.app_label` reports it, so
+    /// the receiving instance can route the message to the right client. It
     /// changes the stamp on this one frame only, never the storage
-    /// namespace, the MLS session, the BLE app tag, or the id on the
+    /// namespace, the MLS session, the BLE app tag, or the label on the
     /// acknowledgements and control frames the engine sends for it.
     ///
     /// It travels in the clear, outside the sealed body and outside every
     /// signature, so any carrier can read and rewrite it (threat model
     /// R17). Treat it as routing metadata, never as an authorization input.
-    /// Held to the same rules as the configured id; an invalid value fails
-    /// the call with `InvalidArgument` before anything is queued.
+    /// Held to the same rules as the configured label; an invalid value
+    /// fails the call with `InvalidArgument` before anything is queued.
+    pub app_label: Option<String>,
+    /// The old name of [`Self::app_label`]. Setting both to different
+    /// values fails the call with `InvalidArgument`.
+    #[deprecated(since = "0.35.0", note = "use app_label")]
     pub app_id: Option<String>,
     /// Send once over the live direct link to the recipient, never
     /// acknowledged or retried (ADR 0032): for state the next send replaces,
@@ -1225,9 +1229,13 @@ pub struct MediaSendOptions {
     /// not collide with an active outbound transfer; bounded to the wire
     /// `file_id` field limit.
     pub file_id: Option<String>,
-    /// Application id stamped on every chunk of this transfer, in place of
-    /// the configured one. Same meaning, same limits and the same cleartext
-    /// caveat as [`SendMessageOptions::app_id`].
+    /// App label stamped on every chunk of this transfer, in place of the
+    /// configured one. Same meaning, same limits and the same cleartext
+    /// caveat as [`SendMessageOptions::app_label`].
+    pub app_label: Option<String>,
+    /// The old name of [`Self::app_label`]. Setting both to different
+    /// values fails the call with `InvalidArgument`.
+    #[deprecated(since = "0.35.0", note = "use app_label")]
     pub app_id: Option<String>,
 }
 

@@ -143,7 +143,12 @@ impl OfflineProtocol {
         Self::validate_outbound_recipient(&recipient_str)?;
         // Parsed first, before anything can queue the send or tick the
         // Lamport clock: a bad id must leave no durable trace.
-        let app_id = Self::parse_send_app_id(options.app_id.as_deref())?;
+        #[allow(deprecated)]
+        let legacy_app_id = options.app_id.as_deref();
+        let app_id = Self::parse_send_app_id(Self::send_app_label(
+            options.app_label.as_deref(),
+            legacy_app_id,
+        )?)?;
 
         // Prevent sending messages to blocked users. Blocking is bidirectional:
         // we neither receive from nor send to a blocked peer.
@@ -919,7 +924,23 @@ impl OfflineProtocol {
         app_id
             .map(AppId::new)
             .transpose()
-            .map_err(|e| Error::InvalidArgument(format!("Invalid app_id: {e}")))
+            .map_err(|e| Error::InvalidArgument(format!("Invalid app_label: {e}")))
+    }
+
+    /// A send's label override, from `app_label` or its deprecated alias
+    /// `app_id`. Both set to different values is refused rather than one
+    /// silently winning, since either could be the one the caller meant.
+    pub(super) fn send_app_label<'a>(
+        app_label: Option<&'a str>,
+        legacy_app_id: Option<&'a str>,
+    ) -> Result<Option<&'a str>> {
+        match (app_label, legacy_app_id) {
+            (Some(label), Some(old)) if label != old => Err(Error::InvalidArgument(format!(
+                "app_label {label:?} and app_id {old:?} disagree; app_id is the old name of app_label, set only app_label"
+            ))),
+            (Some(label), _) => Ok(Some(label)),
+            (None, old) => Ok(old),
+        }
     }
 
     /// Like [`Self::create_message`], stamping `app_id` when given and the
@@ -937,7 +958,7 @@ impl OfflineProtocol {
         let recipient = UserId::new(recipient)?;
         let app_id = match app_id {
             Some(app_id) => app_id,
-            None => AppId::new(&self.config.app_id)?,
+            None => AppId::new(&self.config.app_label)?,
         };
 
         let clock_value = self.lamport_clock.tick();
@@ -2685,7 +2706,12 @@ impl OfflineProtocol {
         let media_metadata = options.media_metadata;
         Self::validate_outbound_recipient(&recipient_str)?;
         // Before any transfer state exists, like the recipient check.
-        let app_id = Self::parse_send_app_id(options.app_id.as_deref())?;
+        #[allow(deprecated)]
+        let legacy_app_id = options.app_id.as_deref();
+        let app_id = Self::parse_send_app_id(Self::send_app_label(
+            options.app_label.as_deref(),
+            legacy_app_id,
+        )?)?;
 
         // Validate the reply id like send_message_with does — a malformed id
         // fails the call instead of riding sealed to the receiver.
@@ -3198,7 +3224,7 @@ impl OfflineProtocol {
         let recipient = UserId::new(recipient)?;
         let app_id = match app_id {
             Some(app_id) => app_id,
-            None => AppId::new(&self.config.app_id)?,
+            None => AppId::new(&self.config.app_label)?,
         };
 
         let clock_value = self.lamport_clock.tick();
@@ -5909,7 +5935,7 @@ impl OfflineProtocol {
             let mut builder = Message::builder(
                 UserId::new(&self.local_id)?,
                 UserId::new(peer)?,
-                AppId::new(&self.config.app_id)?,
+                AppId::new(&self.config.app_label)?,
             )
             .content(String::new())
             .priority(MessagePriority::Low)
@@ -5947,7 +5973,7 @@ impl OfflineProtocol {
     ) -> Result<Message> {
         let sender = UserId::new(&self.local_id)?;
         let recipient = message.sender.clone();
-        let app_id = AppId::new(&self.config.app_id)?;
+        let app_id = AppId::new(&self.config.app_label)?;
         let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
 
         let mut builder = Message::builder(sender, recipient, app_id)
@@ -6139,7 +6165,7 @@ impl OfflineProtocol {
     ) -> Result<()> {
         let sender = UserId::new(&self.local_id)?;
         let recipient = UserId::new(ack_to)?;
-        let app_id = AppId::new(&self.config.app_id)?;
+        let app_id = AppId::new(&self.config.app_label)?;
         let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
 
         let ack_message = Message::builder(sender, recipient, app_id)
