@@ -23,7 +23,7 @@ final class ReferenceStorageTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try AppContainerProtocolStateStorage.wipeAccount(
-            accountNamespace: StorageNamespace.account(appLabel: appLabel, profile: profile))
+            accountNamespace: StorageNamespace.account(appId: appLabel, profile: profile))
     }
 
     /// The store an application opens passes the suite the core defines for a
