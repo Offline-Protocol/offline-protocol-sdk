@@ -1258,16 +1258,21 @@ class PeerStreamManager(TransportManager):
         (``fe80::1%en0``). The socket is bound to it and to nothing else: a
         code names one address, and a socket on every interface would admit
         checks from networks the code was never shown on. ``port`` 0 binds
-        a fresh port. A listener already open is closed first, its streams
-        reported lost, and its code dies: the certificate, credentials and
-        port are fresh on every open.
+        a fresh port. A listener already open is replaced once the new one
+        is open: its streams are reported lost and its code dies, since the
+        certificate, credentials and port are fresh on every open. An open
+        that raises leaves the listener already open as it was (the
+        core's own rule for a refused open), except when ``port`` is that
+        listener's own port, which it must give up before the new socket
+        can bind it.
 
         A :meth:`close_webrtc_direct` (or :meth:`stop`) called before this
         returns wins: the new listener is closed and this raises, so a code
         is never live after the application closed the listener.
 
         Raises :class:`TransportError` when the transport is not running,
-        the listener is closed while it opens, the address cannot be bound,
+        ``port`` is not a port number, the listener is closed while it
+        opens, the address cannot be bound,
         or the core refuses it (public, loopback or wildcard addresses,
         which no code may name, or a library built without the
         ``webrtc-direct`` feature).
@@ -1278,9 +1283,18 @@ class PeerStreamManager(TransportManager):
                 raise TransportError(
                     "start the peer-stream transport before opening a WebRTC Direct listener"
                 )
-            self._close_webrtc_listener()
+            if not 0 <= port <= 65535:
+                raise TransportError(f"a WebRTC Direct listener binds a port from 0 to 65535, not {port}")
+            previous = self._webrtc
+            if previous is not None and port != 0 and previous.port == port:
+                # The port asked for is the open listener's own, which the
+                # new socket cannot bind while that one holds it. A
+                # transport releases its socket on the loop's next turn.
+                self._close_webrtc_listener()
+                await asyncio.sleep(0)
             listener = _WebrtcDirectListener(self)
-            code = await listener.open(host, port)
+            # A bind that fails leaves the open listener as it was.
+            await listener.bind(host, port)
             if self._state != TransportState.RUNNING:
                 # Stopped while the socket was being bound.
                 listener.close()
@@ -1291,6 +1305,13 @@ class PeerStreamManager(TransportManager):
                 # admits a dial (R35), so this one never goes live.
                 listener.close()
                 raise TransportError("the WebRTC Direct listener was closed while it opened")
+            # The core replaces its listener only once the new one exists, so
+            # a refusal here leaves the open one, and its code, live. Read
+            # again after the bind: a socket lost meanwhile closed it.
+            previous = self._webrtc
+            code = listener.start()
+            if previous is not None:
+                self._retire_webrtc_listener(previous)
             self._webrtc = listener
             listener.pump()
             # The address and port, never the fragment: it carries the
@@ -1309,6 +1330,18 @@ class PeerStreamManager(TransportManager):
         in flight raises instead of installing its listener."""
         self._webrtc_closes += 1
         self._close_webrtc_listener()
+
+    def _retire_webrtc_listener(self, listener: _WebrtcDirectListener) -> None:
+        """The core replaced ``listener`` with a new one (an open
+        succeeded): its socket and timer stop and its streams end here,
+        without a ``webrtc_direct_close``, which would close the new one.
+        The core dropped what the old one still had to send, and queued a
+        ``Closed`` for each of its proved streams, which finds them gone."""
+        listener.retire()
+        self._webrtc = None
+        for stream in list(self._dialled.values()):
+            self._end_stream(stream, "listener replaced")
+        self._emit_diagnostic("info", "WebRTC Direct listener closed")
 
     def _close_webrtc_listener(self) -> None:
         """Close the installed listener, if any, without touching an open in
@@ -1489,9 +1522,13 @@ class _WebrtcDirectListener(asyncio.DatagramProtocol):
         #: The ``WebrtcDirectCode`` the core returned. Never logged.
         self.code: Any = None
         self.port: int | None = None
+        self._ip_text = ""
 
-    async def open(self, host: str, port: int) -> Any:
-        """Bind the socket to ``host`` and open the core's listener on it."""
+    async def bind(self, host: str, port: int) -> None:
+        """Bind the socket to ``host``. Touches nothing in the core, so a
+        failure here leaves a listener already open as it was; until
+        :meth:`start` the socket's datagrams are dropped, never handed to
+        that listener."""
         ip_text = host.partition("%")[0]
         try:
             ip = ipaddress.ip_address(ip_text)
@@ -1507,26 +1544,45 @@ class _WebrtcDirectListener(asyncio.DatagramProtocol):
         except OSError as exc:
             raise TransportError(f"WebRTC Direct bind on {host} failed: {exc}") from exc
         sockname = transport.get_extra_info("sockname")
-        bound_port = int(sockname[1])
+        self.port = int(sockname[1])
+        self._ip_text = ip_text
         if family == socket.AF_INET6 and len(sockname) >= 4:
             self._scope_id = int(sockname[3])
+
+    def start(self) -> Any:
+        """Open the core's listener on the bound socket and return its code.
+        The core replaces a listener already open only when this one
+        opens; on a refusal the socket is closed and that one stays."""
         try:
             # The address without its zone, which the core refuses; the real
             # port, never 0, because the code names it.
-            code = self._protocol.webrtc_direct_open(local_ip=ip_text, local_port=bound_port)
+            code = self._protocol.webrtc_direct_open(local_ip=self._ip_text, local_port=self.port)
         except Exception as exc:
-            self._closed = True
-            self._transport = None
-            transport.close()
+            self.close()
             raise TransportError(f"WebRTC Direct listener refused: {exc}") from exc
         self.code = code
-        self.port = bound_port
         return code
+
+    def retire(self) -> None:
+        """Stop the socket and timer of a listener the core already
+        replaced, without closing the core's listener (now another's)."""
+        self._closed = True
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            transport.close()
 
     def close(self) -> None:
         """Close the core's listener, hand its last events to the manager,
         then close the socket."""
         if self._closed:
+            return
+        if self.code is None:
+            # Bound but never started: the core's listener, if any, is
+            # another's.
+            self.retire()
             return
         self._protocol.webrtc_direct_close()
         # The Closed events for every proved stream, and anything the
@@ -1555,7 +1611,9 @@ class _WebrtcDirectListener(asyncio.DatagramProtocol):
         self._transport = transport  # type: ignore[assignment]
 
     def datagram_received(self, data: bytes, addr: Any) -> None:
-        if self._closed:
+        if self._closed or self.code is None:
+            # Before start the core's listener is the one being replaced,
+            # whose socket this is not.
             return
         try:
             self._protocol.webrtc_direct_datagram_received(
@@ -1662,7 +1720,9 @@ class _WebrtcDirectListener(asyncio.DatagramProtocol):
             self._timer = None
         if delay is None or self._closed:
             return
-        self._timer = self._loop.call_later(delay / 1000.0, self._on_timer)
+        # At least a millisecond: a deadline already due must not spin the
+        # loop with zero-delay timers.
+        self._timer = self._loop.call_later(max(delay, 1) / 1000.0, self._on_timer)
 
     def _on_timer(self) -> None:
         self._timer = None

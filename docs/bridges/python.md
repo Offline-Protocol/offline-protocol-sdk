@@ -633,9 +633,10 @@ close the application makes before an open returns wins over that open.
 `PeerStreamManager.open_webrtc_direct(host, port=0)` opens the listener once
 the transport is running and returns the code's fragment; the whole
 `WebrtcDirectCode` is `webrtc_direct_code` while it is open, and
-`close_webrtc_direct()` (or `stop()`) closes it. Opening again closes the
-previous listener first: its streams are reported lost and its code dies,
-because the certificate, credentials and port are fresh on every open. The
+`close_webrtc_direct()` (or `stop()`) closes it. Opening again replaces the
+previous listener once the new one is open: its streams are reported lost
+and its code dies, because the certificate, credentials and port are fresh
+on every open. The
 listener itself (admission by authenticated check only, DTLS, the data
 channel, the preamble and the framing) is the FFI's `webrtc_direct_*`, and
 this binding moves only what the UDL contract gives it: every datagram the
@@ -675,6 +676,15 @@ order and never inside one another.
   would let one machine hold the per-host bound twice over. The listener
   bounds what comes before a proof itself (four pending dials, ten seconds
   to prove).
+- **A failed open keeps the listener already open.** The new socket is bound
+  before the open one is touched, and the FFI replaces its listener only
+  once `webrtc_direct_open` succeeds, so a bind or a refusal leaves the old
+  code working. The replaced listener is then retired, its socket and timer
+  stopped without a `webrtc_direct_close` (which would close the new one),
+  and its streams end through the table. Closing it first, as the bridge
+  did, lost a working code on any failure with nothing to say so. The one
+  exception is a `port` equal to the open listener's own, which the new
+  socket cannot bind until that one gives it up.
 - **A dial proving this host's address is refused**: a copied preamble or a
   loop, and announcing it would make the engine route to itself.
 - **The code is never logged.** It carries the listener's ICE password, and
@@ -686,7 +696,8 @@ order and never inside one another.
   and `open_webrtc_direct` awaits the bind, so a close can run while an open
   is in flight, when no listener is installed for it to close. The open
   records `_webrtc_closes` on entry, and when a close has counted since, it
-  closes the listener it just opened and raises `TransportError`. Without
+  closes the socket it just bound, before the core's listener is opened,
+  and raises `TransportError`. Without
   that, the open installs the listener after the close returned, and the
   application believes its code is dead while the code still admits dials
   ([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener):

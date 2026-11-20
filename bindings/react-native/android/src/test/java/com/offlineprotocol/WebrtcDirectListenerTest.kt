@@ -403,6 +403,21 @@ class WebrtcDirectListenerTest {
     }
 
     @Test
+    fun `a retired listener leaves the engine open and reports nothing`() {
+        // The engine replaced it (an open of another listener succeeded):
+        // its socket stops, but the engine's listener, now the new one, is
+        // never closed from here.
+        val reported = Collections.synchronizedList(mutableListOf<String>())
+        val fake = FakeEngine()
+        val (l, _) = open(fake, Host("peer-a"), onClosed = { reported.add(it) })
+        l.retire()
+        l.close(WebrtcDirectListener.CLOSED_NETWORK)
+        assertFalse(l.isOpen)
+        assertFalse(fake.calls.contains("close"))
+        assertEquals(emptyList<String>(), reported)
+    }
+
+    @Test
     fun `a close the application asked for reports nothing`() {
         // Its own closeWebrtcDirect, or an open replacing the listener,
         // names no reason: the application already knows.
@@ -443,10 +458,11 @@ class WebrtcDirectListenerTest {
     }
 
     @Test
-    fun `listenAddress takes a private IPv4 address, else link-local, never public or IPv6`() {
+    fun `listenAddress takes a private IPv4 address, never link-local, public or IPv6`() {
         fun a(s: String) = InetAddress.getByName(s)
         assertEquals(a("192.168.1.5"), WebrtcDirectListener.listenAddress(listOf(a("fe80::1"), a("169.254.3.4"), a("192.168.1.5"))))
-        assertEquals(a("169.254.3.4"), WebrtcDirectListener.listenAddress(listOf(a("fe80::1"), a("169.254.3.4"))))
+        // The engine refuses an IPv4 link-local host candidate.
+        assertNull(WebrtcDirectListener.listenAddress(listOf(a("fe80::1"), a("169.254.3.4"))))
         assertNull(WebrtcDirectListener.listenAddress(listOf(a("8.8.8.8"), a("fe80::1"))))
         assertNotNull(WebrtcDirectListener.listenAddress(listOf(a("10.0.0.2"))))
     }

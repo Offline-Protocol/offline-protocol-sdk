@@ -21825,9 +21825,12 @@ mod tests {
         for line in [
             // The listener is one of the things the layer is up for.
             "carriers = { PeerStreamLayer.Carriers(p2p = p2pUp, lan = lanUp, listener = webrtc != null) },",
-            // Reported before the code is returned, also when the open fails.
-            "try { return openWebrtcDirectListener(choice, wifi?.first, onClosed) } finally { \
-             confinement.runSync { reportLayer() } }",
+            // Reported before the code is returned, also when the open fails,
+            // and after a listener whose Wi-Fi network went while it opened
+            // was closed again.
+            "try { val code = openWebrtcDirectListener(choice, wifi?.first, onClosed) \
+             if (confinement.runSync { closeIfWifiWentWhileOpening(code) }) {",
+            "return code } finally { confinement.runSync { reportLayer() } }",
             // Every close reports after its streams ended, on the transport thread.
             "fun closeWebrtcDirect(): Boolean = confinement.runSync { \
              layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } } }",
@@ -21953,9 +21956,14 @@ mod tests {
                     // told the reason, or none.
                     "WebrtcDirectListener(webrtcEngine, webrtcSink, ::emitDiagnostic, onClosed) { lost ->",
                     "listener.close(reason) sockets.closeDials()",
-                    // The application's own close and the replacing open name none.
+                    // The application's own close and the replacing open name
+                    // none; an open the transport's stop overtook reports the
+                    // listener it replaced as stopped, since the stop found
+                    // that one still in place.
                     "layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } }",
-                    "synchronized(webrtcLock) { closeWebrtcDirectLocked() val socket = DatagramSocket(null)",
+                    "val code = previous?.holding { listener.open(socket) } ?: listener.open(socket)",
+                    "previous?.retire(WebrtcDirectListener.CLOSED_STOPPED)",
+                    "if (previous != null) { previous.retire() sockets.closeDials() }",
                 ][..],
             ),
             (
@@ -21979,7 +21987,8 @@ mod tests {
                     "listener.close(reason: reason) for row in dialled.values { endDialled(row) }",
                     // The application's own close and the replacing open name none.
                     "onLinkQueueSync { closed = closeWebrtcDirectOnLinkQueue() }",
-                    "onLinkQueueSync { closeWebrtcDirectOnLinkQueue() guard state == .running, !isPaused",
+                    "if let previous = webrtc { retireWebrtcDirectOnLinkQueue(previous) } webrtc = listener",
+                    "previous.retire() for row in dialled.values { endDialled(row) }",
                 ][..],
             ),
             (

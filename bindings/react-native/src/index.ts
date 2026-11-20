@@ -4674,13 +4674,16 @@ export class OfflineProtocol {
    * Put `code` after your page's URL behind `#` and show it as a QR code or
    * text. It carries the listener's password and admits whoever holds it
    * while the listener is open, so close the listener when you stop showing
-   * it, and never log it. Opening again closes the previous listener first:
-   * its streams end and its code stops working, since every open makes a new
-   * certificate, password and port.
+   * it, and never log it. Opening again replaces the previous listener once
+   * the new one is open: its streams end and its code stops working, since
+   * every open makes a new certificate, password and port. An open that
+   * rejects leaves the previous listener, and its code, as they were.
    *
    * Needs the `wifiDirect` transport running, MLS initialized, and a
-   * private IPv4 address to bind: the device's on a Wi-Fi network, or on
-   * Android, when it is on no Wi-Fi network, that of the hotspot it shares.
+   * private IPv4 address to bind (a 169.254 address, on a network with no
+   * DHCP, is refused): the device's on a Wi-Fi network, or on Android, when
+   * it is on no Wi-Fi network, that of the hotspot it shares. On iOS it
+   * rejects while the app is in the background.
    * The listener closes when the transport stops, when that network or
    * hotspot goes or loses the address, or when its socket fails. On iOS it
    * lives only in the foreground: it closes when the app leaves it or the

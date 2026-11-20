@@ -111,9 +111,15 @@ class WebrtcDirectAddressTest {
     }
 
     @Test
-    fun `a link-local hotspot address is taken when it has no private one`() {
-        val choice = choose(null, listOf(nif("rndis0", "fe80::9", "169.254.10.1")), emptySet())
-        assertEquals(a("169.254.10.1"), choice.ip)
+    fun `a link-local address is never taken, the engine refuses it`() {
+        assertThrowsClearly(interfaces = listOf(nif("rndis0", "fe80::9", "169.254.10.1")), known = emptySet())
+    }
+
+    @Test
+    fun `a Wi-Fi network with only a link-local address falls through to the hotspot`() {
+        val choice = choose(listOf("169.254.7.7"), listOf(nif("swlan0", "192.168.43.1")), emptySet())
+        assertTrue(choice is WebrtcDirectAddress.Choice.Hotspot)
+        assertEquals(a("192.168.43.1"), choice.ip)
     }
 
     @Test

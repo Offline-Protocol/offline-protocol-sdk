@@ -118,16 +118,17 @@ internal class WebrtcDirectListener(
     companion object {
         /**
          * The address a listener on a network with [addresses] binds: its
-         * first private IPv4 address (RFC 1918), else its first IPv4
-         * link-local one, else null. A code may name only a private or
-         * link-local address, and a page reaches IPv4 on every network this
-         * runs on; an IPv6 link-local address would also need its zone,
-         * which no code carries.
+         * first private IPv4 address (RFC 1918), else null. A page reaches
+         * IPv4 on every network this runs on; an IPv6 link-local address
+         * would also need its zone, which no code carries. An IPv4
+         * link-local address (169.254/16, a network with no DHCP) is never
+         * chosen although a code may name one: the engine's ICE agent
+         * refuses it as a host candidate, so choosing it turned the clear
+         * "no private address" refusal into an opaque socket error, and on
+         * a Wi-Fi network with no DHCP hid this device's own hotspot.
          */
-        fun listenAddress(addresses: List<InetAddress>): Inet4Address? {
-            val v4 = addresses.filterIsInstance<Inet4Address>()
-            return v4.firstOrNull { it.isSiteLocalAddress } ?: v4.firstOrNull { it.isLinkLocalAddress }
-        }
+        fun listenAddress(addresses: List<InetAddress>): Inet4Address? =
+            addresses.filterIsInstance<Inet4Address>().firstOrNull { it.isSiteLocalAddress }
 
         /**
          * The most bytes [send] holds waiting for [clock], the engine's own
@@ -165,6 +166,8 @@ internal class WebrtcDirectListener(
     private var pumping = false
     private var again = false
     @Volatile private var closed = false
+    /** Whether a refused send was reported: once per listener, since a denial refuses every one. */
+    private var reportedRefusedSend = false
     /** Bytes handed to [send] that [clock] has not yet given the engine. */
     private val handedBytes = AtomicLong(0)
     private var socket: DatagramSocket? = null
@@ -257,6 +260,36 @@ internal class WebrtcDirectListener(
         diagnostic("info", "WebRTC Direct listener closed", emptyMap())
         if (reason != null) onClosed(reason)
     }
+
+    /**
+     * Stops this listener's socket, thread and clock once the engine has
+     * replaced it (an open of another listener succeeded), without closing
+     * the engine's listener: that is the new one now, and a [close] here
+     * would close it. The engine dropped what this one still had to send
+     * and queued a `Closed` for each of its proved streams, which the new
+     * listener hands to the sink. A [reason] is reported as [close] would.
+     */
+    fun retire(reason: String? = null) {
+        val toClose = synchronized(lock) {
+            if (closed) return
+            closed = true
+            timer?.cancel(false)
+            timer = null
+            socket.also { socket = null }
+        }
+        clock.shutdownNow()
+        toClose?.close()
+        diagnostic("info", "WebRTC Direct listener closed", emptyMap())
+        if (reason != null) onClosed(reason)
+    }
+
+    /**
+     * Runs [block] holding this listener's lock, so its own receive thread
+     * and clock cannot reach the engine meanwhile: what an open replacing
+     * this listener runs under, since once the engine swaps, a pump of this
+     * one would drain the new listener's datagrams out of the old socket.
+     */
+    fun <T> holding(block: () -> T): T = synchronized(lock) { block() }
 
     val isOpen: Boolean get() = !closed && code != null
 
@@ -426,9 +459,18 @@ internal class WebrtcDirectListener(
         try {
             val to = InetAddress.getByName(datagram.destinationIp)
             socket.send(DatagramPacket(datagram.data, datagram.data.size, to, datagram.destinationPort))
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // An unreachable page, a full buffer: about one datagram. The
             // page retransmits, and consent ends a stream that stays silent.
+            // Said once, because a local network denial refuses every send
+            // and the page's dial then times out with nothing said on its
+            // side.
+            if (!reportedRefusedSend) {
+                reportedRefusedSend = true
+                diagnostic("warning", "WebRTC Direct could not answer a page: if local network access is denied, allow it", mapOf(
+                    "error" to e.javaClass.simpleName,
+                ))
+            }
         }
     }
 

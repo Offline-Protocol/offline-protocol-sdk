@@ -7,7 +7,7 @@ import java.net.NetworkInterface
  * Where a WebRTC Direct listener (ADR 0039) binds: the rule, kept apart from
  * the framework so it is tested on plain lists (docs/bridges/kotlin.md K10).
  *
- * The listener binds one private (else link-local) IPv4 address that the
+ * The listener binds one private IPv4 address that the
  * pages meant to dial it can reach, and never an address of a network that
  * is not a local one. In order:
  *

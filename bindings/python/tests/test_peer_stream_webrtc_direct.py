@@ -106,6 +106,11 @@ class FakeListener:
         if self.open_error is not None:
             raise self.open_error
         self.opened.append((local_ip, local_port))
+        # Like the core, only once the new listener exists: the one it
+        # replaces yields a Closed for each proved stream.
+        for stream in sorted(self.proved):
+            self.events.append(_event(WebrtcDirectEventKind.CLOSED, stream))
+        self.proved.clear()
         return WebrtcDirectCode(
             fragment=FRAGMENT, host=local_ip, port=local_port, address=OUR_ADDRESS
         )
@@ -423,11 +428,60 @@ class TestListenerLifecycle:
         deliver(host)
         old_port = host.get_metrics()["webrtc_direct_port"]
         await host.open_webrtc_direct("127.0.0.1")
-        assert fake_listener.close_calls == 1
+        # The core replaced its listener itself: a close now would close
+        # the new one.
+        assert fake_listener.close_calls == 0
         protocol.wifi_direct_peer_disconnected.assert_called_once_with(peer_id=PEER_ADDRESS)
         assert len(fake_listener.opened) == 2
         # A fresh socket, so a fresh port.
         assert fake_listener.opened[1][1] != old_port
+        assert host.get_metrics()["webrtc_direct_port"] == fake_listener.opened[1][1]
+        # The old stream's Closed finds it gone: one loss, not two.
+        deliver(host)
+        protocol.wifi_direct_peer_disconnected.assert_called_once()
+
+    async def test_a_refused_reopen_leaves_the_open_listener_live(self, host, protocol, fake_listener):
+        fake_listener.prove(1, PEER_ADDRESS)
+        deliver(host)
+        port = host.get_metrics()["webrtc_direct_port"]
+        fake_listener.open_error = ProtocolError.InvalidArgument("not a private address")
+        with pytest.raises(TransportError, match="refused"):
+            await host.open_webrtc_direct("127.0.0.1")
+        assert host.webrtc_direct_code.fragment == FRAGMENT
+        assert host.get_metrics()["webrtc_direct_port"] == port
+        assert fake_listener.close_calls == 0
+        assert host.connected_peers() == [PEER_ADDRESS]
+        protocol.wifi_direct_peer_disconnected.assert_not_called()
+        # Its stream still carries bodies.
+        protocol.outbound.append(body_for(PEER_ADDRESS, b"still here"))
+        host._drain()
+        assert fake_listener.sent == [(1, b"still here")]
+
+    async def test_a_reopen_that_cannot_bind_leaves_the_open_listener_live(self, host, protocol, fake_listener):
+        fake_listener.prove(1, PEER_ADDRESS)
+        deliver(host)
+        with pytest.raises(TransportError):
+            await host.open_webrtc_direct("not-an-address")
+        with pytest.raises(TransportError, match="bind"):
+            # TEST-NET-3: never this machine's.
+            await host.open_webrtc_direct("203.0.113.9")
+        with pytest.raises(TransportError, match="0 to 65535"):
+            await host.open_webrtc_direct("127.0.0.1", 70000)
+        assert host.webrtc_direct_code is not None
+        assert len(fake_listener.opened) == 1
+        assert fake_listener.close_calls == 0
+        assert host.connected_peers() == [PEER_ADDRESS]
+
+    async def test_reopening_on_the_open_listeners_own_port_gives_it_up_first(
+        self, host, protocol, fake_listener
+    ):
+        fake_listener.prove(1, PEER_ADDRESS)
+        deliver(host)
+        port = host.get_metrics()["webrtc_direct_port"]
+        await host.open_webrtc_direct("127.0.0.1", port)
+        assert host.get_metrics()["webrtc_direct_port"] == port
+        assert fake_listener.close_calls == 1
+        protocol.wifi_direct_peer_disconnected.assert_called_once_with(peer_id=PEER_ADDRESS)
 
     async def test_the_code_is_returned_and_never_logged(self, protocol, fake_listener, fake_verifier, caplog):
         caplog.set_level(logging.DEBUG)
@@ -498,10 +552,9 @@ class TestListenerLifecycle:
                 await opening
             assert manager.webrtc_direct_code is None
             assert manager.get_metrics()["webrtc_direct_port"] is None
-            # The core's listener was opened and closed again, and the socket
-            # with it.
-            assert len(fake_listener.opened) == 1
-            assert fake_listener.close_calls == 1
+            # The core's listener was never opened, and the socket is closed.
+            assert fake_listener.opened == []
+            assert fake_listener.close_calls == 0
             assert len(transports) == 1 and transports[0].is_closing()
             # A later open is the application's own and goes ahead.
             del loop.create_datagram_endpoint

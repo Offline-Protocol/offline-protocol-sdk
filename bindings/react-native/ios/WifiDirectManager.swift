@@ -1074,8 +1074,9 @@ extension WifiDirectManager: WebrtcDirectSink {
     /// on the Wi-Fi network, and returns its dial code. A page on that
     /// network dials the code, and each dial that proves an address is a
     /// peer stream in this transport's one table. A listener already open is
-    /// closed first, its streams reported lost and its code dead: the socket,
-    /// certificate and credentials are fresh on every open.
+    /// replaced once the new one is open, its streams reported lost and its
+    /// code dead: the socket, certificate and credentials are fresh on every
+    /// open. An open that throws leaves the listener already open as it was.
     ///
     /// The socket is bound to the Wi-Fi interface Network framework reports
     /// and to its one address, never a wildcard, so nothing it sends follows
@@ -1089,8 +1090,10 @@ extension WifiDirectManager: WebrtcDirectSink {
     /// application's own (`closeWebrtcDirect`) or by the next open is not.
     ///
     /// Blocks for the open (a certificate is made), so never on the main
-    /// thread. Throws when the transport is not running or paused, the device
-    /// is on no Wi-Fi network with a private address, or the engine refuses
+    /// thread. Throws when the transport is not running or paused, the
+    /// application is in the background (the observer that closes a
+    /// listener on that edge would never fire for one opened there), the
+    /// device is on no Wi-Fi network with a private address, or the engine refuses
     /// (no identity yet, or a library built without `webrtc-direct`). The
     /// code's fragment carries the ICE password: the caller shows it, and
     /// nothing here logs it.
@@ -1098,7 +1101,7 @@ extension WifiDirectManager: WebrtcDirectSink {
         onClosed: @escaping (_ reason: String) -> Void = { _ in }
     ) throws -> WebrtcDirectDialCode {
         guard state == .running else { throw TransportError.notRunning }
-        guard !isPaused else {
+        guard !isPaused, !Self.applicationInBackground() else {
             throw TransportError.invalidState("a WebRTC Direct listener opens only in the foreground")
         }
         guard let wifi = Self.wifiInterfaceName() else {
@@ -1110,10 +1113,12 @@ extension WifiDirectManager: WebrtcDirectSink {
         }
         var result: Result<WebrtcDirectDialCode, Error> = .failure(TransportError.notRunning)
         onLinkQueueSync {
-            closeWebrtcDirectOnLinkQueue()
-            // Stopped or paused while the interface was looked up.
+            // Stopped or paused while the interface was looked up; either
+            // closed the listener open then, with its reason.
             guard state == .running, !isPaused else { return }
             do {
+                // Bound before the listener open now is touched, so a
+                // failure here leaves it, and its code, as it was.
                 let socket = try WebrtcDirectListener.bindSocket(ip: ip, interface: wifi)
                 let listener = WebrtcDirectListener(
                     engine: WebrtcDirectFfi(engine: protocolInstance),
@@ -1131,7 +1136,17 @@ extension WifiDirectManager: WebrtcDirectSink {
                             self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedSocket)
                         }
                     })
+                // The engine replaces its listener only once the new one
+                // exists (`webrtc_direct_open`), so a refused open leaves the
+                // one open now, and its code, live. Its `closed` events for
+                // the replaced listener's streams come out of this open's
+                // pump and end them through the table; this queue is the
+                // one every listener runs on, so the replaced one cannot
+                // reach the engine between the swap and its retirement.
                 let code = try listener.open(socket: socket)
+                if let previous = webrtc {
+                    retireWebrtcDirectOnLinkQueue(previous)
+                }
                 webrtc = listener
                 watchWebrtcDirect(listener, interface: wifi, ip: ip)
                 result = .success(code)
@@ -1171,6 +1186,31 @@ extension WifiDirectManager: WebrtcDirectSink {
         listener.close(reason: reason)
         for row in dialled.values { endDialled(row) }
         return true
+    }
+
+    /// Retires `previous`, which the engine just replaced with a new
+    /// listener: its watchers stop, its socket closes without a close of the
+    /// engine's (now the new) listener, and any of its streams the engine
+    /// did not report closed end here. linkQueue only.
+    private func retireWebrtcDirectOnLinkQueue(_ previous: WebrtcDirectListener) {
+        webrtcPath?.cancel()
+        webrtcPath = nil
+        if let observer = webrtcBackground {
+            NotificationCenter.default.removeObserver(observer)
+            webrtcBackground = nil
+        }
+        webrtc = nil
+        previous.retire()
+        for row in dialled.values { endDialled(row) }
+    }
+
+    /// Whether the application is in the background now. `applicationState`
+    /// is main-thread only, and an open runs off it.
+    private static func applicationInBackground() -> Bool {
+        if Thread.isMainThread {
+            return UIApplication.shared.applicationState == .background
+        }
+        return DispatchQueue.main.sync { UIApplication.shared.applicationState == .background }
     }
 
     /// The name of the interface Network framework reports as Wi-Fi, or nil.

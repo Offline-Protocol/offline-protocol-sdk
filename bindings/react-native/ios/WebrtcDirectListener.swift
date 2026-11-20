@@ -307,6 +307,25 @@ final class WebrtcDirectListener {
         if let reason = reason { onClosed(reason) }
     }
 
+    /// Stops this listener's socket and timer once the engine has replaced
+    /// it (an open of another listener succeeded), without closing the
+    /// engine's listener: that is the new one now, and a `close` here would
+    /// close it. The engine dropped what this one still had to send and
+    /// queued a `closed` for each of its proved streams, which the new
+    /// listener hands to the sink. Reports nothing: the application asked
+    /// for the replacement.
+    func retire() {
+        guard !closed else { return }
+        closed = true
+        guard code != nil else { return }
+        timer?.cancel()
+        timer = nil
+        readSource?.cancel()
+        readSource = nil
+        socket = -1
+        diagnostic("info", "WebRTC Direct listener closed", [:])
+    }
+
     // MARK: - Streams
 
     /// One body on a proved stream; the engine frames it. Throws when the
@@ -516,10 +535,13 @@ final class WebrtcDirectListener {
     }
 
     /// The address a listener on an interface with `addresses` binds: its
-    /// first private IPv4 address (RFC 1918), else its first IPv4 link-local
-    /// one, else nil. A code may name only a private or link-local address,
-    /// and a page reaches IPv4 on every network this runs on; an IPv6
-    /// link-local address would also need its zone, which no code carries.
+    /// first private IPv4 address (RFC 1918), else nil. A page reaches IPv4
+    /// on every network this runs on; an IPv6 link-local address would also
+    /// need its zone, which no code carries. An IPv4 link-local address
+    /// (169.254/16, a network with no DHCP) is never chosen although a code
+    /// may name one: the engine's ICE agent refuses it as a host candidate,
+    /// so choosing it only turned the clear "no private address" refusal
+    /// into an opaque socket error.
     static func listenAddress(_ addresses: [String]) -> String? {
         let v4 = addresses.compactMap { text -> (String, [UInt8])? in
             var address = in_addr()
@@ -529,8 +551,7 @@ final class WebrtcDirectListener {
         let isPrivate: ([UInt8]) -> Bool = { b in
             b[0] == 10 || (b[0] == 172 && (16...31).contains(b[1])) || (b[0] == 192 && b[1] == 168)
         }
-        let isLinkLocal: ([UInt8]) -> Bool = { b in b[0] == 169 && b[1] == 254 }
-        return v4.first { isPrivate($0.1) }?.0 ?? v4.first { isLinkLocal($0.1) }?.0
+        return v4.first { isPrivate($0.1) }?.0
     }
 
     /// The IPv4 addresses the interface named `name` holds now.

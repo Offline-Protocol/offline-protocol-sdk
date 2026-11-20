@@ -320,9 +320,15 @@ subnet), and a socket bound to an address that went does not fail its
 receive, so without the check the listener would stay open on a dead code
 until each stream's consent ran out. A dialled stream ends with its
 listener, never with the LAN carrier: a hotspot listener outlives the Wi-Fi
-network going. Opening again closes the previous listener first, its
-streams reported lost: the socket, certificate and credentials are fresh on
-every open.
+network going. Opening again replaces the previous listener once the new
+one is open, its streams reported lost: the socket, certificate and
+credentials are fresh on every open. The socket is bound before the open
+listener is touched and the engine swaps only on success, so an open that
+throws leaves the old code working; the replaced listener is retired under
+its own lock, since a pump of it after the swap would drain the new one's
+datagrams out of the old socket. An open that finds the Wi-Fi network gone
+once its listener is published closes it and throws, because the loss
+reached the bridge while the replaced listener was still in place.
 
 The application hears every close it did not ask for, once, as the React
 Native `webrtc_direct_closed` event with a reason: `network` (the Wi-Fi
@@ -385,7 +391,8 @@ on the caller's thread and reports every dialled loss before it returns.
 - **The socket is bound to the Wi-Fi network** with `Network.bindSocket`,
   as LAN dials are ([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)),
   and to the address `WebrtcDirectListener.listenAddress` picks from that
-  network's `LinkProperties` (private IPv4, else IPv4 link-local). Unbound,
+  network's `LinkProperties` (private IPv4 only: the engine refuses an IPv4
+  link-local host candidate, so 169.254 is never chosen). Unbound,
   its answers would follow the default network, which on a Wi-Fi with no
   internet is cellular, and a wildcard address cannot go in a code and
   would admit checks from networks the code was never shown on.

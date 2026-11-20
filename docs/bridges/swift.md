@@ -348,8 +348,13 @@ opens the listener while the transport runs and returns the code;
 `closeWebrtcDirect()` closes it, and so do `stop()`, `pause()`, the
 application leaving the foreground, and the Wi-Fi interface going away or
 losing the bound address, since its code then names an address no page can
-reach. Opening again closes the previous listener first, its streams reported
-lost: the socket, certificate and credentials are fresh on every open.
+reach. Opening again replaces the previous listener once the new one is
+open, its streams reported lost: the socket, certificate and credentials are
+fresh on every open. The socket is bound before the open listener is touched
+and the engine swaps only on success, so an open that throws leaves the old
+code working. An open in the background throws: the observer that closes a
+listener when the application leaves the foreground never fires for one
+opened there.
 
 The application hears every close it did not ask for, once, as the React
 Native `webrtc_direct_closed` event with a reason: `background` (it left the
@@ -410,7 +415,8 @@ again, so events are handled in order and never inside one another.
   checked, so its ICE agent drops it and the dial never completes. The
   socket is bound with `IP_BOUND_IF` to the interface Network framework
   reports as Wi-Fi and to the address `WebrtcDirectListener.listenAddress`
-  picks from it (private IPv4, else IPv4 link-local). Unbound, its answers
+  picks from it (private IPv4 only: the engine refuses an IPv4 link-local
+  host candidate, so 169.254 is never chosen). Unbound, its answers
   could follow the default route, which on a Wi-Fi with no internet is
   cellular, and a wildcard address cannot go in a code and would admit
   checks from networks the code was never shown on.

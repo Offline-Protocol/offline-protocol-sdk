@@ -385,6 +385,20 @@ final class WebrtcDirectListenerTests: XCTestCase {
         XCTAssertTrue(queue.sync { reported.isEmpty })
     }
 
+    /// The engine replaced it (an open of another listener succeeded): its
+    /// socket stops, but the engine's listener, now the new one, is never
+    /// closed from here, and nothing is reported.
+    func testARetiredListenerLeavesTheEngineOpenAndReportsNothing() throws {
+        try open()
+        queue.sync {
+            listener.retire()
+            listener.close(reason: WebrtcDirectListener.closedNetwork)
+        }
+        XCTAssertEqual(queue.sync { engine.closes }, 0)
+        XCTAssertTrue(queue.sync { reported.isEmpty })
+        XCTAssertThrowsError(try queue.sync { try listener.send(stream: 1, body: Data("x".utf8)) })
+    }
+
     /// Never opened: there is no listener the application was shown.
     func testAListenerNeverOpenedReportsNothing() {
         queue.sync { listener.close(reason: WebrtcDirectListener.closedStopped) }
@@ -428,12 +442,13 @@ final class WebrtcDirectListenerTests: XCTestCase {
 
     // MARK: - Addresses
 
-    func testListenAddressTakesAPrivateIPv4ElseLinkLocalNeverPublicLoopbackOrIPv6() {
+    func testListenAddressTakesAPrivateIPv4NeverLinkLocalPublicLoopbackOrIPv6() {
         XCTAssertEqual(WebrtcDirectListener.listenAddress(["8.8.8.8", "fe80::1", "169.254.3.4", "192.168.1.20"]), "192.168.1.20")
         XCTAssertEqual(WebrtcDirectListener.listenAddress(["10.1.2.3"]), "10.1.2.3")
         XCTAssertEqual(WebrtcDirectListener.listenAddress(["172.15.0.1", "172.16.0.1"]), "172.16.0.1")
         XCTAssertNil(WebrtcDirectListener.listenAddress(["172.32.0.1"]))
-        XCTAssertEqual(WebrtcDirectListener.listenAddress(["8.8.8.8", "169.254.3.4"]), "169.254.3.4")
+        // The engine refuses an IPv4 link-local host candidate.
+        XCTAssertNil(WebrtcDirectListener.listenAddress(["8.8.8.8", "169.254.3.4"]))
         XCTAssertNil(WebrtcDirectListener.listenAddress(["127.0.0.1", "8.8.8.8", "::1", "fd00::1"]))
         XCTAssertNil(WebrtcDirectListener.listenAddress([]))
     }

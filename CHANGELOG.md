@@ -40,7 +40,9 @@ Questions about a release, or about upgrading to one? Ask in the
   foreground. When the bridge closes the listener itself (its network or
   hotspot went, the app left the foreground, the transport paused or
   stopped, its socket failed), React Native emits one `webrtc_direct_closed`
-  event with the reason, so the app can stop showing a dead code. Custom
+  event with the reason, so the app can stop showing a dead code. Opening
+  again replaces the listener only once the new one is open, so an open
+  that fails leaves the old code working. Custom
   platforms drive the sans-I/O listener through the FFI's
   `webrtc_direct_*` methods, behind the `webrtc-direct` feature, which the
   iOS, Android, desktop and Python release builds turn on; a library built
