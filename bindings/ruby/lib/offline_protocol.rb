@@ -8136,6 +8136,10 @@ module UniFFILib
     [:uint64, RustCallStatus.by_ref],
     RustBuffer.by_value
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof,
+    [RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion,
     [RustBuffer.by_value, RustCallStatus.by_ref],
     RustBuffer.by_value
@@ -8357,6 +8361,10 @@ module UniFFILib
     :uint16
   
   attach_function :uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof,
     [],
     :uint16
   
@@ -11935,6 +11943,27 @@ def self.run_storage_conformance(storage)
     
     
   result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance,(CallbackInterfaceProtocolStateStorageProviderFfiConverter.lower storage))
+  return result.consume_into_string
+end
+
+
+  
+  
+
+def self.verify_gateway_address_proof(address, public_key, signature, challenge)
+    address = ::OfflineProtocol::uniffi_utf8(address)
+    
+    
+    public_key = public_key.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
+    RustBuffer.check_lower_Sequenceu8(public_key)
+    
+    signature = signature.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
+    RustBuffer.check_lower_Sequenceu8(signature)
+    
+    challenge = challenge.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
+    RustBuffer.check_lower_Sequenceu8(challenge)
+    
+  result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof,RustBuffer.alloc_from_string(address),RustBuffer.alloc_from_Sequenceu8(public_key),RustBuffer.alloc_from_Sequenceu8(signature),RustBuffer.alloc_from_Sequenceu8(challenge))
   return result.consume_into_string
 end
 

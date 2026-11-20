@@ -218,6 +218,13 @@ Both ends have something to verify, and neither check substitutes for the other.
    been accepted before. A challenge honoured twice turns one captured
    `DeclareAddress` into a reusable credential.
 
+The SDK exposes the first two as one instance-less call,
+`verify_gateway_address_proof(address, public_key, signature, challenge)`,
+which returns the bound address or throws. A gateway built on the SDK calls it
+rather than building the payload itself, because the payload has one home
+([ADR 0022](../adr/0022-one-sealed-layer-shared-with-the-leaf.md)). The third
+check is connection state and stays the gateway's.
+
 A gateway that skips these attaches sessions under addresses the attaching
 device does not control, which is how a hostile device draws another device's
 inbound traffic to itself and poisons the presence answers given about it.

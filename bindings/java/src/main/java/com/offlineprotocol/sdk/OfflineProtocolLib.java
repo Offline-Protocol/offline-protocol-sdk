@@ -68,6 +68,28 @@ public class OfflineProtocolLib {
     }
     
 
+  public static java.lang.String verifyGatewayAddressProof(java.lang.String address, java.util.List<java.lang.Byte> publicKey, java.util.List<java.lang.Byte> signature, java.util.List<java.lang.Byte> challenge) throws ProtocolException {
+            try {
+                return FfiConverterString.INSTANCE.lift(
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof(_allocator, 
+            FfiConverterString.INSTANCE.lower(address), FfiConverterSequenceByte.INSTANCE.lower(publicKey), FfiConverterSequenceByte.INSTANCE.lower(signature), FfiConverterSequenceByte.INSTANCE.lower(challenge), _status);
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
   public static java.lang.String verifyIdentityAssertion(java.util.List<java.lang.Byte> assertion) throws ProtocolException {
             try {
                 return FfiConverterString.INSTANCE.lift(

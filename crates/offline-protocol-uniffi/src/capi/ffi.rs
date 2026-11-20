@@ -217,8 +217,9 @@ pub extern "C" fn offline_protocol_version() -> *const c_char {
 }
 
 /// Calls one of the definition's instance-less functions
-/// (`derive_address`, `parse_invite`, `verify_identity_assertion`), which
-/// need no engine and may run before `offline_protocol_create`.
+/// (`derive_address`, `parse_invite`, `verify_identity_assertion`,
+/// `verify_gateway_address_proof`), which need no engine and may run before
+/// `offline_protocol_create`.
 ///
 /// `params_json` is a JSON object keyed by the definition's parameter names,
 /// or null for none. On success `*out_result` is the result as JSON, freed

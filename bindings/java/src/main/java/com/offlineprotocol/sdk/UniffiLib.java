@@ -2396,6 +2396,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof(java.lang.foreign.SegmentAllocator _allocator, java.lang.foreign.MemorySegment address, java.lang.foreign.MemorySegment publicKey, java.lang.foreign.MemorySegment signature, java.lang.foreign.MemorySegment challenge, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof.invokeExact(_allocator, address, publicKey, signature, challenge, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -2897,6 +2906,15 @@ final class UniffiLib {
     static short uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 

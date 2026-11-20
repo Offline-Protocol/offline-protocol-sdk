@@ -18,6 +18,15 @@ Questions about a release, or about upgrading to one? Ask in the
 
 ### Added
 
+- **A gateway daemon can verify a device's attach proof without building
+  it: `verify_gateway_address_proof(address, public_key, signature,
+  challenge)`**, instance-less, in every binding and over the C API's
+  instance-less call. It is the gateway half of
+  `gateway_address_declaration`: it checks the signature over the one
+  canonical payload ([the gateway contract](docs/spec/gateway-contract.md#attach))
+  and that the key derives to the claimed address, and returns that address
+  or throws. A daemon still owns the third check, that the challenge is the
+  one it minted for this connection and has not been accepted before.
 - **A browser page can dial a native app on the same Wi-Fi network, or on
   the phone's own hotspot, from one code the app shows: WebRTC Direct**
   ([ADR 0039](docs/adr/0039-a-browser-dials-a-native-device-from-a-code.md)).

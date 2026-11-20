@@ -208,6 +208,7 @@ update_dors_config
 update_relay_config
 update_retry_config
 update_transport_metrics
+verify_gateway_address_proof
 verify_identity_assertion
 verify_signature
 verify_signature_bytes

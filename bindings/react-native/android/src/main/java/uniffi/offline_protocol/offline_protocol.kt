@@ -871,6 +871,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash(
@@ -1950,6 +1952,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof(`address`: RustBuffer.ByValue,`publicKey`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,`challenge`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(`assertion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_offline_protocol_uniffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2078,6 +2082,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() and 0xFFFF) != 20699) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof() and 0xFFFF) != 21016) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() and 0xFFFF) != 61480) {
@@ -14314,6 +14321,21 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
         
         FfiConverterTypeProtocolStateStorageProvider.lower(`storage`),_status)
+}
+    )
+    }
+    
+
+    @Throws(ProtocolException::class) fun `verifyGatewayAddressProof`(`address`: kotlin.String, `publicKey`: List<kotlin.UByte>, `signature`: List<kotlin.UByte>, `challenge`: List<kotlin.UByte>): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof(
+    
+        
+        FfiConverterString.lower(`address`),
+        FfiConverterSequenceUByte.lower(`publicKey`),
+        FfiConverterSequenceUByte.lower(`signature`),
+        FfiConverterSequenceUByte.lower(`challenge`),_status)
 }
     )
     }

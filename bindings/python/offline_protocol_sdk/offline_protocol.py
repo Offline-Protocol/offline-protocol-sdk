@@ -561,6 +561,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof() != 21016:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 61480:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 10852:
@@ -1097,6 +1099,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.restype = c
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.restype = ctypes.c_uint16
@@ -1859,6 +1864,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.argtyp
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof.argtypes = (
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -15069,6 +15082,29 @@ def run_storage_conformance(storage: ProtocolStateStorageProvider) -> str:
         *_uniffi_lowered_args,
     )
     return _uniffi_lift_return(_uniffi_ffi_result)
+def verify_gateway_address_proof(address: str,public_key: typing.List[int],signature: typing.List[int],challenge: typing.List[int]) -> str:
+    
+    _UniffiFfiConverterString.check_lower(address)
+
+    _UniffiFfiConverterSequenceUInt8.check_lower(public_key)
+
+    _UniffiFfiConverterSequenceUInt8.check_lower(signature)
+
+    _UniffiFfiConverterSequenceUInt8.check_lower(challenge)
+    _uniffi_lowered_args = (
+        _UniffiFfiConverterString.lower(address),
+        _UniffiFfiConverterSequenceUInt8.lower(public_key),
+        _UniffiFfiConverterSequenceUInt8.lower(signature),
+        _UniffiFfiConverterSequenceUInt8.lower(challenge),
+    )
+    _uniffi_lift_return = _UniffiFfiConverterString.lift
+    _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+    _uniffi_ffi_result = _uniffi_rust_call_with_error(
+        _uniffi_error_converter,
+        _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof,
+        *_uniffi_lowered_args,
+    )
+    return _uniffi_lift_return(_uniffi_ffi_result)
 def verify_identity_assertion(assertion: typing.List[int]) -> str:
     
     _UniffiFfiConverterSequenceUInt8.check_lower(assertion)
@@ -15161,6 +15197,7 @@ __all__ = [
     "derive_address",
     "parse_invite",
     "run_storage_conformance",
+    "verify_gateway_address_proof",
     "verify_identity_assertion",
     "DataStore",
     "DataStoreProtocol",
