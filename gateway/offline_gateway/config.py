@@ -69,11 +69,14 @@ class GatewayConfig:
     #: Submissions per minute per device, and the burst it may spend at once.
     device_per_minute: float = 120.0
     device_burst: float = 30.0
-    #: Backbone frames per minute per device. The scarce class's budget, and
-    #: the one that matters: it is what stops one device from spending the
-    #: whole link. The burst covers a session bootstrap.
+    #: Backbone frames per minute per device, on a scarce backbone only. The
+    #: one that matters: it is what stops one device from spending the whole
+    #: link. The burst has to cover a first contact: two SDK engines pairing
+    #: over MLS and exchanging one message cost 18 to 20 frames each
+    #: (measured by ``test_end_to_end.py``), and a burst smaller than that
+    #: refuses the pairing's own frames and stalls it on the retry ladder.
     backbone_per_minute: float = 6.0
-    backbone_burst: float = 8.0
+    backbone_burst: float = 24.0
     #: Frames per minute each peer gateway may hand this one.
     peer_per_minute: float = 60.0
     peer_burst: float = 20.0

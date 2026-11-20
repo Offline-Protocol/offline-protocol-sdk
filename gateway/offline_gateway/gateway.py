@@ -50,6 +50,8 @@ MAX_DECLARE_FAILURES = 3
 MAX_WATCHED = 256
 #: Addresses whose last-seen time is remembered after they leave.
 MAX_LAST_SEEN = 65536
+#: Frame types logged at debug level as they are queued: the routing trail.
+_TRACED = frozenset({"MessageSent", "DeliveryError", "MessageReceived"})
 
 
 def sdk_verifier() -> Verifier:
@@ -103,6 +105,14 @@ class Session:
         for every frame addressed to it."""
         if self.closed:
             return False
+        if logger.isEnabledFor(logging.DEBUG) and frame.get("type") in _TRACED:
+            logger.debug(
+                "%r <- %s %s %s",
+                self,
+                frame["type"],
+                frame.get("message_id"),
+                frame.get("reason") or frame.get("sender") or "",
+            )
         try:
             self._queue.put_nowait(frame)
         except asyncio.QueueFull:
@@ -394,7 +404,9 @@ class Gateway:
         if len(content) > self.config.max_backbone_frame_bytes:
             session.send(wire.delivery_error(message_id, recipient, wire.FRAME_TOO_LARGE))
             return
-        if not self._backbone_budget.take(session.address):
+        # The scarce class's own budget. A broad backbone carries what the
+        # device budget above already admitted.
+        if self.backbone.rate_class != "broad" and not self._backbone_budget.take(session.address):
             session.send(wire.delivery_error(message_id, recipient, wire.BUDGET_EXCEEDED))
             return
         backbone_frame = BackboneFrame(recipient, session.address, content, message_id, reply_to)

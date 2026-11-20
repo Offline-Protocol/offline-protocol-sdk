@@ -106,7 +106,8 @@ async def settle(devices: list[Device], cond, what: str, secs: int = 30) -> None
         if cond():
             return
         await asyncio.sleep(0.05)
-    raise AssertionError(f"timed out: {what}")
+    trail = {d.profile: [e.get("type") for e in d.seen] for d in devices}
+    raise AssertionError(f"timed out: {what}; events seen: {trail}")
 
 
 async def _attached(gateway: Gateway, devices: list[Device]) -> None:
@@ -146,10 +147,13 @@ async def test_two_engines_pair_and_talk_through_one_gateway() -> None:
         await gateway.stop()
 
 
-async def test_two_engines_talk_across_two_gateways() -> None:
+@pytest.mark.parametrize("rate_class", ["broad", "scarce"])
+async def test_two_engines_talk_across_two_gateways(rate_class: str) -> None:
+    """Under the scarce class the default per-device backbone budget applies,
+    and a first contact has to fit inside it."""
     network = InMemoryNetwork()
-    a = Gateway(GatewayConfig(listen_port=0), backbone=InMemoryBackbone(network, "a"))
-    b = Gateway(GatewayConfig(listen_port=0), backbone=InMemoryBackbone(network, "b"))
+    a = Gateway(GatewayConfig(listen_port=0), backbone=InMemoryBackbone(network, "a", rate_class))
+    b = Gateway(GatewayConfig(listen_port=0), backbone=InMemoryBackbone(network, "b", rate_class))
     port_a, port_b = await a.start(), await b.start()
     alice, bob = Device("e2e-far-alice", port_a), Device("e2e-far-bob", port_b)
     try:

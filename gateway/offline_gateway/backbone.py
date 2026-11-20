@@ -222,9 +222,10 @@ class InMemoryBackbone(Backbone):
     kind = "memory"
     rate_class = "broad"
 
-    def __init__(self, network: InMemoryNetwork, name: str) -> None:
+    def __init__(self, network: InMemoryNetwork, name: str, rate_class: str = "broad") -> None:
         self.network = network
         self.name = name
+        self.rate_class = rate_class
         self.table = PresenceTable()
         self.hooks: BackboneHooks | None = None
         #: Seconds each forward waits before it is carried, to exercise the

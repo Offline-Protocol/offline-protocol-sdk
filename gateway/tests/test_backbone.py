@@ -136,7 +136,7 @@ async def test_the_per_device_backbone_budget_is_budget_exceeded():
             gw = Gateway(
                 GatewayConfig(listen_port=0, attach_grace=0, backbone_per_minute=0.0001, backbone_burst=2),
                 verifier=fake_verify,
-                backbone=InMemoryBackbone(network, name),
+                backbone=InMemoryBackbone(network, name, rate_class="scarce"),
             )
             gw.port = await gw.start()  # type: ignore[attr-defined]
             gws.append(gw)
