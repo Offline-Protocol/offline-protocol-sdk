@@ -3201,12 +3201,14 @@ new ones.
 | React Native, browser, Flutter | `appId` still works, with a one-time warning in development builds. Setting both names to different values throws. |
 | Python | `app_id=` still works on `ProtocolConfig`, `SendMessageOptions` and `MediaSendOptions`, with a `DeprecationWarning`. A local API server config file that still says `app_id` loads with a warning. |
 | Rust | `ProtocolConfig::new` and `builder` keep their arguments. Reading the field is now `config.app_label` (`config.app_id()` is deprecated). The send options' `app_id` fields are deprecated beside `app_label`. |
-| Swift | The generated `ProtocolConfig(appId:…)` is now `ProtocolConfig(appLabel:…)`. `OfflineProtocolReferenceStorage` and `OfflineProtocolDevelopmentCleartextConfig` keep deprecated `appId:` overloads. |
-| Kotlin | The generated `ProtocolConfig(appId = …)` is now `ProtocolConfig(appLabel = …)`; positional calls are unaffected. |
-| Java, C# | The field kept its position, so the positional Java constructor is unaffected. C#: `AppId =` becomes `AppLabel =`. |
-| C | The config JSON key is `app_label`. |
-| Ruby | `app_id:` becomes `app_label:`. |
+| Swift | **Breaks:** the generated initializer is now `ProtocolConfig(appLabel:…)` (and `appLabel:` on the send options). Still compiles, deprecated: reading or setting `.appId` on `ProtocolConfig`, `SendMessageOptions` and `MediaSendOptions`, and the `appId:` overloads of `OfflineProtocolReferenceStorage` and `OfflineProtocolDevelopmentCleartextConfig`. |
+| Kotlin | **Breaks:** the named argument `ProtocolConfig(appId = …)` (and on the send options, `OfflineProtocolReferenceStorage` and `OfflineProtocolDevelopmentCleartextConfig.make`) is now `appLabel = …`; positional calls are unaffected. Still compiles, deprecated: `.appId` on the three records, through `import uniffi.offline_protocol.*` or `import uniffi.offline_protocol.appId`. |
+| Java | **Breaks:** the accessor `appId()` is now `appLabel()` on the three records. The field kept its position, so the positional constructor is unaffected. |
+| C# | **Breaks:** `AppId =` becomes `AppLabel =`. |
+| C | The config JSON key is `app_label`. A key `app_id` is still read as the label, on `ProtocolConfig` and both send options, so a config file written for 0.34 loads unchanged; both keys with different values is refused. |
+| Ruby | **Breaks:** `app_id:` becomes `app_label:`. |
 | Per-send override | The generated send options take `app_label` / `appLabel`. |
+| Config JSON read by the native bridges | `appLabel`, `appId` and `app_id` are all read. Two of them with different values is now refused rather than `appLabel` silently winning. |
 
 **Events** carry the label under `app_label`, with `app_id` beside it holding
 the same value until the alias is removed. Read `app_label`.
@@ -3214,7 +3216,9 @@ the same value until the alias is removed. Read `app_label`.
 **Telemetry.** A new app may pass its portal App ID as its label, and then
 `enableTelemetry` needs only the key: when its config names no App ID and the
 label has the shape `app_…` (or the legacy `proj_…`), the label is used. An app
-that shipped with another label keeps it and passes the App ID as before.
+that shipped with another label keeps it and passes the App ID as before. Use
+the App ID as the label only if it will never change: see
+[the configuration guide](configuration.md#the-app-label-and-the-app-id).
 
 **The label carries no authority.** It is public: anyone nearby can read it and
 any app can use the same one. Nothing should decide whom to trust from it.

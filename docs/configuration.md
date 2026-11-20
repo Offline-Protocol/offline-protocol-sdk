@@ -37,6 +37,14 @@ names no App ID and the label has the shape `app_…`, the SDK uses the label.
 An app that already shipped with another label keeps that label and passes the
 App ID to `enableTelemetry`.
 
+Do this only if the App ID will stay the app's label for good. The label
+cannot change after the app ships, and an App ID can: the portal has already
+moved from `proj_…` to `app_…` once, and an app that moves to another portal
+app, or uses one App ID for staging and another for production, would split
+its storage and its mesh along the same line. Two builds with two App IDs as
+labels never see each other. When in doubt, choose a label of your own, such
+as a reverse-DNS name, and pass the App ID to `enableTelemetry`.
+
 ## Configuration Structure
 
 ```typescript

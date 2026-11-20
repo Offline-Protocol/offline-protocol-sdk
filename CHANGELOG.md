@@ -64,8 +64,11 @@ Questions about a release, or about upgrading to one? Ask in the
   Flutter and Python still take `appId` (`app_id=`) with a deprecation
   warning, and refuse both names set to different values; Rust keeps
   deprecated `app_id` send options and a `ProtocolConfig::app_id()` getter;
-  Swift keeps deprecated `appId:` helper overloads. The generated Swift,
-  Kotlin, Ruby, C and C# config takes the new name. Events carry
+  Swift and Kotlin keep a deprecated `appId` property on the three records,
+  and Swift its `appId:` helper overloads; the C API still reads the JSON key
+  `app_id`. **Breaking at compile time:** the generated Swift initializer,
+  Kotlin named arguments, the Java `appId()` accessor, C# `AppId` and Ruby
+  `app_id:` take the new name. Events carry
   `app_label`, with `app_id` beside it for now. The docs now say plainly
   that the label is public and carries no authority. A new app may pass its
   portal App ID as its label, and `enableTelemetry` then needs only the key.
