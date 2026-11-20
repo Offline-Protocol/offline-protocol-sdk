@@ -97,6 +97,35 @@ fn an_unknown_field_is_refused_rather_than_ignored() {
 }
 
 #[test]
+fn a_config_from_before_the_app_label_rename_still_decodes() {
+    // A 0.34 config file names the label `app_id`. Same value, so the same
+    // storage namespace: it must load, not fail at engine creation.
+    let mut config = minimal_config();
+    let label = config.as_object_mut().and_then(|o| o.remove("app_label"));
+    config["app_id"] = label.clone().expect("the minimal config has a label");
+    let decoded = ProtocolConfig::decode(&config, "config").expect("the old name decodes");
+    assert_eq!(Some(json!(decoded.app_label)), label);
+
+    // Both names with one value is no conflict; two values is refused.
+    config["app_label"] = config["app_id"].clone();
+    ProtocolConfig::decode(&config, "config").expect("agreeing names decode");
+    config["app_label"] = json!("another-app");
+    let err = ProtocolConfig::decode(&config, "config").expect_err("disagreeing names");
+    assert!(
+        format!("{err:?}").contains("disagrees with app_label"),
+        "{err:?}"
+    );
+
+    // The send options carried the same field.
+    let options = crate::SendMessageOptions::decode(&json!({"app_id": "other-app"}), "options")
+        .expect("the old name decodes");
+    assert_eq!(options.app_label.as_deref(), Some("other-app"));
+    let options = crate::MediaSendOptions::decode(&json!({"app_id": "other-app"}), "options")
+        .expect("the old name decodes");
+    assert_eq!(options.app_label.as_deref(), Some("other-app"));
+}
+
+#[test]
 fn enums_cross_by_the_definitions_spelling() {
     // The wrapper's serde spelling is `wifiDirect`; the definition's, and so
     // this boundary's, is `WiFiDirect`.
