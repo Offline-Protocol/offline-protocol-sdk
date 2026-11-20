@@ -5944,6 +5944,259 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public void webrtcDirectClose()  {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close(_uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void webrtcDirectCloseStream(long stream)  {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream(_uniffiHandle,
+            stream, _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void webrtcDirectDatagramReceived(java.lang.String sourceIp, short sourcePort, java.util.List<java.lang.Byte> data) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(sourceIp), sourcePort, FfiConverterSequenceByte.INSTANCE.lower(data), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public WebrtcDirectDatagram webrtcDirectNextDatagram()  {
+            try {
+                return FfiConverterOptionalTypeWebrtcDirectDatagram.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram(_allocator, _uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public WebrtcDirectEvent webrtcDirectNextEvent()  {
+            try {
+                return FfiConverterOptionalTypeWebrtcDirectEvent.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event(_allocator, _uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public WebrtcDirectCode webrtcDirectOpen(java.lang.String localIp, short localPort) throws ProtocolException {
+            try {
+                return FfiConverterTypeWebrtcDirectCode.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open(_allocator, _uniffiHandle,
+            FfiConverterString.INSTANCE.lower(localIp), localPort, _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public void webrtcDirectSend(long stream, java.util.List<java.lang.Byte> body) throws ProtocolException {
+            try {
+                
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send(_uniffiHandle,
+            stream, FfiConverterSequenceByte.INSTANCE.lower(body), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
+    public java.lang.Integer webrtcDirectTick()  {
+            try {
+                return FfiConverterOptionalInteger.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCall( (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick(_allocator, _uniffiHandle,
+            _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public void wifiDirectFastLinkEnded(java.lang.String linkId, java.lang.String reason)  {
             try {
                 

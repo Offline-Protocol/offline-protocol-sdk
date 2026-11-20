@@ -197,3 +197,84 @@ fn the_documented_mobile_builds_use_the_mobile_profile() {
         }
     }
 }
+
+/// Whether a build command turns on `feature` with `--features`.
+fn turns_on(build: &str, feature: &str) -> bool {
+    build
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .filter(|w| w[0] == "--features")
+        // A word may close the array a script builds its command in.
+        .flat_map(|w| w[1].trim_end_matches(')').trim_matches('"').split(','))
+        .any(|f| f == feature)
+}
+
+#[test]
+fn the_shipped_mobile_and_python_libraries_carry_the_webrtc_direct_listener() {
+    // ADR 0039, decision 10: the feature is off in the crate and on in the
+    // iOS, Android and Python libraries the release ships. A build that
+    // drops it still compiles, links and passes every binding's tests (each
+    // method exists either way), and ships a library whose
+    // `webrtc_direct_open` refuses on every device.
+    for path in [
+        "bindings/react-native/scripts/build-uniffi-ios.sh",
+        "bindings/react-native/scripts/build-uniffi-android.sh",
+        "bindings/python/scripts/build-desktop.sh",
+    ] {
+        let text = read(path);
+        let builds: Vec<String> = builds_of_the_library(&text);
+        // build-desktop.sh assembles its command in an array.
+        let builds = if builds.is_empty() {
+            commands(&text)
+                .into_iter()
+                .filter(|c| {
+                    c.contains("CARGO_ARGS=(build") && c.contains("offline-protocol-uniffi")
+                })
+                .collect()
+        } else {
+            builds
+        };
+        assert!(!builds.is_empty(), "{path} no longer builds the library");
+        for build in builds {
+            assert!(
+                turns_on(&build, "webrtc-direct"),
+                "{path}: a shipped library is built with `--features webrtc-direct`: {build}"
+            );
+        }
+    }
+
+    // The release builds Android itself, and the desktop libraries the wheels
+    // are made from, each for a named target. The Java and Ruby jobs build a
+    // library for their tests only, with no target, and ship none.
+    let release = read(".github/workflows/release.yml");
+    let shipped: Vec<String> = builds_of_the_library(&release)
+        .into_iter()
+        .filter(|b| b.contains("--target"))
+        .collect();
+    assert!(
+        shipped.len() >= 4,
+        "Android and three desktop builds: {shipped:?}"
+    );
+    for build in shipped {
+        assert!(
+            turns_on(&build, "webrtc-direct"),
+            "release.yml: a shipped library is built with `--features webrtc-direct`: {build}"
+        );
+    }
+
+    // CI's one iOS build on a pull request is the library the release ships,
+    // so the minimum-OS gate after it covers the listener too.
+    let ci = read(".github/workflows/ci.yml");
+    let simulator = ci
+        .find("TARGET=aarch64-apple-ios-sim")
+        .expect("the Swift package job builds a simulator slice");
+    let build = builds_of_the_library(&ci[simulator..])
+        .into_iter()
+        .next()
+        .expect("a build follows the target choice");
+    assert!(
+        turns_on(&build, "webrtc-direct"),
+        "CI builds the iOS library the release ships: {build}"
+    );
+}

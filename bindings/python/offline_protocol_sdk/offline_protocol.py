@@ -1023,6 +1023,22 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 24438:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close() != 52913:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream() != 41353:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received() != 8160:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram() != 44469:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event() != 64868:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open() != 32102:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send() != 6566:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick() != 49:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended() != 54290:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_hosting() != 47337:
@@ -1774,6 +1790,30 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended.restype = ctypes.c_uint16
@@ -3287,6 +3327,54 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signa
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes.restype = ctypes.c_int8
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.c_uint16,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.c_uint16,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -8289,6 +8377,229 @@ class _UniffiFfiConverterTypeTransportMetrics(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalFloat32.write(value.energy_cost, buf)
 
 @dataclass
+class WebrtcDirectCode:
+    def __init__(self, *, fragment:str, host:str, port:int, address:str):
+        self.fragment = fragment
+        self.host = host
+        self.port = port
+        self.address = address
+        
+        
+
+    
+    def __str__(self):
+        return "WebrtcDirectCode(fragment={}, host={}, port={}, address={})".format(self.fragment, self.host, self.port, self.address)
+    def __eq__(self, other):
+        if self.fragment != other.fragment:
+            return False
+        if self.host != other.host:
+            return False
+        if self.port != other.port:
+            return False
+        if self.address != other.address:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeWebrtcDirectCode(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return WebrtcDirectCode(
+            fragment=_UniffiFfiConverterString.read(buf),
+            host=_UniffiFfiConverterString.read(buf),
+            port=_UniffiFfiConverterUInt16.read(buf),
+            address=_UniffiFfiConverterString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.fragment)
+        _UniffiFfiConverterString.check_lower(value.host)
+        _UniffiFfiConverterUInt16.check_lower(value.port)
+        _UniffiFfiConverterString.check_lower(value.address)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.fragment, buf)
+        _UniffiFfiConverterString.write(value.host, buf)
+        _UniffiFfiConverterUInt16.write(value.port, buf)
+        _UniffiFfiConverterString.write(value.address, buf)
+
+@dataclass
+class WebrtcDirectDatagram:
+    def __init__(self, *, destination_ip:str, destination_port:int, data:typing.List[int]):
+        self.destination_ip = destination_ip
+        self.destination_port = destination_port
+        self.data = data
+        
+        
+
+    
+    def __str__(self):
+        return "WebrtcDirectDatagram(destination_ip={}, destination_port={}, data={})".format(self.destination_ip, self.destination_port, self.data)
+    def __eq__(self, other):
+        if self.destination_ip != other.destination_ip:
+            return False
+        if self.destination_port != other.destination_port:
+            return False
+        if self.data != other.data:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeWebrtcDirectDatagram(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return WebrtcDirectDatagram(
+            destination_ip=_UniffiFfiConverterString.read(buf),
+            destination_port=_UniffiFfiConverterUInt16.read(buf),
+            data=_UniffiFfiConverterSequenceUInt8.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.destination_ip)
+        _UniffiFfiConverterUInt16.check_lower(value.destination_port)
+        _UniffiFfiConverterSequenceUInt8.check_lower(value.data)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.destination_ip, buf)
+        _UniffiFfiConverterUInt16.write(value.destination_port, buf)
+        _UniffiFfiConverterSequenceUInt8.write(value.data, buf)
+
+
+
+
+
+
+class WebrtcDirectEventKind(enum.Enum):
+    
+    PROVED = 0
+    
+    BODY = 1
+    
+    CLOSED = 2
+    
+
+
+class _UniffiFfiConverterTypeWebrtcDirectEventKind(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return WebrtcDirectEventKind.PROVED
+        if variant == 2:
+            return WebrtcDirectEventKind.BODY
+        if variant == 3:
+            return WebrtcDirectEventKind.CLOSED
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == WebrtcDirectEventKind.PROVED:
+            return
+        if value == WebrtcDirectEventKind.BODY:
+            return
+        if value == WebrtcDirectEventKind.CLOSED:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == WebrtcDirectEventKind.PROVED:
+            buf.write_i32(1)
+        if value == WebrtcDirectEventKind.BODY:
+            buf.write_i32(2)
+        if value == WebrtcDirectEventKind.CLOSED:
+            buf.write_i32(3)
+
+
+
+class _UniffiFfiConverterOptionalSequenceUInt8(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterSequenceUInt8.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterSequenceUInt8.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterSequenceUInt8.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class WebrtcDirectEvent:
+    def __init__(self, *, kind:WebrtcDirectEventKind, stream:int, address:typing.Optional[str], remote_ip:typing.Optional[str], remote_port:typing.Optional[int], data:typing.Optional[typing.List[int]]):
+        self.kind = kind
+        self.stream = stream
+        self.address = address
+        self.remote_ip = remote_ip
+        self.remote_port = remote_port
+        self.data = data
+        
+        
+
+    
+    def __str__(self):
+        return "WebrtcDirectEvent(kind={}, stream={}, address={}, remote_ip={}, remote_port={}, data={})".format(self.kind, self.stream, self.address, self.remote_ip, self.remote_port, self.data)
+    def __eq__(self, other):
+        if self.kind != other.kind:
+            return False
+        if self.stream != other.stream:
+            return False
+        if self.address != other.address:
+            return False
+        if self.remote_ip != other.remote_ip:
+            return False
+        if self.remote_port != other.remote_port:
+            return False
+        if self.data != other.data:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeWebrtcDirectEvent(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return WebrtcDirectEvent(
+            kind=_UniffiFfiConverterTypeWebrtcDirectEventKind.read(buf),
+            stream=_UniffiFfiConverterUInt64.read(buf),
+            address=_UniffiFfiConverterOptionalString.read(buf),
+            remote_ip=_UniffiFfiConverterOptionalString.read(buf),
+            remote_port=_UniffiFfiConverterOptionalUInt16.read(buf),
+            data=_UniffiFfiConverterOptionalSequenceUInt8.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterTypeWebrtcDirectEventKind.check_lower(value.kind)
+        _UniffiFfiConverterUInt64.check_lower(value.stream)
+        _UniffiFfiConverterOptionalString.check_lower(value.address)
+        _UniffiFfiConverterOptionalString.check_lower(value.remote_ip)
+        _UniffiFfiConverterOptionalUInt16.check_lower(value.remote_port)
+        _UniffiFfiConverterOptionalSequenceUInt8.check_lower(value.data)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterTypeWebrtcDirectEventKind.write(value.kind, buf)
+        _UniffiFfiConverterUInt64.write(value.stream, buf)
+        _UniffiFfiConverterOptionalString.write(value.address, buf)
+        _UniffiFfiConverterOptionalString.write(value.remote_ip, buf)
+        _UniffiFfiConverterOptionalUInt16.write(value.remote_port, buf)
+        _UniffiFfiConverterOptionalSequenceUInt8.write(value.data, buf)
+
+@dataclass
 class WifiDirectMessage:
     def __init__(self, *, recipient_id:str, data:typing.List[int]):
         self.recipient_id = recipient_id
@@ -10311,31 +10622,6 @@ class _UniffiFfiConverterTypeMeshServices:
     def write(cls, value: MeshServices, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
 
-class _UniffiFfiConverterOptionalSequenceUInt8(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterSequenceUInt8.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterSequenceUInt8.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterSequenceUInt8.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
 class _UniffiFfiConverterOptionalTypeBleFragment(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -11147,6 +11433,56 @@ class _UniffiFfiConverterOptionalTypeTelemetryStats(_UniffiConverterRustBuffer):
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
+class _UniffiFfiConverterOptionalTypeWebrtcDirectDatagram(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeWebrtcDirectDatagram.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeWebrtcDirectDatagram.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeWebrtcDirectDatagram.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterOptionalTypeWebrtcDirectEvent(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeWebrtcDirectEvent.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeWebrtcDirectEvent.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeWebrtcDirectEvent.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 class _UniffiFfiConverterOptionalTypeWifiDirectMessage(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -11561,6 +11897,22 @@ class OfflineProtocolProtocol(typing.Protocol):
     def verify_signature(self, public_key: typing.List[int],data: typing.List[int],signature: typing.List[int]) -> bool:
         raise NotImplementedError
     def verify_signature_bytes(self, public_key: bytes,data: bytes,signature: bytes) -> bool:
+        raise NotImplementedError
+    def webrtc_direct_close(self, ) -> None:
+        raise NotImplementedError
+    def webrtc_direct_close_stream(self, stream: int) -> None:
+        raise NotImplementedError
+    def webrtc_direct_datagram_received(self, source_ip: str,source_port: int,data: typing.List[int]) -> None:
+        raise NotImplementedError
+    def webrtc_direct_next_datagram(self, ) -> typing.Optional[WebrtcDirectDatagram]:
+        raise NotImplementedError
+    def webrtc_direct_next_event(self, ) -> typing.Optional[WebrtcDirectEvent]:
+        raise NotImplementedError
+    def webrtc_direct_open(self, local_ip: str,local_port: int) -> WebrtcDirectCode:
+        raise NotImplementedError
+    def webrtc_direct_send(self, stream: int,body: typing.List[int]) -> None:
+        raise NotImplementedError
+    def webrtc_direct_tick(self, ) -> typing.Optional[int]:
         raise NotImplementedError
     def wifi_direct_fast_link_ended(self, link_id: str,reason: str) -> None:
         raise NotImplementedError
@@ -14379,6 +14731,126 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def webrtc_direct_close(self, ) -> None:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def webrtc_direct_close_stream(self, stream: int) -> None:
+        
+        _UniffiFfiConverterUInt64.check_lower(stream)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterUInt64.lower(stream),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def webrtc_direct_datagram_received(self, source_ip: str,source_port: int,data: typing.List[int]) -> None:
+        
+        _UniffiFfiConverterString.check_lower(source_ip)
+
+        _UniffiFfiConverterUInt16.check_lower(source_port)
+
+        _UniffiFfiConverterSequenceUInt8.check_lower(data)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(source_ip),
+            _UniffiFfiConverterUInt16.lower(source_port),
+            _UniffiFfiConverterSequenceUInt8.lower(data),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def webrtc_direct_next_datagram(self, ) -> typing.Optional[WebrtcDirectDatagram]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalTypeWebrtcDirectDatagram.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def webrtc_direct_next_event(self, ) -> typing.Optional[WebrtcDirectEvent]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalTypeWebrtcDirectEvent.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def webrtc_direct_open(self, local_ip: str,local_port: int) -> WebrtcDirectCode:
+        
+        _UniffiFfiConverterString.check_lower(local_ip)
+
+        _UniffiFfiConverterUInt16.check_lower(local_port)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(local_ip),
+            _UniffiFfiConverterUInt16.lower(local_port),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeWebrtcDirectCode.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def webrtc_direct_send(self, stream: int,body: typing.List[int]) -> None:
+        
+        _UniffiFfiConverterUInt64.check_lower(stream)
+
+        _UniffiFfiConverterSequenceUInt8.check_lower(body)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterUInt64.lower(stream),
+            _UniffiFfiConverterSequenceUInt8.lower(body),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def webrtc_direct_tick(self, ) -> typing.Optional[int]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalUInt32.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def wifi_direct_fast_link_ended(self, link_id: str,reason: str) -> None:
         
         _UniffiFfiConverterString.check_lower(link_id)
@@ -14624,6 +15096,7 @@ __all__ = [
     "SubscriptionRulesFallback",
     "TelemetryOs",
     "MlsVerbosity",
+    "WebrtcDirectEventKind",
     "AppState",
     "EstablishmentState",
     "MlsStorageError",
@@ -14681,6 +15154,9 @@ __all__ = [
     "TelemetryStats",
     "TransportConfig",
     "TransportMetrics",
+    "WebrtcDirectCode",
+    "WebrtcDirectDatagram",
+    "WebrtcDirectEvent",
     "WifiDirectMessage",
     "derive_address",
     "parse_invite",

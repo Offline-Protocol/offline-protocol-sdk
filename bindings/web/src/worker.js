@@ -256,8 +256,11 @@ const handlers = {
     flush();
     return address;
   },
-  openLink() {
-    const link = engine.openLink();
+  // `expect`: the address the link's preamble must prove (a dial code's
+  // `a`, W16). The engine closes a link that proves another, announcing
+  // nothing.
+  openLink({ expect } = {}) {
+    const link = expect === undefined ? engine.openLink() : engine.openLinkExpecting(expect);
     pageLinks.add(link);
     return link;
   },

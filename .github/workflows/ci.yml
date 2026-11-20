@@ -82,6 +82,7 @@ jobs:
       native_scripts: ${{ steps.gate.outputs.native_scripts }}
       swift_package: ${{ steps.gate.outputs.swift_package }}
       android_library: ${{ steps.gate.outputs.android_library }}
+      android_native: ${{ steps.gate.outputs.android_native }}
       flutter_dart: ${{ steps.gate.outputs.flutter_dart }}
       flutter_native: ${{ steps.gate.outputs.flutter_native }}
       flutter_ios: ${{ steps.gate.outputs.flutter_ios }}
@@ -114,7 +115,9 @@ jobs:
             # The crates the FFI library links, short of the FFI crate. Named
             # one by one because `offline-protocol-leaf` and
             # `offline-protocol-web` are not on the engine. A new crate edits
-            # the root Cargo.toml, which every list here already includes.
+            # the root Cargo.toml only in the commit that adds it, so it is
+            # named here too: a later change to it alone would otherwise skip
+            # every job that builds the shipped libraries.
             engine: &engine
               - *cargo
               - 'crates/offline-protocol-core/**'
@@ -127,6 +130,9 @@ jobs:
               - 'crates/offline-protocol-data/**'
               - 'crates/offline-protocol-telemetry-wire/**'
               - 'crates/offline-protocol/**'
+              # The WebRTC Direct listener, which the shipped libraries build
+              # with the `webrtc-direct` feature (ADR 0039).
+              - 'crates/offline-protocol-webrtc-direct/**'
 
             ffi: &ffi
               - *engine
@@ -217,6 +223,9 @@ jobs:
               - *engine
               - 'crates/offline-protocol-web/**'
               - 'bindings/web/**'
+              # direct.html dials this crate's example listener, and
+              # direct-code.html replays its dial-code vectors (W16).
+              - 'crates/offline-protocol-webrtc-direct/**'
               # The browser job reloads the lobby offline (W15).
               - 'examples/web-lobby/**'
               # The browser job opens the coordination example in two frames.
@@ -316,6 +325,13 @@ jobs:
               - 'scripts/pick-ios-simulator.sh'
               - 'scripts/test-swift-package.sh'
 
+            # The shipped Android library itself: the FFI crate cross-compiled
+            # as the release builds it, with the WebRTC Direct listener.
+            android_native:
+              - *ffi
+              - '.github/workflows/release.yml'
+              - 'bindings/react-native/scripts/check-elf-alignment.py'
+
             # No Rust: the library is built from the bridge sources and the
             # generated Kotlin, both under bindings/react-native/android.
             android_library:
@@ -398,7 +414,7 @@ jobs:
           for name in rust rust_tests manifests spec_vectors notices embedded \
                       mls_interop c_binding java ruby csharp web python python_wheel \
                       release_packaging rn_typecheck android_unit ios_unit \
-                      native_scripts swift_package android_library \
+                      native_scripts swift_package android_library android_native \
                       flutter_dart flutter_native flutter_ios flutter_lock; do
             value="$(decide "$name")"
             echo "$name=$value" >> "$GITHUB_OUTPUT"
@@ -571,6 +587,14 @@ jobs:
         # does not satisfy, so linting test targets fails on main today.
         run: cargo clippy --package offline-protocol --no-default-features --locked -- -D warnings
 
+      # The WebRTC Direct listener the iOS, Android and Python packages ship
+      # (ADR 0039). `webrtc-direct` is off by default and no workspace member
+      # turns it on, so the step above lints only the stub that refuses
+      # `webrtc_direct_open`, and the bridge to the listener would rot behind
+      # a `#[cfg]` that only the Swift Package job compiles, never linted.
+      - name: Clippy (WebRTC Direct)
+        run: cargo clippy --package offline-protocol-uniffi --features webrtc-direct --locked -- -D warnings
+
   docs:
     name: Rustdoc
     needs: changes
@@ -612,9 +636,11 @@ jobs:
 
       # Without the UniFFI crate, which declares its own, higher rust-version:
       # its bindgen build dependencies need 1.91 (see its Cargo.toml). It is
-      # built on stable by every other job here.
+      # built on stable by every other job here. Without the WebRTC Direct
+      # crate either: str0m 0.25 needs Rust 1.89, and no library crate
+      # depends on it.
       - name: Check workspace on MSRV
-        run: cargo check --workspace --exclude offline-protocol-uniffi --all-targets --locked
+        run: cargo check --workspace --exclude offline-protocol-uniffi --exclude offline-protocol-webrtc-direct --all-targets --locked
 
       # The UniFFI crate on its own declared floor. Every other job builds it
       # on stable, so without this step its `rust-version` could fall behind
@@ -857,6 +883,17 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+      # The FFI crate's WebRTC Direct tests (`tests::webrtc_direct::with_the_feature`):
+      # a page dials the listener through the FFI, proves, carries bodies and
+      # closes. The workspace run above builds the crate without the feature,
+      # which compiles those tests out, so without this step they run nowhere.
+      # On every system in the matrix, because the listener's crypto backend
+      # follows the target (Apple's on macOS, aws-lc-rs elsewhere) and the
+      # shipped packages carry both. `--lib`: the crate builds no Rust
+      # library, so its unit tests are all the tests it has.
+      - name: Test (WebRTC Direct)
+        run: cargo test --package offline-protocol-uniffi --features webrtc-direct --lib --locked
 
       # The release profile (LTO, one codegen unit) over the sources the test
       # build above just compiled. What it adds is the profile, which moves
@@ -1276,6 +1313,8 @@ jobs:
       # entropy, OPFS store and glue work in a browser, and only a run in more
       # than one engine catches what one engine forgives (Firefox's
       # persist() waits for the user, so awaiting it hung every durable start).
+      # Then a node dialling the WebRTC Direct crate's example listener on
+      # the runner's private address, which the script builds first (W16).
       # Then the lobby example, reloaded offline from its service worker (W15).
       - name: Run the browser tests
         run: bash bindings/web/scripts/test-browser.sh
@@ -1776,7 +1815,7 @@ jobs:
             -Xcc -IGenerated \
             InternetManager.swift NostrManager.swift TransportManager.swift \
             BleManager.swift WifiDirectManager.swift PeerStreamFraming.swift \
-            PeerStreamSession.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
+            PeerStreamSession.swift WebrtcDirectListener.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
             BleHelloPolicy.swift BleMessageNotificationPolicy.swift BleWriteStallPolicy.swift BleScanPolicy.swift \
@@ -1968,8 +2007,10 @@ jobs:
           source bindings/react-native/scripts/shared/xcframework.sh
           IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)"
           export IPHONEOS_DEPLOYMENT_TARGET
+          # With the WebRTC Direct listener, as the release builds it, so the
+          # minimum-OS gate below covers what ships.
           cargo build --profile mobile --locked --target "$TARGET" \
-            --package offline-protocol-uniffi
+            --package offline-protocol-uniffi --features webrtc-direct
           ARCHIVE="target/$TARGET/mobile/liboffline_protocol_uniffi.a"
           CEILING="$IPHONEOS_DEPLOYMENT_TARGET"
           if [ "$TARGET" = aarch64-apple-ios-sim ]; then
@@ -2092,6 +2133,53 @@ jobs:
       - name: Build a minified application against the published library
         working-directory: bindings/kotlin/consumer-check
         run: gradle --no-daemon --stacktrace -PVERSION_NAME=0.0.0 :app:assembleRelease
+
+  # The one pull-request job that cross-compiles the shipped Android library.
+  # The release builds four ABIs with `--features webrtc-direct` (ADR 0039,
+  # decision 10); nothing else here does, and the Flutter build leaves the
+  # feature out, so a dependency of the listener that does not build or
+  # link for Android was found only by a release. One ABI, built exactly as
+  # the release builds it, is enough to catch that.
+  android-native:
+    name: Android Native Library
+    needs: changes
+    if: needs.changes.outputs.android_native == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-android-native
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      # The release's build step for arm64-v8a (release.yml, build-android),
+      # including the compiler cc-rs must be told about.
+      - name: Build arm64-v8a with the WebRTC Direct listener
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_TOOLCHAIN/aarch64-linux-android21-clang"
+          export AR="$NDK_TOOLCHAIN/llvm-ar"
+          export CC_aarch64_linux_android="$NDK_TOOLCHAIN/aarch64-linux-android21-clang"
+          export CXX_aarch64_linux_android="$NDK_TOOLCHAIN/aarch64-linux-android21-clang++"
+          cargo build --profile mobile --locked --target aarch64-linux-android \
+            --package offline-protocol-uniffi --no-default-features --features webrtc-direct
+          python3 bindings/react-native/scripts/check-elf-alignment.py \
+            target/aarch64-linux-android/mobile/liboffline_protocol_uniffi.so
 
   flutter-binding:
     name: Flutter Binding
@@ -2242,6 +2330,7 @@ jobs:
       - native-package-scripts
       - swift-package
       - android-library
+      - android-native
       - flutter-binding
       - flutter-binding-ios
     runs-on: ubuntu-latest

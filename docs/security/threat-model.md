@@ -1527,6 +1527,67 @@ joined by an iPhone that was handed its name, and the session is the only
 channel the two devices share. Both sides of the residual are the price of a
 link the user asked for and can see.
 
+### R35. A dial code admits whoever holds it to an open listener
+
+While a WebRTC Direct listener is open
+([ADR 0039](../adr/0039-a-browser-dials-a-native-device-from-a-code.md)),
+the device shows a code that names its private network address, a UDP port,
+its certificate's hash, its ICE username and password, and its address.
+Whoever sees the code (over a shoulder, in a photo, on a shared screen, in a
+browser's history) learns that address, and from the same network can dial
+the listener for as long as it stays open.
+
+**What a dial gets:** a stream that must prove an address with the preamble,
+which is what any device on the network already gets from the TCP
+peer-stream listener, open to the whole LAN since ADR 0027 and 0028. A
+replayed preamble
+([R16](#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier))
+labels a stream with an address its holder cannot use. The ICE password is
+not an admission control for people. It decides which datagrams make the
+listener keep state: without it, a datagram costs one integrity check, gets
+no reply, and allocates nothing, so the listener is neither a memory sink nor
+a reflector for the rest of the network. A device on the path that saw one
+of a page's checks, without the code, can only send it again, since the
+transaction id is under its integrity. From another source the listener
+drops it, so a replay cannot add a candidate to the page's dial or move its
+send path to an address of the sender's choosing; from the page's own source
+it is answered as a retransmit but never counts as consent, so replays
+cannot keep a gone page's stream alive.
+
+**A swapped code:** someone who can replace the code a person scans or
+opens can send the page to a listener of their own. The claim is in the
+same code, so they replace it too. The page is then linked to the
+attacker's address, never the device's, and MLS admits that address to
+nothing it was not invited to. As with the WebRTC codes
+([R27](#r27-a-webrtc-connection-code-is-unauthenticated-and-names-local-addresses)),
+an application should show the address the page linked to. A code cannot
+send a page off its network: the page refuses a host that is not a
+private or link-local IP literal.
+
+**The link itself:** the page checks the listener's certificate against the
+code, so a device on the path that does not hold the code cannot read or
+change the channel. Nothing relies on that, since link encryption forms no
+part of the trust argument
+([stream framing](../spec/stream-framing.md#invariants)). The listener does
+not check the page's certificate. It has nothing to compare it with, and
+the page's identity is what its preamble proves.
+
+**Availability:** a holder of the code can occupy the listener's four pending
+dials, each for at most 10 s, and its proved streams count against the
+slot's caps (sixteen streams, twelve inbound, four from one remote address).
+Because a listener keeps the newer of two dialled streams for one address,
+a holder of the code who also holds a copy of a page's preamble can replace
+that page's live stream with one it cannot use, again and again. The page
+redials, and the cost is the link, never its content.
+
+**Why it stands:** the code is the only channel a page and a device that
+have never met share, and anything a person can scan can be photographed.
+The bound is time: the certificate, password and port are fresh each time
+the application opens the listener, and closing it ends every stream and
+every use of the code. An application should open the listener when a
+person asks to link a page and close it once that page is linked. A page
+should remove the code from its address bar once it has read it.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device
@@ -1584,8 +1645,9 @@ the application says: WebSockets to the Nostr relays it names for the Nostr
 transport (`nostr: { relays }`, W12), for `NostrSignaller` (R28) and for
 `NearbyRoom` (R30); a query to the STUN server it names for `NearbyRoom`,
 which learns the network's public address; and ICE traffic to the STUN or
-TURN servers it names for `WebRtcCarrier` (R27). Web Bluetooth (R31) opens
-no network connection. With none of these, a browser node opens nothing
+TURN servers it names for `WebRtcCarrier` (R27), and UDP traffic to the one
+listener a dial code names, on the local network (R35). Web Bluetooth (R31)
+opens no network connection. With none of these, a browser node opens nothing
 beyond its own origin and the devices it links to.
 
 The bound is on the core, not on the whole SDK. The React Native bridge

@@ -1512,6 +1512,68 @@ export interface FastLinkChangedEvent extends BaseEvent {
 }
 
 /**
+ * A WebRTC Direct listener's dial code (ADR 0039), from `openWebrtcDirect`.
+ *
+ * A page that can reach this device (on the same Wi-Fi network, or, on
+ * Android, joined to the hotspot this device shares) dials it from `code`,
+ * and its stream joins the peer-stream slot like any other. Put `code`
+ * after your page's URL behind `#` (for example
+ * `https://example.app/dial#op-direct=1&...`) and show that as a QR code or
+ * text: a fragment never reaches a web server. `code` carries the listener's
+ * ICE password and admits whoever holds it for as long as the listener is
+ * open, so show it only to the people meant to dial, and never log it.
+ */
+export interface WebrtcDirectCode {
+  /** The dial code fragment, `op-direct=1&...`, without the `#`. */
+  code: string;
+  /**
+   * The private IPv4 address the listener is bound to: this device's on the
+   * Wi-Fi network, or on Android with no Wi-Fi network, its own hotspot's.
+   */
+  host: string;
+  /** The listener's UDP port. */
+  port: number;
+  /** This device's address (`off1…`), which the dialling page proves it reached. */
+  address: string;
+}
+
+/**
+ * Why the bridge closed a WebRTC Direct listener the app opened
+ * ({@link WebrtcDirectClosedEvent}):
+ *
+ * - `network`: the Wi-Fi network the listener is bound to went, or no longer
+ *   gives this device the bound address.
+ * - `hotspot` (Android): this device's own hotspot, which the listener is
+ *   bound to, went down or lost the bound address.
+ * - `socket`: the listener's socket failed.
+ * - `stopped`: the `wifiDirect` transport stopped.
+ * - `background` (iOS): the app left the foreground.
+ * - `paused` (iOS): the transport paused.
+ */
+export type WebrtcDirectClosedReason =
+  | 'network'
+  | 'hotspot'
+  | 'socket'
+  | 'stopped'
+  | 'background'
+  | 'paused';
+
+/**
+ * The bridge closed the WebRTC Direct listener the app opened (ADR 0039), for
+ * `reason`. Its code admits nothing any more and every stream a page dialled
+ * through it has ended, so stop showing the code, and call `openWebrtcDirect`
+ * again (for a new code) when the device can be dialled again.
+ *
+ * Arrives once per listener, and never for a close the app asked for:
+ * `closeWebrtcDirect()`, or an `openWebrtcDirect()` replacing the listener.
+ * Like most events it is dropped when no listener is registered for it.
+ */
+export interface WebrtcDirectClosedEvent extends BaseEvent {
+  type: 'webrtc_direct_closed';
+  reason: WebrtcDirectClosedReason;
+}
+
+/**
  * Relay promoted event
  */
 /**
@@ -3199,6 +3261,7 @@ export type ProtocolEvent =
   | MessageDecryptionFailedEvent
   | TransportSwitchedEvent
   | FastLinkChangedEvent
+  | WebrtcDirectClosedEvent
   | RelayPromotedEvent
   | RelayDemotedEvent
   | RelayDemotedBatteryEvent

@@ -159,9 +159,10 @@ for i in "${!ABIS[@]}"; do
   echo "Building for $abi ($target)..."
   
   # Without the C binding: a cdylib exports every C symbol, so the dispatcher
-  # behind them could not be stripped (the `capi` feature in the crate).
+  # behind them could not be stripped (the `capi` feature in the crate). With
+  # the WebRTC Direct listener (ADR 0039, decision 10), on aws-lc-rs.
   cargo build --profile mobile --target "$target" --package offline-protocol-uniffi \
-    --no-default-features
+    --no-default-features --features webrtc-direct
   
   # Create output directory for this ABI
   mkdir -p "$OUTPUT_DIR/$abi"

@@ -16,6 +16,11 @@ mod build_profile_tests;
 #[cfg(feature = "capi")]
 pub mod capi;
 mod host_log;
+mod webrtc_direct;
+
+pub use webrtc_direct::{
+    WebrtcDirectCode, WebrtcDirectDatagram, WebrtcDirectEvent, WebrtcDirectEventKind,
+};
 
 use offline_protocol::{
     AppState as CoreAppState, CustodyConfig as CoreCustodyConfig, CustodyStats as CoreCustodyStats,
@@ -2792,6 +2797,10 @@ pub struct OfflineProtocol {
     /// and any host object that refers to this instance, still exists.
     /// Taken after [`Self::inner`], never before it.
     file_stores: Mutex<FileStoreState>,
+    /// The WebRTC Direct listener slot (ADR 0039). Its own lock, never held
+    /// while [`Self::inner`] is taken: `webrtc_direct_open` reads the
+    /// identity before taking it.
+    webrtc_direct: webrtc_direct::WebrtcDirect,
 }
 
 /// The transport callbacks an app registered, kept so they can be re-applied
@@ -2949,6 +2958,7 @@ impl OfflineProtocol {
             },
             transport_callbacks: Arc::new(RwLock::new(TransportCallbacks::default())),
             file_stores: Mutex::new(FileStoreState::default()),
+            webrtc_direct: webrtc_direct::WebrtcDirect::new(),
         })
     }
 
@@ -8028,6 +8038,74 @@ impl OfflineProtocol {
         }
     }
 
+    /// Opens a WebRTC Direct listener on the platform's socket and returns
+    /// its dial code (ADR 0039). See the interface definition for the
+    /// platform's half of the contract.
+    ///
+    /// # Errors
+    ///
+    /// [`ProtocolError::InvalidState`] from a library built without the
+    /// `webrtc-direct` feature, [`ProtocolError::MlsNotInitialized`] before
+    /// `initialize_mls`, [`ProtocolError::InvalidArgument`] for an address a
+    /// code cannot name, and [`ProtocolError::TransportError`] when no
+    /// certificate or credentials could be made.
+    pub fn webrtc_direct_open(
+        &self,
+        local_ip: String,
+        local_port: u16,
+    ) -> Result<WebrtcDirectCode, ProtocolError> {
+        self.webrtc_direct.open(&local_ip, local_port, || {
+            let address = self
+                .local_address()
+                .ok_or(ProtocolError::MlsNotInitialized)?;
+            let preamble = self.identity_assertion(Vec::new())?;
+            Ok(webrtc_direct::Identity { address, preamble })
+        })
+    }
+
+    /// Closes the WebRTC Direct listener; `Closed` events follow for its
+    /// proved streams.
+    pub fn webrtc_direct_close(&self) {
+        self.webrtc_direct.close();
+    }
+
+    /// One datagram the listener's socket received.
+    pub fn webrtc_direct_datagram_received(
+        &self,
+        source_ip: String,
+        source_port: u16,
+        data: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        self.webrtc_direct
+            .datagram_received(&source_ip, source_port, &data)
+    }
+
+    /// The next datagram to send from the listener's socket.
+    pub fn webrtc_direct_next_datagram(&self) -> Option<WebrtcDirectDatagram> {
+        self.webrtc_direct.next_datagram()
+    }
+
+    /// The next listener event.
+    pub fn webrtc_direct_next_event(&self) -> Option<WebrtcDirectEvent> {
+        self.webrtc_direct.next_event()
+    }
+
+    /// Sends one message body on a proved stream.
+    pub fn webrtc_direct_send(&self, stream: u64, body: Vec<u8>) -> Result<(), ProtocolError> {
+        self.webrtc_direct.send(stream, &body)
+    }
+
+    /// Ends one stream.
+    pub fn webrtc_direct_close_stream(&self, stream: u64) {
+        self.webrtc_direct.close_stream(stream);
+    }
+
+    /// Fires the listener's due timers; milliseconds until the next call is
+    /// needed, or `None` when nothing is timed.
+    pub fn webrtc_direct_tick(&self) -> Option<u32> {
+        self.webrtc_direct.tick()
+    }
+
     /// Unblock a previously blocked user.
     pub fn unblock_user(&self, user_id: String) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
@@ -8961,6 +9039,7 @@ mod tests {
     mod csharp_bridge_guards;
     mod file_stores;
     mod flutter_bridge_guards;
+    mod webrtc_direct;
 
     use super::*;
     use std::collections::HashMap;
@@ -21602,6 +21681,337 @@ mod tests {
         }
     }
 
+    /// Every peer-stream manager that holds streams a page dialled to its
+    /// WebRTC Direct listener keeps the newer of two for one address, and
+    /// the existing stream against a stream of the other kind.
+    ///
+    /// Only the page dials, so the lower-address rule has no race to settle
+    /// here, and under it a listener whose address is the lower would keep
+    /// the older dialled stream: a page that reloaded, or came back after a
+    /// Wi-Fi drop, would be refused until the dead stream's consent ran out,
+    /// up to 15 s, while the page (which keeps its first link and closed
+    /// the old one) waits on a stream the listener will not hold. Nothing
+    /// fails on either side; the page just cannot reconnect. A hand-mirrored
+    /// policy (docs/bridges C5, ADR 0039 decision 6, the stream framing
+    /// chapter's "What a receiver owes"), pinned as the lines the rule is
+    /// made of. A manager that gains a listener adds its row here.
+    #[test]
+    fn every_peer_stream_manager_keeps_the_newer_dialled_stream() {
+        let python_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/python/offline_protocol_sdk/peer_stream_manager.py");
+        let python = std::fs::read_to_string(&python_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", python_path.display()));
+
+        // The Kotlin sources are read with comments dropped and whitespace
+        // collapsed (`rn_source_code_only`), so their lines are one-spaced.
+        let links =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt");
+        let sockets =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt");
+        // The Swift sources likewise.
+        let swift_links = rn_source_code_only("ios/PeerStreamFraming.swift");
+        let swift_session = rn_source_code_only("ios/PeerStreamSession.swift");
+        let swift_manager = rn_source_code_only("ios/WifiDirectManager.swift");
+
+        let managers: [(&str, &str, &[&str]); 6] = [
+            (
+                "bindings/python/offline_protocol_sdk/peer_stream_manager.py",
+                &python,
+                &[
+                    // A TCP stream and a dialled one say which they are.
+                    "class _Stream:\n    \"\"\"One stream, both directions, and what it has proved.\"\"\"\n\n    #: A TCP stream: this host or the peer may have opened it.\n    dialled = False",
+                    "    #: Only a page dials a listener (ADR 0039).\n    dialled = True",
+                    // The rule, ahead of the lower-address tie-break.
+                    "        if new.dialled or older.dialled:\n            return new.dialled and older.dialled\n        local = self.local_address",
+                    // Both kinds go through it, from one table.
+                    "if not self._new_stream_wins(stream, older, derived):",
+                    "            self._streams.add(stream)\n            if self._hold(stream, address):",
+                ],
+            ),
+            (
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt",
+                &links,
+                &[
+                    // The rule, ahead of the lower-address tie-break.
+                    "val held = byAddress[address] \
+                     if (held != null && (dialled || held in dialledHandles)) { \
+                     if (!(dialled && held in dialledHandles)) { \
+                     return Announcement(firstForAddress = false, superseded = null, refused = true) } \
+                     } else if (byAddress.containsKey(address) &&",
+                    "if (dialled) dialledHandles.add(handle)",
+                ],
+            ),
+            (
+                "bindings/react-native/android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt",
+                &sockets,
+                &[
+                    // A TCP stream and a dialled one say which they are.
+                    "open val dialled: Boolean get() = false",
+                    "override val dialled: Boolean get() = true",
+                    // Both kinds go through it, from one table.
+                    "val announcement = links.announce(stream, address, outbound, local, stream.dialled)",
+                    "!announce(held, address, outbound = false) ->",
+                    // The caps leave out the dialled stream about to be superseded.
+                    "val replacing = links.handleFor(address)?.takeIf { it.dialled }",
+                ],
+            ),
+            (
+                "bindings/react-native/ios/PeerStreamFraming.swift",
+                &swift_links,
+                &[
+                    // The rule, ahead of the lower-address tie-break.
+                    "if let held = byAddress[address], dialled || dialledHandles.contains(held) { \
+                     if !(dialled && dialledHandles.contains(held)) { \
+                     return Announcement(firstForAddress: false, superseded: nil, refused: true) } \
+                     } else if byAddress[address] != nil,",
+                    "if dialled { dialledHandles.insert(handle) }",
+                ],
+            ),
+            (
+                "bindings/react-native/ios/PeerStreamSession.swift",
+                &swift_session,
+                &[
+                    // Both kinds go through it, from one table.
+                    "localAddress: host.peerStreamLocalAddress(), dialled: isDialled(handle))",
+                    "take(.announce(address), from: handle, link, host) return !link.refused",
+                    // The caps leave out the dialled stream about to be superseded.
+                    "let replacing = links.handle(for: address).flatMap { isDialled($0) ? $0 : nil } \
+                     guard admits(replacing) else {",
+                ],
+            ),
+            (
+                "bindings/react-native/ios/WifiDirectManager.swift",
+                &swift_manager,
+                &[
+                    // A TCP stream and a dialled one say which they are.
+                    "var dialled: Bool { false }",
+                    "override var dialled: Bool { true }",
+                    "isOutbound: { $0.outbound }, isDialled: { $0.dialled }",
+                    // Into the one table, under the inbound caps.
+                    "let held = peers.dialProved(row, address: address) { replacing in \
+                     PeerStreamDialPolicy.admitsDialled(",
+                ],
+            ),
+        ];
+        for (path, code, needed) in managers {
+            for line in needed {
+                assert!(
+                    code.contains(line),
+                    "{path}: of two dialled streams for one address the newer must win, and \
+                     against a stream of the other kind the existing one stays, in the one \
+                     stream table. Expected to find:\n  {line}"
+                );
+            }
+        }
+    }
+
+    /// An open WebRTC Direct listener holds the Android stream layer up, and
+    /// closing it reports the layer only after its streams were reported lost.
+    ///
+    /// A phone sharing its hotspot, on no Wi-Fi network and with Wi-Fi P2P
+    /// off, has neither carrier up. A page dialled its listener there and
+    /// proved its address, the phone counted it nearby, and no MLS session
+    /// ever formed: the core holds a link usable only while the layer is up
+    /// (stream framing, "Position among the transports"), and the layer was
+    /// reported for P2P and the LAN alone. On a Wi-Fi network the LAN held it
+    /// up and hid it. `PeerStreamLayerTest` pins the rule and the order in
+    /// `PeerStreamLayer`; these are the manager lines that feed it, which no
+    /// JVM test reaches. iOS and Python report the layer up from start to
+    /// stop, so a listener open while they run is always under an up layer.
+    #[test]
+    fn android_webrtc_direct_listener_holds_the_stream_layer_up() {
+        let manager =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        for line in [
+            // The listener is one of the things the layer is up for.
+            "carriers = { PeerStreamLayer.Carriers(p2p = p2pUp, lan = lanUp, listener = webrtc != null) },",
+            // Reported before the code is returned, also when the open fails,
+            // and after a listener whose Wi-Fi network went while it opened
+            // was closed again, or that a close overtook.
+            "try { val listener = openWebrtcDirectListener(choice, wifi?.first, onClosed) \
+             confinement.runSync { confirmWebrtcDirectOpened(listener) }?.let { refusal ->",
+            "while it opened\") } finally { confinement.runSync { reportLayer() } }",
+            // Every close reports after its streams ended, on the transport thread.
+            "fun closeWebrtcDirect(): Boolean = confinement.runSync { \
+             layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } } }",
+            "layer.afterEnding { synchronized(webrtcLock) { if (webrtc === only) closeWebrtcDirectLocked(reason) } }",
+        ] {
+            assert!(
+                manager.contains(line),
+                "WifiDirectManager.kt: an open WebRTC Direct listener must hold the stream layer \
+                 up, reported on the transport thread after its streams were reported lost. \
+                 Expected to find:\n  {line}"
+            );
+        }
+    }
+
+    /// The application hears, once and with a reason, every close of its
+    /// WebRTC Direct listener it did not ask for, on both platforms.
+    ///
+    /// The bridges closed the listener themselves (the Wi-Fi network or the
+    /// hotspot went, the socket failed, the transport stopped or paused, the
+    /// application left the foreground) and said so only in a diagnostic,
+    /// so an application kept showing a code whose listener was gone and
+    /// every page that dialled it timed out with nothing to say why. Each
+    /// listener reports a close that names a reason once, and one that names
+    /// none (the application's own, or an open replacing it) not at all:
+    /// `WebrtcDirectListenerTest` and `WebrtcDirectListenerTests` pin that.
+    /// These are the lines that feed it, which no JVM or Swift test reaches:
+    /// each close path names its reason, the application's own close and
+    /// the replacing open name none, and the module turns the report into
+    /// the event. The reason tokens are the TypeScript union, both platforms
+    /// together.
+    #[test]
+    fn every_bridge_close_of_a_webrtc_direct_listener_reaches_the_application() {
+        use std::collections::BTreeSet;
+
+        let types = rn_source_code_only("src/types.ts");
+        let union: BTreeSet<String> = types
+            .split_once("export type WebrtcDirectClosedReason =")
+            .expect("types.ts must declare WebrtcDirectClosedReason")
+            .1
+            .split_once(';')
+            .expect("unterminated WebrtcDirectClosedReason")
+            .0
+            .split('|')
+            .map(|member| member.trim().trim_matches('\'').to_string())
+            .filter(|member| !member.is_empty())
+            .collect();
+        assert!(
+            types.contains(
+                "export interface WebrtcDirectClosedEvent extends BaseEvent { \
+                 type: 'webrtc_direct_closed'; reason: WebrtcDirectClosedReason; }"
+            ),
+            "types.ts must declare WebrtcDirectClosedEvent with its tag and reason"
+        );
+
+        let kotlin_listener = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/WebrtcDirectListener.kt",
+        );
+        let kotlin_manager =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let kotlin_module = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        let swift_listener = rn_source_code_only("ios/WebrtcDirectListener.swift");
+        let swift_manager = rn_source_code_only("ios/WifiDirectManager.swift");
+        let swift_module = rn_source_code_only("ios/OfflineProtocolModule.swift");
+
+        // The tokens each platform declares, by the constant that names them.
+        let declared = |source: &str, prefix: &str| -> Vec<(String, String)> {
+            source
+                .split(prefix)
+                .skip(1)
+                .filter_map(|rest| {
+                    let (name, rest) = rest.split_once(" = \"")?;
+                    let (value, _) = rest.split_once('"')?;
+                    Some((name.to_string(), value.to_string()))
+                })
+                .filter(|(name, _)| name != "EVENT_TYPE" && name != "EventType")
+                .collect()
+        };
+        let kotlin = declared(&kotlin_listener, "const val CLOSED_");
+        let swift = declared(&swift_listener, "static let closed");
+        assert!(
+            kotlin.len() >= 4 && swift.len() >= 5,
+            "a token scan matched nothing"
+        );
+        let both: BTreeSet<String> = kotlin
+            .iter()
+            .chain(swift.iter())
+            .map(|(_, value)| value.clone())
+            .collect();
+        assert_eq!(
+            both, union,
+            "the reasons the bridges report must be exactly types.ts WebrtcDirectClosedReason"
+        );
+        for (name, value) in &kotlin {
+            assert!(
+                kotlin_manager.contains(&format!("WebrtcDirectListener.CLOSED_{name}")),
+                "WifiDirectManager.kt never closes a listener for `{value}`"
+            );
+        }
+        for (name, value) in &swift {
+            assert!(
+                swift_manager.contains(&format!("WebrtcDirectListener.closed{name}")),
+                "WifiDirectManager.swift never closes a listener for `{value}`"
+            );
+        }
+        assert!(
+            kotlin_listener.contains("const val CLOSED_EVENT_TYPE = \"webrtc_direct_closed\"")
+                && swift_listener.contains("static let closedEventType = \"webrtc_direct_closed\""),
+            "both listeners must name the tag types.ts declares"
+        );
+
+        for (path, code, needed) in [
+            (
+                "WifiDirectManager.kt",
+                &kotlin_manager,
+                &[
+                    "synchronized(webrtcLock) { closeWebrtcDirectLocked(WebrtcDirectListener.CLOSED_STOPPED) }",
+                    "closeWebrtcDirect(listener, WebrtcDirectListener.CLOSED_HOTSPOT)",
+                    "transportHandler.post { closeWebrtcDirect(lost, WebrtcDirectListener.CLOSED_SOCKET) }",
+                    "closeWebrtcDirectLocked(WebrtcDirectListener.CLOSED_NETWORK)",
+                    // The listener carries the application's report, and is
+                    // told the reason, or none.
+                    "WebrtcDirectListener(webrtcEngine, webrtcSink, ::emitDiagnostic, onClosed) { lost ->",
+                    "listener.close(reason) sockets.closeDials()",
+                    // The application's own close and the replacing open name
+                    // none; an open the transport's stop overtook reports the
+                    // listener it replaced as stopped, since the stop found
+                    // that one still in place.
+                    "layer.afterEnding { synchronized(webrtcLock) { closeWebrtcDirectLocked() } }",
+                    "if (previous != null) previous.replacedBy { listener.open(socket) } else listener.open(socket)",
+                    "previous?.retire(WebrtcDirectListener.CLOSED_STOPPED)",
+                    "if (previous != null) { previous.retire() sockets.closeDials() }",
+                ][..],
+            ),
+            (
+                "OfflineProtocolModule.kt",
+                &kotlin_module,
+                &[
+                    "manager.openWebrtcDirect { reason -> emitWebrtcDirectClosedEvent(reason) }",
+                    "sendEvent(EVENT_NAME, eventParams(WebrtcDirectListener.closedEventJson(reason)))",
+                ][..],
+            ),
+            (
+                "WifiDirectManager.swift",
+                &swift_manager,
+                &[
+                    "closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedStopped)",
+                    "closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedPaused)",
+                    "self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedSocket)",
+                    "self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedNetwork)",
+                    "self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedBackground)",
+                    "onClosed: onClosed, onSocketLost:",
+                    "listener.close(reason: reason) for row in dialled.values { endDialled(row) }",
+                    // The application's own close and the replacing open name none.
+                    "onLinkQueueSync { closed = closeWebrtcDirectOnLinkQueue() }",
+                    "if let previous = webrtc { retireWebrtcDirectOnLinkQueue(previous) } webrtc = listener",
+                    "previous.retire() for row in dialled.values { endDialled(row) }",
+                ][..],
+            ),
+            (
+                "OfflineProtocolModule.swift",
+                &swift_module,
+                &[
+                    "manager.openWebrtcDirect(onClosed: { [weak self] reason in \
+                     self?.emitWebrtcDirectClosedEvent(reason: reason) })",
+                    "body: [\"eventJson\": WebrtcDirectListener.closedEventJson(reason: reason)]",
+                ][..],
+            ),
+        ] {
+            for line in needed {
+                assert!(
+                    code.contains(line),
+                    "{path}: every close of a WebRTC Direct listener the application did not ask \
+                     for must reach it once as `webrtc_direct_closed` with its reason. Expected \
+                     to find:\n  {line}"
+                );
+            }
+        }
+    }
+
     /// A peer-stream redial ladder starts over only after a stream that
     /// carried its peer (a body after the preamble, or the address held
     /// through the keepalive window), on iOS and Android alike.
@@ -21778,7 +22188,8 @@ mod tests {
                     "case .announce(let address): \
                      guard sendPreambleIfNeeded(handle, link) else { return } \
                      let announcement = links.announce( handle, address: address, \
-                     outbound: isOutbound(handle), localAddress: host.peerStreamLocalAddress())",
+                     outbound: isOutbound(handle), localAddress: host.peerStreamLocalAddress(), \
+                     dialled: isDialled(handle))",
                     // The losing kind of a duplicate announces nothing and
                     // reports nothing: the held stream keeps the address.
                     "if announcement.refused { link.refused = true disconnect(handle)",
@@ -21796,6 +22207,12 @@ mod tests {
                 ][..],
                 &[
                     "return try verifyIdentityAssertion(assertion: [UInt8](assertion))",
+                    // A dialled stream's address is the one the listener's
+                    // verifier derived (ADR 0039), never a claimed one, and
+                    // it is announced through the same path.
+                    "case .proved: return .proved( stream: event.stream, address: event.address ?? \"\",",
+                    "let held = peers.dialProved(row, address: address) {",
+                    "take(.announce(address), from: handle, link, host)",
                     "return Data(try protocolInstance.identityAssertion(signedData: []))",
                     "switch PeerStreamFraming.unframe(message, \
                      preamble: link.preamble.awaitingPreamble)",
@@ -21826,9 +22243,16 @@ mod tests {
                 &[
                     "is PeerStreamPreamble.Outcome.Announce -> outcome.address",
                     "if (!announce(stream, address, outbound)) {",
-                    "PeerStreamDialPolicy.admitsInbound(host, inboundHosts, reserved, limits)",
-                    "val announcement = links.announce(stream, address, outbound, local) \
+                    "PeerStreamDialPolicy.admitsInbound(host, hosts, open, limits)",
+                    "val announcement = links.announce(stream, address, outbound, local, stream.dialled) \
                      if (announcement.refused) {",
+                    // A dialled stream's address is the one the listener's
+                    // verifier derived (ADR 0039), never a claimed one.
+                    "WebrtcDirectEventKind.PROVED -> WebrtcDirectListener.Event.Proved( \
+                     stream, event.address ?: \"\",",
+                    "sockets.dialProved(listener, stream, address, remoteIp, \
+                     accepting = { state == TransportState.RUNNING })",
+                    "!announce(held, address, outbound = false) ->",
                     "if (!deliver(stream, address, body)) {",
                     "links.remove(stream)?.let { address -> try { host.peerDisconnected(address)",
                     "if (announcement.firstForAddress) { try { host.peerConnected(address)",
@@ -21923,9 +22347,11 @@ mod tests {
         // that survived a restart, and a reconnect then met state that said
         // its preamble was already sent.
         assert!(
-            ios_manager
-                .contains("static func == (lhs: Stream, rhs: Stream) -> Bool { lhs === rhs }"),
-            "ios/WifiDirectManager.swift: a Stream must compare by identity"
+            ios_manager.contains("static func == (lhs: Held, rhs: Held) -> Bool { lhs === rhs }")
+                && ios_manager.contains("private final class Stream: Held {")
+                && ios_manager.contains("private final class DialledStream: Held {"),
+            "ios/WifiDirectManager.swift: a stream table row (Held, and Stream and DialledStream \
+             under it) must compare by identity"
         );
         // A service-instance record (`sid`) is never a peer hint: the stream
         // chapter's MUST, which the Python browser already keeps. Taking one

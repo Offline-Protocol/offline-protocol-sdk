@@ -10,6 +10,7 @@
 
 import Foundation
 import Network
+import UIKit
 // Scoped: NetworkExtension also exports a legacy `NWEndpoint`, which would make
 // every use of Network's ambiguous in this file.
 import class NetworkExtension.NEHotspotConfiguration
@@ -51,6 +52,12 @@ import let NetworkExtension.NEHotspotConfigurationErrorDomain
 /// connect, and no body reaches the core after its loss report. The core
 /// re-adds a neighbour on any inbound body, so that ordering is what keeps a
 /// reported-lost peer lost.
+///
+/// A third source of streams is a page that dialled this device's WebRTC
+/// Direct listener (`openWebrtcDirect`, ADR 0039): `WebrtcDirectListener`
+/// runs its socket and the engine's listener on `linkQueue` too, and each
+/// stream it proves is a row in the same table, under the same caps and the
+/// same one-stream-per-address rule (docs/bridges/swift.md S10).
 public class WifiDirectManager: NSObject, TransportManager {
 
     // MARK: - TransportManager Protocol
@@ -120,15 +127,40 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// Each stream from its first frame to its end: the preamble, the
     /// framing, one announced stream per address. Set once in `init`, before
     /// any callback can arrive, and never reassigned.
-    private var peers: PeerStreamSession<Stream>!
+    private var peers: PeerStreamSession<Held>!
 
-    /// One TCP stream. A new one per connection and never reused, so no state
-    /// from an earlier stream can be mistaken for this one's.
-    private final class Stream: Hashable {
-        let connection: NWConnection
+    /// One row in the stream table, of either kind: a TCP stream, or a stream
+    /// a page dialled to the WebRTC Direct listener. A new object per stream,
+    /// compared by identity and never by a value a later stream could share,
+    /// so no state from an earlier stream can be mistaken for this one's.
+    private class Held: Hashable {
         /// Whether this device opened it, which decides which of two streams
         /// for one address is kept.
         let outbound: Bool
+
+        init(outbound: Bool) {
+            self.outbound = outbound
+        }
+
+        /// The remote host an inbound stream came from, for the per-host
+        /// bound; nil if unknown (unknowns share one bound).
+        var remoteHost: String? { nil }
+
+        /// A stream a page dialled to the listener, which `PeerStreamLinks`
+        /// orders apart.
+        var dialled: Bool { false }
+
+        /// Ends the transport under the row. The end's bookkeeping is the
+        /// owner's (`end(_:)`, `endDialled(_:)`).
+        func abort() {}
+
+        static func == (lhs: Held, rhs: Held) -> Bool { lhs === rhs }
+        func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
+    }
+
+    /// One TCP stream.
+    private final class Stream: Held {
+        let connection: NWConnection
         /// The address an outbound stream was dialed toward, for the redial.
         let dialed: String?
         let reader = PeerStreamReader()
@@ -148,18 +180,62 @@ public class WifiDirectManager: NSObject, TransportManager {
 
         init(connection: NWConnection, outbound: Bool, dialed: String?) {
             self.connection = connection
-            self.outbound = outbound
             self.dialed = dialed
+            super.init(outbound: outbound)
         }
 
-        static func == (lhs: Stream, rhs: Stream) -> Bool { lhs === rhs }
-        func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
+        override var remoteHost: String? { WifiDirectManager.host(of: connection) }
+
+        /// Its `.cancelled` then ends it.
+        override func abort() {
+            connection.cancel()
+        }
+    }
+
+    /// A stream a page dialled to the WebRTC Direct listener (ADR 0039). The
+    /// listener owns the channel, its framing and its writer, so the row
+    /// holds only the listener's id for it. Inbound, from the address the
+    /// page's first check came from.
+    private final class DialledStream: Held {
+        let id: UInt64
+        let remoteIp: String
+        private weak var listener: WebrtcDirectListener?
+        /// The listener ended it, or was told to: it is never told twice.
+        private var ended = false
+
+        init(id: UInt64, remoteIp: String, listener: WebrtcDirectListener) {
+            self.id = id
+            self.remoteIp = remoteIp
+            self.listener = listener
+            super.init(outbound: false)
+        }
+
+        override var remoteHost: String? { remoteIp }
+        override var dialled: Bool { true }
+
+        func endedByListener() {
+            ended = true
+        }
+
+        /// One body; the listener frames it. Throws when it is refused.
+        func send(_ body: Data) throws {
+            guard !ended, let listener = listener else { throw TransportError.notRunning }
+            try listener.send(stream: id, body: body)
+        }
+
+        /// Its `closed` then ends it, and finds nothing to report.
+        override func abort() {
+            guard !ended else { return }
+            ended = true
+            listener?.closeStream(id)
+        }
     }
 
     // linkQueue only, all of it.
     private var listener: NWListener?
     private var browser: NWBrowser?
-    private var streams = Set<Stream>()
+    /// Every open row, of both kinds: what the caps count.
+    private var streams = Set<Held>()
     /// The endpoint each advertised address is reachable at, while it is.
     private var adverts: [String: NWEndpoint] = [:]
     /// Records whose dial was answered by a peer that did not prove the
@@ -176,6 +252,13 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// `wifiDirect.fastLink` (ADR 0038). Set before `start()`, which
     /// declares it with the roles.
     var fastLinkMode: FastLinkMode = .any
+    /// The WebRTC Direct listener a page dials, between `openWebrtcDirect`
+    /// and its close, what closes it when the Wi-Fi network or the
+    /// foreground goes, and its held streams by the listener's id.
+    private var webrtc: WebrtcDirectListener?
+    private var webrtcPath: NWPathMonitor?
+    private var webrtcBackground: NSObjectProtocol?
+    private var dialled: [UInt64: DialledStream] = [:]
 
     /// Guards [_state] and [_isPaused], which the lifecycle writes from the
     /// bridge queue and the send path reads from any thread. Everything
@@ -217,22 +300,26 @@ public class WifiDirectManager: NSObject, TransportManager {
         self.deviceId = deviceId
         super.init()
         linkQueue.setSpecific(key: Self.linkQueueKey, value: true)
-        peers = PeerStreamSession<Stream>(
+        peers = PeerStreamSession<Held>(
             host: self,
             preambleTimeout: PREAMBLE_TIMEOUT,
-            send: { [weak self] frame, stream in
-                guard let self = self, self.write(frame, to: stream) else {
+            send: { [weak self] frame, held in
+                // Only a TCP stream sends a preamble through here: the
+                // listener sends ours on a dialled one.
+                guard let self = self, let stream = held as? Stream,
+                      self.write(frame, to: stream) else {
                     throw TransportError.notRunning
                 }
             },
-            disconnect: { stream in
-                // Its `.cancelled` then ends it, and finds nothing to report.
-                stream.connection.cancel()
+            disconnect: { held in
+                // Its end then finds nothing to report.
+                held.abort()
             },
             schedule: { [weak self] delay, block in
                 self?.linkQueue.asyncAfter(deadline: .now() + delay, execute: block)
             },
-            isOutbound: { $0.outbound }
+            isOutbound: { $0.outbound },
+            isDialled: { $0.dialled }
         )
     }
 
@@ -341,7 +428,10 @@ public class WifiDirectManager: NSObject, TransportManager {
 
             old.listener?.cancel()
             old.browser?.cancel()
-            old.streams.forEach { $0.connection.cancel() }
+            old.streams.forEach { $0.abort() }
+            // Its streams were forgotten and reported lost above, so the
+            // `closed` it reports for each finds nothing.
+            closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedStopped)
         }
 
         try? protocolInstance.wifiDirectStatusChanged(isConnected: false)
@@ -362,6 +452,10 @@ public class WifiDirectManager: NSObject, TransportManager {
             // so, lets the host end its half at once rather than when
             // keepalive notices, about 40 s later.
             endFastLink(reason: "background")
+            // A WebRTC Direct listener lives only in the foreground (ADR 0039
+            // decision 8): suspended, its socket answers no page, and its
+            // streams would wait out their consent instead of ending now.
+            closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedPaused)
         }
     }
 
@@ -419,7 +513,7 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// core's answer and this lookup; the body is dropped and the core's
     /// acknowledgement and retry cover it.
     private func sendMessage(recipientId: String, data: Data) {
-        guard let frame = PeerStreamFraming.frame(data) else {
+        guard !data.isEmpty, data.count <= PeerStreamFraming.maxBodyBytes else {
             emitDiagnostic("error", "Peer-stream body dropped: outside the frame bounds", context: [
                 "recipientId": recipientId,
                 "dataSize": data.count
@@ -428,13 +522,28 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
         linkQueue.async { [weak self] in
             guard let self = self else { return }
-            guard let stream = self.peers.handle(for: recipientId), self.streams.contains(stream) else {
+            guard let held = self.peers.handle(for: recipientId), self.streams.contains(held) else {
                 self.emitDiagnostic("warning", "Peer-stream body dropped: no stream holds the recipient", context: [
                     "recipientId": recipientId,
                     "dataSize": data.count
                 ])
                 return
             }
+            if let row = held as? DialledStream {
+                // The listener frames it. A refusal is a stream that ended or
+                // has more than its bound queued, which leaves it open: the
+                // body is dropped and the core retries it.
+                do {
+                    try row.send(data)
+                } catch {
+                    self.emitDiagnostic("warning", "Peer-stream body dropped: the dialled stream refused it", context: [
+                        "recipientId": recipientId,
+                        "dataSize": data.count
+                    ])
+                }
+                return
+            }
+            guard let stream = held as? Stream, let frame = PeerStreamFraming.frame(data) else { return }
             if !self.write(frame, to: stream) {
                 self.emitDiagnostic("warning", "Peer-stream body dropped: the peer is not reading", context: [
                     "recipientId": recipientId,
@@ -494,7 +603,7 @@ public class WifiDirectManager: NSObject, TransportManager {
             guard let self = self, let listener = listener, listener === self.listener,
                   PeerStreamDialPolicy.admitsInbound(
                       from: Self.host(of: connection),
-                      inboundFrom: self.streams.filter { !$0.outbound }.map { Self.host(of: $0.connection) },
+                      inboundFrom: self.streams.filter { !$0.outbound }.map { $0.remoteHost },
                       open: self.streams.count) else {
                 connection.cancel()
                 return
@@ -887,6 +996,351 @@ extension WifiDirectManager: PeerStreamHost {
 
 extension WifiDirectManager: @unchecked Sendable {}
 
+// MARK: - WebRTC Direct (ADR 0039)
+
+/// A page on the same Wi-Fi network dials this device from a code it shows,
+/// with no internet and no server (ADR 0039, docs/spec/stream-framing.md,
+/// "Dialling a listener from a browser"). The listener itself (admission by
+/// authenticated check only, DTLS, the channel, the preamble and the framing)
+/// is the engine's `webrtc_direct_*`; `WebrtcDirectListener` moves datagrams
+/// and ticks for it on `linkQueue`, and this extension decides what the core
+/// hears: each stream it proves is a row in the one stream table
+/// (docs/bridges/swift.md S10).
+extension WifiDirectManager: WebrtcDirectSink {
+    /// How long `openWebrtcDirect` waits for Network framework to name the
+    /// Wi-Fi interface. Its first path update is immediate on a device.
+    private static let WEBRTC_DIRECT_PATH_WAIT: TimeInterval = 2.0
+
+    /// The engine's `webrtc_direct_*` methods, adapted to the listener's
+    /// types. The generated `WebrtcDirectCode` prints every field, the
+    /// password-carrying fragment among them, so it goes no further than
+    /// this adapter.
+    private struct WebrtcDirectFfi: WebrtcDirectEngine {
+        let engine: OfflineProtocol
+
+        func open(localIp: String, localPort: UInt16) throws -> WebrtcDirectDialCode {
+            let code = try engine.webrtcDirectOpen(localIp: localIp, localPort: localPort)
+            return WebrtcDirectDialCode(
+                fragment: code.fragment, host: code.host, port: code.port, address: code.address)
+        }
+
+        func close() {
+            engine.webrtcDirectClose()
+        }
+
+        func datagramReceived(sourceIp: String, sourcePort: UInt16, data: Data) throws {
+            try engine.webrtcDirectDatagramReceived(
+                sourceIp: sourceIp, sourcePort: sourcePort, data: [UInt8](data))
+        }
+
+        func nextDatagram() -> WebrtcDirectListener.Datagram? {
+            guard let datagram = engine.webrtcDirectNextDatagram() else { return nil }
+            return WebrtcDirectListener.Datagram(
+                destinationIp: datagram.destinationIp,
+                destinationPort: datagram.destinationPort,
+                data: Data(datagram.data))
+        }
+
+        func nextEvent() -> WebrtcDirectListener.Event? {
+            guard let event = engine.webrtcDirectNextEvent() else { return nil }
+            switch event.kind {
+            case .proved:
+                // The address the listener's verifier derived, never a
+                // claimed one.
+                return .proved(
+                    stream: event.stream, address: event.address ?? "",
+                    remoteIp: event.remoteIp ?? "", remotePort: event.remotePort ?? 0)
+            case .body:
+                return .body(stream: event.stream, data: Data(event.data ?? []))
+            case .closed:
+                return .closed(stream: event.stream)
+            }
+        }
+
+        func send(stream: UInt64, body: Data) throws {
+            try engine.webrtcDirectSend(stream: stream, body: [UInt8](body))
+        }
+
+        func closeStream(_ stream: UInt64) {
+            engine.webrtcDirectCloseStream(stream: stream)
+        }
+
+        func tick() -> UInt32? {
+            engine.webrtcDirectTick()
+        }
+    }
+
+    /// Opens a WebRTC Direct listener on this device's private IPv4 address
+    /// on the Wi-Fi network, and returns its dial code. A page on that
+    /// network dials the code, and each dial that proves an address is a
+    /// peer stream in this transport's one table. A listener already open is
+    /// replaced once the new one is open, its streams reported lost and its
+    /// code dead: the socket, certificate and credentials are fresh on every
+    /// open. An open that throws leaves the listener already open as it was.
+    ///
+    /// The socket is bound to the Wi-Fi interface Network framework reports
+    /// and to its one address, never a wildcard, so nothing it sends follows
+    /// the default route onto cellular. The listener lives only in the
+    /// foreground (ADR 0039 decision 8): it closes when the application
+    /// leaves it, when the transport pauses or stops, and when the Wi-Fi
+    /// network goes or loses the bound address, since its code then names an
+    /// address no page can reach. Each of those closes, and a socket failure,
+    /// is reported to `onClosed` once with its reason
+    /// (`WebrtcDirectListener.closedNetwork` and the others); a close of the
+    /// application's own (`closeWebrtcDirect`) or by the next open is not.
+    ///
+    /// Blocks for the open (a certificate is made), so never on the main
+    /// thread. Throws when the transport is not running or paused, the
+    /// application is in the background (the observer that closes a
+    /// listener on that edge would never fire for one opened there), the
+    /// device is on no Wi-Fi network with a private address, or the engine refuses
+    /// (no identity yet, or a library built without `webrtc-direct`). The
+    /// code's fragment carries the ICE password: the caller shows it, and
+    /// nothing here logs it.
+    public func openWebrtcDirect(
+        onClosed: @escaping (_ reason: String) -> Void = { _ in }
+    ) throws -> WebrtcDirectDialCode {
+        guard state == .running else { throw TransportError.notRunning }
+        guard !isPaused, !Self.applicationInBackground() else {
+            throw TransportError.invalidState("a WebRTC Direct listener opens only in the foreground")
+        }
+        guard let wifi = Self.wifiInterfaceName() else {
+            throw TransportError.notAvailable("not on a Wi-Fi network: a WebRTC Direct listener binds the network's own address")
+        }
+        guard let ip = WebrtcDirectListener.listenAddress(
+            WebrtcDirectListener.ipv4Addresses(ofInterface: wifi)) else {
+            throw TransportError.notAvailable("the Wi-Fi network gave this device no private IPv4 address")
+        }
+        var result: Result<(WebrtcDirectDialCode, WebrtcDirectListener), Error> =
+            .failure(TransportError.notRunning)
+        onLinkQueueSync {
+            // Stopped or paused while the interface was looked up; either
+            // closed the listener open then, with its reason.
+            guard state == .running, !isPaused else { return }
+            do {
+                // Bound before the listener open now is touched, so a
+                // failure here leaves it, and its code, as it was.
+                let socket = try WebrtcDirectListener.bindSocket(ip: ip, interface: wifi)
+                let listener = WebrtcDirectListener(
+                    engine: WebrtcDirectFfi(engine: protocolInstance),
+                    sink: self,
+                    queue: linkQueue,
+                    diagnostic: { [weak self] level, message, context in
+                        self?.emitDiagnostic(level, message, context: context)
+                    },
+                    onClosed: onClosed,
+                    onSocketLost: { [weak self] lost in
+                        // Its streams end now rather than at their consent
+                        // timeout.
+                        self?.linkQueue.async { [weak self] in
+                            guard let self = self, self.webrtc === lost else { return }
+                            self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedSocket)
+                        }
+                    })
+                // The engine replaces its listener only once the new one
+                // exists (`webrtc_direct_open`), so a refused open leaves the
+                // one open now, and its code, live. Its `closed` events for
+                // the replaced listener's streams come out of this open's
+                // pump and end them through the table; this queue is the
+                // one every listener runs on, so the replaced one cannot
+                // reach the engine between the swap and its retirement.
+                let code = try listener.open(socket: socket)
+                if let previous = webrtc {
+                    retireWebrtcDirectOnLinkQueue(previous)
+                }
+                webrtc = listener
+                watchWebrtcDirect(listener, interface: wifi, ip: ip)
+                result = .success((code, listener))
+            } catch {
+                result = .failure(error)
+            }
+        }
+        let (code, listener) = try result.get()
+        // The foreground was read before the interface lookup (up to two
+        // seconds) and the open, and the background observer exists only
+        // from the open on, so a move to the background in between was
+        // posted to no one. Read again now that the observer is in place
+        // (never on linkQueue: this takes the main queue). Closed as the
+        // application's own close, so the throw is its one signal.
+        if Self.applicationInBackground() {
+            onLinkQueueSync {
+                if webrtc === listener { closeWebrtcDirectOnLinkQueue() }
+            }
+            throw TransportError.invalidState("the application left the foreground while the WebRTC Direct listener opened")
+        }
+        // A stop, a network loss, the observer or another open may have
+        // closed or replaced this listener since it was published, and told
+        // the application so. A code is returned only for a listener still
+        // open, so the application never holds a code after its close.
+        var live = false
+        onLinkQueueSync { live = webrtc === listener && listener.isOpen }
+        guard live else {
+            throw TransportError.invalidState("the WebRTC Direct listener closed while it opened")
+        }
+        return code
+    }
+
+    /// Closes the WebRTC Direct listener, if one is open. Every dialled
+    /// stream ends and each that held an address is reported lost once; the
+    /// code admits nothing again. False when none was open.
+    @discardableResult
+    public func closeWebrtcDirect() -> Bool {
+        var closed = false
+        onLinkQueueSync { closed = closeWebrtcDirectOnLinkQueue() }
+        return closed
+    }
+
+    /// Closes the listener, if one is open. `reason` is nil for a close the
+    /// application asked for (its own, or an open replacing the listener),
+    /// and otherwise the token the listener reports to the application once.
+    /// linkQueue only.
+    @discardableResult
+    fileprivate func closeWebrtcDirectOnLinkQueue(reason: String? = nil) -> Bool {
+        webrtcPath?.cancel()
+        webrtcPath = nil
+        if let observer = webrtcBackground {
+            NotificationCenter.default.removeObserver(observer)
+            webrtcBackground = nil
+        }
+        guard let listener = webrtc else { return false }
+        webrtc = nil
+        // The listener reports every proved stream closed, and each ends
+        // through the table as it is; any it did not report end here.
+        listener.close(reason: reason)
+        for row in dialled.values { endDialled(row) }
+        return true
+    }
+
+    /// Retires `previous`, which the engine just replaced with a new
+    /// listener: its watchers stop, its socket closes without a close of the
+    /// engine's (now the new) listener, and any of its streams the engine
+    /// did not report closed end here. linkQueue only.
+    private func retireWebrtcDirectOnLinkQueue(_ previous: WebrtcDirectListener) {
+        webrtcPath?.cancel()
+        webrtcPath = nil
+        if let observer = webrtcBackground {
+            NotificationCenter.default.removeObserver(observer)
+            webrtcBackground = nil
+        }
+        webrtc = nil
+        previous.retire()
+        for row in dialled.values { endDialled(row) }
+    }
+
+    /// Whether the application is in the background now. `applicationState`
+    /// is main-thread only, and an open runs off it.
+    private static func applicationInBackground() -> Bool {
+        if Thread.isMainThread {
+            return UIApplication.shared.applicationState == .background
+        }
+        return DispatchQueue.main.sync { UIApplication.shared.applicationState == .background }
+    }
+
+    /// The name of the interface Network framework reports as Wi-Fi, or nil.
+    /// Waits on a queue of its own, so never call it on `linkQueue`'s.
+    private static func wifiInterfaceName() -> String? {
+        let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
+        let queue = DispatchQueue(label: "com.offlineprotocol.wifidirect.webrtc-path")
+        let looked = DispatchSemaphore(value: 0)
+        var name: String?
+        monitor.pathUpdateHandler = { path in
+            name = path.availableInterfaces.first { $0.type == .wifi }?.name
+            looked.signal()
+        }
+        monitor.start(queue: queue)
+        _ = looked.wait(timeout: .now() + WEBRTC_DIRECT_PATH_WAIT)
+        monitor.cancel()
+        return queue.sync { name }
+    }
+
+    /// Closes `listener` when the Wi-Fi interface goes or loses the bound
+    /// address, and when the application leaves the foreground. linkQueue
+    /// only.
+    private func watchWebrtcDirect(_ listener: WebrtcDirectListener, interface: String, ip: String) {
+        let path = NWPathMonitor(requiredInterfaceType: .wifi)
+        path.pathUpdateHandler = { [weak self, weak listener] update in
+            guard let self = self, let listener = listener, self.webrtc === listener else { return }
+            let held = update.availableInterfaces.contains { $0.type == .wifi && $0.name == interface }
+                && WebrtcDirectListener.ipv4Addresses(ofInterface: interface).contains(ip)
+            guard !held else { return }
+            self.emitDiagnostic("info", "WebRTC Direct listener closed: the Wi-Fi network went", context: [:])
+            self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedNetwork)
+        }
+        path.start(queue: linkQueue)
+        webrtcPath = path
+        webrtcBackground = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
+        ) { [weak self, weak listener] _ in
+            self?.linkQueue.async { [weak self, weak listener] in
+                guard let self = self, let listener = listener, self.webrtc === listener else { return }
+                self.emitDiagnostic("info", "WebRTC Direct listener closed: the application left the foreground", context: [:])
+                self.closeWebrtcDirectOnLinkQueue(reason: WebrtcDirectListener.closedBackground)
+            }
+        }
+    }
+
+    /// Ends a dialled row: out of the table, reported lost if and only if it
+    /// still held its address (one refused or superseded is already out),
+    /// and the listener told unless it reported the end. linkQueue only.
+    private func endDialled(_ row: DialledStream) {
+        guard dialled[row.id] === row else { return }
+        dialled.removeValue(forKey: row.id)
+        streams.remove(row)
+        peers.ended(row)
+        row.abort()
+    }
+
+    // MARK: WebrtcDirectSink (linkQueue, inside the listener's pump)
+
+    /// A page's preamble verified on the listener's `stream`: the caps, then
+    /// the one-stream-per-address rule, then the announcement, as for a TCP
+    /// stream (`PeerStreamSession.dialProved`). A refused stream is closed
+    /// through the listener, nothing is announced, and neither this table nor
+    /// the session keeps it, so its later `Closed` finds nothing to end.
+    func webrtcDirectProved(
+        _ listener: WebrtcDirectListener, stream id: UInt64, address: String, remoteIp: String
+    ) {
+        let row = DialledStream(id: id, remoteIp: remoteIp, listener: listener)
+        let refusal: String?
+        if webrtc !== listener || state != .running {
+            refusal = "not running"
+        } else if address.isEmpty {
+            refusal = "no address"
+        } else {
+            refusal = nil
+        }
+        if let refusal = refusal {
+            emitDiagnostic("warning", "Dialled stream refused", context: [
+                "stream": id,
+                "reason": refusal,
+            ])
+            row.abort()
+            return
+        }
+        let held = peers.dialProved(row, address: address) { replacing in
+            PeerStreamDialPolicy.admitsDialled(
+                from: remoteIp,
+                inboundFrom: streams.filter { !$0.outbound }.map { $0.remoteHost },
+                open: streams.count,
+                replacing: replacing?.remoteHost)
+        }
+        guard held else { return }
+        streams.insert(row)
+        dialled[id] = row
+    }
+
+    func webrtcDirectBody(_ listener: WebrtcDirectListener, stream id: UInt64, data: Data) {
+        guard let row = dialled[id] else { return }
+        peers.dialReceived(data, from: row)
+    }
+
+    func webrtcDirectClosed(_ listener: WebrtcDirectListener, stream id: UInt64) {
+        guard let row = dialled[id] else { return }
+        row.endedByListener()
+        endDialled(row)
+    }
+}
+
 // MARK: - Fast link (ADR 0038)
 
 /// A network this device joins for one peer, from an offer that arrived
@@ -1141,11 +1595,14 @@ extension WifiDirectManager {
         }
     }
 
-    /// Whether `stream` positively runs over a network other than the
+    /// Whether `held` positively runs over a network other than the
     /// group: its path has a gateway, and none is the offered host. That is
     /// a phone the join left on its own Wi-Fi. A path with no gateway yet is
-    /// a link-local one on the group before DHCP, and counts as on it.
-    private static func runsOffTheGroup(_ stream: Stream, host: String) -> Bool {
+    /// a link-local one on the group before DHCP, and counts as on it. A
+    /// stream a page dialled to the WebRTC Direct listener is never the
+    /// link's: the listener is bound to the network the phone was on.
+    private static func runsOffTheGroup(_ held: Held, host: String) -> Bool {
+        guard let stream = held as? Stream else { return true }
         guard let path = stream.connection.currentPath, !path.gateways.isEmpty else {
             return false
         }

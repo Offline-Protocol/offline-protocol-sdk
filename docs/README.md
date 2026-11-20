@@ -155,6 +155,7 @@ in here fails **silently** when violated.
 | [Nostr Transport](../examples/nostr-example/README.md) | Minimal React Native app using the Nostr relay transport |
 | [Mesh between tabs](../examples/web-two-tabs/README.md) | Browser tabs, each a full node in a Web Worker, messaging end-to-end encrypted with no server |
 | [Pong lobby](../examples/web-lobby/README.md) | A two-player Pong game between browsers over WebRTC, with no server |
+| [Dial a native app](../examples/web-direct/README.md) | A page that links to a native app on the same Wi-Fi network from the WebRTC Direct code the app shows |
 | [Java](../examples/java-app/README.md) | Two devices in one JVM pairing, messaging, sending a file and forming a group over the Java binding |
 | [Ruby](../examples/ruby-app/README.md) | The same two devices in one Ruby process, over the Ruby binding |
 | `cargo run -p offline-protocol --example replicated_notes` | Replicated documents: open a store, edit, persist, reopen |

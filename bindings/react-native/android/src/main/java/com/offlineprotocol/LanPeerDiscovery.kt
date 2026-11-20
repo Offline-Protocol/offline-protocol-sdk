@@ -165,6 +165,16 @@ internal class LanPeerDiscovery(
         if (network != null) discover()
     }
 
+    /**
+     * The Wi-Fi network followed now and its properties, or null when there
+     * is none: what a WebRTC Direct listener binds its socket to.
+     */
+    fun wifiNetwork(): Pair<Network, LinkProperties>? {
+        val network = networks.current ?: return null
+        val properties = networks.currentProperties ?: return null
+        return network to properties
+    }
+
     // MARK: - The network
 
     /** A matching network came up or changed; [NetworkChoice] decides what it means. */

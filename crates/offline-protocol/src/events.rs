@@ -4827,6 +4827,9 @@ mod tests {
             // Android only: the mesh foreground service's notification has no
             // iOS counterpart.
             "mesh_stopped_by_user",
+            // The bridge closed the WebRTC Direct listener the application
+            // opened: the listener's socket and lifecycle are the bridge's.
+            "webrtc_direct_closed",
         ]
         .map(str::to_string)
         .into();

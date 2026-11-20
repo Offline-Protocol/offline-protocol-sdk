@@ -133,6 +133,9 @@ internal class NetworkChoice<N : Any, P : Any> {
     var current: N? = null
         private set
 
+    /** The followed network's properties, as last reported. */
+    val currentProperties: P? get() = current?.let { candidates[it] }
+
     fun up(network: N, properties: P): Up {
         candidates[network] = properties
         return when (current) {

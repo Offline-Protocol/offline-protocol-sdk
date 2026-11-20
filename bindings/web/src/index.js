@@ -1,6 +1,7 @@
 // The page's handle on a node running in its own worker.
 
 export { WebRtcCarrier } from "./webrtc.js";
+export { parseDirectCode } from "./direct-code.js";
 export { NostrSignaller } from "./nostr-signal.js";
 export { NearbyRoom, publicAddress } from "./nearby.js";
 export { BluetoothCarrier } from "./bluetooth.js";
@@ -360,8 +361,13 @@ export class OfflineNode extends EventTarget {
   /// Registers a carrier the page opened toward one other node. `send` puts
   /// bytes on it, in order; `close` closes it. Resolves to the link id the
   /// carrier reports its bytes and its close under.
-  async openLink({ send, close }) {
-    const link = await this.#call("openLink");
+  ///
+  /// `expect`, for a carrier opened toward a known address (a dial code's,
+  /// W16), is the address the other end's preamble must prove. The engine
+  /// closes a link whose preamble proves anyone else and announces nothing,
+  /// and refuses an `expect` that is not a canonical address.
+  async openLink({ send, close, expect }) {
+    const link = await this.#call("openLink", expect === undefined ? undefined : { expect });
     this.#links.set(link, { send, close });
     return link;
   }

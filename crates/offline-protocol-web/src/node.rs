@@ -340,6 +340,22 @@ impl Node {
     /// on it. The page sends whatever [`Self::next_outbound`] yields for the
     /// returned id. Refused once [`MAX_LINKS`] are open.
     pub fn open_link(&mut self) -> NodeResult<LinkId> {
+        self.open_link_expecting(None)
+    }
+
+    /// [`Self::open_link`] for a carrier opened toward a known address, such
+    /// as a dial code's `a` (W16): the preamble must prove exactly
+    /// `expected`, and a link whose preamble proves anyone else closes
+    /// before anything is announced. Without the claim, a page that opened a
+    /// swapped code would announce whoever answered. `None` is
+    /// [`Self::open_link`]. A claim that is not a canonical address is
+    /// refused here, since no preamble could ever match it.
+    pub fn open_link_expecting(&mut self, expected: Option<&str>) -> NodeResult<LinkId> {
+        if let Some(expected) = expected {
+            expected
+                .parse::<offline_protocol_core::Address>()
+                .map_err(|e| NodeError(format!("the expected address is not canonical: {e}")))?;
+        }
         if self.links.len() >= MAX_LINKS {
             return Err(NodeError(format!("{MAX_LINKS} links are already open")));
         }
@@ -354,10 +370,14 @@ impl Node {
                 .ok()
                 .map(|address| address.to_string())
         });
+        let reader = match expected {
+            Some(address) => PeerStreamReader::new(verify).expecting(address),
+            None => PeerStreamReader::new(verify),
+        };
         self.links.insert(
             link,
             Link {
-                reader: PeerStreamReader::new(verify),
+                reader,
                 peer: None,
                 opened: Instant::now(),
             },

@@ -163,6 +163,17 @@ class PeerStreamPreamble(
  * a replayer can end a real stream when its copy is the winning kind; it
  * cannot use the stream it gets.
  *
+ * A stream a page dialled to the WebRTC Direct listener (ADR 0039) is the
+ * exception, decided ahead of that rule: of two dialled streams for one
+ * address the newer wins, and against a stream of the other kind the existing
+ * one stays, in both directions. Only the page dials, so there is no race for
+ * the lower-address rule to settle, and under it a device whose address is
+ * the lower would keep the older dialled stream: a page that reloaded, or came
+ * back after a Wi-Fi drop, would be refused until the dead stream's consent
+ * ran out (up to 15 s) while it waited on a stream this device will not hold.
+ * Python's `_new_stream_wins` holds the same rule, and
+ * `every_peer_stream_manager_keeps_the_newer_dialled_stream` pins both.
+ *
  * Thread-safe, and deliberately knows nothing of the protocol: the send path
  * reads it from a thread the core may be calling from while holding its global
  * mutex, so nothing may ever call the core while holding this lock.
@@ -209,10 +220,17 @@ class PeerStreamLinks<H : Any> {
 
     private val byAddress = HashMap<String, H>()
     private val byHandle = HashMap<H, String>()
+    /** The held streams a page dialled, which [announce] orders apart. */
+    private val dialledHandles = HashSet<H>()
 
+    /**
+     * [dialled] is whether [handle] is a stream a page dialled to the WebRTC
+     * Direct listener; see the class comment for why it is ordered apart.
+     */
     @Synchronized
     fun announce(
         handle: H, address: String, outbound: Boolean, localAddress: String?,
+        dialled: Boolean = false,
     ): Announcement<H> {
         if (byHandle.containsKey(handle)) {
             // A stream proves one address, once. A second announcement, for
@@ -222,14 +240,25 @@ class PeerStreamLinks<H : Any> {
             // host app down, and this one behave the same.
             return Announcement(firstForAddress = false, superseded = null)
         }
-        if (byAddress.containsKey(address) &&
+        val held = byAddress[address]
+        if (held != null && (dialled || held in dialledHandles)) {
+            // A dialled stream on either side: the newer of two dialled
+            // streams wins, and against the other kind the held one stays.
+            if (!(dialled && held in dialledHandles)) {
+                return Announcement(firstForAddress = false, superseded = null, refused = true)
+            }
+        } else if (byAddress.containsKey(address) &&
             !newStreamWins(outbound, localAddress, address)
         ) {
             return Announcement(firstForAddress = false, superseded = null, refused = true)
         }
         val older = byAddress.put(address, handle)
         byHandle[handle] = address
-        if (older != null) byHandle.remove(older)
+        if (dialled) dialledHandles.add(handle)
+        if (older != null) {
+            byHandle.remove(older)
+            dialledHandles.remove(older)
+        }
         return Announcement(firstForAddress = older == null, superseded = older)
     }
 
@@ -240,6 +269,7 @@ class PeerStreamLinks<H : Any> {
      */
     @Synchronized
     fun remove(handle: H): String? {
+        dialledHandles.remove(handle)
         val address = byHandle.remove(handle) ?: return null
         if (byAddress[address] == handle) byAddress.remove(address)
         return address
@@ -251,6 +281,7 @@ class PeerStreamLinks<H : Any> {
         val live = byAddress.map { (address, handle) -> handle to address }
         byAddress.clear()
         byHandle.clear()
+        dialledHandles.clear()
         return live
     }
 

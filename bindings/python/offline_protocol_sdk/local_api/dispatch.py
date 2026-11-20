@@ -264,6 +264,16 @@ PLATFORM: frozenset[str] = frozenset(
         "wifi_direct_next_fast_link_directive",
         "wifi_direct_fast_link_hosting",
         "wifi_direct_fast_link_ended",
+        # WebRTC Direct listener (ADR 0039): the socket's feed and drain, and
+        # a code that carries the listener's ICE password
+        "webrtc_direct_open",
+        "webrtc_direct_close",
+        "webrtc_direct_datagram_received",
+        "webrtc_direct_next_datagram",
+        "webrtc_direct_next_event",
+        "webrtc_direct_send",
+        "webrtc_direct_close_stream",
+        "webrtc_direct_tick",
         # gateway client
         "reticulum_status_changed",
         "reticulum_message_received",

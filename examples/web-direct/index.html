@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>starting</title>
+<style>
+  :root { --bg: #fafaf7; --fg: #1c1c1a; --muted: #6b6b66; --line: #ddddd6; --accent: #2457c5; --bad: #b3261e; --good: #1e7b34; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --accent: #7aa2ff; --bad: #ff8a80; --good: #7bd88f; }
+  }
+  body { margin: 0; padding: 20px 16px; background: var(--bg); color: var(--fg);
+         font: 16px/1.5 system-ui, sans-serif; max-width: 720px; margin-inline: auto; }
+  h1 { font-size: 18px; margin: 0 0 12px; color: var(--muted); }
+  #state { font-size: 40px; font-weight: 600; line-height: 1.2; margin: 0 0 8px; overflow-wrap: anywhere; }
+  #state.linked { color: var(--good); }
+  #state.failed { color: var(--bad); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 20px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  code { font-size: 14px; }
+  section { border-top: 1px solid var(--line); padding: 14px 0; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; margin: 0; }
+  input, button { font: inherit; padding: 8px 12px; border: 1px solid var(--line);
+                  border-radius: 6px; background: transparent; color: inherit; }
+  input { flex: 1 1 200px; min-width: 0; }
+  button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  ul { list-style: none; padding: 0; margin: 0; font-size: 18px; }
+  li { padding: 4px 0; overflow-wrap: anywhere; }
+  .meta { color: var(--muted); font-size: 14px; }
+</style>
+<h1>WebRTC Direct dial</h1>
+<div id="state" role="status">starting</div>
+<dl>
+  <dt>Dial</dt><dd id="dial-ms">-</dd>
+  <dt>Linked to</dt><dd><code id="address">-</code></dd>
+  <dt>Proved</dt><dd id="proved">no</dd>
+  <dt>Session</dt><dd id="session">not ready</dd>
+  <dt>Last send</dt><dd id="last-send">-</dd>
+  <dt>256 KiB</dt><dd id="big-send">-</dd>
+</dl>
+
+<section>
+  <form id="send">
+    <input id="text" placeholder="Message" autocomplete="off" required aria-label="Message">
+    <button id="send-button" disabled>Send</button>
+  </form>
+  <p><button id="big" disabled>Send 256 KiB</button> <button id="again" disabled>Dial again</button></p>
+</section>
+<section>
+  <form id="paste">
+    <input id="code" placeholder="Paste a dial code or its URL" autocomplete="off" required aria-label="Dial code">
+    <button>Dial</button>
+  </form>
+</section>
+<section>
+  <div class="meta">Received</div>
+  <ul id="received"></ul>
+</section>
+<section class="meta">
+  This page: <code id="me">-</code>
+</section>
+
+<script type="module">
+// A page that dials a native app's WebRTC Direct listener from the code the
+// app shows (docs/bridges/web.md, W16). The code arrives in this page's
+// fragment (a QR code's URL) or by paste. The page reads it, removes it from
+// the address bar at once (it admits dials while the listener is open), and
+// keeps it in memory only, for "Dial again".
+//
+// The key results are also in document.title, and in window.demo, so a
+// driver can read them without the DOM.
+import { OfflineNode, WebRtcCarrier } from "../../bindings/web/src/index.js";
+
+const $ = (id) => document.getElementById(id);
+const BIG = 256 * 1024;
+// The app id must equal the native app's: examples/react-native-app uses
+// "offline-messenger". `?app=` names another.
+const appId = new URLSearchParams(location.search).get("app") || "offline-messenger";
+
+const demo = (window.demo = {
+  state: "starting",
+  reason: null,
+  dialMs: null,
+  address: null,
+  proved: false,
+  session: false,
+  lastDeliveredMs: null,
+  bigDeliveredMs: null,
+  received: [],
+});
+const pending = new Map(); // message id -> { started, big }
+let code = null; // the dial code, in memory only
+let current = null; // the connection the last dial made
+
+function render() {
+  const state = demo.state === "failed" ? `failed: ${demo.reason}` : demo.state;
+  $("state").textContent = state;
+  $("state").className = demo.state;
+  $("dial-ms").textContent = demo.dialMs === null ? "-" : `${demo.dialMs} ms`;
+  $("address").textContent = demo.address ?? "-";
+  $("proved").textContent = demo.proved ? "yes" : "no";
+  $("session").textContent = demo.session ? "ready" : "not ready";
+  const linked = demo.state === "linked";
+  for (const id of ["send-button", "big"]) $(id).disabled = !linked;
+  $("again").disabled = code === null || demo.state === "dialling";
+  const parts = [demo.state === "linked" ? `linked ${demo.dialMs}ms` : state];
+  if (demo.session) parts.push("session");
+  if (demo.lastDeliveredMs !== null) parts.push(`delivered ${demo.lastDeliveredMs}ms`);
+  if (demo.bigDeliveredMs !== null) parts.push(`big ${demo.bigDeliveredMs}ms`);
+  if (demo.received.length) parts.push(`received ${demo.received.length}`);
+  document.title = parts.join(" | ");
+}
+
+function fail(reason) {
+  demo.state = "failed";
+  demo.reason = reason;
+  render();
+}
+
+let node;
+try {
+  node = await OfflineNode.start({ appId, storage: "memory", tabs: false });
+} catch (error) {
+  fail(`start: ${error.message}`);
+  throw error;
+}
+$("me").textContent = node.address;
+node.addEventListener("fatal", ({ detail }) => fail(`node ended: ${JSON.stringify(detail)}`));
+const carrier = new WebRtcCarrier(node);
+
+carrier.addEventListener("connection", ({ detail }) => {
+  // Only the last dial's connection: a dial again closes the one before it.
+  if (detail.connection !== current) return;
+  if (detail.state === "closed" || detail.state === "disconnected") demo.state = detail.state;
+  else if (detail.state === "connected") demo.state = "linked";
+  render();
+});
+node.addEventListener("neighbor_discovered", ({ detail }) => {
+  if (detail.peer_id === demo.address) demo.proved = true;
+  render();
+});
+node.addEventListener("neighbor_lost", ({ detail }) => {
+  if (detail.peer_id === demo.address) demo.proved = false;
+  render();
+});
+node.addEventListener("secure_session_established", ({ detail }) => {
+  if (detail.peer_id === demo.address) demo.session = true;
+  render();
+});
+node.addEventListener("message_received", ({ detail }) => {
+  const text = detail.content.length > 200 ? `${detail.content.slice(0, 40)}... (${detail.content.length} chars)` : detail.content;
+  demo.received.push({ sender: detail.sender, length: detail.content.length, text });
+  const item = document.createElement("li");
+  item.textContent = `${detail.sender.slice(0, 10)}: ${text}${detail.encrypted ? " (encrypted)" : ""}`;
+  $("received").prepend(item);
+  render();
+});
+node.addEventListener("message_delivered", ({ detail }) => {
+  const sent = pending.get(detail.message_id);
+  if (!sent) return;
+  pending.delete(detail.message_id);
+  const ms = Math.round(performance.now() - sent.started);
+  const line = `delivered in ${ms} ms (engine ${detail.latency_ms} ms)`;
+  if (sent.big) {
+    demo.bigDeliveredMs = ms;
+    $("big-send").textContent = line;
+  } else {
+    demo.lastDeliveredMs = ms;
+    $("last-send").textContent = `${sent.text}: ${line}`;
+  }
+  render();
+});
+node.addEventListener("message_failed", ({ detail }) => {
+  const sent = pending.get(detail.message_id);
+  if (!sent) return;
+  pending.delete(detail.message_id);
+  $(sent.big ? "big-send" : "last-send").textContent = `failed: ${detail.reason ?? "unknown"}`;
+});
+
+async function dial() {
+  current = null;
+  demo.state = "dialling";
+  demo.reason = null;
+  demo.dialMs = null;
+  render();
+  const started = performance.now();
+  try {
+    const connection = await carrier.dial(code);
+    current = connection;
+    demo.dialMs = Math.round(performance.now() - started);
+    demo.address = connection.address;
+    demo.state = "linked";
+    render();
+  } catch (error) {
+    // A refused code names its rule; a dial that did not open names its state.
+    fail(error.reason ?? error.state ?? error.message);
+  }
+}
+
+async function send(text, big) {
+  const started = performance.now();
+  try {
+    const id = await node.sendMessage(demo.address, text);
+    pending.set(id, { started, big, text });
+    $(big ? "big-send" : "last-send").textContent = big ? "sending" : `${text}: sending`;
+  } catch (error) {
+    $(big ? "big-send" : "last-send").textContent = `failed: ${error.message}`;
+  }
+}
+
+$("send").addEventListener("submit", (event) => {
+  event.preventDefault();
+  send($("text").value, false);
+  $("text").value = "";
+});
+$("big").addEventListener("click", () => send("x".repeat(BIG), true));
+$("again").addEventListener("click", () => dial());
+$("paste").addEventListener("submit", (event) => {
+  event.preventDefault();
+  code = $("code").value.trim();
+  $("code").value = "";
+  dial();
+});
+
+// The code from the fragment, then out of the address bar before anything else.
+if (location.hash.length > 1) {
+  code = location.hash;
+  history.replaceState(null, "", location.pathname + location.search);
+  dial();
+} else {
+  demo.state = "paste a code";
+  render();
+}
+addEventListener("pagehide", () => node.stop());
+</script>
+</html>

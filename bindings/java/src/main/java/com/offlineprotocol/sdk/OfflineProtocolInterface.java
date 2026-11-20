@@ -182,6 +182,14 @@ public interface OfflineProtocolInterface {
     public void updateTransportMetrics(TransportType transportType, TransportMetrics metrics) throws ProtocolException;
     public boolean verifySignature(java.util.List<java.lang.Byte> publicKey, java.util.List<java.lang.Byte> data, java.util.List<java.lang.Byte> signature) throws ProtocolException;
     public boolean verifySignatureBytes(byte[] publicKey, byte[] data, byte[] signature) throws ProtocolException;
+    public void webrtcDirectClose();
+    public void webrtcDirectCloseStream(long stream);
+    public void webrtcDirectDatagramReceived(java.lang.String sourceIp, short sourcePort, java.util.List<java.lang.Byte> data) throws ProtocolException;
+    public WebrtcDirectDatagram webrtcDirectNextDatagram();
+    public WebrtcDirectEvent webrtcDirectNextEvent();
+    public WebrtcDirectCode webrtcDirectOpen(java.lang.String localIp, short localPort) throws ProtocolException;
+    public void webrtcDirectSend(long stream, java.util.List<java.lang.Byte> body) throws ProtocolException;
+    public java.lang.Integer webrtcDirectTick();
     public void wifiDirectFastLinkEnded(java.lang.String linkId, java.lang.String reason);
     public void wifiDirectFastLinkHosting(java.lang.String linkId, java.lang.String host, short port) throws ProtocolException;
     public WifiDirectMessage wifiDirectGetNextMessage();

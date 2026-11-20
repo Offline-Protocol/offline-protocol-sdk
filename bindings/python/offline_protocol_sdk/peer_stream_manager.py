@@ -73,6 +73,19 @@ host advertises ``_offlineprotocol._tcp`` with ``txtvers=1`` and
 ``addr=<off1…>`` and browses for the same, and the ``addr`` in a record is a
 hint the preamble proves, never a name to announce.
 
+A third source is a browser. :meth:`PeerStreamManager.open_webrtc_direct`
+opens a WebRTC Direct listener (ADR 0039) on a UDP socket bound to one
+private or link-local address, and returns the dial code a page on the same
+network dials from. The listener is the FFI's ``webrtc_direct_*``: it admits
+only authenticated checks, runs the preamble and the framing itself, and
+reports each stream that proved an address. Each such stream is a row in
+the same table as the TCP streams, under the same caps and the same
+one-stream-per-address rule, with one difference the chapter fixes: of two
+*dialled* streams for one address the newer is kept, because only the page
+dials and a page that reloaded is always the newer one; against a TCP stream
+the existing one stays. The code carries the listener's ICE password, so it
+is returned to the application and never logged.
+
 The link is not encrypted by this manager. The chapter is explicit that link
 encryption forms no part of the trust argument: every message inside a frame
 authenticates itself at the layer that owns it, and a host that wants the
@@ -91,7 +104,7 @@ import socket
 from dataclasses import dataclass
 from typing import Any
 
-from .offline_protocol import verify_identity_assertion
+from .offline_protocol import WebrtcDirectEventKind, verify_identity_assertion
 from .transport_manager import TransportError, TransportManager, TransportState
 
 logger = logging.getLogger(__name__)
@@ -219,6 +232,9 @@ class PeerEntry:
 class _Stream:
     """One stream, both directions, and what it has proved."""
 
+    #: A TCP stream: this host or the peer may have opened it.
+    dialled = False
+
     __slots__ = (
         "reader",
         "writer",
@@ -278,6 +294,90 @@ class _Stream:
         #: nothing about the peer, and its bytes were already held by the
         #: core's queue.
         self.write_blocked = False
+
+
+class WebrtcDirectDialCode:
+    """A WebRTC Direct listener's dial code: ``fragment``, ``host``,
+    ``port`` and ``address``, as the core's ``WebrtcDirectCode`` gives them.
+
+    ``fragment`` carries the listener's ICE password, so ``str()`` and
+    ``repr()`` leave it out. The core's record redacts it only on the Rust
+    side; its generated Python ``__str__`` prints every field, so an
+    application logging the code (``logger.info("%s", code)``, an f-string)
+    would put the password in its log.
+    """
+
+    __slots__ = ("fragment", "host", "port", "address")
+
+    def __init__(self, fragment: str, host: str, port: int, address: str) -> None:
+        self.fragment = fragment
+        self.host = host
+        self.port = port
+        self.address = address
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, WebrtcDirectDialCode):
+            return NotImplemented
+        return (self.fragment, self.host, self.port, self.address) == (
+            other.fragment,
+            other.host,
+            other.port,
+            other.address,
+        )
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return (
+            f"WebrtcDirectDialCode(fragment=<redacted>, host={self.host!r}, "
+            f"port={self.port!r}, address={self.address!r})"
+        )
+
+    __str__ = __repr__
+
+
+class _DialledStream:
+    """A stream a page dialled to this host's WebRTC Direct listener, from
+    the moment the listener reports its preamble proved an address.
+
+    The listener owns its bytes, framing and liveness; this is its row in
+    the manager's one stream table, so the caps and the
+    one-stream-per-address rule see dialled and TCP streams together. A
+    table per kind would let a page and a TCP peer each announce the same
+    address, and the first close would report a reachable peer lost.
+    """
+
+    #: Only a page dials a listener (ADR 0039).
+    dialled = True
+    #: So every dialled stream is inbound, and counts against the per-host
+    #: bound under the address its first check came from. Counted as
+    #: outbound, a page could hold streams past the bound a host's inbound
+    #: TCP streams already used.
+    outbound = False
+    #: A dial carries no claim to compare: the address is what it proved.
+    expected = None
+    #: No writer of ours: the listener queues and writes.
+    writer_task = None
+
+    __slots__ = (
+        "stream_id",
+        "endpoint",
+        "remote_host",
+        "peer",
+        "learned",
+        "was_announced",
+        "superseded",
+    )
+
+    def __init__(self, stream_id: int, endpoint: str, remote_host: str, address: str) -> None:
+        #: The listener's id for the stream, never reused.
+        self.stream_id = stream_id
+        self.endpoint = endpoint
+        self.remote_host = remote_host
+        self.peer: str | None = None
+        self.learned: str | None = address
+        self.was_announced = False
+        self.superseded = False
 
 
 def frame(body: bytes) -> bytes:
@@ -383,6 +483,8 @@ class PeerStreamManager(TransportManager):
     """The host's peer-stream transport: a TCP listener, outbound connections
     to configured and discovered peers, the preamble exchange, and the drain
     of the core's outbound queue onto the stream that proved each recipient.
+    Once started, :meth:`open_webrtc_direct` adds a listener pages dial, and
+    its streams join the same table.
 
     Parameters
     ----------
@@ -464,6 +566,20 @@ class PeerStreamManager(TransportManager):
         #: time, and remembering it would only grow the map.
         self._refusals: dict[str, int] = {}
         self._discovery: _LanDiscovery | None = None
+        #: The WebRTC Direct listener, while one is open.
+        self._webrtc: _WebrtcDirectListener | None = None
+        #: Opens one listener at a time: two overlapping opens would each
+        #: close the other's and leave a socket no one closes.
+        self._webrtc_lock = asyncio.Lock()
+        #: Counts the application's closes. An open records it on entry and
+        #: refuses to install its listener if it moved: a close that runs
+        #: while an open is in flight finds no listener to close, and the
+        #: open would otherwise install one the application believes closed.
+        self._webrtc_closes = 0
+        #: listener stream id -> the dialled stream, from its proof until
+        #: this side closes it or the listener reports it closed. A stream
+        #: not here is not attributed: its bodies and its end are ignored.
+        self._dialled: dict[int, _DialledStream] = {}
 
         # Metrics
         self._bytes_sent = 0
@@ -511,7 +627,7 @@ class PeerStreamManager(TransportManager):
         return self._protocol.local_address()
 
     def connected_peers(self) -> list[str]:
-        """The addresses with an announced stream right now."""
+        """The addresses with an announced stream right now, TCP or dialled."""
         return list(self._by_peer)
 
     async def start(self) -> None:
@@ -604,6 +720,9 @@ class PeerStreamManager(TransportManager):
             self._discovery = None
         if self._server is not None:
             self._server.close()
+        # Every dialled stream ends with its listener, each reported lost
+        # once, before the sweep below; the code is dead from here on.
+        self.close_webrtc_direct()
         # Streams before the server's wait: since Python 3.12 `wait_closed`
         # waits for every connection handler to finish, and a handler
         # finishes only once its stream is closed.
@@ -633,7 +752,9 @@ class PeerStreamManager(TransportManager):
             "frames_dropped": self._frames_dropped,
             "connected_peers": len(self._by_peer),
             "open_streams": len(self._streams),
+            "dialled_streams": sum(1 for s in self._streams if s.dialled),
             "listen_port": self.listen_port,
+            "webrtc_direct_port": self._webrtc.port if self._webrtc is not None else None,
         }
 
     # -- inbound and outbound streams -----------------------------------------
@@ -902,6 +1023,12 @@ class PeerStreamManager(TransportManager):
                 {"endpoint": stream.endpoint, "expected": stream.expected, "derived": derived},
             )
             return False
+        return self._hold(stream, derived)
+
+    def _hold(self, stream: _Stream | _DialledStream, derived: str) -> bool:
+        """The one-announced-stream-per-address rule, then the announcement,
+        for a stream of either kind whose preamble proved ``derived``.
+        ``False`` when the stream is to be closed unannounced."""
         if derived == self.local_address:
             # Counted, so a peer entry that points at this host climbs to the
             # refusal ceiling instead of reconnecting at the ladder's pace
@@ -920,7 +1047,7 @@ class PeerStreamManager(TransportManager):
             # two of that kind the newer one. If that is this stream, it
             # takes the announcement over and the older one closes silently;
             # if not, this one closes silently. The core sees neither.
-            if not self._new_stream_wins(stream, derived):
+            if not self._new_stream_wins(stream, older, derived):
                 self._streams_refused += 1
                 self._emit_diagnostic(
                     "info", "Refusing a second stream for an announced address", {"peer": derived}
@@ -952,16 +1079,28 @@ class PeerStreamManager(TransportManager):
         self._schedule_drain()
         return True
 
-    def _new_stream_wins(self, new: _Stream, peer: str) -> bool:
-        """The tie-break both ends compute alike: the stream opened by the
-        lower of the two addresses is the one to keep.
+    def _new_stream_wins(
+        self, new: _Stream | _DialledStream, older: _Stream | _DialledStream, peer: str
+    ) -> bool:
+        """Whether ``new`` takes ``peer``'s announcement over from ``older``.
 
+        Between two TCP streams, the tie-break both ends compute alike: the
+        stream opened by the lower of the two addresses is the one to keep.
         This helps only the lower address past its own stale stream. The
         higher address's reconnect is the losing kind while the lower side
         still holds a stream it believes live, which is why every stream
         carries TCP keepalive: a dead peer's stream ends within a bound, and
         the reconnect wins from then on.
+
+        A dialled stream is the exception (ADR 0039 decision 6). Only the
+        page dials, so there is no simultaneous dial for the tie-break to
+        settle, and the newer of two dialled streams is a page that
+        reloaded or came back after a Wi-Fi drop: kept, the older would
+        refuse it until the dead stream's consent ran out, up to 15 s.
+        Against a stream of the other kind the existing one stays.
         """
+        if new.dialled or older.dialled:
+            return new.dialled and older.dialled
         local = self.local_address
         if local is None:
             # No address of our own to order by; keep what is announced.
@@ -975,30 +1114,46 @@ class PeerStreamManager(TransportManager):
         if stream.outbound:
             self._refusals[stream.endpoint] = self._refusals.get(stream.endpoint, 0) + 1
 
-    async def _close_stream(self, stream: _Stream, reason: str) -> None:
-        if stream not in self._streams:
-            return
-        self._streams.discard(stream)
-        announced = stream.peer is not None and self._by_peer.get(stream.peer) is stream
-        if announced:
-            self._by_peer.pop(stream.peer, None)
-        task = stream.writer_task
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
-        _discard_socket(stream.writer)
-        # A stream that never proved a peer was never announced, and there
-        # is nothing to report.
-        if announced:
-            try:
-                self._protocol.wifi_direct_peer_disconnected(peer_id=stream.peer)
-            except Exception:
-                logger.debug("wifi_direct_peer_disconnected failed for %s", stream.peer)
-            self._emit_diagnostic("info", "Peer lost", {"peer": stream.peer, "reason": reason})
-            self._loss.set()
-        else:
-            self._emit_diagnostic(
-                "debug", "Unannounced stream closed", {"endpoint": stream.endpoint, "reason": reason}
-            )
+    async def _close_stream(self, stream: _Stream | _DialledStream, reason: str) -> None:
+        self._end_stream(stream, reason)
+
+    def _end_stream(self, stream: _Stream | _DialledStream, reason: str) -> None:
+        """Take ``stream`` out of the table and close it, reporting its peer
+        lost if and only if the stream held the announcement. Idempotent."""
+        # Out of the dial map first: the listener's Closed for this stream,
+        # which may arrive while it is being closed below, then finds
+        # nothing and reports nothing.
+        dial_open = stream.dialled and self._dialled.pop(stream.stream_id, None) is stream
+        if stream in self._streams:
+            self._streams.discard(stream)
+            announced = stream.peer is not None and self._by_peer.get(stream.peer) is stream
+            if announced:
+                self._by_peer.pop(stream.peer, None)
+            if not stream.dialled:
+                task = stream.writer_task
+                if task is not None and task is not asyncio.current_task():
+                    task.cancel()
+                _discard_socket(stream.writer)
+            # A stream that never proved a peer was never announced, and
+            # there is nothing to report.
+            if announced:
+                try:
+                    self._protocol.wifi_direct_peer_disconnected(peer_id=stream.peer)
+                except Exception:
+                    logger.debug("wifi_direct_peer_disconnected failed for %s", stream.peer)
+                context: dict[str, Any] = {"peer": stream.peer, "reason": reason}
+                if stream.dialled:
+                    context["stream"] = stream.stream_id
+                self._emit_diagnostic("info", "Peer lost", context)
+                self._loss.set()
+            else:
+                self._emit_diagnostic(
+                    "debug",
+                    "Unannounced stream closed",
+                    {"endpoint": stream.endpoint, "reason": reason},
+                )
+        if dial_open and self._webrtc is not None:
+            self._webrtc.close_stream(stream.stream_id)
 
     async def _write_loop(self, stream: _Stream) -> None:
         """Write ``stream``'s queued frames, one at a time. A peer that takes
@@ -1082,6 +1237,9 @@ class PeerStreamManager(TransportManager):
             if message is None:
                 return
             stream = self._by_peer.get(message.recipient_id)
+            if stream is not None and stream.dialled:
+                self._send_dialled(stream, bytes(message.data))
+                continue
             if stream is None or stream.writer_task is None:
                 # The stream closed between the queue and the drain; the
                 # core's retry path re-offers the message.
@@ -1117,6 +1275,239 @@ class PeerStreamManager(TransportManager):
             stream.queued_bytes += len(data)
             stream.outbound_queue.put_nowait(data)
 
+    # -- WebRTC Direct: streams a page dialled ---------------------------------
+
+    @property
+    def webrtc_direct_code(self) -> WebrtcDirectDialCode | None:
+        """The open listener's :class:`WebrtcDirectDialCode` (``fragment``,
+        ``host``, ``port``, ``address``), or ``None`` with none open. Its
+        ``str()`` and ``repr()`` leave the fragment out.
+
+        ``fragment`` is what a page dials: show it as a QR code or text,
+        after ``#`` in a URL so it never reaches a web server. It carries
+        the listener's ICE password, so it is the application's to show
+        and this manager never logs it.
+        """
+        return self._webrtc.code if self._webrtc is not None else None
+
+    async def open_webrtc_direct(self, host: str, port: int = 0) -> str:
+        """Open a WebRTC Direct listener (ADR 0039) and return its dial code
+        fragment, ``op-direct=1&...``.
+
+        ``host`` is this machine's private or link-local IP address on the
+        network the pages are on, an IPv6 link-local one with its zone
+        (``fe80::1%en0``). The socket is bound to it and to nothing else: a
+        code names one address, and a socket on every interface would admit
+        checks from networks the code was never shown on. ``port`` 0 binds
+        a fresh port. A listener already open is replaced once the new one
+        is open: its streams are reported lost and its code dies, since the
+        certificate, credentials and port are fresh on every open. An open
+        that raises leaves the listener already open as it was (the
+        core's own rule for a refused open), except when ``port`` is that
+        listener's own port, which it must give up before the new socket
+        can bind it.
+
+        A :meth:`close_webrtc_direct` (or :meth:`stop`) called before this
+        returns wins: the new listener is closed and this raises, so a code
+        is never live after the application closed the listener.
+
+        Raises :class:`TransportError` when the transport is not running,
+        ``port`` is not a port number, the listener is closed while it
+        opens, the address cannot be bound,
+        or the core refuses it (public, loopback or wildcard addresses,
+        which no code may name, or a library built without the
+        ``webrtc-direct`` feature).
+        """
+        closes = self._webrtc_closes
+        async with self._webrtc_lock:
+            if self._state != TransportState.RUNNING:
+                raise TransportError(
+                    "start the peer-stream transport before opening a WebRTC Direct listener"
+                )
+            if not 0 <= port <= 65535:
+                raise TransportError(f"a WebRTC Direct listener binds a port from 0 to 65535, not {port}")
+            previous = self._webrtc
+            if previous is not None and port != 0 and previous.port == port:
+                # The port asked for is the open listener's own, which the
+                # new socket cannot bind while that one holds it. A
+                # transport releases its socket on the loop's next turn.
+                self._close_webrtc_listener()
+                await asyncio.sleep(0)
+            listener = _WebrtcDirectListener(self)
+            # A bind that fails leaves the open listener as it was.
+            await listener.bind(host, port)
+            if self._state != TransportState.RUNNING:
+                # Stopped while the socket was being bound.
+                listener.close()
+                raise TransportError("the peer-stream transport stopped while the listener opened")
+            if self._webrtc_closes != closes:
+                # Closed while the socket was being bound, or while this
+                # open waited for another: the application believes no code
+                # admits a dial (R35), so this one never goes live.
+                listener.close()
+                raise TransportError("the WebRTC Direct listener was closed while it opened")
+            # The core replaces its listener only once the new one exists, so
+            # a refusal here leaves the open one, and its code, live. Read
+            # again after the bind: a socket lost meanwhile closed it.
+            previous = self._webrtc
+            code = listener.start()
+            if previous is not None:
+                self._retire_webrtc_listener(previous)
+            self._webrtc = listener
+            listener.pump()
+            # The address and port, never the fragment: it carries the
+            # listener's ICE password.
+            self._emit_diagnostic(
+                "info",
+                "WebRTC Direct listener open",
+                {"host": code.host, "port": code.port, "address": code.address},
+            )
+            return str(code.fragment)
+
+    def close_webrtc_direct(self) -> None:
+        """Close the WebRTC Direct listener, if one is open. Every dialled
+        stream ends and each that held an address is reported lost once;
+        the code admits nothing again. An :meth:`open_webrtc_direct` still
+        in flight raises instead of installing its listener."""
+        self._webrtc_closes += 1
+        self._close_webrtc_listener()
+
+    def _retire_webrtc_listener(self, listener: _WebrtcDirectListener) -> None:
+        """The core replaced ``listener`` with a new one (an open
+        succeeded): its socket and timer stop and its streams end here,
+        without a ``webrtc_direct_close``, which would close the new one.
+        The core dropped what the old one still had to send, and queued a
+        ``Closed`` for each of its proved streams, which finds them gone."""
+        listener.retire()
+        self._webrtc = None
+        for stream in list(self._dialled.values()):
+            self._end_stream(stream, "listener replaced")
+        self._emit_diagnostic("info", "WebRTC Direct listener closed")
+
+    def _close_webrtc_listener(self) -> None:
+        """Close the installed listener, if any, without touching an open in
+        flight: what an open calls to replace the previous listener."""
+        listener = self._webrtc
+        if listener is None:
+            return
+        # The listener reports every proved stream closed, and each is
+        # ended through the table as it is.
+        listener.close()
+        self._webrtc = None
+        for stream in list(self._dialled.values()):
+            self._end_stream(stream, "listener closed")
+        self._emit_diagnostic("info", "WebRTC Direct listener closed")
+
+    def _on_webrtc_event(self, event: Any) -> None:
+        """One listener event: the table decides what the core hears."""
+        kind = event.kind
+        if kind is WebrtcDirectEventKind.PROVED:
+            self._on_dialled_proved(
+                int(event.stream),
+                str(event.address or ""),
+                str(event.remote_ip or ""),
+                int(event.remote_port or 0),
+            )
+        elif kind is WebrtcDirectEventKind.BODY:
+            stream = self._dialled.get(int(event.stream))
+            # Only the stream holding its address speaks for it: a refused
+            # or superseded one is out of the table, or about to be.
+            if stream is None or stream.peer is None or self._by_peer.get(stream.peer) is not stream:
+                return
+            data = event.data or []
+            self._frames_received += 1
+            self._bytes_received += LENGTH_PREFIX_LEN + len(data)
+            try:
+                self._protocol.wifi_direct_message_received(sender_id=stream.peer, data=list(data))
+            except Exception as exc:
+                self._emit_diagnostic(
+                    "error",
+                    "Error handing a frame to the core",
+                    {"peer": stream.peer, "error": str(exc)},
+                )
+        elif kind is WebrtcDirectEventKind.CLOSED:
+            # Ours to report only if it is still in the map: a stream this
+            # side closed (refused, superseded) left it then.
+            closed = self._dialled.pop(int(event.stream), None)
+            if closed is not None:
+                self._end_stream(closed, "the dial ended")
+
+    def _on_dialled_proved(
+        self, stream_id: int, address: str, remote_ip: str, remote_port: int
+    ) -> None:
+        """A page's preamble verified on a dialled stream. The caps, then
+        the same rule a TCP stream goes through."""
+        endpoint = f"[{remote_ip}]:{remote_port}" if ":" in remote_ip else f"{remote_ip}:{remote_port}"
+        stream = _DialledStream(stream_id, endpoint, remote_ip, address)
+        self._dialled[stream_id] = stream
+        older = self._by_peer.get(address)
+        # The caps count what is held once a stream this one supersedes is
+        # gone, so a page that reloads is never refused for its own old one.
+        replaced = older if older is not None and self._new_stream_wins(stream, older, address) else None
+        refusal: str | None = None
+        if self._state != TransportState.RUNNING:
+            refusal = "transport stopping"
+        elif len(self._streams) - (replaced is not None) >= self._max_streams:
+            refusal = "at capacity"
+        elif (
+            self._inbound_from(remote_ip)
+            - (replaced is not None and replaced.remote_host == remote_ip)
+            >= self._max_streams_per_host
+        ):
+            refusal = "per-host limit"
+        else:
+            self._streams.add(stream)
+            if self._hold(stream, address):
+                self._emit_diagnostic(
+                    "info",
+                    "Dialled stream proved",
+                    {
+                        "stream": stream_id,
+                        "peer": address,
+                        "remote": endpoint,
+                        "superseded": replaced.stream_id if isinstance(replaced, _DialledStream) else None,
+                    },
+                )
+                return
+            refusal = (
+                "the stream proves this host's own address"
+                if address == self.local_address
+                else "another kind of stream holds the address"
+            )
+        if refusal in ("at capacity", "per-host limit"):
+            self._streams_refused += 1
+        self._emit_diagnostic(
+            "warning",
+            "Dialled stream refused",
+            {"stream": stream_id, "peer": address, "reason": refusal},
+        )
+        self._end_stream(stream, refusal)
+
+    def _send_dialled(self, stream: _DialledStream, body: bytes) -> None:
+        """One outbound body onto the dialled stream proving its recipient.
+        The listener frames and chunks it; a refusal (a body that cannot be
+        one frame, a stream past its 8 MiB queue, which the listener leaves
+        open, as a TCP stream's writer drops a body past its bound) drops
+        it, and the retry path re-offers it."""
+        listener = self._webrtc
+        if listener is None:
+            return
+        try:
+            listener.send(stream.stream_id, body)
+        except Exception as exc:
+            self._frames_dropped += 1
+            self._emit_diagnostic(
+                "warning",
+                "WebRTC Direct refused a body",
+                {"peer": stream.peer, "error": str(exc)},
+            )
+        else:
+            self._frames_sent += 1
+            self._bytes_sent += LENGTH_PREFIX_LEN + len(body)
+        # The listener's Closed for a stream the send ended, and the
+        # datagrams the send queued, go out now.
+        listener.pump()
+
     # -- discovery hooks --------------------------------------------------------
 
     def _on_record_resolved(self, name: str, entries: list[PeerEntry]) -> None:
@@ -1135,6 +1526,252 @@ class PeerStreamManager(TransportManager):
         current stream, if any, ends. A live stream is not cut, because a
         record expiring says nothing about the stream."""
         self._retire_connector(f"dns-sd:{name}")
+
+
+class _WebrtcDirectListener(asyncio.DatagramProtocol):
+    """The platform's half of a WebRTC Direct listener: one UDP socket, the
+    clock, and the pump between them and the FFI's sans-I/O listener.
+
+    Kept apart from :class:`PeerStreamManager` because none of it is a
+    stream rule: it moves datagrams and fires timers, and hands every event
+    to the manager, whose one table decides what the core hears. The FFI's
+    contract (the ``webrtc_direct_*`` block in the UDL) is what it holds:
+
+    * every datagram the socket receives goes to the listener, unfiltered,
+      because the listener answers only an authenticated check;
+    * after every call into the listener, every datagram it queued is sent
+      and every event it queued is handled;
+    * ``webrtc_direct_tick`` runs again within the milliseconds it returned,
+      and after any other call, since a datagram or a send can bring the
+      next deadline forward.
+
+    Everything runs on the event loop, so the FFI is never entered from two
+    threads at once from here.
+    """
+
+    def __init__(self, manager: PeerStreamManager) -> None:
+        self._manager = manager
+        self._protocol = manager._protocol
+        self._loop = asyncio.get_running_loop()
+        self._transport: asyncio.DatagramTransport | None = None
+        #: The socket's IPv6 scope, added to a link-local destination: the
+        #: listener names destinations without a zone.
+        self._scope_id = 0
+        self._timer: asyncio.TimerHandle | None = None
+        self._pumping = False
+        self._again = False
+        self._closed = False
+        #: The ``WebrtcDirectCode`` the core returned. Never logged.
+        self.code: WebrtcDirectDialCode | None = None
+        self.port: int | None = None
+        self._ip_text = ""
+
+    async def bind(self, host: str, port: int) -> None:
+        """Bind the socket to ``host``. Touches nothing in the core, so a
+        failure here leaves a listener already open as it was; until
+        :meth:`start` the socket's datagrams are dropped, never handed to
+        that listener."""
+        ip_text = host.partition("%")[0]
+        try:
+            ip = ipaddress.ip_address(ip_text)
+        except ValueError as exc:
+            raise TransportError(
+                f"a WebRTC Direct listener binds an IP address literal, not {host!r}"
+            ) from exc
+        family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+        try:
+            transport, _ = await self._loop.create_datagram_endpoint(
+                lambda: self, local_addr=(host, port), family=family
+            )
+        except OSError as exc:
+            raise TransportError(f"WebRTC Direct bind on {host} failed: {exc}") from exc
+        sockname = transport.get_extra_info("sockname")
+        self.port = int(sockname[1])
+        self._ip_text = ip_text
+        if family == socket.AF_INET6 and len(sockname) >= 4:
+            self._scope_id = int(sockname[3])
+
+    def start(self) -> Any:
+        """Open the core's listener on the bound socket and return its code.
+        The core replaces a listener already open only when this one
+        opens; on a refusal the socket is closed and that one stays."""
+        try:
+            # The address without its zone, which the core refuses; the real
+            # port, never 0, because the code names it.
+            code = self._protocol.webrtc_direct_open(local_ip=self._ip_text, local_port=self.port)
+        except Exception as exc:
+            self.close()
+            raise TransportError(f"WebRTC Direct listener refused: {exc}") from exc
+        self.code = WebrtcDirectDialCode(
+            str(code.fragment), str(code.host), int(code.port), str(code.address)
+        )
+        return self.code
+
+    def retire(self) -> None:
+        """Stop the socket and timer of a listener the core already
+        replaced, without closing the core's listener (now another's)."""
+        self._closed = True
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            transport.close()
+
+    def close(self) -> None:
+        """Close the core's listener, hand its last events to the manager,
+        then close the socket."""
+        if self._closed:
+            return
+        if self.code is None:
+            # Bound but never started: the core's listener, if any, is
+            # another's.
+            self.retire()
+            return
+        self._protocol.webrtc_direct_close()
+        # The Closed events for every proved stream, and anything the
+        # close queued to send, while the socket is still open.
+        self.pump()
+        self._closed = True
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            transport.close()
+
+    def send(self, stream_id: int, body: bytes) -> None:
+        """One body on a proved stream. Raises what the core raises; the
+        caller pumps."""
+        self._protocol.webrtc_direct_send(stream=stream_id, body=list(body))
+
+    def close_stream(self, stream_id: int) -> None:
+        self._protocol.webrtc_direct_close_stream(stream=stream_id)
+        self.pump()
+
+    # -- asyncio.DatagramProtocol ---------------------------------------------
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self._transport = transport  # type: ignore[assignment]
+
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        if self._closed or self.code is None:
+            # Before start the core's listener is the one being replaced,
+            # whose socket this is not.
+            return
+        try:
+            self._protocol.webrtc_direct_datagram_received(
+                source_ip=str(addr[0]).partition("%")[0],
+                source_port=int(addr[1]),
+                data=list(data),
+            )
+        except Exception as exc:
+            # No listener (a close raced the socket) or a source that is not
+            # an address literal: about one datagram, not the socket.
+            logger.debug("WebRTC Direct datagram not taken: %s", exc)
+        self.pump()
+
+    def error_received(self, exc: Exception) -> None:
+        # An ICMP unreachable for an earlier send surfaces here on some
+        # platforms; it is about one page, not the socket.
+        logger.debug("WebRTC Direct socket error: %s", exc)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if self._closed:
+            return
+        # The socket went without a close of ours (the interface went
+        # away): the listener cannot be reached, so its streams end now
+        # rather than at their consent timeout.
+        logger.warning("WebRTC Direct socket lost: %s", exc)
+        self._transport = None
+        if self._manager._webrtc is self:
+            # Not the application's close: an open waiting to replace this
+            # listener still goes ahead.
+            self._manager._close_webrtc_listener()
+        else:
+            self.close()
+
+    # -- the pump -------------------------------------------------------------
+
+    def pump(self) -> None:
+        """Send what the listener queued, hand its events to the manager,
+        fire its due timers, until nothing moves; then arm the timer.
+
+        A handler may call back in (a refusal closes a stream, a body's
+        answer is sent): the nested call only marks the pump dirty, and
+        this loop goes round again, so events are handled in order and
+        never from inside one another.
+        """
+        if self._pumping:
+            self._again = True
+            return
+        self._pumping = True
+        delay: int | None = None
+        try:
+            while True:
+                self._again = False
+                self._flush()
+                delay = self._protocol.webrtc_direct_tick()
+                if not self._flush() and not self._again:
+                    break
+        finally:
+            self._pumping = False
+        self._arm(delay)
+
+    def _flush(self) -> bool:
+        moved = False
+        while True:
+            datagram = self._protocol.webrtc_direct_next_datagram()
+            if datagram is None:
+                break
+            moved = True
+            self._sendto(datagram)
+        while True:
+            event = self._protocol.webrtc_direct_next_event()
+            if event is None:
+                break
+            moved = True
+            try:
+                self._manager._on_webrtc_event(event)
+            except Exception:
+                logger.exception("WebRTC Direct event handling failed")
+            # A handler's own calls (a close, a send) queue datagrams.
+            while True:
+                datagram = self._protocol.webrtc_direct_next_datagram()
+                if datagram is None:
+                    break
+                self._sendto(datagram)
+        return moved
+
+    def _sendto(self, datagram: Any) -> None:
+        transport = self._transport
+        if transport is None:
+            return
+        ip = datagram.destination_ip
+        port = int(datagram.destination_port)
+        try:
+            if ipaddress.ip_address(ip).version == 6:
+                scope = self._scope_id if ipaddress.ip_address(ip).is_link_local else 0
+                transport.sendto(bytes(datagram.data), (ip, port, 0, scope))
+            else:
+                transport.sendto(bytes(datagram.data), (ip, port))
+        except Exception as exc:
+            logger.debug("WebRTC Direct send to %s:%s failed: %s", ip, port, exc)
+
+    def _arm(self, delay: int | None) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        if delay is None or self._closed:
+            return
+        # At least a millisecond: a deadline already due must not spin the
+        # loop with zero-delay timers.
+        self._timer = self._loop.call_later(max(delay, 1) / 1000.0, self._on_timer)
+
+    def _on_timer(self) -> None:
+        self._timer = None
+        if not self._closed:
+            self.pump()
 
 
 def advertised_addresses(listen_host: str) -> list[str]:

@@ -119,8 +119,9 @@ cd "$PROJECT_ROOT"
 # Ensure target is installed
 rustup target add "$TARGET"
 
-# Build
-CARGO_ARGS=(build --target "$TARGET" --package offline-protocol-uniffi)
+# Build. With the WebRTC Direct listener (ADR 0039, decision 10): the wheel
+# turns it on, so the library the tests load does too.
+CARGO_ARGS=(build --target "$TARGET" --package offline-protocol-uniffi --features webrtc-direct)
 if [[ "$PROFILE" == "release" ]]; then
     CARGO_ARGS+=(--release)
 fi

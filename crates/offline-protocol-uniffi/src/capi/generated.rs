@@ -2229,6 +2229,128 @@ impl Codec for Vec<crate::FastLinkDirective> {
     }
 }
 
+impl Codec for crate::WebrtcDirectCode {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "WebrtcDirectCode")?;
+        let out = Self {
+            fragment: f.take("fragment")?,
+            host: f.take("host")?,
+            port: f.take("port")?,
+            address: f.take("address")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("fragment", self.fragment.encode()),
+            ("host", self.host.encode()),
+            ("port", self.port.encode()),
+            ("address", self.address.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::WebrtcDirectCode> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::WebrtcDirectDatagram {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "WebrtcDirectDatagram")?;
+        let out = Self {
+            destination_ip: f.take("destination_ip")?,
+            destination_port: f.take("destination_port")?,
+            data: f.take("data")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("destination_ip", self.destination_ip.encode()),
+            ("destination_port", self.destination_port.encode()),
+            ("data", self.data.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::WebrtcDirectDatagram> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::WebrtcDirectEventKind {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        match value.as_str() {
+            Some("Proved") => Ok(Self::Proved),
+            Some("Body") => Ok(Self::Body),
+            Some("Closed") => Ok(Self::Closed),
+            _ => Err(variant_error(at, "WebrtcDirectEventKind", &["Proved", "Body", "Closed"])),
+        }
+    }
+    fn encode(&self) -> Value {
+        Value::from(match self {
+            Self::Proved => "Proved",
+            Self::Body => "Body",
+            Self::Closed => "Closed",
+        })
+    }
+}
+
+impl Codec for Vec<crate::WebrtcDirectEventKind> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
+impl Codec for crate::WebrtcDirectEvent {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        let mut f = Fields::new(value, at, "WebrtcDirectEvent")?;
+        let out = Self {
+            kind: f.take("kind")?,
+            stream: f.take("stream")?,
+            address: f.take("address")?,
+            remote_ip: f.take("remote_ip")?,
+            remote_port: f.take("remote_port")?,
+            data: f.take("data")?,
+        };
+        f.finish()?;
+        Ok(out)
+    }
+    fn encode(&self) -> Value {
+        object(vec![
+            ("kind", self.kind.encode()),
+            ("stream", self.stream.encode()),
+            ("address", self.address.encode()),
+            ("remote_ip", self.remote_ip.encode()),
+            ("remote_port", self.remote_port.encode()),
+            ("data", self.data.encode()),
+        ])
+    }
+}
+
+impl Codec for Vec<crate::WebrtcDirectEvent> {
+    fn decode(value: &Value, at: &str) -> Decoded<Self> {
+        decode_array(value, at)
+    }
+    fn encode(&self) -> Value {
+        encode_array(self)
+    }
+}
+
 impl Codec for crate::GatewayAddressDeclaration {
     fn decode(value: &Value, at: &str) -> Decoded<Self> {
         let mut f = Fields::new(value, at, "GatewayAddressDeclaration")?;
@@ -2763,6 +2885,54 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             args.finish()?;
             target.wifi_direct_fast_link_ended(arg_link_id, arg_reason);
             Ok(Value::Null)
+        }
+        "webrtc_direct_open" => {
+            let arg_local_ip = args.take("local_ip")?;
+            let arg_local_port = args.take("local_port")?;
+            args.finish()?;
+            let result = target.webrtc_direct_open(arg_local_ip, arg_local_port)?;
+            Ok(result.encode())
+        }
+        "webrtc_direct_close" => {
+            args.finish()?;
+            target.webrtc_direct_close();
+            Ok(Value::Null)
+        }
+        "webrtc_direct_datagram_received" => {
+            let arg_source_ip = args.take("source_ip")?;
+            let arg_source_port = args.take("source_port")?;
+            let arg_data = args.take("data")?;
+            args.finish()?;
+            target.webrtc_direct_datagram_received(arg_source_ip, arg_source_port, arg_data)?;
+            Ok(Value::Null)
+        }
+        "webrtc_direct_next_datagram" => {
+            args.finish()?;
+            let result = target.webrtc_direct_next_datagram();
+            Ok(result.encode())
+        }
+        "webrtc_direct_next_event" => {
+            args.finish()?;
+            let result = target.webrtc_direct_next_event();
+            Ok(result.encode())
+        }
+        "webrtc_direct_send" => {
+            let arg_stream = args.take("stream")?;
+            let arg_body = args.take("body")?;
+            args.finish()?;
+            target.webrtc_direct_send(arg_stream, arg_body)?;
+            Ok(Value::Null)
+        }
+        "webrtc_direct_close_stream" => {
+            let arg_stream = args.take("stream")?;
+            args.finish()?;
+            target.webrtc_direct_close_stream(arg_stream);
+            Ok(Value::Null)
+        }
+        "webrtc_direct_tick" => {
+            args.finish()?;
+            let result = target.webrtc_direct_tick();
+            Ok(result.encode())
         }
         "reticulum_status_changed" => {
             let arg_is_connected = args.take("is_connected")?;

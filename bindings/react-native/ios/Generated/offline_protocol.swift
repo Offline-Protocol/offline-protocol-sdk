@@ -1885,6 +1885,22 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func verifySignatureBytes(publicKey: Data, data: Data, signature: Data) throws  -> Bool
     
+    func webrtcDirectClose() 
+    
+    func webrtcDirectCloseStream(stream: UInt64) 
+    
+    func webrtcDirectDatagramReceived(sourceIp: String, sourcePort: UInt16, data: [UInt8]) throws 
+    
+    func webrtcDirectNextDatagram()  -> WebrtcDirectDatagram?
+    
+    func webrtcDirectNextEvent()  -> WebrtcDirectEvent?
+    
+    func webrtcDirectOpen(localIp: String, localPort: UInt16) throws  -> WebrtcDirectCode
+    
+    func webrtcDirectSend(stream: UInt64, body: [UInt8]) throws 
+    
+    func webrtcDirectTick()  -> UInt32?
+    
     func wifiDirectFastLinkEnded(linkId: String, reason: String) 
     
     func wifiDirectFastLinkHosting(linkId: String, host: String, port: UInt16) throws 
@@ -3705,6 +3721,82 @@ open func verifySignatureBytes(publicKey: Data, data: Data, signature: Data)thro
         FfiConverterData.lower(publicKey),
         FfiConverterData.lower(data),
         FfiConverterData.lower(signature),uniffiCallStatus
+    )
+})
+}
+    
+open func webrtcDirectClose()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+open func webrtcDirectCloseStream(stream: UInt64)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(stream),uniffiCallStatus
+    )
+}
+}
+    
+open func webrtcDirectDatagramReceived(sourceIp: String, sourcePort: UInt16, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceIp),
+        FfiConverterUInt16.lower(sourcePort),
+        FfiConverterSequenceUInt8.lower(data),uniffiCallStatus
+    )
+}
+}
+    
+open func webrtcDirectNextDatagram() -> WebrtcDirectDatagram?  {
+    return try!  FfiConverterOptionTypeWebrtcDirectDatagram.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func webrtcDirectNextEvent() -> WebrtcDirectEvent?  {
+    return try!  FfiConverterOptionTypeWebrtcDirectEvent.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func webrtcDirectOpen(localIp: String, localPort: UInt16)throws  -> WebrtcDirectCode  {
+    return try  FfiConverterTypeWebrtcDirectCode_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(localIp),
+        FfiConverterUInt16.lower(localPort),uniffiCallStatus
+    )
+})
+}
+    
+open func webrtcDirectSend(stream: UInt64, body: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(stream),
+        FfiConverterSequenceUInt8.lower(body),uniffiCallStatus
+    )
+}
+}
+    
+open func webrtcDirectTick() -> UInt32?  {
+    return try!  FfiConverterOptionUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -7542,6 +7634,196 @@ public func FfiConverterTypeTransportMetrics_lower(_ value: TransportMetrics) ->
 }
 
 
+public struct WebrtcDirectCode: Equatable, Hashable {
+    public var fragment: String
+    public var host: String
+    public var port: UInt16
+    public var address: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(fragment: String, host: String, port: UInt16, address: String) {
+        self.fragment = fragment
+        self.host = host
+        self.port = port
+        self.address = address
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WebrtcDirectCode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWebrtcDirectCode: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WebrtcDirectCode {
+        return
+            try WebrtcDirectCode(
+                fragment: FfiConverterString.read(from: &buf), 
+                host: FfiConverterString.read(from: &buf), 
+                port: FfiConverterUInt16.read(from: &buf), 
+                address: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WebrtcDirectCode, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.fragment, into: &buf)
+        FfiConverterString.write(value.host, into: &buf)
+        FfiConverterUInt16.write(value.port, into: &buf)
+        FfiConverterString.write(value.address, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebrtcDirectCode_lift(_ buf: RustBuffer) throws -> WebrtcDirectCode {
+    return try FfiConverterTypeWebrtcDirectCode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebrtcDirectCode_lower(_ value: WebrtcDirectCode) -> RustBuffer {
+    return FfiConverterTypeWebrtcDirectCode.lower(value)
+}
+
+
+public struct WebrtcDirectDatagram: Equatable, Hashable {
+    public var destinationIp: String
+    public var destinationPort: UInt16
+    public var data: [UInt8]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(destinationIp: String, destinationPort: UInt16, data: [UInt8]) {
+        self.destinationIp = destinationIp
+        self.destinationPort = destinationPort
+        self.data = data
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WebrtcDirectDatagram: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWebrtcDirectDatagram: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WebrtcDirectDatagram {
+        return
+            try WebrtcDirectDatagram(
+                destinationIp: FfiConverterString.read(from: &buf), 
+                destinationPort: FfiConverterUInt16.read(from: &buf), 
+                data: FfiConverterSequenceUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WebrtcDirectDatagram, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.destinationIp, into: &buf)
+        FfiConverterUInt16.write(value.destinationPort, into: &buf)
+        FfiConverterSequenceUInt8.write(value.data, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebrtcDirectDatagram_lift(_ buf: RustBuffer) throws -> WebrtcDirectDatagram {
+    return try FfiConverterTypeWebrtcDirectDatagram.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebrtcDirectDatagram_lower(_ value: WebrtcDirectDatagram) -> RustBuffer {
+    return FfiConverterTypeWebrtcDirectDatagram.lower(value)
+}
+
+
+public struct WebrtcDirectEvent: Equatable, Hashable {
+    public var kind: WebrtcDirectEventKind
+    public var stream: UInt64
+    public var address: String?
+    public var remoteIp: String?
+    public var remotePort: UInt16?
+    public var data: [UInt8]?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: WebrtcDirectEventKind, stream: UInt64, address: String?, remoteIp: String?, remotePort: UInt16?, data: [UInt8]?) {
+        self.kind = kind
+        self.stream = stream
+        self.address = address
+        self.remoteIp = remoteIp
+        self.remotePort = remotePort
+        self.data = data
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WebrtcDirectEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWebrtcDirectEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WebrtcDirectEvent {
+        return
+            try WebrtcDirectEvent(
+                kind: FfiConverterTypeWebrtcDirectEventKind.read(from: &buf), 
+                stream: FfiConverterUInt64.read(from: &buf), 
+                address: FfiConverterOptionString.read(from: &buf), 
+                remoteIp: FfiConverterOptionString.read(from: &buf), 
+                remotePort: FfiConverterOptionUInt16.read(from: &buf), 
+                data: FfiConverterOptionSequenceUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WebrtcDirectEvent, into buf: inout [UInt8]) {
+        FfiConverterTypeWebrtcDirectEventKind.write(value.kind, into: &buf)
+        FfiConverterUInt64.write(value.stream, into: &buf)
+        FfiConverterOptionString.write(value.address, into: &buf)
+        FfiConverterOptionString.write(value.remoteIp, into: &buf)
+        FfiConverterOptionUInt16.write(value.remotePort, into: &buf)
+        FfiConverterOptionSequenceUInt8.write(value.data, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebrtcDirectEvent_lift(_ buf: RustBuffer) throws -> WebrtcDirectEvent {
+    return try FfiConverterTypeWebrtcDirectEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebrtcDirectEvent_lower(_ value: WebrtcDirectEvent) -> RustBuffer {
+    return FfiConverterTypeWebrtcDirectEvent.lower(value)
+}
+
+
 public struct WifiDirectMessage: Equatable, Hashable {
     public var recipientId: String
     public var data: [UInt8]
@@ -9211,6 +9493,79 @@ public func FfiConverterTypeTransportType_lift(_ buf: RustBuffer) throws -> Tran
 #endif
 public func FfiConverterTypeTransportType_lower(_ value: TransportType) -> RustBuffer {
     return FfiConverterTypeTransportType.lower(value)
+}
+
+
+
+
+public enum WebrtcDirectEventKind: Equatable, Hashable {
+    
+    case proved
+    case body
+    case closed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WebrtcDirectEventKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWebrtcDirectEventKind: FfiConverterRustBuffer {
+    typealias SwiftType = WebrtcDirectEventKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WebrtcDirectEventKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .proved
+        
+        case 2: return .body
+        
+        case 3: return .closed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WebrtcDirectEventKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .proved:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .body:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .closed:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebrtcDirectEventKind_lift(_ buf: RustBuffer) throws -> WebrtcDirectEventKind {
+    return try FfiConverterTypeWebrtcDirectEventKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWebrtcDirectEventKind_lower(_ value: WebrtcDirectEventKind) -> RustBuffer {
+    return FfiConverterTypeWebrtcDirectEventKind.lower(value)
 }
 
 
@@ -10958,6 +11313,54 @@ fileprivate struct FfiConverterOptionTypeTransportMetrics: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWebrtcDirectDatagram: FfiConverterRustBuffer {
+    typealias SwiftType = WebrtcDirectDatagram?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWebrtcDirectDatagram.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWebrtcDirectDatagram.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWebrtcDirectEvent: FfiConverterRustBuffer {
+    typealias SwiftType = WebrtcDirectEvent?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWebrtcDirectEvent.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWebrtcDirectEvent.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWifiDirectMessage: FfiConverterRustBuffer {
     typealias SwiftType = WifiDirectMessage?
 
@@ -12063,6 +12466,30 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 24438) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close() != 52913) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream() != 41353) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received() != 8160) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram() != 44469) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event() != 64868) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open() != 32102) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send() != 6566) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick() != 49) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended() != 54290) {

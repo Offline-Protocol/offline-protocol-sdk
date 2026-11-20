@@ -1,0 +1,285 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// A node dials the WebRTC Direct crate's example listener, a full native
+// engine on this machine's private address, from the code it prints (W16).
+// The runner starts the listener and relays it (test/direct-listener.mjs),
+// and runs this page in the engine's default settings, so the listener
+// learns the page's address from its first check rather than a candidate.
+//
+// Checks: the page's local description is the one the browser generated,
+// and the dial uses no ICE server although the carrier has one; a session
+// and an encrypted message both ways; a 100 KiB message each way; a second
+// dial of the same code replaces the first at both ends with one loss
+// reported; a loss when the listener closes. Then the refusals: a wrong
+// certificate hash fails DTLS, a wrong password gets no answer, and a wrong
+// `a` closes the link with nothing announced. The title ends as PASS or
+// FAIL: <step>.
+import { OfflineNode, WebRtcCarrier, parseDirectCode } from "../src/index.js";
+import { log, waitFor, run } from "./common.js";
+
+const appId = `web-direct-${crypto.randomUUID()}`;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The listener's lines, as the runner collected them.
+const lines = () => window.directLines();
+async function until(find, what, ms = 20000) {
+  const deadline = performance.now() + ms;
+  for (;;) {
+    const found = await find();
+    if (found) return found;
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await sleep(100);
+  }
+}
+const listenerSaw = (type, predicate = () => true, after = 0) =>
+  until(async () => (await lines()).slice(after).find((l) => l.type === type && predicate(l)), `the listener's ${type}`);
+
+// Records every description the page sets and every offer the browser made,
+// with the connection, so the check reads what the browser holds rather
+// than what the carrier says it did.
+const offers = [];
+const createOffer = RTCPeerConnection.prototype.createOffer;
+const setLocalDescription = RTCPeerConnection.prototype.setLocalDescription;
+RTCPeerConnection.prototype.createOffer = async function (...args) {
+  const offer = await createOffer.apply(this, args);
+  offers.push({ pc: this, offer: { type: offer.type, sdp: offer.sdp }, set: [] });
+  return offer;
+};
+RTCPeerConnection.prototype.setLocalDescription = function (description, ...rest) {
+  offers.findLast((o) => o.pc === this)?.set.push(description && { type: description.type, sdp: description.sdp });
+  return setLocalDescription.call(this, description, ...rest);
+};
+
+const iceLine = (sdp, name) => new RegExp(`^a=${name}:(\\S+)`, "m").exec(sdp)?.[1];
+
+// The fragment with one key's value replaced.
+function withValue(fragment, key, value) {
+  return fragment
+    .split("&")
+    .map((part) => (part.startsWith(`${key}=`) ? `${key}=${value}` : part))
+    .join("&");
+}
+
+// A connection's states, in order, from the carrier's events.
+function states(carrier, handle) {
+  const seen = [];
+  carrier.addEventListener("connection", ({ detail }) => {
+    if (detail.connection === handle) seen.push(detail.state);
+  });
+  return seen;
+}
+
+await run(async (step) => {
+  step.name = "start";
+  const node = await OfflineNode.start({ appId, profile: "direct", storage: "memory", tabs: false });
+  // Every engine event from the start, so a check that begins after an
+  // event fired still sees it.
+  const events = [];
+  node.addEventListener("event", ({ detail }) => events.push(detail));
+  const pageSaw = (type, predicate = () => true, after = 0, ms = 20000) =>
+    until(() => events.slice(after).find((e) => e.type === type && predicate(e)), `the page's ${type}`, ms);
+  const listening = await window.directListen(appId);
+  const listener = listening.address;
+  // The code as a person's scan opens it: a whole URL, the code in its fragment.
+  const url = `${location.origin}/app/#${listening.code}`;
+  log(`page ${node.address}\nlistener ${listener} on ${listening.host}:${listening.port}`);
+
+  step.name = "dial";
+  // An ICE server the dial must not use: the listener is on this network.
+  const carrier = new WebRtcCarrier(node, { iceServers: [{ urls: "stun:192.0.2.1:3478" }] });
+  const started = performance.now();
+  const first = await carrier.dial(url);
+  log(`channel open after ${Math.round(performance.now() - started)} ms`);
+  if (first.address !== listener) throw new Error(`the dial named ${first.address}`);
+  const firstStates = states(carrier, first);
+
+  step.name = "local description";
+  const made = offers.at(-1);
+  if (!made || made.set.length !== 1) throw new Error("the dial did not set one local description");
+  if (made.set[0].sdp !== made.offer.sdp) throw new Error("the page set a description other than the browser's offer");
+  const local = made.pc.localDescription.sdp;
+  for (const name of ["ice-ufrag", "ice-pwd"]) {
+    const own = iceLine(made.offer.sdp, name);
+    if (!own || iceLine(local, name) !== own) {
+      throw new Error(`the local ${name} is ${iceLine(local, name)}, not the browser's ${own}`);
+    }
+  }
+  const remote = made.pc.remoteDescription.sdp;
+  if (iceLine(remote, "ice-ufrag") !== parseDirectCode(url).ufrag) throw new Error("the remote description is not the code's");
+  if (made.pc.getConfiguration().iceServers?.length) throw new Error("the dial used the carrier's ICE servers");
+  log("the local description is the browser's own, and the dial named no ICE server");
+
+  step.name = "session";
+  await pageSaw("neighbor_discovered", (e) => e.peer_id === listener);
+  const proved = await listenerSaw("proved", (l) => l.address === node.address);
+  await pageSaw("secure_session_established", (e) => e.peer_id === listener);
+  await listenerSaw("session_ready", (l) => l.peer === node.address);
+  log(`session established; the listener saw the page at ${proved.remote}`);
+
+  step.name = "messages both ways";
+  const echoed = waitFor(node, "message_received", (e) => e.content === "echo:over a dial");
+  await node.sendMessage(listener, "over a dial");
+  const heard = await listenerSaw("message", (l) => l.text === "over a dial");
+  if (heard.encrypted !== true || heard.from !== node.address) throw new Error(`the listener got ${JSON.stringify(heard)}`);
+  const echo = await echoed;
+  if (echo.encrypted !== true || echo.sender !== listener) throw new Error(`the page got ${JSON.stringify(echo)}`);
+  const told = waitFor(node, "message_received", (e) => e.content === "from the listener");
+  await window.directCommand(`send ${node.address} from the listener`);
+  if ((await told).encrypted !== true) throw new Error("the listener's message was not encrypted");
+  log("encrypted messages crossed both ways");
+
+  step.name = "large messages";
+  const SIZE = 100 * 1024;
+  const bigIn = waitFor(node, "message_received", (e) => e.content.length === SIZE && /^x+$/.test(e.content));
+  await window.directCommand(`big ${node.address} ${SIZE}`);
+  await bigIn;
+  await node.sendMessage(listener, "y".repeat(SIZE));
+  await listenerSaw("message", (l) => l.from === node.address && l.len === SIZE);
+  log("a 100 KiB message crossed each way in chunks");
+
+  step.name = "dial again";
+  // The same code again, from the object parseDirectCode returned. The page
+  // closes its first connection once the second's channel opens, before it
+  // links the second (its engine keeps the first link per address), so each
+  // end loses the first stream once and holds the second. The page's close
+  // and the new dial's preamble reach the listener about together, so it
+  // reports that stream lost or supersedes it; a stream it supersedes is
+  // never reported at all. Either way the first stream ends exactly once.
+  const before = (await lines()).length;
+  const eventsBefore = events.length;
+  const second = await carrier.dial(parseDirectCode(url));
+  await pageSaw("neighbor_discovered", (e) => e.peer_id === listener, eventsBefore);
+  const replaced = await listenerSaw("proved", (l) => l.address === node.address, before);
+  if (replaced.stream === proved.stream) throw new Error("the listener proved the first stream again");
+  const again = waitFor(node, "message_received", (e) => e.content === "echo:after the second dial");
+  await node.sendMessage(listener, "after the second dial");
+  await again;
+  const sinceRedial = (await lines()).slice(before);
+  const ended = sinceRedial.filter((l) => l.type === "lost" && l.stream === proved.stream).length +
+    (replaced.superseded === proved.stream ? 1 : 0);
+  const otherLosses = sinceRedial.filter((l) => l.type === "lost" && l.stream !== proved.stream);
+  const engineLosses = sinceRedial.filter((l) => l.type === "neighbor_lost");
+  if (ended !== 1 || otherLosses.length || engineLosses.length > 1) {
+    throw new Error(`the listener ended the first stream ${ended} times: ${JSON.stringify(sinceRedial)}`);
+  }
+  const pageLosses = events.slice(eventsBefore).filter((e) => e.type === "neighbor_lost" && e.peer_id === listener);
+  if (pageLosses.length !== 1) throw new Error(`the page reported ${pageLosses.length} losses, not one`);
+  if (firstStates.filter((s) => s === "closed").length !== 1 || firstStates.at(-1) !== "closed") {
+    throw new Error(`the first connection went ${firstStates.join(", ")}`);
+  }
+  log(
+    `a second dial replaced the first at both ends, the listener ${replaced.superseded === null ? "losing" : "superseding"} the first stream once`,
+  );
+
+  step.name = "a failed dial again keeps the link";
+  // A dial of the linked address that fails (a wrong password, which the
+  // listener never answers) must not cost the link that works: the page
+  // closes its old link only once a new channel opens.
+  const keptStates = states(carrier, second);
+  const current = parseDirectCode(url).password;
+  const stalePassword = (current[0] === "A" ? "B" : "A") + current.slice(1);
+  let stale = null;
+  try {
+    await carrier.dial(withValue(listening.code, "w", stalePassword), { timeoutMs: 3000 });
+  } catch (error) {
+    stale = error;
+  }
+  if (stale?.state !== "timeout") throw new Error(`the stale dial ended ${stale?.state ?? "resolved"}`);
+  const kept = waitFor(node, "message_received", (e) => e.content === "echo:after a failed dial");
+  await node.sendMessage(listener, "after a failed dial");
+  await kept;
+  if (keptStates.includes("closed")) throw new Error("the failed dial closed the working link");
+  log("a dial again that failed left the working link up");
+
+  step.name = "listener closes";
+  // A closing listener ends each connection (its DTLS close_notify), so the
+  // page closes its link at once. Before it did, the page learned only as
+  // its checks went unanswered: "disconnected" after a few seconds, then
+  // the carrier's disconnectedMs (15 s), and held a dead link until then.
+  const secondStates = states(carrier, second);
+  const lostAt = events.length;
+  const at = (await lines()).length;
+  const closedAt = performance.now();
+  await window.directCommand("close");
+  await listenerSaw("closed", () => true, at);
+  await listenerSaw("lost", (l) => l.address === node.address, at);
+  await until(() => secondStates.includes("closed"), "the connection to close", 5000);
+  await pageSaw("neighbor_lost", (e) => e.peer_id === listener, lostAt, 5000);
+  log(`closing the listener reported the page lost at both ends; the page closed after ${Math.round(performance.now() - closedAt)} ms`);
+
+  // A fresh listener for the refusals: the closed one's code is dead.
+  const fresh = await window.directListen(appId);
+  const code = fresh.code;
+  const failedDial = async (input, options) => {
+    try {
+      await carrier.dial(input, options);
+    } catch (error) {
+      return error;
+    }
+    throw new Error("the dial resolved");
+  };
+  const noProof = async () => {
+    const proof = (await lines()).find((l) => l.type === "proved");
+    if (proof) throw new Error(`the listener proved ${JSON.stringify(proof)}`);
+  };
+
+  step.name = "wrong certificate hash";
+  const c = parseDirectCode(code);
+  // Another canonical hash: the first character moved on by one.
+  const hash = /(?:^|&)c=([^&]+)/.exec(code)[1];
+  const other = (hash[0] === "A" ? "B" : "A") + hash.slice(1);
+  const dtls = await failedDial(withValue(code, "c", other));
+  if (dtls.state !== "failed") throw new Error(`the dial ended ${dtls.state}: ${dtls.message}`);
+  await noProof();
+  log(`a wrong certificate hash failed: ${dtls.message}`);
+
+  step.name = "wrong password";
+  const pwd = c.password;
+  const wrong = (pwd[0] === "A" ? "B" : "A") + pwd.slice(1);
+  const unanswered = await failedDial(withValue(code, "w", wrong), { timeoutMs: 3000 });
+  if (unanswered.state !== "timeout") throw new Error(`the dial ended ${unanswered.state}: ${unanswered.message}`);
+  await noProof();
+  log("a wrong password got no answer");
+
+  step.name = "dial again during setup";
+  // A second dial of one address closes the first while the browser is
+  // still making its offer, a step the browser then never settles. The
+  // first dial must reject as closed, long before its own timeout. Both
+  // carry the wrong password, so neither reaches the listener.
+  const settles = (promise, ms, what) =>
+    Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} never settled`)), ms)),
+    ]);
+  const early = failedDial(withValue(code, "w", wrong), { timeoutMs: 60000 });
+  const late = failedDial(withValue(code, "w", wrong), { timeoutMs: 2000 });
+  const closedEarly = await settles(early, 5000, "the first of two dials");
+  if (closedEarly.state !== "closed") throw new Error(`the first dial ended ${closedEarly.state}: ${closedEarly.message}`);
+  const timedOut = await settles(late, 10000, "the second of two dials");
+  if (timedOut.state !== "timeout") throw new Error(`the second dial ended ${timedOut.state}: ${timedOut.message}`);
+  await noProof();
+  log("a second dial closed the first during its setup, and the first rejected at once");
+
+  step.name = "wrong address";
+  // A canonical address nobody here holds (a vector's).
+  const stranger = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn";
+  const eventsAt = events.length;
+  const swapped = await carrier.dial(withValue(code, "a", stranger));
+  const swappedStates = states(carrier, swapped);
+  const announcedAny = () => events.slice(eventsAt).some((e) => e.type === "neighbor_discovered");
+  await until(() => swappedStates.includes("closed") || announcedAny(), "the swapped link to close");
+  // The listener proved the page, then saw it leave.
+  await listenerSaw("proved", (l) => l.address === node.address);
+  await sleep(500);
+  const announced = events.slice(eventsAt).filter((e) => e.type === "neighbor_discovered");
+  if (announced.length) throw new Error(`the page announced ${JSON.stringify(announced)}`);
+  log("a wrong address closed the link with nothing announced");
+
+  await window.directStop();
+  carrier.close();
+  await node.stop();
+});
+</script>

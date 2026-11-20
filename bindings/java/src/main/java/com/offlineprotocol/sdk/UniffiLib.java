@@ -2153,6 +2153,78 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close(long ptr, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close.invokeExact(ptr, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream(long ptr, long stream, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream.invokeExact(ptr, stream, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_SHORT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received(long ptr, java.lang.foreign.MemorySegment sourceIp, short sourcePort, java.lang.foreign.MemorySegment data, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received.invokeExact(ptr, sourceIp, sourcePort, data, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram.invokeExact(_allocator, ptr, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event.invokeExact(_allocator, ptr, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_SHORT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment localIp, short localPort, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open.invokeExact(_allocator, ptr, localIp, localPort, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send(long ptr, long stream, java.lang.foreign.MemorySegment body, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send.invokeExact(ptr, stream, body, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick.invokeExact(_allocator, ptr, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -4877,6 +4949,78 @@ final class UniffiLib {
     static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 

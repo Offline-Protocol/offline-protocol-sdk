@@ -43,7 +43,9 @@ echo "Building for iOS $IOS_DEPLOYMENT_TARGET and later"
 echo "Building UniFFI library for iOS architectures..."
 for arch in "${IOS_ARCHS[@]}"; do
   echo "Building for $arch..."
-  cargo build --profile mobile --target "$arch" --package offline-protocol-uniffi
+  # With the WebRTC Direct listener (ADR 0039, decision 10), on Apple's crypto.
+  cargo build --profile mobile --target "$arch" --package offline-protocol-uniffi \
+    --features webrtc-direct
 done
 
 # Create output directories

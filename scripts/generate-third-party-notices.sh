@@ -20,8 +20,12 @@ if [ "$installed" != "cargo-about $CARGO_ABOUT_VERSION" ]; then
   exit 1
 fi
 
+# With `webrtc-direct`: the iOS, Android and Python libraries ship the WebRTC
+# Direct listener (ADR 0039, decision 10), so str0m and its crypto are in the
+# graph those packages redistribute even though the crate leaves it off.
 cargo about generate \
   --manifest-path crates/offline-protocol-uniffi/Cargo.toml \
+  --features webrtc-direct \
   --locked \
   -o THIRD-PARTY-NOTICES.md \
   about.hbs

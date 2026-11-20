@@ -1474,6 +1474,73 @@ private_constant :UniffiHandleMap
     end
   end
 
+  # The Record type WebrtcDirectCode.
+
+  def self.check_lower_TypeWebrtcDirectCode(v)
+    
+    
+    
+    
+  end
+
+  def self.alloc_from_TypeWebrtcDirectCode(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_TypeWebrtcDirectCode(v)
+      return builder.finalize
+    end
+  end
+
+  def consume_into_TypeWebrtcDirectCode
+    consumeWithStream do |stream|
+      return stream.read_TypeWebrtcDirectCode
+    end
+  end
+
+  # The Record type WebrtcDirectDatagram.
+
+  def self.check_lower_TypeWebrtcDirectDatagram(v)
+    
+    
+    RustBuffer.check_lower_Sequenceu8(v.data)
+  end
+
+  def self.alloc_from_TypeWebrtcDirectDatagram(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_TypeWebrtcDirectDatagram(v)
+      return builder.finalize
+    end
+  end
+
+  def consume_into_TypeWebrtcDirectDatagram
+    consumeWithStream do |stream|
+      return stream.read_TypeWebrtcDirectDatagram
+    end
+  end
+
+  # The Record type WebrtcDirectEvent.
+
+  def self.check_lower_TypeWebrtcDirectEvent(v)
+    RustBuffer.check_lower_TypeWebrtcDirectEventKind(v.kind)
+    
+    RustBuffer.check_lower_Optionalstring(v.address)
+    RustBuffer.check_lower_Optionalstring(v.remote_ip)
+    RustBuffer.check_lower_Optionalu16(v.remote_port)
+    RustBuffer.check_lower_OptionalSequenceu8(v.data)
+  end
+
+  def self.alloc_from_TypeWebrtcDirectEvent(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_TypeWebrtcDirectEvent(v)
+      return builder.finalize
+    end
+  end
+
+  def consume_into_TypeWebrtcDirectEvent
+    consumeWithStream do |stream|
+      return stream.read_TypeWebrtcDirectEvent
+    end
+  end
+
   # The Record type WifiDirectMessage.
 
   def self.check_lower_TypeWifiDirectMessage(v)
@@ -1826,6 +1893,25 @@ private_constant :UniffiHandleMap
   def consume_into_TypeTransportType
     consumeWithStream do |stream|
       return stream.read_TypeTransportType
+    end
+  end
+  
+
+  # The Enum type WebrtcDirectEventKind.
+
+  def self.check_lower_TypeWebrtcDirectEventKind(v)
+  end
+
+  def self.alloc_from_TypeWebrtcDirectEventKind(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_TypeWebrtcDirectEventKind(v)
+      return builder.finalize
+    end
+  end
+
+  def consume_into_TypeWebrtcDirectEventKind
+    consumeWithStream do |stream|
+      return stream.read_TypeWebrtcDirectEventKind
     end
   end
   
@@ -2373,6 +2459,48 @@ private_constant :UniffiHandleMap
   def consume_into_OptionalTypeTransportMetrics
     consumeWithStream do |stream|
       return stream.read_OptionalTypeTransportMetrics
+    end
+  end
+
+  # The Optional<T> type for TypeWebrtcDirectDatagram.
+
+  def self.check_lower_OptionalTypeWebrtcDirectDatagram(v)
+    if !v.nil?
+      RustBuffer.check_lower_TypeWebrtcDirectDatagram(v)
+    end
+  end
+
+  def self.alloc_from_OptionalTypeWebrtcDirectDatagram(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_OptionalTypeWebrtcDirectDatagram(v)
+      return builder.finalize()
+    end
+  end
+
+  def consume_into_OptionalTypeWebrtcDirectDatagram
+    consumeWithStream do |stream|
+      return stream.read_OptionalTypeWebrtcDirectDatagram
+    end
+  end
+
+  # The Optional<T> type for TypeWebrtcDirectEvent.
+
+  def self.check_lower_OptionalTypeWebrtcDirectEvent(v)
+    if !v.nil?
+      RustBuffer.check_lower_TypeWebrtcDirectEvent(v)
+    end
+  end
+
+  def self.alloc_from_OptionalTypeWebrtcDirectEvent(v)
+    RustBuffer.allocWithBuilder do |builder|
+      builder.write_OptionalTypeWebrtcDirectEvent(v)
+      return builder.finalize()
+    end
+  end
+
+  def consume_into_OptionalTypeWebrtcDirectEvent
+    consumeWithStream do |stream|
+      return stream.read_OptionalTypeWebrtcDirectEvent
     end
   end
 
@@ -3519,6 +3647,40 @@ class RustBufferStream
     )
   end
 
+  # The Record type WebrtcDirectCode.
+
+  def read_TypeWebrtcDirectCode
+    WebrtcDirectCode.new(
+      fragment: read_string,
+      host: read_string,
+      port: read_u16,
+      address: read_string
+    )
+  end
+
+  # The Record type WebrtcDirectDatagram.
+
+  def read_TypeWebrtcDirectDatagram
+    WebrtcDirectDatagram.new(
+      destination_ip: read_string,
+      destination_port: read_u16,
+      data: read_Sequenceu8
+    )
+  end
+
+  # The Record type WebrtcDirectEvent.
+
+  def read_TypeWebrtcDirectEvent
+    WebrtcDirectEvent.new(
+      kind: read_TypeWebrtcDirectEventKind,
+      stream: read_u64,
+      address: read_Optionalstring,
+      remote_ip: read_Optionalstring,
+      remote_port: read_Optionalu16,
+      data: read_OptionalSequenceu8
+    )
+  end
+
   # The Record type WifiDirectMessage.
 
   def read_TypeWifiDirectMessage
@@ -4091,6 +4253,28 @@ class RustBufferStream
 
   
 
+  
+  
+  # The Enum type WebrtcDirectEventKind.
+
+  def read_TypeWebrtcDirectEventKind
+    variant = unpack_from 4, 'l>'
+    
+    if variant == 1
+      return WebrtcDirectEventKind::PROVED
+    end
+    if variant == 2
+      return WebrtcDirectEventKind::BODY
+    end
+    if variant == 3
+      return WebrtcDirectEventKind::CLOSED
+    end
+
+    raise InternalError, 'Unexpected variant tag for TypeWebrtcDirectEventKind'
+  end
+
+  
+
   # The CallbackInterface type BleTransportCallback: read a uint64 handle.
   def read_CallbackInterfaceBleTransportCallback
     handle = unpack_from 8, 'Q>'
@@ -4506,6 +4690,36 @@ class RustBufferStream
       return read_TypeTransportMetrics
     else
       raise InternalError, 'Unexpected flag byte for OptionalTypeTransportMetrics'
+    end
+  end
+
+  
+  # The Optional<T> type for TypeWebrtcDirectDatagram.
+
+  def read_OptionalTypeWebrtcDirectDatagram
+    flag = unpack_from 1, 'c'
+
+    if flag == 0
+      return nil
+    elsif flag == 1
+      return read_TypeWebrtcDirectDatagram
+    else
+      raise InternalError, 'Unexpected flag byte for OptionalTypeWebrtcDirectDatagram'
+    end
+  end
+
+  
+  # The Optional<T> type for TypeWebrtcDirectEvent.
+
+  def read_OptionalTypeWebrtcDirectEvent
+    flag = unpack_from 1, 'c'
+
+    if flag == 0
+      return nil
+    elsif flag == 1
+      return read_TypeWebrtcDirectEvent
+    else
+      raise InternalError, 'Unexpected flag byte for OptionalTypeWebrtcDirectEvent'
     end
   end
 
@@ -5469,6 +5683,34 @@ class RustBufferBuilder
     self.write_Optionalf32(v.energy_cost)
   end
 
+  # The Record type WebrtcDirectCode.
+
+  def write_TypeWebrtcDirectCode(v)
+    self.write_string(v.fragment)
+    self.write_string(v.host)
+    self.write_u16(v.port)
+    self.write_string(v.address)
+  end
+
+  # The Record type WebrtcDirectDatagram.
+
+  def write_TypeWebrtcDirectDatagram(v)
+    self.write_string(v.destination_ip)
+    self.write_u16(v.destination_port)
+    self.write_Sequenceu8(v.data)
+  end
+
+  # The Record type WebrtcDirectEvent.
+
+  def write_TypeWebrtcDirectEvent(v)
+    self.write_TypeWebrtcDirectEventKind(v.kind)
+    self.write_u64(v.stream)
+    self.write_Optionalstring(v.address)
+    self.write_Optionalstring(v.remote_ip)
+    self.write_Optionalu16(v.remote_port)
+    self.write_OptionalSequenceu8(v.data)
+  end
+
   # The Record type WifiDirectMessage.
 
   def write_TypeWifiDirectMessage(v)
@@ -5881,6 +6123,21 @@ class RustBufferBuilder
  end
   
 
+  # The Enum type WebrtcDirectEventKind.
+
+  def write_TypeWebrtcDirectEventKind(v)
+    if v == WebrtcDirectEventKind::PROVED
+      pack_into(4, 'l>', 1)
+    end
+    if v == WebrtcDirectEventKind::BODY
+      pack_into(4, 'l>', 2)
+    end
+    if v == WebrtcDirectEventKind::CLOSED
+      pack_into(4, 'l>', 3)
+    end
+ end
+  
+
   # The CallbackInterface type BleTransportCallback: write a uint64 handle.
   def write_CallbackInterfaceBleTransportCallback(v)
     handle = CallbackInterfaceBleTransportCallbackFfiConverter.lower(v)
@@ -6195,6 +6452,28 @@ class RustBufferBuilder
     end
   end
 
+  # The Optional<T> type for TypeWebrtcDirectDatagram.
+
+  def write_OptionalTypeWebrtcDirectDatagram(v)
+    if v.nil?
+      pack_into(1, 'c', 0)
+    else
+      pack_into(1, 'c', 1)
+      self.write_TypeWebrtcDirectDatagram(v)
+    end
+  end
+
+  # The Optional<T> type for TypeWebrtcDirectEvent.
+
+  def write_OptionalTypeWebrtcDirectEvent(v)
+    if v.nil?
+      pack_into(1, 'c', 0)
+    else
+      pack_into(1, 'c', 1)
+      self.write_TypeWebrtcDirectEvent(v)
+    end
+  end
+
   # The Optional<T> type for TypeWifiDirectMessage.
 
   def write_OptionalTypeWifiDirectMessage(v)
@@ -6445,6 +6724,7 @@ class ProtocolError
     TelemetryConfigInvalid = Class.new StandardError
 
 end
+
 
 
 
@@ -7748,6 +8028,38 @@ module UniFFILib
     [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
     :int8
   
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close,
+    [:uint64, RustCallStatus.by_ref],
+    :void
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream,
+    [:uint64, :uint64, RustCallStatus.by_ref],
+    :void
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received,
+    [:uint64, RustBuffer.by_value, :uint16, RustBuffer.by_value, RustCallStatus.by_ref],
+    :void
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram,
+    [:uint64, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event,
+    [:uint64, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open,
+    [:uint64, RustBuffer.by_value, :uint16, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send,
+    [:uint64, :uint64, RustBuffer.by_value, RustCallStatus.by_ref],
+    :void
+  
+  attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick,
+    [:uint64, RustCallStatus.by_ref],
+    RustBuffer.by_value
+  
   attach_function :uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_fast_link_ended,
     [:uint64, RustBuffer.by_value, RustBuffer.by_value, RustCallStatus.by_ref],
     :void
@@ -8960,6 +9272,38 @@ module UniFFILib
     [],
     :uint16
   
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_close_stream,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_datagram_received,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_datagram,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_next_event,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_open,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_send,
+    [],
+    :uint16
+  
+  attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_webrtc_direct_tick,
+    [],
+    :uint16
+  
   attach_function :uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_fast_link_ended,
     [],
     :uint16
@@ -9295,6 +9639,18 @@ class TransportType
   WI_FI_DIRECT = 2
   RETICULUM = 3
   NOSTR = 4
+  
+end
+
+
+  
+  
+  
+
+class WebrtcDirectEventKind
+  PROVED = 0
+  BODY = 1
+  CLOSED = 2
   
 end
 
@@ -11430,6 +11786,100 @@ class TransportMetrics
   
 end
   
+  # Record type WebrtcDirectCode
+class WebrtcDirectCode
+  attr_reader :fragment, :host, :port, :address
+
+  def initialize(fragment:, host:, port:, address:)
+    @fragment = fragment
+    @host = host
+    @port = port
+    @address = address
+  end
+
+  def ==(other)
+    if @fragment != other.fragment
+      return false
+    end
+    if @host != other.host
+      return false
+    end
+    if @port != other.port
+      return false
+    end
+    if @address != other.address
+      return false
+    end
+
+    true
+  end
+  
+end
+  
+  # Record type WebrtcDirectDatagram
+class WebrtcDirectDatagram
+  attr_reader :destination_ip, :destination_port, :data
+
+  def initialize(destination_ip:, destination_port:, data:)
+    @destination_ip = destination_ip
+    @destination_port = destination_port
+    @data = data
+  end
+
+  def ==(other)
+    if @destination_ip != other.destination_ip
+      return false
+    end
+    if @destination_port != other.destination_port
+      return false
+    end
+    if @data != other.data
+      return false
+    end
+
+    true
+  end
+  
+end
+  
+  # Record type WebrtcDirectEvent
+class WebrtcDirectEvent
+  attr_reader :kind, :stream, :address, :remote_ip, :remote_port, :data
+
+  def initialize(kind:, stream:, address:, remote_ip:, remote_port:, data:)
+    @kind = kind
+    @stream = stream
+    @address = address
+    @remote_ip = remote_ip
+    @remote_port = remote_port
+    @data = data
+  end
+
+  def ==(other)
+    if @kind != other.kind
+      return false
+    end
+    if @stream != other.stream
+      return false
+    end
+    if @address != other.address
+      return false
+    end
+    if @remote_ip != other.remote_ip
+      return false
+    end
+    if @remote_port != other.remote_port
+      return false
+    end
+    if @data != other.data
+      return false
+    end
+
+    true
+  end
+  
+end
+  
   # Record type WifiDirectMessage
 class WifiDirectMessage
   attr_reader :recipient_id, :data
@@ -13217,6 +13667,54 @@ end
         
     result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes,uniffi_clone_handle(),RustBuffer.alloc_from_bytes(public_key),RustBuffer.alloc_from_bytes(data),RustBuffer.alloc_from_bytes(signature))
     return 1 == result
+  end
+  def webrtc_direct_close()
+      ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close,uniffi_clone_handle(),)
+  end
+  
+  def webrtc_direct_close_stream(stream)
+        stream = ::OfflineProtocol::uniffi_in_range(stream, "u64", 0, 2**64)
+        
+      ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_close_stream,uniffi_clone_handle(),stream)
+  end
+  
+  def webrtc_direct_datagram_received(source_ip, source_port, data)
+        source_ip = ::OfflineProtocol::uniffi_utf8(source_ip)
+        
+        source_port = ::OfflineProtocol::uniffi_in_range(source_port, "u16", 0, 2**16)
+        
+        data = data.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
+        RustBuffer.check_lower_Sequenceu8(data)
+      ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_datagram_received,uniffi_clone_handle(),RustBuffer.alloc_from_string(source_ip),source_port,RustBuffer.alloc_from_Sequenceu8(data))
+  end
+  
+  def webrtc_direct_next_datagram()
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_datagram,uniffi_clone_handle(),)
+    return result.consume_into_OptionalTypeWebrtcDirectDatagram
+  end
+  def webrtc_direct_next_event()
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_next_event,uniffi_clone_handle(),)
+    return result.consume_into_OptionalTypeWebrtcDirectEvent
+  end
+  def webrtc_direct_open(local_ip, local_port)
+        local_ip = ::OfflineProtocol::uniffi_utf8(local_ip)
+        
+        local_port = ::OfflineProtocol::uniffi_in_range(local_port, "u16", 0, 2**16)
+        
+    result = ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_open,uniffi_clone_handle(),RustBuffer.alloc_from_string(local_ip),local_port)
+    return result.consume_into_TypeWebrtcDirectCode
+  end
+  def webrtc_direct_send(stream, body)
+        stream = ::OfflineProtocol::uniffi_in_range(stream, "u64", 0, 2**64)
+        
+        body = body.map { |v| ::OfflineProtocol::uniffi_in_range(v, "u8", 0, 2**8) }
+        RustBuffer.check_lower_Sequenceu8(body)
+      ::OfflineProtocol.rust_call_with_error(ProtocolError,:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_send,uniffi_clone_handle(),stream,RustBuffer.alloc_from_Sequenceu8(body))
+  end
+  
+  def webrtc_direct_tick()
+    result = ::OfflineProtocol.rust_call(:uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_webrtc_direct_tick,uniffi_clone_handle(),)
+    return result.consume_into_Optionalu32
   end
   def wifi_direct_fast_link_ended(link_id, reason)
         link_id = ::OfflineProtocol::uniffi_utf8(link_id)

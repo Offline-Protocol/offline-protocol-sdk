@@ -338,6 +338,14 @@ impl WebEngine {
         self.node.open_link().map_err(js)
     }
 
+    /// Registers a carrier opened toward `address`, a dial code's claim
+    /// (W16): a link whose preamble proves anyone else closes with nothing
+    /// announced. Refuses an address that is not canonical.
+    #[wasm_bindgen(js_name = openLinkExpecting)]
+    pub fn open_link_expecting(&mut self, address: &str) -> Result<LinkId, JsError> {
+        self.node.open_link_expecting(Some(address)).map_err(js)
+    }
+
     /// Bytes a carrier delivered. Returns the reason to close it, or
     /// `undefined` to keep it open.
     #[wasm_bindgen(js_name = linkReceived)]

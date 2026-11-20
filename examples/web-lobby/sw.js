@@ -23,8 +23,8 @@ const ASSETS = [
   "./icon.svg",
   "./icon-192.png",
   "./icon-512.png",
-  ...["bluetooth", "index", "nearby", "nostr-relays", "nostr-signal", "store",
-      "tab-carrier", "webrtc", "worker"].map((file) => `${SDK}src/${file}.js`),
+  ...["bluetooth", "direct-code", "index", "nearby", "nostr-relays", "nostr-signal",
+      "store", "tab-carrier", "webrtc", "worker"].map((file) => `${SDK}src/${file}.js`),
   `${SDK}pkg/offline_protocol_web.js`,
   `${SDK}pkg/offline_protocol_web_bg.wasm`,
 ];

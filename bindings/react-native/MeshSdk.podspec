@@ -77,6 +77,7 @@ Pod::Spec.new do |s|
     "ios/WifiDirectManager.swift",
     "ios/PeerStreamFraming.swift",
     "ios/PeerStreamSession.swift",
+    "ios/WebrtcDirectListener.swift",
     "ios/NostrManager.swift",
     "ios/NostrQueryTracker.swift",
     "ios/ReticulumManager.swift",

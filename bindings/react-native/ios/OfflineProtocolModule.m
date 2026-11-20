@@ -454,6 +454,13 @@ RCT_EXTERN_METHOD(closeFastLink:(NSString *)peerId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// WebRTC Direct (ADR 0039)
+RCT_EXTERN_METHOD(openWebrtcDirect:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(closeWebrtcDirect:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // User Blocking
 RCT_EXTERN_METHOD(blockUser:(NSString *)userId
                   resolver:(RCTPromiseResolveBlock)resolve

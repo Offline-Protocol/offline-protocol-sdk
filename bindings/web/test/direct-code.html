@@ -1,0 +1,85 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// parseDirectCode against the dial-code conformance vectors the listener's
+// reader replays too (docs/spec/stream-framing.md, "Conformance vectors"):
+// every accepted code must read to exactly the values the vector states,
+// and every refused one must be refused for the rule it names. Then the
+// rules the vectors leave to each reader's own tests: the shape of a part,
+// and that a refusal never decodes a value. The title ends as PASS or
+// FAIL: <step>.
+import { parseDirectCode } from "../src/index.js";
+import { log, run } from "./common.js";
+
+const VECTORS = "../../../crates/offline-protocol-webrtc-direct/tests/data/webrtc-direct-dial-v1.vectors.json";
+
+const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
+function refusal(input) {
+  try {
+    parseDirectCode(input);
+  } catch (error) {
+    return error;
+  }
+  return null;
+}
+
+await run(async (step) => {
+  step.name = "vectors";
+  const response = await fetch(VECTORS, { cache: "no-store" });
+  if (!response.ok) throw new Error(`could not fetch the vectors: ${response.status}`);
+  const vectors = await response.json();
+  if (String(vectors.version) !== "1") throw new Error(`vectors version ${vectors.version}`);
+
+  step.name = "accepted codes";
+  for (const vector of vectors.accept) {
+    let code;
+    try {
+      code = parseDirectCode(vector.input);
+    } catch (error) {
+      throw new Error(`${vector.name}: refused (${error.reason}: ${error.message})`);
+    }
+    if (!(code.certhash instanceof Uint8Array) || code.certhash.length !== 32) {
+      throw new Error(`${vector.name}: the hash is not 32 bytes`);
+    }
+    const read = {
+      host: code.host,
+      port: code.port,
+      certhash_hex: hex(code.certhash),
+      ufrag: code.ufrag,
+      password: code.password,
+      address: code.address,
+    };
+    for (const [key, expected] of Object.entries(vector.expect)) {
+      if (read[key] !== expected) {
+        throw new Error(`${vector.name}: ${key} read as ${JSON.stringify(read[key])}, not ${JSON.stringify(expected)}`);
+      }
+    }
+  }
+  log(`${vectors.accept.length} codes accepted with the values the vectors state`);
+
+  step.name = "refused codes";
+  for (const vector of vectors.refuse) {
+    const error = refusal(vector.input);
+    if (error === null) throw new Error(`${vector.name}: accepted`);
+    if (error.reason !== vector.reason) {
+      throw new Error(`${vector.name}: refused as ${error.reason} (${error.message}), not ${vector.reason}`);
+    }
+    if (vector.key !== undefined && error.key !== vector.key) {
+      throw new Error(`${vector.name}: named ${error.key}, not ${vector.key}`);
+    }
+    if (!error.message) throw new Error(`${vector.name}: the refusal has no message`);
+  }
+  log(`${vectors.refuse.length} codes refused, each for the rule its vector names`);
+
+  step.name = "an unknown key with an empty value";
+  // The shape of a part (no `=`, an empty part, a `%` in a value no key
+  // reads) is in the shared vectors, which the Rust parser replays too. This
+  // is the one acceptance they do not state.
+  const good = vectors.accept[0].fragment;
+  if (refusal(`${good}&x-future=`) !== null) throw new Error("an unknown key with an empty value was refused");
+  log("an unknown key is ignored when well formed, even with an empty value");
+});
+</script>

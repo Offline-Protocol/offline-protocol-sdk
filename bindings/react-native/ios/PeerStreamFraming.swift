@@ -200,6 +200,17 @@ final class PeerStreamPreamble {
         self.localAddress = localAddress
     }
 
+    /// A stream whose preamble was verified before it reached this side: one
+    /// a page dialled to the WebRTC Direct listener, which runs the position
+    /// rule with the one verifier and reports the address it derived. Every
+    /// body is then a message from `address`.
+    init(proved address: String) {
+        self.verify = { _ in throw PeerStreamRefusal(reason: "already proved") }
+        self.expected = nil
+        self.localAddress = nil
+        self.address = address
+    }
+
     func accept(_ body: Data) -> Outcome {
         if let address = address {
             return .deliver(address: address, body: body)
@@ -244,6 +255,18 @@ final class PeerStreamPreamble {
 /// recorded in R16, is that a replayer can end a real stream when its copy is
 /// the winning kind; it cannot use the stream it gets.
 ///
+/// A stream a page dialled to the WebRTC Direct listener (ADR 0039) is the
+/// exception, decided ahead of that rule: of two dialled streams for one
+/// address the newer wins, and against a stream of the other kind the existing
+/// one stays, in both directions. Only the page dials, so there is no race for
+/// the lower-address rule to settle, and under it a device whose address is
+/// the lower would keep the older dialled stream: a page that reloaded, or came
+/// back after a Wi-Fi drop, would be refused until the dead stream's consent
+/// ran out (up to 15 s) while it waited on a stream this device will not hold.
+/// Android's `PeerStreamLinks` and Python's `_new_stream_wins` hold the same
+/// rule, and `every_peer_stream_manager_keeps_the_newer_dialled_stream` pins
+/// all three.
+///
 /// Thread-safe, and deliberately knows nothing of the protocol: the send path
 /// reads it from whichever thread the core calls `onMessagesAvailable` on,
 /// holding its global mutex, so nothing may ever call the core while holding
@@ -273,9 +296,14 @@ final class PeerStreamLinks<Handle: Hashable> {
     private let lock = NSLock()
     private var byAddress: [String: Handle] = [:]
     private var byHandle: [Handle: String] = [:]
+    /// The held streams a page dialled, which `announce` orders apart.
+    private var dialledHandles = Set<Handle>()
 
+    /// `dialled` is whether `handle` is a stream a page dialled to the WebRTC
+    /// Direct listener; see the type's comment for why it is ordered apart.
     func announce(
-        _ handle: Handle, address: String, outbound: Bool, localAddress: String?
+        _ handle: Handle, address: String, outbound: Bool, localAddress: String?,
+        dialled: Bool = false
     ) -> Announcement {
         lock.lock(); defer { lock.unlock() }
         if byHandle[handle] != nil {
@@ -286,13 +314,23 @@ final class PeerStreamLinks<Handle: Hashable> {
             // trap here would take the app down for a bookkeeping mistake.
             return Announcement(firstForAddress: false, superseded: nil)
         }
-        if byAddress[address] != nil,
+        if let held = byAddress[address], dialled || dialledHandles.contains(held) {
+            // A dialled stream on either side: the newer of two dialled
+            // streams wins, and against the other kind the held one stays.
+            if !(dialled && dialledHandles.contains(held)) {
+                return Announcement(firstForAddress: false, superseded: nil, refused: true)
+            }
+        } else if byAddress[address] != nil,
            !Self.newStreamWins(outbound: outbound, localAddress: localAddress, peer: address) {
             return Announcement(firstForAddress: false, superseded: nil, refused: true)
         }
         let older = byAddress.updateValue(handle, forKey: address)
         byHandle[handle] = address
-        if let older = older { byHandle.removeValue(forKey: older) }
+        if dialled { dialledHandles.insert(handle) }
+        if let older = older {
+            byHandle.removeValue(forKey: older)
+            dialledHandles.remove(older)
+        }
         return Announcement(firstForAddress: older == nil, superseded: older)
     }
 
@@ -302,6 +340,7 @@ final class PeerStreamLinks<Handle: Hashable> {
     @discardableResult
     func remove(_ handle: Handle) -> String? {
         lock.lock(); defer { lock.unlock() }
+        dialledHandles.remove(handle)
         guard let address = byHandle.removeValue(forKey: handle) else { return nil }
         if byAddress[address] == handle { byAddress.removeValue(forKey: address) }
         return address
@@ -313,6 +352,7 @@ final class PeerStreamLinks<Handle: Hashable> {
         let live = byAddress.map { (handle: $0.value, address: $0.key) }
         byAddress.removeAll()
         byHandle.removeAll()
+        dialledHandles.removeAll()
         return live
     }
 

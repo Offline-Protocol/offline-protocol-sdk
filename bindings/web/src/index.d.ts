@@ -103,6 +103,12 @@ export interface PageCarrier {
   send(bytes: Uint8Array): void;
   /** Closes the carrier; the other end must see it close. */
   close(): void;
+  /**
+   * The address the other end's preamble must prove, for a carrier opened
+   * toward a known address (a dial code's, W16). The engine closes a link
+   * whose preamble proves anyone else and announces nothing.
+   */
+  expect?: string;
 }
 
 /**
@@ -266,8 +272,81 @@ export class WebRtcCarrier extends EventTarget {
   constructor(node: OfflineNode, options?: { iceServers?: RTCIceServer[]; disconnectedMs?: number });
   offer(): Promise<OfferedConnection>;
   answer(offerCode: string): Promise<AnsweredConnection>;
+  /**
+   * Dials a native device's WebRTC Direct listener from the code it shows
+   * (W16): the code's text (a whole URL, a `#fragment` or a bare fragment)
+   * or what `parseDirectCode` returned. Resolves once the data channel is
+   * open. The link's preamble must prove the code's `address`, or the
+   * engine closes it and announces nothing. Closes this carrier's earlier
+   * dialled connection to the same address once the channel opens (a dial
+   * that fails leaves it as it was; one still setting up is abandoned at
+   * once), and uses no ICE server.
+   * Rejects, closing the connection, on a refused code, on a connection
+   * that fails (a certificate that does not match the code fails DTLS:
+   * `state` "failed") or closes first (`state` "closed"), or when the
+   * channel has not opened within `timeoutMs` (default 15000; `state`
+   * "timeout"). A listener that does not admit the dial answers nothing.
+   */
+  dial(code: string | DirectCode, options?: { timeoutMs?: number }): Promise<DialledConnection>;
   close(): void;
 }
+
+/** What `dial()` resolves to. */
+export interface DialledConnection {
+  /** The code's address, which the link's preamble proved or will close on. */
+  address: string;
+  close(): void;
+}
+
+/** A dial code, as `parseDirectCode` read it. */
+export interface DirectCode {
+  /** The listener's IP literal: IPv4 dotted decimal or RFC 5952 IPv6, no brackets. */
+  host: string;
+  /** The listener's UDP port. */
+  port: number;
+  /** SHA-256 of the listener's DER certificate, 32 bytes. */
+  certhash: Uint8Array;
+  /** The listener's ICE username fragment. */
+  ufrag: string;
+  /** The listener's ICE password. */
+  password: string;
+  /** The listener's `off1…` address, the claim the link's preamble must prove. */
+  address: string;
+}
+
+/**
+ * Why `parseDirectCode` refused a code: an Error named "DirectCodeError"
+ * whose `reason` names the rule, as the conformance vectors do, and whose
+ * `key` names the key for a missing or repeated one.
+ */
+export interface DirectCodeError extends Error {
+  reason:
+    | "too_long"
+    | "percent_encoded"
+    | "malformed"
+    | "missing_key"
+    | "repeated_key"
+    | "unsupported_version"
+    | "host_not_literal"
+    | "host_loopback"
+    | "host_not_local"
+    | "port"
+    | "certhash"
+    | "ufrag"
+    | "password"
+    | "address";
+  key?: string;
+}
+
+/**
+ * Reads a dial code (docs/spec/stream-framing.md, "The dial code") from a
+ * whole URL, a `#fragment` or a bare fragment, under every rule the format
+ * states. Throws a DirectCodeError naming the rule a code breaks. A page
+ * that read the code from its own address bar should remove it with
+ * `history.replaceState`: it admits dials for as long as its listener is
+ * open.
+ */
+export function parseDirectCode(input: string): DirectCode;
 
 /** What `offer()` resolves to: show `code`, then pass the answer to `accept`. */
 export interface OfferedConnection {
@@ -290,13 +369,13 @@ export interface AnsweredConnection {
  * after the last answered check) or when it has stayed "disconnected" for
  * the carrier's `disconnectedMs`, whichever comes first. "closed" comes
  * once, at the end.
- * Events start once `offer()` or `answer()` has resolved; a call that
+ * Events start once `offer()`, `answer()` or `dial()` has resolved; a call that
  * rejects, including one whose connection closed while it gathered, reports
  * nothing.
  */
 export interface ConnectionStateDetail {
   state: "connected" | "disconnected" | "closed";
-  connection: OfferedConnection | AnsweredConnection;
+  connection: OfferedConnection | AnsweredConnection | DialledConnection;
 }
 
 /** A connection one side of a NostrSignaller room made. */

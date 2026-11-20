@@ -211,6 +211,14 @@ update_transport_metrics
 verify_identity_assertion
 verify_signature
 verify_signature_bytes
+webrtc_direct_close
+webrtc_direct_close_stream
+webrtc_direct_datagram_received
+webrtc_direct_next_datagram
+webrtc_direct_next_event
+webrtc_direct_open
+webrtc_direct_send
+webrtc_direct_tick
 wifi_direct_fast_link_ended
 wifi_direct_fast_link_hosting
 wifi_direct_get_next_message

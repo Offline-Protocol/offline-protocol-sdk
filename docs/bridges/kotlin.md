@@ -278,6 +278,160 @@ nothing, in at least one direction, until the Android app restarted.
   rule, its bounds and those gaps are in
   [the transport lifecycle](../state-machines/transport-lifecycle.md#per-transport-constraints).
 
+## K10. A stream a page dialled is a row in the one stream table
+
+**Invariants:** a stream a page dialled to this device's WebRTC Direct
+listener ([ADR 0039](../adr/0039-a-browser-dials-a-native-device-from-a-code.md),
+[stream framing](../spec/stream-framing.md#dialling-a-listener-from-a-browser))
+is held in the same table as the TCP streams of K8, under the same caps and
+the same one-announced-stream-per-address rule, so the core hears one
+announcement and, later, one loss per address whichever kind carries it. Of
+two dialled streams proving one address the newer is kept; against a TCP
+stream the existing one stays, in both directions. A dialled stream counts
+as inbound, from the address its page's first check came from. A stream
+proving this device's own address is refused. The dial code is returned to
+the application and never logged. The listener's socket is bound to one
+private IPv4 address, never a wildcard and never the default network: the
+Wi-Fi network's, with the socket bound to that network too, when this device
+is a client of one; otherwise that of the hotspot this device shares, so a
+laptop or phone that joined it can dial with no other network at all. A
+hotspot (a tethering interface) is told apart from cellular, a VPN or the
+Wi-Fi client with no privileged `TetheringManager`: each of those is a
+`Network` that is not a local network, and a tethering interface is either
+no `Network` at all (before Android 15) or a local one
+(`NET_CAPABILITY_LOCAL_NETWORK`, as Android 16 on a Samsung reports its
+hotspot), so an interface of a `Network` that is not local is never chosen.
+Binding a VPN's or the cellular
+interface's private address would show a code no page nearby can reach. A
+Wi-Fi Direct group interface is never chosen: a dialled stream counts as a
+LAN stream, so a listener there would let anyone on a fast link's group past
+its host's admission of the invitee alone (ADR 0038).
+
+`WifiDirectManager.openWebrtcDirect()` (React Native `openWebrtcDirect()`)
+opens the listener while the transport runs and returns the code;
+`closeWebrtcDirect()` closes it, and so do `stop()` and the network it is
+bound to going away or losing the bound address, since its code then names an
+address no page can reach. For the Wi-Fi network the LAN carrier's network
+callback says so. For a hotspot a check on the transport thread every two
+seconds, while such a listener is open, reads its interface: no public
+broadcast says a tethering interface went (`WIFI_AP_STATE_CHANGED` is hidden,
+covers the Wi-Fi hotspot alone and is silent when a restart picks a new
+subnet), and a socket bound to an address that went does not fail its
+receive, so without the check the listener would stay open on a dead code
+until each stream's consent ran out. A dialled stream ends with its
+listener, never with the LAN carrier: a hotspot listener outlives the Wi-Fi
+network going. Opening again replaces the previous listener once the new
+one is open, its streams reported lost: the socket, certificate and
+credentials are fresh on every open. The socket is bound before the open
+listener is touched and the engine swaps only on success, so an open that
+throws leaves the old code working. The replaced listener stops entering
+the engine in the same hold of its lock that the open ran under: a
+datagram, timer or send parked on that lock would otherwise run once it was
+let go and enter the new listener from a second thread, draining its
+datagrams out of the old socket. An open returns a code only for a listener
+still open once it is published. One that finds the Wi-Fi network gone
+closes it and throws, because the loss reached the bridge while the
+replaced listener was still in place, and one that a stop or a loss closed
+in between throws too: that close has already told the application, which
+would otherwise get the code after the event.
+
+The application hears every close it did not ask for, once, as the React
+Native `webrtc_direct_closed` event with a reason: `network` (the Wi-Fi
+network went or lost the bound address), `hotspot` (the hotspot's interface
+went or lost it), `socket` (the socket failed) or `stopped`. A close of its
+own (`closeWebrtcDirect()`) or by the next open reports nothing. Before the
+event a diagnostic was the only signal, so an application kept showing a code
+whose listener was gone and every page that dialled it timed out with nothing
+to say why. The report is the listener's own (`openWebrtcDirect`'s
+`onClosed`, which `WebrtcDirectListener` calls once, after its first close
+that names a reason), so a listener closed twice, or one an open replaced,
+cannot report twice or late. The listener itself (admission by authenticated check only,
+DTLS, the channel, the preamble and the framing) is the engine's
+`webrtc_direct_*`, and `WebrtcDirectListener` moves only what the UDL
+contract gives it: every datagram the socket receives, unfiltered; every
+datagram and event the engine queued, after every call; and a tick on a
+timer re-armed from the tick's own return. Every call into the engine is
+made under that class's one lock, so the engine's listener is never entered
+from two threads at once, and a handler that calls back in (a refusal, a
+supersede) only marks the pump to go round again, so events are handled in
+order and never inside one another. Only the listener's own threads take
+that lock: the receive thread, and one thread that runs the timer and every
+send and stream close handed to it, in the order they were handed. The
+pump after a call hands every queued event to the table, and a body reaches
+the core, which can mean an MLS decrypt under the core's lock; a send that
+ran it on the transport thread, which Wi-Fi P2P's broadcasts share, or
+waited there on the receive thread's deliveries, would stall both, where a
+TCP stream's send only queues a frame for its writer. So a send returns
+once handed. A send the engine then refuses (the stream ended, or past its
+8 MiB bound, which leaves the stream open) is dropped and the core retries;
+more than that bound waiting to be handed is refused at once. Closing the
+listener is the exception: it runs on the caller's thread and reports every
+dialled loss before it returns.
+
+- **One table.** `PeerStreamSockets.dialProved` puts the stream in the same
+  `PeerStreamLinks` and the same admission count as the sockets, and
+  `dialBody` and `dialClosed` go through the same `deliver` and `endStream`.
+  A table per kind would let a page and a TCP peer each announce the same
+  address, and the first close would tell the core a reachable peer is gone,
+  which a copied preamble
+  ([R16](../security/threat-model.md#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier))
+  is enough to cause.
+- **The newer dialled stream wins.** `PeerStreamLinks.announce` decides it
+  ahead of the lower-address rule of K8. Only the page dials, so that rule
+  has no race to settle here, and under it a device whose address is the
+  lower would keep the older dialled stream: a page that reloaded, or came
+  back after a Wi-Fi drop, would be refused until the dead stream's consent
+  ran out, up to 15 s, while the page, which closed its old link before
+  dialling again (W3, W16), waits on a stream this device will not hold. The
+  superseded stream is closed with `webrtc_direct_close_stream`, out of the
+  table first, so its `Closed` reports nothing. Against a TCP stream the
+  existing one stays, so neither kind can take an address from the other.
+  `every_peer_stream_manager_keeps_the_newer_dialled_stream` pins the lines,
+  beside Python's (P18).
+- **The caps cover both kinds**: 16 streams, 12 inbound and 4 from one
+  remote address, the chapter's mobile values. A dial past a cap is closed
+  and never announced. A dialled stream it would supersede is not counted,
+  so a page at the cap can still reload. Counted as outbound, dialled
+  streams would let one machine hold the per-address bound twice over.
+- **The socket is bound to the Wi-Fi network** with `Network.bindSocket`,
+  as LAN dials are ([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)),
+  and to the address `WebrtcDirectListener.listenAddress` picks from that
+  network's `LinkProperties` (private IPv4 only: the engine refuses an IPv4
+  link-local host candidate, so 169.254 is never chosen). Unbound,
+  its answers would follow the default network, which on a Wi-Fi with no
+  internet is cellular, and a wildcard address cannot go in a code and
+  would admit checks from networks the code was never shown on.
+- **An open listener holds the stream layer up.** The core holds a link
+  usable only while the layer is up
+  ([stream framing](../spec/stream-framing.md#position-among-the-transports)),
+  and a phone sharing its hotspot, on no Wi-Fi network and
+  with Wi-Fi P2P off, has neither carrier up. Reported for P2P and the LAN
+  alone, a page dialled such a phone, proved its address and was counted
+  nearby, and no key package ever went out, so no MLS session formed; on a
+  Wi-Fi network the LAN carrier held the layer up and hid it.
+  `PeerStreamLayer` reports the layer up while P2P, the LAN or a listener
+  is, once per edge, on the transport thread: before an open returns its
+  code, and after a close (by the application, the hotspot check, the
+  socket dying) has ended its streams, so each dialled peer is reported
+  lost while the core still holds it, as the LAN going does. `stop()`
+  reports the layer down itself, once, after every stream.
+- **The code never reaches a log.** It carries the listener's ICE password
+  and admits whoever holds it while the listener is open
+  ([R35](../security/threat-model.md#r35-a-dial-code-admits-whoever-holds-it-to-an-open-listener)).
+  Diagnostics carry the host, port and address only, and
+  `WebrtcDirectListener.Code.toString` leaves the fragment out, so a stray
+  string template cannot leak it either. This is the fast link's passphrase
+  rule (ADR 0038) applied to a code.
+
+The listener lives while the application keeps it open, in the background
+too; iOS will close it when the application leaves the foreground (ADR 0039
+decision 8). `WebrtcDirectDialledStreamsTest` pins the table's rules and
+`WebrtcDirectListenerTest` the pump, the clock, the close and the code, both
+on a fake engine; `PeerStreamLayerTest` pins the layer rule and its order,
+and `android_webrtc_direct_listener_holds_the_stream_layer_up` the manager
+lines that feed it. A page dialling a phone is covered only by a device run
+(C9).
+
 ## Testing
 
 Unit tests live in

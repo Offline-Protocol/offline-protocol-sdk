@@ -69,6 +69,7 @@ import type {
   ServiceSubscriptionInfo,
   SubscriptionMode,
   SubscriptionPolicy,
+  WebrtcDirectCode,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import {
@@ -4657,6 +4658,54 @@ export class OfflineProtocol {
   async closeFastLink(peerId: string): Promise<boolean> {
     warnPeerIdIfMisshapen(peerId, 'closeFastLink');
     return await OfflineProtocolNativeModule.closeFastLink(peerId);
+  }
+
+  // ─── WebRTC Direct ──────────────────────────────────────────
+
+  /**
+   * Opens a WebRTC Direct listener (ADR 0039): a page running the browser
+   * node on the same Wi-Fi network (or, on Android, joined to the hotspot
+   * this device shares) dials this device from the code it resolves with,
+   * with no internet and no server, in Chromium, Firefox and Safari alike.
+   * Each dial that proves an address becomes an ordinary peer
+   * stream of the `wifiDirect` transport, so messages to and from the page
+   * flow as they do for any peer.
+   *
+   * Put `code` after your page's URL behind `#` and show it as a QR code or
+   * text. It carries the listener's password and admits whoever holds it
+   * while the listener is open, so close the listener when you stop showing
+   * it, and never log it. Opening again replaces the previous listener once
+   * the new one is open: its streams end and its code stops working, since
+   * every open makes a new certificate, password and port. An open that
+   * rejects leaves the previous listener, and its code, as they were.
+   *
+   * Needs the `wifiDirect` transport running, MLS initialized, and a
+   * private IPv4 address to bind (a 169.254 address, on a network with no
+   * DHCP, is refused): the device's on a Wi-Fi network, or on Android, when
+   * it is on no Wi-Fi network, that of the hotspot it shares. On iOS it
+   * rejects while the app is in the background.
+   * The listener closes when the transport stops, when that network or
+   * hotspot goes or loses the address, or when its socket fails. On iOS it
+   * lives only in the foreground: it closes when the app leaves it or the
+   * transport pauses, so open it again on return, and the app needs
+   * `NSLocalNetworkUsageDescription` (the user's local network permission).
+   *
+   * Each of those closes arrives as one `webrtc_direct_closed` event
+   * (`WebrtcDirectClosedEvent`) with its reason, so the app can stop
+   * showing a code that admits nothing. A close the app asked for
+   * (`closeWebrtcDirect`, or opening again) sends none.
+   */
+  async openWebrtcDirect(): Promise<WebrtcDirectCode> {
+    return await OfflineProtocolNativeModule.openWebrtcDirect();
+  }
+
+  /**
+   * Closes the WebRTC Direct listener, if one is open. Every stream a page
+   * dialled ends, and its code admits nothing again. No
+   * `webrtc_direct_closed` event follows: the app asked for this close.
+   */
+  async closeWebrtcDirect(): Promise<void> {
+    await OfflineProtocolNativeModule.closeWebrtcDirect();
   }
 
   // ─── User Blocking ──────────────────────────────────────────

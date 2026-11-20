@@ -1610,6 +1610,61 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         ProtocolEngineHostBridgeReactNative.closeFastLink(this, peerId, promise)
     }
 
+    // WebRTC Direct (ADR 0039). The listener belongs to the Wi-Fi Direct
+    // transport's stream table, not to the engine, so these go to the manager
+    // rather than through the shared engine bridge. The code's fragment
+    // carries the listener's ICE password: resolved to the application,
+    // never logged.
+
+    @ReactMethod
+    fun openWebrtcDirect(promise: Promise) {
+        val manager = wifiDirectManager
+        if (manager == null) {
+            promise.reject(
+                "ERROR_WEBRTC_DIRECT",
+                "Enable the wifiDirect transport first: a WebRTC Direct listener's streams are its peer streams",
+                null,
+            )
+            return
+        }
+        try {
+            val code = manager.openWebrtcDirect { reason -> emitWebrtcDirectClosedEvent(reason) }
+            promise.resolve(Arguments.createMap().apply {
+                putString("code", code.fragment)
+                putString("host", code.host)
+                putInt("port", code.port)
+                putString("address", code.address)
+            })
+        } catch (e: Exception) {
+            rejectBridgePromise(promise, e, "ERROR_WEBRTC_DIRECT", "Failed to open a WebRTC Direct listener", mapProtocolErrors = true)
+        }
+    }
+
+    /**
+     * Forwards the bridge's own close of the listener the application opened
+     * (its network or hotspot went, its socket failed, the transport stopped)
+     * as the `webrtc_direct_closed` event, once per listener. Without it the
+     * application kept showing a code whose listener was gone. Not for a
+     * close the application asked for: [closeWebrtcDirect] or the next open.
+     */
+    private fun emitWebrtcDirectClosedEvent(reason: String) {
+        try {
+            sendEvent(EVENT_NAME, eventParams(WebrtcDirectListener.closedEventJson(reason)))
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Failed to emit WebRTC Direct closed event", e)
+        }
+    }
+
+    @ReactMethod
+    fun closeWebrtcDirect(promise: Promise) {
+        try {
+            wifiDirectManager?.closeWebrtcDirect()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_WEBRTC_DIRECT", "Failed to close the WebRTC Direct listener: ${e.message}", e)
+        }
+    }
+
     // User Blocking
 
     @ReactMethod

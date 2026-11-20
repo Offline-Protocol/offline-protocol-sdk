@@ -1522,6 +1522,87 @@ interface OfflineProtocol {
     // `close` reasons in docs/spec/control-messages.md. The peer is told.
     void wifi_direct_fast_link_ended(string link_id, string reason);
 
+    // WebRTC Direct listener (ADR 0039, docs/spec/stream-framing.md, section
+    // "Dialling a listener from a browser"). A page on the same network dials
+    // this device from a code it shows, and each dial that proves an address
+    // becomes an ordinary stream in the peer-stream slot above.
+    //
+    // The listener is sans-I/O. The platform owns one UDP socket, bound to a
+    // private or link-local address on the Wi-Fi network (never a wildcard,
+    // whose address cannot go in a code), and the clock:
+    //
+    // - every datagram the socket receives goes to
+    //   `webrtc_direct_datagram_received`, and the listener answers only an
+    //   authenticated check, so the platform never filters;
+    // - after every call here, the platform sends every datagram
+    //   `webrtc_direct_next_datagram` yields, from that socket, and acts on
+    //   every event `webrtc_direct_next_event` yields;
+    // - it calls `webrtc_direct_tick` again within the milliseconds the last
+    //   tick returned, or after any other call here, since a datagram or a
+    //   send can bring the next deadline forward.
+    //
+    // The listener proves who is on each stream; the platform decides which
+    // streams the engine hears about. It keeps a stream table and calls the
+    // `wifi_direct_*` methods above itself: one announcement and, later, one
+    // loss per address; of two dialled streams proving one address the newer
+    // wins and the older is closed without a loss, while against a stream of
+    // another kind the existing one stays; a proved stream counts against the
+    // slot's caps (16 streams, 12 inbound, 4 from one remote IP), and a
+    // stream past a cap, or proving this device's own address, is closed and
+    // never announced. The listener's own events never reach the engine.
+    //
+    // Without the `webrtc-direct` cargo feature (the iOS, Android and Python
+    // packages turn it on) every method below still exists:
+    // `webrtc_direct_open`, `webrtc_direct_datagram_received` and
+    // `webrtc_direct_send` refuse with a message naming the feature, and the
+    // rest return null or do nothing.
+
+    // Opens a listener on the platform's socket at `local_ip:local_port` and
+    // returns its dial code. Only after `initialize_mls`: the code carries
+    // this device's address and the stream's preamble is its identity
+    // assertion. The certificate, ICE username and password are fresh on
+    // every open, and so should the socket be. A listener already open is
+    // replaced once the new one is made: its proved streams end, with
+    // `Closed` events, and its code is dead. A refused open leaves it as it
+    // was. Refused for an address a code cannot name (public, loopback,
+    // wildcard, port 0) or an IP literal with a zone index. Stream ids are
+    // never reused, across listeners too.
+    [Throws=ProtocolError]
+    WebrtcDirectCode webrtc_direct_open(string local_ip, u16 local_port);
+
+    // Closes the listener: a `Closed` event follows for every proved stream,
+    // and its code admits nothing again. Nothing happens with none open.
+    void webrtc_direct_close();
+
+    // One datagram the listener's socket received from `source_ip:source_port`.
+    // Refused only when no listener is open or the source is not an IP
+    // literal (without a zone index). A datagram to send names none either:
+    // for a link-local destination the platform adds its socket's own.
+    [Throws=ProtocolError]
+    void webrtc_direct_datagram_received(string source_ip, u16 source_port, sequence<u8> data);
+
+    // The next datagram to send from the listener's socket, or null.
+    WebrtcDirectDatagram? webrtc_direct_next_datagram();
+
+    // The next listener event, or null. See `WebrtcDirectEvent`.
+    WebrtcDirectEvent? webrtc_direct_next_event();
+
+    // Sends one message body on a proved stream; the listener frames it.
+    // Refused for a stream that is not proved or has ended, a body that
+    // cannot be one frame, or one that would put more than 8 MiB behind the
+    // channel. That last refusal leaves the stream open: the body is
+    // dropped, as a TCP stream's writer drops one past its bound.
+    [Throws=ProtocolError]
+    void webrtc_direct_send(u64 stream, sequence<u8> body);
+
+    // Ends one stream. A `Closed` event follows if it was proved.
+    void webrtc_direct_close_stream(u64 stream);
+
+    // Fires the listener's due timers, and returns how many milliseconds
+    // until the next call is needed, or null when nothing is timed (no
+    // listener, or no dial in progress).
+    u32? webrtc_direct_tick();
+
     // Reticulum transport callback (event-driven sending)
     void set_reticulum_transport_callback(ReticulumTransportCallback callback);
 
@@ -2649,6 +2730,51 @@ dictionary FastLinkDirective {
     u16? port;
     u64 expires_in_ms;
     string? reason;
+};
+
+// A WebRTC Direct listener's dial code (ADR 0039). `fragment` is the whole
+// code, `op-direct=1&...` without the `#`: append it to the page's URL after
+// a `#`, or show it as a QR code. It never goes in a query string or a path,
+// where a web server would log the listener's address and password. `host`,
+// `port` and `address` are the listener's socket and this device's address,
+// as the code names them, for display.
+dictionary WebrtcDirectCode {
+    string fragment;
+    string host;
+    u16 port;
+    string address;
+};
+
+// A datagram for the platform to send from the listener's socket.
+dictionary WebrtcDirectDatagram {
+    string destination_ip;
+    u16 destination_port;
+    sequence<u8> data;
+};
+
+// What a WebRTC Direct listener reports.
+enum WebrtcDirectEventKind {
+    // A dial's preamble verified: `address` is the address it derived, never
+    // a claimed one, and `remote_ip:remote_port` is where the dial's first
+    // check came from (for the per-remote-IP cap, never an identity).
+    "Proved",
+    // One message body, `data`, from a proved stream.
+    "Body",
+    // A proved stream ended, for any reason, including the platform's own
+    // close. Exactly once per proved stream, never for one that was not.
+    "Closed",
+};
+
+// One listener event. `stream` names the stream in every kind; `address`,
+// `remote_ip` and `remote_port` are set on `Proved` only, `data` on `Body`
+// only.
+dictionary WebrtcDirectEvent {
+    WebrtcDirectEventKind kind;
+    u64 stream;
+    string? address;
+    string? remote_ip;
+    u16? remote_port;
+    sequence<u8>? data;
 };
 
 // The signed proof a device presents to attach to a gateway: everything

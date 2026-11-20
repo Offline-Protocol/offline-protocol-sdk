@@ -1,0 +1,806 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for the WebRTC Direct dial code, from",
+    "docs/spec/stream-framing.md, \"The dial code\".",
+    "",
+    "Computed from the table in that chapter, not by running the code",
+    "they pin: every expectation is stated by hand and checked against",
+    "the chapter's rules written out a second time in the generator.",
+    "",
+    "`accept` cases give the input and every value a dialler must read,",
+    "with the certificate hash as hex, and `fragment`, the code a",
+    "listener writes for those values (`op-direct` first, then the",
+    "table's order). `refuse` cases give the input and the rule it",
+    "breaks. Each breaks exactly one rule, so `reason` is the same",
+    "whatever order a dialler checks in, except that the two",
+    "fragment-wide rules (over 512 characters, any `%`) are checked",
+    "before any key is read: a value is never decoded to be checked.",
+    "A dialler is held to refusing; one that names why it refused",
+    "names `reason` (and `key`, for a missing or repeated key).",
+    "",
+    "Inputs come as a bare fragment, a `#fragment` and a whole URL,",
+    "because the code is read from all three. Every input is ASCII,",
+    "so a length in characters and in UTF-16 units agree."
+  ],
+  "format": "op-direct=1&h=<host>&p=<port>&c=<certhash>&u=<ufrag>&w=<password>&a=<address>",
+  "keys": [
+    "op-direct",
+    "h",
+    "p",
+    "c",
+    "u",
+    "w",
+    "a"
+  ],
+  "version": "1",
+  "max_fragment_len": 512,
+  "certhash_text_len": 43,
+  "ufrag_len": [
+    4,
+    32
+  ],
+  "password_len": [
+    22,
+    64
+  ],
+  "reasons": {
+    "too_long": "The fragment is over max_fragment_len characters.",
+    "percent_encoded": "The fragment contains `%`.",
+    "malformed": "A part of the fragment is not `key=value` (no `=`, or empty).",
+    "missing_key": "A key the table defines is absent (`key` names it).",
+    "repeated_key": "A key the table defines appears twice (`key` names it).",
+    "unsupported_version": "`op-direct` is not `1`.",
+    "host_not_literal": "`h` is not an IPv4 dotted-decimal or RFC 5952 IPv6 literal.",
+    "host_loopback": "`h` is a loopback address.",
+    "host_not_local": "`h` is neither private (RFC 1918, fc00::/7) nor link-local (169.254/16, fe80::/10).",
+    "port": "`p` is not decimal from 1 to 65535.",
+    "certhash": "`c` is not 43 characters of base64url with no padding.",
+    "ufrag": "`u` is not 4 to 32 characters of A-Z a-z 0-9.",
+    "password": "`w` is not 22 to 64 characters of A-Z a-z 0-9.",
+    "address": "`a` is not a canonical address."
+  },
+  "accept": [
+    {
+      "name": "ipv4, bare",
+      "note": "The fragment alone, as a listener writes it.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "ipv4, with its #",
+      "note": "As `location.hash` returns it.",
+      "input": "#op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "ipv4, in a whole URL",
+      "note": "Everything after the first `#` is the code; the page before it is not read.",
+      "input": "https://example.test/page#op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "a query string is not the code",
+      "note": "The query names a public host and a port of 1. A dialler reads the fragment only, so neither is seen and nothing is repeated.",
+      "input": "https://example.test/page?op-direct=1&h=8.8.8.8&p=1#op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host fe80::1c2b:3aff:fe4d:5e6f",
+      "note": "IPv6 link-local, fe80::/10, no zone.",
+      "input": "op-direct=1&h=fe80::1c2b:3aff:fe4d:5e6f&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "fe80::1c2b:3aff:fe4d:5e6f",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=fe80::1c2b:3aff:fe4d:5e6f&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host fd12:3456:789a::1",
+      "note": "IPv6 unique local, fc00::/7.",
+      "input": "op-direct=1&h=fd12:3456:789a::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "fd12:3456:789a::1",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=fd12:3456:789a::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host fc00::1",
+      "note": "The first address of fc00::/7.",
+      "input": "op-direct=1&h=fc00::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "fc00::1",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=fc00::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+      "note": "The last address of fc00::/7.",
+      "input": "op-direct=1&h=fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host febf:ffff::1",
+      "note": "Inside fe80::/10 at its upper edge.",
+      "input": "op-direct=1&h=febf:ffff::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "febf:ffff::1",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=febf:ffff::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host 10.0.0.1",
+      "note": "RFC 1918, 10/8.",
+      "input": "op-direct=1&h=10.0.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "10.0.0.1",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=10.0.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host 172.16.0.1",
+      "note": "RFC 1918, the low edge of 172.16/12.",
+      "input": "op-direct=1&h=172.16.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "172.16.0.1",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=172.16.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host 172.31.255.254",
+      "note": "RFC 1918, the high edge of 172.16/12.",
+      "input": "op-direct=1&h=172.31.255.254&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "172.31.255.254",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=172.31.255.254&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host 192.168.0.1",
+      "note": "RFC 1918, 192.168/16.",
+      "input": "op-direct=1&h=192.168.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.0.1",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "host 169.254.7.7",
+      "note": "IPv4 link-local, 169.254/16.",
+      "input": "op-direct=1&h=169.254.7.7&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "169.254.7.7",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=169.254.7.7&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "keys in reverse order",
+      "note": "Keys are looked up by name; only a listener's writing has an order.",
+      "input": "a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&u=AbCdEfGhIjKlMnOp&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&p=50123&h=192.168.1.23&op-direct=1",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "unknown keys are ignored",
+      "note": "One between known keys and one with an empty value at the end.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&x-future=whatever&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&z=",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "port 1",
+      "note": "The port range is inclusive at both ends.",
+      "input": "op-direct=1&h=192.168.1.23&p=1&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 1,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=1&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "port 65535",
+      "note": "The port range is inclusive at both ends.",
+      "input": "op-direct=1&h=192.168.1.23&p=65535&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 65535,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=65535&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "ufrag of 4",
+      "note": "The shortest username fragment.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=aB3d&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "aB3d",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=aB3d&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "ufrag of 32",
+      "note": "The longest username fragment.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9Z9&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "password of 22",
+      "note": "The shortest password.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=pppppppppppQQQQQQQQQQQ&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "pppppppppppQQQQQQQQQQQ",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=pppppppppppQQQQQQQQQQQ&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "password of 64",
+      "note": "The longest password.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=77777777777777777777777777777777xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "77777777777777777777777777777777xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=77777777777777777777777777777777xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "a fragment of exactly 512 characters",
+      "note": "The limit is inclusive: 512 is read, 513 is not. Filled with an unknown key.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&pad=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "a long page URL before a 512-character fragment",
+      "note": "The limit is on the fragment, not on the URL it follows.",
+      "input": "https://example.test/qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq#op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&pad=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "expect": {
+        "host": "192.168.1.23",
+        "port": 50123,
+        "certhash_hex": "4589b0890f7f1d66e37c12e866c0f9541ca2d026251956031f0fbf6284980fa8",
+        "ufrag": "AbCdEfGhIjKlMnOp",
+        "password": "Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+        "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+      },
+      "fragment": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    }
+  ],
+  "refuse": [
+    {
+      "name": "no op-direct",
+      "note": "Every key is required.",
+      "input": "h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "missing_key",
+      "key": "op-direct"
+    },
+    {
+      "name": "no h",
+      "note": "Every key is required.",
+      "input": "op-direct=1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "missing_key",
+      "key": "h"
+    },
+    {
+      "name": "no p",
+      "note": "Every key is required.",
+      "input": "op-direct=1&h=192.168.1.23&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "missing_key",
+      "key": "p"
+    },
+    {
+      "name": "no c",
+      "note": "Every key is required.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "missing_key",
+      "key": "c"
+    },
+    {
+      "name": "no u",
+      "note": "Every key is required.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "missing_key",
+      "key": "u"
+    },
+    {
+      "name": "no w",
+      "note": "Every key is required.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "missing_key",
+      "key": "w"
+    },
+    {
+      "name": "no a",
+      "note": "Every key is required.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+      "reason": "missing_key",
+      "key": "a"
+    },
+    {
+      "name": "op-direct twice",
+      "note": "Refused even with the same value, so no code carries two values of which each reader picks a different one.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&op-direct=1",
+      "reason": "repeated_key",
+      "key": "op-direct"
+    },
+    {
+      "name": "h twice",
+      "note": "Refused even with the same value, so no code carries two values of which each reader picks a different one.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&h=192.168.1.23",
+      "reason": "repeated_key",
+      "key": "h"
+    },
+    {
+      "name": "p twice",
+      "note": "Refused even with the same value, so no code carries two values of which each reader picks a different one.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&p=50123",
+      "reason": "repeated_key",
+      "key": "p"
+    },
+    {
+      "name": "c twice",
+      "note": "Refused even with the same value, so no code carries two values of which each reader picks a different one.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g",
+      "reason": "repeated_key",
+      "key": "c"
+    },
+    {
+      "name": "u twice",
+      "note": "Refused even with the same value, so no code carries two values of which each reader picks a different one.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&u=AbCdEfGhIjKlMnOp",
+      "reason": "repeated_key",
+      "key": "u"
+    },
+    {
+      "name": "w twice",
+      "note": "Refused even with the same value, so no code carries two values of which each reader picks a different one.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa",
+      "reason": "repeated_key",
+      "key": "w"
+    },
+    {
+      "name": "a twice",
+      "note": "Refused even with the same value, so no code carries two values of which each reader picks a different one.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "repeated_key",
+      "key": "a"
+    },
+    {
+      "name": "version 2",
+      "note": "Only `1` is this version.",
+      "input": "op-direct=2&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "unsupported_version"
+    },
+    {
+      "name": "version 01",
+      "note": "Only `1` is this version.",
+      "input": "op-direct=01&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "unsupported_version"
+    },
+    {
+      "name": "host 8.8.8.8",
+      "note": "A public IPv4 address.",
+      "input": "op-direct=1&h=8.8.8.8&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host 172.15.255.255",
+      "note": "Just below 172.16/12.",
+      "input": "op-direct=1&h=172.15.255.255&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host 172.32.0.1",
+      "note": "Just above 172.16/12.",
+      "input": "op-direct=1&h=172.32.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host 100.64.0.1",
+      "note": "Shared address space (RFC 6598) is not private.",
+      "input": "op-direct=1&h=100.64.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host 2001:db8::1",
+      "note": "A global IPv6 address.",
+      "input": "op-direct=1&h=2001:db8::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host fec0::1",
+      "note": "The retired site-local range, outside fe80::/10.",
+      "input": "op-direct=1&h=fec0::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host fbff::1",
+      "note": "Just below fc00::/7.",
+      "input": "op-direct=1&h=fbff::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host ::ffff:192.168.1.1",
+      "note": "A private IPv4 address mapped into IPv6 is an IPv6 address, and not a local one.",
+      "input": "op-direct=1&h=::ffff:192.168.1.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host ::ffff:127.0.0.1",
+      "note": "Loopback mapped into IPv6 is not ::1, and is not a local IPv6 address either.",
+      "input": "op-direct=1&h=::ffff:127.0.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host 0.0.0.0",
+      "note": "The unspecified IPv4 address names no host.",
+      "input": "op-direct=1&h=0.0.0.0&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host ::",
+      "note": "The unspecified IPv6 address names no host.",
+      "input": "op-direct=1&h=::&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_local"
+    },
+    {
+      "name": "host 127.0.0.1",
+      "note": "Loopback, which some browsers do not dial.",
+      "input": "op-direct=1&h=127.0.0.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_loopback"
+    },
+    {
+      "name": "host 127.8.9.10",
+      "note": "Loopback, which some browsers do not dial.",
+      "input": "op-direct=1&h=127.8.9.10&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_loopback"
+    },
+    {
+      "name": "host ::1",
+      "note": "Loopback, which some browsers do not dial.",
+      "input": "op-direct=1&h=::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_loopback"
+    },
+    {
+      "name": "host 'printer.local'",
+      "note": "A name, which the browser would resolve.",
+      "input": "op-direct=1&h=printer.local&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host 'localhost'",
+      "note": "A name, even one that means loopback.",
+      "input": "op-direct=1&h=localhost&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host ''",
+      "note": "No host at all.",
+      "input": "op-direct=1&h=&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host 'FE80::1'",
+      "note": "RFC 5952 text is lower case.",
+      "input": "op-direct=1&h=FE80::1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host 'fe80:0:0:0:0:0:0:1'",
+      "note": "RFC 5952 text compresses the zero run.",
+      "input": "op-direct=1&h=fe80:0:0:0:0:0:0:1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host '[fe80::1]'",
+      "note": "No brackets.",
+      "input": "op-direct=1&h=[fe80::1]&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host '192.168.001.1'",
+      "note": "Dotted decimal has no leading zeros.",
+      "input": "op-direct=1&h=192.168.001.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host '192.168.1'",
+      "note": "Dotted decimal has four parts.",
+      "input": "op-direct=1&h=192.168.1&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host 'fe80::1.2.3.4'",
+      "note": "RFC 5952 writes an embedded IPv4 tail only for a mapped or compatible address.",
+      "input": "op-direct=1&h=fe80::1.2.3.4&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "host_not_literal"
+    },
+    {
+      "name": "host with a zone",
+      "note": "No zone: its `%` is refused before the host is read.",
+      "input": "op-direct=1&h=fe80::1%en0&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "percent_encoded"
+    },
+    {
+      "name": "port '0'",
+      "note": "Port 0 is not a port.",
+      "input": "op-direct=1&h=192.168.1.23&p=0&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "port"
+    },
+    {
+      "name": "port '65536'",
+      "note": "One over the range.",
+      "input": "op-direct=1&h=192.168.1.23&p=65536&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "port"
+    },
+    {
+      "name": "port '+80'",
+      "note": "Decimal digits only.",
+      "input": "op-direct=1&h=192.168.1.23&p=+80&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "port"
+    },
+    {
+      "name": "port '00080'",
+      "note": "No leading zero: one port, one spelling.",
+      "input": "op-direct=1&h=192.168.1.23&p=00080&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "port"
+    },
+    {
+      "name": "port ''",
+      "note": "No port at all.",
+      "input": "op-direct=1&h=192.168.1.23&p=&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "port"
+    },
+    {
+      "name": "certhash one character short",
+      "note": "42 characters.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "certhash"
+    },
+    {
+      "name": "certhash one character long",
+      "note": "44 characters.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6gA&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "certhash"
+    },
+    {
+      "name": "certhash padded",
+      "note": "43 characters, the last a pad: no padding.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6=&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "certhash"
+    },
+    {
+      "name": "certhash with a spare bit set",
+      "note": "The last character's two spare bits are not zero: one hash, one spelling.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6h&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "certhash"
+    },
+    {
+      "name": "certhash in the standard alphabet",
+      "note": "The same hash in standard base64, not base64url.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9/HWbjfBLoZsD5VByi0CYlGVYDHw+/YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "certhash"
+    },
+    {
+      "name": "ufrag one under its bounds",
+      "note": "3 characters, under 4.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=abc&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "ufrag"
+    },
+    {
+      "name": "ufrag one over its bounds",
+      "note": "33 characters, over 32.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "ufrag"
+    },
+    {
+      "name": "ufrag outside its alphabet",
+      "note": "`-` is not in A-Z a-z 0-9.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=abcd-efg&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "ufrag"
+    },
+    {
+      "name": "password one under its bounds",
+      "note": "21 characters, under 22.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=ppppppppppppppppppppp&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "password"
+    },
+    {
+      "name": "password one over its bounds",
+      "note": "65 characters, over 64.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "password"
+    },
+    {
+      "name": "password outside its alphabet",
+      "note": "`+` is not in A-Z a-z 0-9.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=pppppppppppppppppppppp+&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "password"
+    },
+    {
+      "name": "a percent-encoded value",
+      "note": "%41 is `A`, so a dialler that decoded would read a valid username fragment. None decodes: the `%` refuses the code.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=%41bCdEfGh&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "reason": "percent_encoded"
+    },
+    {
+      "name": "address with a checksum error",
+      "note": "The last character changed.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvq",
+      "reason": "address"
+    },
+    {
+      "name": "address in upper case",
+      "note": "Upper case is not the canonical rendering.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=OFF1QYSLUVWL5922YCTZD0U9GPR06GN3K7LDFVGTWGVN",
+      "reason": "address"
+    },
+    {
+      "name": "a trailing &",
+      "note": "It leaves an empty part.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&",
+      "reason": "malformed"
+    },
+    {
+      "name": "an empty part",
+      "note": "Two `&` with nothing between them.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&&x-future=1",
+      "reason": "malformed"
+    },
+    {
+      "name": "a part with no =",
+      "note": "An unknown key still needs its `=`.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&flag",
+      "reason": "malformed"
+    },
+    {
+      "name": "an empty code",
+      "note": "No part is `key=value`.",
+      "input": "",
+      "reason": "malformed"
+    },
+    {
+      "name": "a % in an unknown key's value",
+      "note": "An unknown key is ignored only when it is well formed: the `%` rule is fragment-wide.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&x-future=%41",
+      "reason": "percent_encoded"
+    },
+    {
+      "name": "a fragment of 513 characters",
+      "note": "One over the limit. Filled with an unknown key, so the length is the only rule broken.",
+      "input": "op-direct=1&h=192.168.1.23&p=50123&c=RYmwiQ9_HWbjfBLoZsD5VByi0CYlGVYDHw-_YoSYD6g&u=AbCdEfGhIjKlMnOp&w=Q7mK2xR9vT4nB8cL1zW6yH3jF5dS0pGa&a=off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn&pad=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "reason": "too_long"
+    }
+  ]
+}
