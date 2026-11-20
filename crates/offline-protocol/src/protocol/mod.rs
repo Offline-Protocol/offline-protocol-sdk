@@ -2105,7 +2105,10 @@ impl OfflineProtocol {
     /// events to the ingest itself.
     ///
     /// `config` must carry the `api_key` and `app_id` the developer portal
-    /// issued; [`TelemetryConfig::validate`] names any field that is refused,
+    /// issued. When it names no `app_id` and this instance's
+    /// [`ProtocolConfig::app_label`] is a portal App ID (`app_…`), that is
+    /// used, so an app that passed its App ID as its label needs only the
+    /// key. [`TelemetryConfig::validate`] names any field that is refused,
     /// and the refusal is [`Error::TelemetryConfigInvalid`]. `host` names the
     /// platform stamped on every batch and the application state right now.
     ///
@@ -2119,6 +2122,16 @@ impl OfflineProtocol {
     /// `docs/telemetry.md`.
     #[cfg(feature = "telemetry-pipe")]
     pub fn enable_telemetry(&mut self, config: TelemetryConfig, host: TelemetryHost) -> Result<()> {
+        let config = match (
+            config.app_id().filter(|id| !id.is_empty()),
+            self.config.dashboard_app_id(),
+        ) {
+            (None, Some(label)) => {
+                let label = label.to_string();
+                config.with_app_id(label)
+            }
+            _ => config,
+        };
         if let Err(field) = config.validate() {
             return Err(Error::TelemetryConfigInvalid(field.to_string()));
         }
