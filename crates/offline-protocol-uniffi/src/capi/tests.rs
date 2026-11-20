@@ -15,7 +15,7 @@ use crate::{MessagePriority, ProtocolConfig, TransportType};
 /// its own, since the crates are I/O-free and the host drains the queue.
 pub(super) fn minimal_config() -> Value {
     json!({
-        "app_id": "com.example.capi",
+        "app_label": "com.example.capi",
         "profile": "capi-test",
         "ble_enabled": false,
         "wifi_direct_enabled": false,

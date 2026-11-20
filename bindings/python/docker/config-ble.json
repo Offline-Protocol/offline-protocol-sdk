@@ -1,5 +1,5 @@
 {
-  "app_id": "offline-protocol-service",
+  "app_label": "offline-protocol-service",
   "profile": "device",
   "ble_enabled": true,
   "wifi_direct_enabled": true,

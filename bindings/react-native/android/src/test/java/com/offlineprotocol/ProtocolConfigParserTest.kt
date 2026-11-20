@@ -21,6 +21,14 @@ class ProtocolConfigParserTest {
     private fun parse(json: String) = ProtocolConfigParser.parse(json).coreConfig
 
     @Test
+    fun theAppLabelIsReadUnderItsNewAndOldNames() {
+        assertEquals("app.muster", parse("""{"appLabel":"app.muster","userId":"alice"}""").appLabel)
+        assertEquals("app.muster", parse("""{"appId":"app.muster","userId":"alice"}""").appLabel)
+        assertEquals("app.muster", parse("""{"app_id":"app.muster","userId":"alice"}""").appLabel)
+        assertEquals("new", parse("""{"appLabel":"new","appId":"old","userId":"alice"}""").appLabel)
+    }
+
+    @Test
     fun killSwitchesDefaultOnWhenOmitted() {
         val config = parse("""{"appId":"app","userId":"alice"}""")
         assertTrue(config.binaryWireEnabled)

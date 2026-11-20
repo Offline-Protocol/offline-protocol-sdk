@@ -76,7 +76,7 @@ def test_a_signature_over_other_data_is_refused() -> None:
 
 def _config(profile: str) -> ProtocolConfig:
     return ProtocolConfig(
-        app_id="test-app",
+        app_label="test-app",
         profile=profile,
         ble_enabled=False,
         wifi_direct_enabled=False,

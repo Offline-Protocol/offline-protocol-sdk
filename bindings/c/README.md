@@ -52,7 +52,7 @@ int main(void) {
   /* Every ProtocolConfig field without a default in the interface
    * definition; the rest take the definition's defaults. */
   const char *config =
-      "{\"app_id\":\"com.example.app\",\"profile\":\"default\","
+      "{\"app_label\":\"com.example.app\",\"profile\":\"default\","
       "\"ble_enabled\":false,\"wifi_direct_enabled\":false,\"internet_enabled\":true,"
       "\"reticulum_enabled\":false,\"nostr_enabled\":false,\"prefer_online\":false,"
       "\"initial_ttl\":8,\"encryption_enabled\":true,\"auto_key_exchange\":true,"

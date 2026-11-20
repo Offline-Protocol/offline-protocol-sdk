@@ -1516,7 +1516,7 @@ pub struct SendMessageOptions {
     pub reply_context: Option<ReplyContext>,
     pub media_metadata: Option<MediaMetadata>,
     pub forward_info: Option<ForwardInfo>,
-    pub app_id: Option<String>,
+    pub app_label: Option<String>,
 }
 
 /// Options for `send_media_rich`, mirroring the core `MediaSendOptions`.
@@ -1528,7 +1528,7 @@ pub struct MediaSendOptions {
     pub reply_context: Option<ReplyContext>,
     pub forward_info: Option<ForwardInfo>,
     pub file_id: Option<String>,
-    pub app_id: Option<String>,
+    pub app_label: Option<String>,
 }
 
 /// File transfer progress
@@ -1993,7 +1993,7 @@ impl Default for PendingQueueConfig {
 /// Protocol configuration (simplified)
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
-    pub app_id: String,
+    pub app_label: String,
     /// Local profile selector: which stored identity this instance runs as.
     /// Never on the wire — see `OfflineProtocol::local_address`.
     pub profile: String,
@@ -2451,7 +2451,7 @@ impl From<CoreMeshRelayStats> for MeshRelayStats {
 
 impl From<ProtocolConfig> for CoreConfig {
     fn from(config: ProtocolConfig) -> Self {
-        let mut core_config = CoreConfig::new(config.app_id, config.profile);
+        let mut core_config = CoreConfig::new(config.app_label, config.profile);
         core_config.transport.ble_enabled = config.ble_enabled;
         core_config.transport.wifi_direct_enabled = config.wifi_direct_enabled;
         core_config.transport.internet_enabled = config.internet_enabled;
@@ -3755,10 +3755,13 @@ impl OfflineProtocol {
             media_metadata: options.media_metadata.map(CoreMediaMetadata::from),
             forward_info,
             via_transport,
-            app_id: options.app_id,
+            app_label: options.app_label,
             // Ephemeral sends reach the browser binding only so far; the UDL
             // record gains the field when a native binding needs it (ADR 0032).
             ephemeral: false,
+            // The deprecated `app_id` alias exists for Rust callers; the UDL
+            // field kept its position under the new name instead.
+            ..Default::default()
         };
 
         let message_id = protocol
@@ -6410,7 +6413,8 @@ impl OfflineProtocol {
             reply_context,
             forward_info,
             file_id: options.file_id,
-            app_id: options.app_id,
+            app_label: options.app_label,
+            ..Default::default()
         };
 
         let mut protocol = self.lock_inner()?;
@@ -7003,7 +7007,7 @@ impl OfflineProtocol {
         let (app_id, profile) = {
             let protocol = self.lock_inner()?;
             let config = protocol.config();
-            (config.app_id.clone(), config.profile.clone())
+            (config.app_label.clone(), config.profile.clone())
         };
         self.initialize_mls_over(
             "initialize_mls_with_file_stores",
@@ -9400,7 +9404,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            app_id: "test-app".to_string(),
+            app_label: "test-app".to_string(),
             profile: "user123".to_string(),
             ble_enabled: true,
             wifi_direct_enabled: true,
@@ -9440,7 +9444,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            app_id: "test-app".to_string(),
+            app_label: "test-app".to_string(),
             profile: "user123".to_string(),
             ble_enabled: true,
             wifi_direct_enabled: false,
@@ -9965,7 +9969,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            app_id: "test-app".to_string(),
+            app_label: "test-app".to_string(),
             profile: "user123".to_string(),
             ble_enabled: false,
             wifi_direct_enabled: false,
@@ -10273,14 +10277,14 @@ mod tests {
         protocol.reticulum_status_changed(true).unwrap();
         protocol.force_transport(TransportType::Reticulum).unwrap();
 
-        let options = |app_id: &str| SendMessageOptions {
+        let options = |app_label: &str| SendMessageOptions {
             priority: None,
             reply_to_msg: None,
             content_type: None,
             reply_context: None,
             media_metadata: None,
             forward_info: None,
-            app_id: Some(app_id.to_string()),
+            app_label: Some(app_label.to_string()),
         };
 
         let refused = protocol.send_message_rich(
@@ -10289,7 +10293,7 @@ mod tests {
             options("bad/app"),
         );
         assert!(
-            matches!(refused, Err(ProtocolError::InvalidArgument(ref m)) if m.contains("app_id")),
+            matches!(refused, Err(ProtocolError::InvalidArgument(ref m)) if m.contains("app_label")),
             "an invalid per-send app id is the caller's defect, got {refused:?}"
         );
         assert!(protocol.reticulum_get_next_message().is_none());
@@ -22742,14 +22746,14 @@ mod tests {
                 &swift_bridge,
                 "static func sendMessageRich(",
                 "host.sendMessageRich(",
-                "appId: options?[\"app_id\"] as? String",
+                "appLabel: (options?[\"app_label\"] ?? options?[\"app_id\"]) as? String",
             ),
             (
                 "Swift sendMediaRich",
                 &swift_bridge,
                 "static func sendMediaRich(",
                 "host.requireProtocol().sendMediaRich(",
-                "appId: options?[\"app_id\"] as? String",
+                "appLabel: (options?[\"app_label\"] ?? options?[\"app_id\"]) as? String",
             ),
             (
                 "Kotlin sendMessageRich",
@@ -22758,7 +22762,7 @@ mod tests {
                 ),
                 "fun sendMessageRich(",
                 "host.sendMessageRich(",
-                "appId = optionsMap?.get(\"app_id\")",
+                "appLabel = (optionsMap?.get(\"app_label\") ?: optionsMap?.get(\"app_id\"))",
             ),
             (
                 "Kotlin sendMediaRich",
@@ -22767,7 +22771,7 @@ mod tests {
                 ),
                 "fun sendMediaRich(",
                 "host.requireProtocolBridge().sendMediaRich(",
-                "appId = options?.get(\"app_id\")",
+                "appLabel = (options?.get(\"app_label\") ?: options?.get(\"app_id\"))",
             ),
         ] {
             assert_has(label, &region(label, code, from, to), read);

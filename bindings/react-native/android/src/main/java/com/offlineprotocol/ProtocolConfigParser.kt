@@ -251,7 +251,8 @@ internal object ProtocolConfigParser {
                 ?: json.optBooleanCompat("controlFreshnessEnforced", "control_freshness_enforced")
 
         val config = ProtocolConfig(
-            appId = json.safeOptString("appId", json.safeOptString("app_id")),
+            // `appLabel` since 0.35; `appId` and `app_id` are its old names, still read.
+            appLabel = json.safeOptString("appLabel", json.safeOptString("appId", json.safeOptString("app_id"))),
             profile = json.safeOptString("profile"),
             bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),

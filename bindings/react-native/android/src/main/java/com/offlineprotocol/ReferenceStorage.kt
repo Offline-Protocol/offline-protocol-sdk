@@ -6,7 +6,7 @@ import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.ProtocolStateStorageProvider
 
 /**
- * Opens, and erases, the SDK's built-in storage for one `(appId, profile)`
+ * Opens, and erases, the SDK's built-in storage for one `(appLabel, profile)`
  * account: the `EncryptedSharedPreferences` MLS store and the app-container
  * protocol-state store.
  *
@@ -90,23 +90,23 @@ object OfflineProtocolReferenceStorage {
      * store on its own.
      */
     @JvmStatic
-    fun makeSecureStorage(context: Context, appId: String, profile: String): MlsStorageProvider =
-        MlsSecureStorage(context, StorageNamespace.account(appId, profile))
+    fun makeSecureStorage(context: Context, appLabel: String, profile: String): MlsStorageProvider =
+        MlsSecureStorage(context, StorageNamespace.account(appLabel, profile))
 
     /** The app-container protocol-state store for one account. */
     @JvmStatic
     fun makeProtocolStateStorage(
         context: Context,
-        appId: String,
+        appLabel: String,
         profile: String,
     ): ProtocolStateStorageProvider =
-        AppContainerProtocolStateStorage(context, StorageNamespace.account(appId, profile))
+        AppContainerProtocolStateStorage(context, StorageNamespace.account(appLabel, profile))
 
     /**
      * Opens both stores for one account and hands them to
      * [OfflineProtocol.initializeMls].
      *
-     * Call it after `setEventCallback` and before `start()`, with the `appId`
+     * Call it after `setEventCallback` and before `start()`, with the `appLabel`
      * and `profile` the engine was configured with. Report the result's
      * [LegacyAdoption.warning] when it has one: it is the only signal that this
      * account lost its earlier identity.
@@ -115,10 +115,10 @@ object OfflineProtocolReferenceStorage {
     fun initializeMls(
         protocol: OfflineProtocol,
         context: Context,
-        appId: String,
+        appLabel: String,
         profile: String,
     ): LegacyAdoption {
-        val namespace = StorageNamespace.account(appId, profile)
+        val namespace = StorageNamespace.account(appLabel, profile)
         val secure = MlsSecureStorage(context, namespace)
         val state = AppContainerProtocolStateStorage(context, namespace)
         protocol.initializeMls(secure, state)
@@ -140,8 +140,8 @@ object OfflineProtocolReferenceStorage {
      * call again after an error.
      */
     @JvmStatic
-    fun wipe(context: Context, appId: String, profile: String) {
-        val namespace = StorageNamespace.account(appId, profile)
+    fun wipe(context: Context, appLabel: String, profile: String) {
+        val namespace = StorageNamespace.account(appLabel, profile)
         var firstError: Exception? = null
         try {
             MlsSecureStorage.wipeAccount(context, namespace)

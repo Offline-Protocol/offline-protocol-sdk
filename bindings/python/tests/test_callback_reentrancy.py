@@ -35,7 +35,7 @@ class Handler(EventCallback):
         pass
 
 core = OfflineProtocol(ProtocolConfig(
-    app_id="test-app", profile="reentrancy-user", ble_enabled=True,
+    app_label="test-app", profile="reentrancy-user", ble_enabled=True,
     wifi_direct_enabled=True, internet_enabled=True, reticulum_enabled=False,
     nostr_enabled=False, prefer_online=True, initial_ttl=3,
     encryption_enabled=True, auto_key_exchange=False, store_pending=True,

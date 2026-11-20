@@ -5319,7 +5319,7 @@ class _UniffiFfiConverterOptionalTypeForwardInfo(_UniffiConverterRustBuffer):
 
 @dataclass
 class MediaSendOptions:
-    def __init__(self, *, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, caption:typing.Optional[str] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT, file_id:typing.Optional[str] = _DEFAULT, app_id:typing.Optional[str] = _DEFAULT):
+    def __init__(self, *, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, caption:typing.Optional[str] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT, file_id:typing.Optional[str] = _DEFAULT, app_label:typing.Optional[str] = _DEFAULT):
         if media_metadata is _DEFAULT:
             self.media_metadata = None
         else:
@@ -5344,16 +5344,16 @@ class MediaSendOptions:
             self.file_id = None
         else:
             self.file_id = file_id
-        if app_id is _DEFAULT:
-            self.app_id = None
+        if app_label is _DEFAULT:
+            self.app_label = None
         else:
-            self.app_id = app_id
+            self.app_label = app_label
         
         
 
     
     def __str__(self):
-        return "MediaSendOptions(media_metadata={}, caption={}, reply_to_msg={}, reply_context={}, forward_info={}, file_id={}, app_id={})".format(self.media_metadata, self.caption, self.reply_to_msg, self.reply_context, self.forward_info, self.file_id, self.app_id)
+        return "MediaSendOptions(media_metadata={}, caption={}, reply_to_msg={}, reply_context={}, forward_info={}, file_id={}, app_label={})".format(self.media_metadata, self.caption, self.reply_to_msg, self.reply_context, self.forward_info, self.file_id, self.app_label)
     def __eq__(self, other):
         if self.media_metadata != other.media_metadata:
             return False
@@ -5367,7 +5367,7 @@ class MediaSendOptions:
             return False
         if self.file_id != other.file_id:
             return False
-        if self.app_id != other.app_id:
+        if self.app_label != other.app_label:
             return False
         return True
 
@@ -5381,7 +5381,7 @@ class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
             reply_context=_UniffiFfiConverterOptionalTypeReplyContext.read(buf),
             forward_info=_UniffiFfiConverterOptionalTypeForwardInfo.read(buf),
             file_id=_UniffiFfiConverterOptionalString.read(buf),
-            app_id=_UniffiFfiConverterOptionalString.read(buf),
+            app_label=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -5392,7 +5392,7 @@ class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeReplyContext.check_lower(value.reply_context)
         _UniffiFfiConverterOptionalTypeForwardInfo.check_lower(value.forward_info)
         _UniffiFfiConverterOptionalString.check_lower(value.file_id)
-        _UniffiFfiConverterOptionalString.check_lower(value.app_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.app_label)
 
     @staticmethod
     def write(value, buf):
@@ -5402,7 +5402,7 @@ class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeReplyContext.write(value.reply_context, buf)
         _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
         _UniffiFfiConverterOptionalString.write(value.file_id, buf)
-        _UniffiFfiConverterOptionalString.write(value.app_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.app_label, buf)
 
 class _UniffiFfiConverterOptionalUInt8(_UniffiConverterRustBuffer):
     @classmethod
@@ -6590,8 +6590,8 @@ class _UniffiFfiConverterOptionalTypeCustodyConfig(_UniffiConverterRustBuffer):
 
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, edge_driven_unreachable_dm:bool = False, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, custody:typing.Optional[CustodyConfig] = _DEFAULT, data_enabled:bool = True, control_freshness_enforced:bool = True, encrypt_service_messages:bool = True):
-        self.app_id = app_id
+    def __init__(self, *, app_label:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, edge_driven_unreachable_dm:bool = False, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, custody:typing.Optional[CustodyConfig] = _DEFAULT, data_enabled:bool = True, control_freshness_enforced:bool = True, encrypt_service_messages:bool = True):
+        self.app_label = app_label
         self.profile = profile
         self.ble_enabled = ble_enabled
         self.wifi_direct_enabled = wifi_direct_enabled
@@ -6637,9 +6637,9 @@ class ProtocolConfig:
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, edge_driven_unreachable_dm={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, custody={}, data_enabled={}, control_freshness_enforced={}, encrypt_service_messages={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.edge_driven_unreachable_dm, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.custody, self.data_enabled, self.control_freshness_enforced, self.encrypt_service_messages)
+        return "ProtocolConfig(app_label={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, edge_driven_unreachable_dm={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, custody={}, data_enabled={}, control_freshness_enforced={}, encrypt_service_messages={})".format(self.app_label, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.edge_driven_unreachable_dm, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.custody, self.data_enabled, self.control_freshness_enforced, self.encrypt_service_messages)
     def __eq__(self, other):
-        if self.app_id != other.app_id:
+        if self.app_label != other.app_label:
             return False
         if self.profile != other.profile:
             return False
@@ -6715,7 +6715,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
     @staticmethod
     def read(buf):
         return ProtocolConfig(
-            app_id=_UniffiFfiConverterString.read(buf),
+            app_label=_UniffiFfiConverterString.read(buf),
             profile=_UniffiFfiConverterString.read(buf),
             ble_enabled=_UniffiFfiConverterBoolean.read(buf),
             wifi_direct_enabled=_UniffiFfiConverterBoolean.read(buf),
@@ -6754,7 +6754,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
 
     @staticmethod
     def check_lower(value):
-        _UniffiFfiConverterString.check_lower(value.app_id)
+        _UniffiFfiConverterString.check_lower(value.app_label)
         _UniffiFfiConverterString.check_lower(value.profile)
         _UniffiFfiConverterBoolean.check_lower(value.ble_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.wifi_direct_enabled)
@@ -6792,7 +6792,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
 
     @staticmethod
     def write(value, buf):
-        _UniffiFfiConverterString.write(value.app_id, buf)
+        _UniffiFfiConverterString.write(value.app_label, buf)
         _UniffiFfiConverterString.write(value.profile, buf)
         _UniffiFfiConverterBoolean.write(value.ble_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.wifi_direct_enabled, buf)
@@ -7326,7 +7326,7 @@ class _UniffiFfiConverterOptionalTypeContentType(_UniffiConverterRustBuffer):
 
 @dataclass
 class SendMessageOptions:
-    def __init__(self, *, priority:typing.Optional[MessagePriority] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, content_type:typing.Optional[ContentType] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT, app_id:typing.Optional[str] = _DEFAULT):
+    def __init__(self, *, priority:typing.Optional[MessagePriority] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, content_type:typing.Optional[ContentType] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT, app_label:typing.Optional[str] = _DEFAULT):
         if priority is _DEFAULT:
             self.priority = None
         else:
@@ -7351,16 +7351,16 @@ class SendMessageOptions:
             self.forward_info = None
         else:
             self.forward_info = forward_info
-        if app_id is _DEFAULT:
-            self.app_id = None
+        if app_label is _DEFAULT:
+            self.app_label = None
         else:
-            self.app_id = app_id
+            self.app_label = app_label
         
         
 
     
     def __str__(self):
-        return "SendMessageOptions(priority={}, reply_to_msg={}, content_type={}, reply_context={}, media_metadata={}, forward_info={}, app_id={})".format(self.priority, self.reply_to_msg, self.content_type, self.reply_context, self.media_metadata, self.forward_info, self.app_id)
+        return "SendMessageOptions(priority={}, reply_to_msg={}, content_type={}, reply_context={}, media_metadata={}, forward_info={}, app_label={})".format(self.priority, self.reply_to_msg, self.content_type, self.reply_context, self.media_metadata, self.forward_info, self.app_label)
     def __eq__(self, other):
         if self.priority != other.priority:
             return False
@@ -7374,7 +7374,7 @@ class SendMessageOptions:
             return False
         if self.forward_info != other.forward_info:
             return False
-        if self.app_id != other.app_id:
+        if self.app_label != other.app_label:
             return False
         return True
 
@@ -7388,7 +7388,7 @@ class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
             reply_context=_UniffiFfiConverterOptionalTypeReplyContext.read(buf),
             media_metadata=_UniffiFfiConverterOptionalTypeMediaMetadata.read(buf),
             forward_info=_UniffiFfiConverterOptionalTypeForwardInfo.read(buf),
-            app_id=_UniffiFfiConverterOptionalString.read(buf),
+            app_label=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -7399,7 +7399,7 @@ class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeReplyContext.check_lower(value.reply_context)
         _UniffiFfiConverterOptionalTypeMediaMetadata.check_lower(value.media_metadata)
         _UniffiFfiConverterOptionalTypeForwardInfo.check_lower(value.forward_info)
-        _UniffiFfiConverterOptionalString.check_lower(value.app_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.app_label)
 
     @staticmethod
     def write(value, buf):
@@ -7409,7 +7409,7 @@ class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeReplyContext.write(value.reply_context, buf)
         _UniffiFfiConverterOptionalTypeMediaMetadata.write(value.media_metadata, buf)
         _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
-        _UniffiFfiConverterOptionalString.write(value.app_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.app_label, buf)
 
 @dataclass
 class ServicePublishReport:

@@ -34,7 +34,7 @@ DELIVERY_TIMEOUT = 45.0
 
 def scenario_config(profile: str) -> ProtocolConfig:
     return ProtocolConfig(
-        app_id="scenario",
+        app_label="scenario",
         profile=profile,
         ble_enabled=False,
         wifi_direct_enabled=True,

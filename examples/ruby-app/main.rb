@@ -21,7 +21,7 @@ Sdk = OfflineProtocol
 # default are named; the generated record keeps the rest (docs/bridges/ruby.md, R2).
 def config(profile)
   Sdk::ProtocolConfig.new(
-    app_id: "com.example.ruby", profile: profile,
+    app_label: "com.example.ruby", profile: profile,
     ble_enabled: false, wifi_direct_enabled: false, internet_enabled: true,
     reticulum_enabled: false, nostr_enabled: false, prefer_online: true,
     initial_ttl: 8, encryption_enabled: true, auto_key_exchange: true,
@@ -182,7 +182,7 @@ Dir.mktmpdir("offline-protocol-ruby-example") do |root|
     bob.engine.send_message_rich(
       alice.address, "hello alice",
       Sdk::SendMessageOptions.new(priority: Sdk::MessagePriority::HIGH, reply_to_msg: greeting_id,
-                                  content_type: Sdk::ContentType::TEXT, app_id: "com.example.ruby")
+                                  content_type: Sdk::ContentType::TEXT, app_label: "com.example.ruby")
     )
     until_done(devices, "alice received a threaded reply") do
       alice.saw?("message_received") { |e| e["content"] == "hello alice" && e["reply_to_msg"] == greeting_id }

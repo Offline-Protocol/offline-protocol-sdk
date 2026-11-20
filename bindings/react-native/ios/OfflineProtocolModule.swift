@@ -621,7 +621,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             inboundEvents.bumpGeneration()
             currentConfig = config
             emitDiagnostic(level: "info", message: "Protocol core created", context: [
-                "appId": config.appId,
+                "appLabel": config.appLabel,
                 "userId": config.profile,
                 "bleEnabled": config.bleEnabled,
                 "wifiDirectEnabled": config.wifiDirectEnabled,
@@ -656,7 +656,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             // Initialize BLE manager if BLE is enabled
             if config.bleEnabled {
-                let manager = BleManager(protocol: proto, deviceId: config.profile, appId: config.appId)
+                let manager = BleManager(protocol: proto, deviceId: config.profile, appId: config.appLabel)
                 manager.delegate = self
                 bleManager = manager
                 
@@ -679,7 +679,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             
             // Initialize Internet manager if internet is enabled
             if config.internetEnabled {
-                internetManager = InternetManager(protocol: proto, deviceId: config.profile, appId: config.appId)
+                internetManager = InternetManager(protocol: proto, deviceId: config.profile, appId: config.appLabel)
                 internetManager?.delegate = self
                 internetManager?.serverMessageEmitter = { [weak self] rawJson in
                     self?.emitServerMessageEvent(rawJson)
@@ -2373,7 +2373,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                     // and gates LeaveGroup on it, so a placeholder would
                     // silently corrupt relay group state. Mirrors the
                     // Android module's guard.
-                    guard let userId = currentConfig?.profile, let appId = currentConfig?.appId else {
+                    guard let userId = currentConfig?.profile, let appId = currentConfig?.appLabel else {
                         throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [
                             NSLocalizedDescriptionKey: "Cannot enable Internet transport before initialize(config)"
                         ])
@@ -2436,7 +2436,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                     let newManager = BleManager(
                         protocol: proto,
                         deviceId: currentConfig?.profile ?? "unknown",
-                        appId: currentConfig?.appId ?? ""
+                        appId: currentConfig?.appLabel ?? ""
                     )
                     newManager.delegate = self
                     bleManager = newManager
@@ -3094,7 +3094,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         do {
             let adoption = try OfflineProtocolReferenceStorage.initializeMls(
                 on: proto,
-                appId: config.appId,
+                appLabel: config.appLabel,
                 profile: config.profile
             )
             // A warning means this account is starting from a fresh MLS

@@ -7,7 +7,7 @@ public class SendMessageOptions {
     private ReplyContext replyContext;
     private MediaMetadata mediaMetadata;
     private ForwardInfo forwardInfo;
-    private java.lang.String appId;
+    private java.lang.String appLabel;
 
     public SendMessageOptions(
         MessagePriority priority, 
@@ -16,7 +16,7 @@ public class SendMessageOptions {
         ReplyContext replyContext, 
         MediaMetadata mediaMetadata, 
         ForwardInfo forwardInfo, 
-        java.lang.String appId
+        java.lang.String appLabel
     ) {
         
         this.priority = priority;
@@ -31,7 +31,7 @@ public class SendMessageOptions {
         
         this.forwardInfo = forwardInfo;
         
-        this.appId = appId;
+        this.appLabel = appLabel;
     }
     
     public MessagePriority priority() {
@@ -58,8 +58,8 @@ public class SendMessageOptions {
         return this.forwardInfo;
     }
     
-    public java.lang.String appId() {
-        return this.appId;
+    public java.lang.String appLabel() {
+        return this.appLabel;
     }
     public void setPriority(MessagePriority priority) {
         this.priority = priority;
@@ -79,8 +79,8 @@ public class SendMessageOptions {
     public void setForwardInfo(ForwardInfo forwardInfo) {
         this.forwardInfo = forwardInfo;
     }
-    public void setAppId(java.lang.String appId) {
-        this.appId = appId;
+    public void setAppLabel(java.lang.String appLabel) {
+        this.appLabel = appLabel;
     }
 
     
@@ -103,7 +103,7 @@ public class SendMessageOptions {
               
               java.util.Objects.equals(forwardInfo, _uniffiThat.forwardInfo) && 
               
-              java.util.Objects.equals(appId, _uniffiThat.appId)
+              java.util.Objects.equals(appLabel, _uniffiThat.appLabel)
               
             );
         };
@@ -118,7 +118,7 @@ public class SendMessageOptions {
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(replyContext);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(mediaMetadata);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(forwardInfo);
-        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(appId);
+        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(appLabel);
         return _uniffiHash;
     }
 

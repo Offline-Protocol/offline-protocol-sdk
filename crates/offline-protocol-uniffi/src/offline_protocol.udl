@@ -405,9 +405,11 @@ dictionary ForwardInfo {
 // never sent cleartext. All fields defaulted so callers can pass only what
 // they need. content_type must not be FileChunk (internal transport type),
 // and rich extras over 32 KiB serialized are rejected — both InvalidArgument.
-// app_id stamps this message with another application's id instead of the
-// configured one (one instance serving several applications); it is
-// cleartext and unsigned on the wire, and an invalid id is InvalidArgument.
+// app_label stamps this message with another application's label instead of
+// the configured one (one instance serving several applications); it is
+// cleartext and unsigned on the wire, and an invalid label is
+// InvalidArgument. It was named app_id before 0.35; the field kept its
+// position, so a positional constructor (Java, C#) is unaffected.
 dictionary SendMessageOptions {
     MessagePriority? priority = null;
     string? reply_to_msg = null;
@@ -415,7 +417,7 @@ dictionary SendMessageOptions {
     ReplyContext? reply_context = null;
     MediaMetadata? media_metadata = null;
     ForwardInfo? forward_info = null;
-    string? app_id = null;
+    string? app_label = null;
 };
 
 // Options for send_media_rich. The rich fields (caption, reply_to_msg,
@@ -426,8 +428,9 @@ dictionary SendMessageOptions {
 // cleartext. All fields defaulted so callers can pass only what they need.
 // An unparsable reply_to_msg, rich extras over 32 KiB serialized, or a
 // file_id that is empty, over 4096 bytes, or already carried by an active
-// outbound transfer are rejected — all InvalidArgument. app_id stamps
-// every chunk, with the meaning and limits of SendMessageOptions.app_id.
+// outbound transfer are rejected — all InvalidArgument. app_label stamps
+// every chunk, with the meaning and limits of SendMessageOptions.app_label
+// (app_id before 0.35).
 dictionary MediaSendOptions {
     MediaMetadata? media_metadata = null;
     string? caption = null;
@@ -435,7 +438,7 @@ dictionary MediaSendOptions {
     ReplyContext? reply_context = null;
     ForwardInfo? forward_info = null;
     string? file_id = null;
-    string? app_id = null;
+    string? app_label = null;
 };
 
 // File transfer progress information
@@ -813,7 +816,15 @@ dictionary EncryptionConfig {
 
 // Extended configuration for protocol creation
 dictionary ProtocolConfig {
-    string app_id;
+    // The app label: keeps this app's peers together on the mesh, and with
+    // the profile selects the storage namespace. Formerly app_id; the wire
+    // field keeps that name. It is public and carries no authority: anyone
+    // nearby can read it and any app can use the same one. It is not the
+    // portal App ID (app_…), which only turns on telemetry, though a new app
+    // may pass its App ID here and enable_telemetry then falls back to it.
+    // A shipped app must keep its value: changing it means fresh storage, a
+    // new identity, and old builds that no longer see new ones.
+    string app_label;
     // Local profile selector: picks which stored identity this instance runs
     // as. Never on the wire — the wire identity is `local_address()`, derived
     // from the identity key in this profile's storage.
@@ -1040,7 +1051,10 @@ enum AppState {
 };
 
 // Configuration for `enable_telemetry`. `api_key` and `app_id` come from the
-// developer portal and are required; `os` and `os_major` are filled by the
+// developer portal and are required, except that `app_id` may be empty when
+// the ProtocolConfig's app_label is the portal App ID (app_…), which is then
+// used. This app_id really is the App ID, unlike the mesh app_label, and
+// keeps its name. `os` and `os_major` are filled by the
 // binding. Every other field is optional and falls back to the Rust default
 // when null: app_version "0.0.0", debug false, flush_interval_ms 30000,
 // max_batch_bytes 262144, max_buffered_records 4096, include_device_id
@@ -1888,7 +1902,7 @@ interface OfflineProtocol {
     // filesystem and no platform keystore (a headless Linux service). The MLS
     // store opens at `mls_root`, every record sealed under `store_key` (32
     // bytes, never all zero); the protocol-state store opens at `state_root`.
-    // Both use the account directory derived from this instance's app_id and
+    // Both use the account directory derived from this instance's app_label and
     // profile. `mls_root` must survive an upgrade (it holds the identity);
     // `state_root` should be removed with the installation.
     //

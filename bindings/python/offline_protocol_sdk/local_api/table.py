@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "1434037a4c4290f6b95ba740059bff529b3ede9b5ec7dfd33e9cfaaed8083e80"
+UDL_SHA256 = "f9c81a10fede9dd28c162e866716c435f6b6019dddcdcbffe44a5096886ad8ab"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',
@@ -723,7 +723,7 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                   ('reply_context', 'ReplyContext?', True),
                                   ('forward_info', 'ForwardInfo?', True),
                                   ('file_id', 'string?', True),
-                                  ('app_id', 'string?', True)),
+                                  ('app_label', 'string?', True)),
              'MeshRelayConfig': (('max_ttl', 'u8?', True),
                                  ('dense_max_ttl', 'u8?', True),
                                  ('dense_degree', 'u64?', True),
@@ -824,7 +824,7 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                     ('max_pending_global', 'u64', False),
                                     ('pending_ttl_ms', 'u64', False),
                                     ('overflow_policy', 'OverflowPolicy', False)),
-             'ProtocolConfig': (('app_id', 'string', False),
+             'ProtocolConfig': (('app_label', 'string', False),
                                 ('profile', 'string', False),
                                 ('ble_enabled', 'boolean', False),
                                 ('wifi_direct_enabled', 'boolean', False),
@@ -891,7 +891,7 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                     ('reply_context', 'ReplyContext?', True),
                                     ('media_metadata', 'MediaMetadata?', True),
                                     ('forward_info', 'ForwardInfo?', True),
-                                    ('app_id', 'string?', True)),
+                                    ('app_label', 'string?', True)),
              'ServicePublishReport': (('subscribers', 'u32', False),
                                       ('sent_live', 'u32', False),
                                       ('queued', 'u32', False),

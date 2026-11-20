@@ -53,7 +53,7 @@ puts Sdk.derive_address([0] * 32)
 
 # Name the fields the definition leaves without a default; the rest take it.
 config = Sdk::ProtocolConfig.new(
-  app_id: "com.example.ruby", profile: "ruby-example",
+  app_label: "com.example.ruby", profile: "ruby-example",
   ble_enabled: false, wifi_direct_enabled: false, internet_enabled: true,
   reticulum_enabled: false, nostr_enabled: false, prefer_online: false,
   initial_ttl: 8, encryption_enabled: true, auto_key_exchange: true,

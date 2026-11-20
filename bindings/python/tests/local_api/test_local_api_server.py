@@ -205,16 +205,24 @@ async def test_engine_errors_carry_the_variant_and_the_positional_code(harness):
     assert await client.call("get_group_info", {"group_id": "nope"}) is None
 
 
-async def test_send_message_rich_refuses_a_client_supplied_app_id(harness):
+async def test_send_message_rich_refuses_a_client_supplied_app_label(harness):
     server = await harness.server()
     client = await harness.client(server)
     await client.hello("notes")
+    # The label is the server's to set from the hello.
     with pytest.raises(RpcFailure) as err:
+        await client.call(
+            "send_message_rich",
+            {"recipient": "off1zzzz", "content": "hi", "options": {"app_label": "other"}},
+        )
+    assert err.value.variant == "InvalidArgument"
+    # The name a 0.34 client would send is no field at all now, so it is
+    # refused at decoding rather than reaching the engine.
+    with pytest.raises(RpcFailure, match="no field 'app_id'"):
         await client.call(
             "send_message_rich",
             {"recipient": "off1zzzz", "content": "hi", "options": {"app_id": "other"}},
         )
-    assert err.value.variant == "InvalidArgument"
 
 
 # -- subscriptions -------------------------------------------------------------
@@ -747,7 +755,7 @@ def _cli_args(tmp_path, *extra, **config):
     from offline_protocol_sdk.local_api import cli
 
     fields = {
-        "app_id": "server-app",
+        "app_label": "server-app",
         "profile": "cli-user",
         "ble_enabled": False,
         "wifi_direct_enabled": False,
@@ -771,6 +779,19 @@ def _cli_args(tmp_path, *extra, **config):
     os.environ["OP_TEST_CLI_KEY"] = "ab" * 32
     argv = [*_cli_argv(tmp_path), *extra]
     return cli, cli.build_parser().parse_args(argv)
+
+
+def test_a_config_file_from_before_the_rename_still_loads(tmp_path):
+    # A server config written for 0.34 names the label `app_id`. Same value,
+    # so the same storage namespace and address; a disagreement is refused.
+    cli, args = _cli_args(tmp_path, app_label=None)
+    raw = json.loads((tmp_path / "config.json").read_text())
+    del raw["app_label"]
+    raw["app_id"] = "server-app"
+    assert cli._accept_old_app_label_key(raw)["app_label"] == "server-app"
+    raw["app_label"] = "other-app"
+    with pytest.raises(SystemExit, match="disagree"):
+        cli._accept_old_app_label_key(raw)
 
 
 def _cli_argv(tmp_path):

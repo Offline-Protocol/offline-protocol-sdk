@@ -64,7 +64,7 @@ def on_event(event: dict[str, Any]) -> None:
 
 async def main(user_id: str, server_url: str, state_root: Path) -> None:
     config = ProtocolConfig(
-        app_id="offline-example",
+        app_label="offline-example",
         user_id=user_id,
         ble_enabled=False,
         wifi_direct_enabled=False,

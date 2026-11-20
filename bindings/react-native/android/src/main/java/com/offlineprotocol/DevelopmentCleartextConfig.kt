@@ -23,11 +23,11 @@ object OfflineProtocolDevelopmentCleartextConfig {
      * encryption off, `requireEncryption` off, and sibling MLS flags off.
      */
     fun make(
-        appId: String,
+        appLabel: String,
         profile: String,
     ): ProtocolConfig =
         ProtocolConfig(
-            appId = appId,
+            appLabel = appLabel,
             profile = profile,
             bleEnabled = true,
             wifiDirectEnabled = false,

@@ -14,7 +14,7 @@ import XCTest
 
 final class ReferenceStorageTests: XCTestCase {
 
-    private let appId = "reference-storage-tests"
+    private let appLabel = "reference-storage-tests"
     private var profile = ""
 
     override func setUpWithError() throws {
@@ -23,14 +23,14 @@ final class ReferenceStorageTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try AppContainerProtocolStateStorage.wipeAccount(
-            accountNamespace: StorageNamespace.account(appId: appId, profile: profile))
+            accountNamespace: StorageNamespace.account(appLabel: appLabel, profile: profile))
     }
 
     /// The store an application opens passes the suite the core defines for a
     /// supported backend (C11), at the account's own root.
     func testTheReferenceStateStorePassesConformance() throws {
         let storage = try OfflineProtocolReferenceStorage.makeProtocolStateStorage(
-            appId: appId, profile: profile)
+            appLabel: appLabel, profile: profile)
 
         let report = try StorageConformance.run(on: storage)
 
@@ -43,14 +43,14 @@ final class ReferenceStorageTests: XCTestCase {
     /// still be wiped, because the wipe attempts both halves.
     func testWipeErasesTheStoreTheFactoryOpened() throws {
         let written = try OfflineProtocolReferenceStorage.makeProtocolStateStorage(
-            appId: appId, profile: profile)
+            appLabel: appLabel, profile: profile)
         try written.store(keyType: "pending/messages", keyId: "peer", data: Data([1, 2, 3]))
         XCTAssertNotNil(try written.load(keyType: "pending/messages", keyId: "peer"))
 
-        _ = try? OfflineProtocolReferenceStorage.wipe(appId: appId, profile: profile)
+        _ = try? OfflineProtocolReferenceStorage.wipe(appLabel: appLabel, profile: profile)
 
         let reopened = try OfflineProtocolReferenceStorage.makeProtocolStateStorage(
-            appId: appId, profile: profile)
+            appLabel: appLabel, profile: profile)
         XCTAssertNil(try reopened.load(keyType: "pending/messages", keyId: "peer"))
     }
 

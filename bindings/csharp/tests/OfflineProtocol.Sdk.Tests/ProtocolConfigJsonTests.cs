@@ -7,7 +7,7 @@ public sealed class ProtocolConfigJsonTests
 {
     private static readonly string[] RequiredKeys =
     [
-        "app_id", "profile", "ble_enabled", "wifi_direct_enabled", "internet_enabled",
+        "app_label", "profile", "ble_enabled", "wifi_direct_enabled", "internet_enabled",
         "reticulum_enabled", "nostr_enabled", "prefer_online", "initial_ttl", "encryption_enabled",
         "auto_key_exchange", "store_pending", "max_pending_per_peer", "max_pending_global",
         "pending_ttl_ms", "overflow_policy",
@@ -16,7 +16,7 @@ public sealed class ProtocolConfigJsonTests
     internal static ProtocolConfig Required(OverflowPolicy policy = OverflowPolicy.DropOldest) =>
         new()
         {
-            AppId = "app",
+            AppLabel = "app",
             Profile = "p",
             BleEnabled = true,
             WifiDirectEnabled = false,

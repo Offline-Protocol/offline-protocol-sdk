@@ -178,7 +178,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         currentConfig = config
         emitEventJson = emitter
         onDiagnostic("info", "Protocol core created", [
-            "appId": config.appId,
+            "appLabel": config.appLabel,
             "userId": config.profile,
             "bleEnabled": config.bleEnabled,
             "wifiDirectEnabled": config.wifiDirectEnabled,
@@ -476,14 +476,14 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         let manager = BleManager(
             protocol: proto,
             deviceId: config?.profile ?? "unknown",
-            appId: config?.appId ?? ""
+            appId: config?.appLabel ?? ""
         )
         manager.delegate = self
         return manager
     }
 
     private func makeInternetManager(proto: OfflineProtocol, config: ProtocolConfig) -> InternetManager {
-        let manager = InternetManager(protocol: proto, deviceId: config.profile, appId: config.appId)
+        let manager = InternetManager(protocol: proto, deviceId: config.profile, appId: config.appLabel)
         manager.delegate = self
         if let emit = emitEventJson {
             InternetTransportBootstrap.attachEmitters(manager: manager, emitEventJson: emit)
@@ -995,7 +995,7 @@ final class ProtocolEngineHost: TransportManagerDelegate {
         }
         let adoption = try OfflineProtocolReferenceStorage.initializeMls(
             on: proto,
-            appId: config.appId,
+            appLabel: config.appLabel,
             profile: config.profile
         )
         if let warning = adoption.warning {

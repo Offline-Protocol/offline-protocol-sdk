@@ -2706,7 +2706,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val adoption = OfflineProtocolReferenceStorage.initializeMls(
                 proto,
                 reactApplicationContext,
-                config.appId,
+                config.appLabel,
                 config.profile
             )
             // A warning means this account is starting from a fresh MLS
