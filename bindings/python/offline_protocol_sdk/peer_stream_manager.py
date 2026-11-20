@@ -296,6 +296,46 @@ class _Stream:
         self.write_blocked = False
 
 
+class WebrtcDirectDialCode:
+    """A WebRTC Direct listener's dial code: ``fragment``, ``host``,
+    ``port`` and ``address``, as the core's ``WebrtcDirectCode`` gives them.
+
+    ``fragment`` carries the listener's ICE password, so ``str()`` and
+    ``repr()`` leave it out. The core's record redacts it only on the Rust
+    side; its generated Python ``__str__`` prints every field, so an
+    application logging the code (``logger.info("%s", code)``, an f-string)
+    would put the password in its log.
+    """
+
+    __slots__ = ("fragment", "host", "port", "address")
+
+    def __init__(self, fragment: str, host: str, port: int, address: str) -> None:
+        self.fragment = fragment
+        self.host = host
+        self.port = port
+        self.address = address
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, WebrtcDirectDialCode):
+            return NotImplemented
+        return (self.fragment, self.host, self.port, self.address) == (
+            other.fragment,
+            other.host,
+            other.port,
+            other.address,
+        )
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return (
+            f"WebrtcDirectDialCode(fragment=<redacted>, host={self.host!r}, "
+            f"port={self.port!r}, address={self.address!r})"
+        )
+
+    __str__ = __repr__
+
+
 class _DialledStream:
     """A stream a page dialled to this host's WebRTC Direct listener, from
     the moment the listener reports its preamble proved an address.
@@ -1238,9 +1278,10 @@ class PeerStreamManager(TransportManager):
     # -- WebRTC Direct: streams a page dialled ---------------------------------
 
     @property
-    def webrtc_direct_code(self) -> Any | None:
-        """The open listener's ``WebrtcDirectCode`` (``fragment``, ``host``,
-        ``port``, ``address``), or ``None`` with none open.
+    def webrtc_direct_code(self) -> WebrtcDirectDialCode | None:
+        """The open listener's :class:`WebrtcDirectDialCode` (``fragment``,
+        ``host``, ``port``, ``address``), or ``None`` with none open. Its
+        ``str()`` and ``repr()`` leave the fragment out.
 
         ``fragment`` is what a page dials: show it as a QR code or text,
         after ``#`` in a URL so it never reaches a web server. It carries
@@ -1445,8 +1486,9 @@ class PeerStreamManager(TransportManager):
     def _send_dialled(self, stream: _DialledStream, body: bytes) -> None:
         """One outbound body onto the dialled stream proving its recipient.
         The listener frames and chunks it; a refusal (a body that cannot be
-        one frame, a stream past its 8 MiB queue, which the listener closes)
-        drops it, and the retry path re-offers it."""
+        one frame, a stream past its 8 MiB queue, which the listener leaves
+        open, as a TCP stream's writer drops a body past its bound) drops
+        it, and the retry path re-offers it."""
         listener = self._webrtc
         if listener is None:
             return
@@ -1520,7 +1562,7 @@ class _WebrtcDirectListener(asyncio.DatagramProtocol):
         self._again = False
         self._closed = False
         #: The ``WebrtcDirectCode`` the core returned. Never logged.
-        self.code: Any = None
+        self.code: WebrtcDirectDialCode | None = None
         self.port: int | None = None
         self._ip_text = ""
 
@@ -1560,8 +1602,10 @@ class _WebrtcDirectListener(asyncio.DatagramProtocol):
         except Exception as exc:
             self.close()
             raise TransportError(f"WebRTC Direct listener refused: {exc}") from exc
-        self.code = code
-        return code
+        self.code = WebrtcDirectDialCode(
+            str(code.fragment), str(code.host), int(code.port), str(code.address)
+        )
+        return self.code
 
     def retire(self) -> None:
         """Stop the socket and timer of a listener the core already

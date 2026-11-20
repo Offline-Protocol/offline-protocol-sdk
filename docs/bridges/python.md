@@ -631,8 +631,10 @@ private or link-local address the application names, never a wildcard. A
 close the application makes before an open returns wins over that open.
 
 `PeerStreamManager.open_webrtc_direct(host, port=0)` opens the listener once
-the transport is running and returns the code's fragment; the whole
-`WebrtcDirectCode` is `webrtc_direct_code` while it is open, and
+the transport is running and returns the code's fragment; the whole code,
+a `WebrtcDirectDialCode` whose `str()` and `repr()` leave the fragment out
+(the generated record's `__str__` prints it, password and all), is
+`webrtc_direct_code` while it is open, and
 `close_webrtc_direct()` (or `stop()`) closes it. Opening again replaces the
 previous listener once the new one is open: its streams are reported lost
 and its code dies, because the certificate, credentials and port are fresh

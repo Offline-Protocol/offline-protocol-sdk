@@ -503,6 +503,21 @@ class TestListenerLifecycle:
         assert PASSWORD not in repr(diagnostics)
         assert any(d[1] == "WebRTC Direct listener open" for d in diagnostics)
 
+    async def test_a_logged_code_leaves_the_password_out(self, protocol, fake_listener, fake_verifier):
+        # An application that logs the code it shows must not log the
+        # password: the generated record's __str__ prints every field.
+        manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
+        await manager.start()
+        try:
+            await manager.open_webrtc_direct("127.0.0.1")
+            code = manager.webrtc_direct_code
+            assert code.fragment == FRAGMENT
+            for text in (str(code), repr(code), f"{code}", "%s" % (code,)):
+                assert PASSWORD not in text, text
+                assert "<redacted>" in text
+        finally:
+            await manager.stop()
+
     async def test_open_needs_a_running_transport(self, protocol, fake_listener):
         manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
         with pytest.raises(TransportError):
