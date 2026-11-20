@@ -135,7 +135,7 @@ export function maybeExplainTransportDiagnostic(event: DiagnosticEvent): void {
       'ble-multi-app',
       `[OfflineProtocol] ${peer !== undefined ? `Peer ${peer}` : 'A peer'} is running ` +
         'several SDK apps on one phone; the stack is picking the instance for your ' +
-        'appId. Give each product its own appId on shared test phones. See ' +
+        'appLabel. Give each product its own appLabel on shared test phones. See ' +
         MULTI_APP_DOC
     );
   }

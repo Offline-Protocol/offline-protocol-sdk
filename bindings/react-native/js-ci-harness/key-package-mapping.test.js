@@ -99,7 +99,7 @@ function nativeRecord(overrides = {}) {
 let OfflineProtocol;
 
 function newSdk() {
-  return new OfflineProtocol({ appId: 'harness', profile: 'harness-profile' });
+  return new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile' });
 }
 
 for (const method of ['mlsGenerateKeyPackage', 'mlsGetOrCreateKeyPackage']) {

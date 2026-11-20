@@ -109,7 +109,7 @@ function release() {
 
 function config(extra = {}) {
   return {
-    appId: 'harness',
+    appLabel: 'harness',
     profile: 'harness-profile',
     devLifecycleWarnings: true,
     ...extra,

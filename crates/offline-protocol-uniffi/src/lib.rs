@@ -22670,17 +22670,20 @@ mod tests {
         }
     }
 
-    /// The per-send application id crosses every hand-written layer of the
-    /// React Native binding under one spelling.
+    /// The per-send app label crosses every hand-written layer of the React
+    /// Native binding under one spelling.
     ///
     /// The field is optional everywhere, so each layer that forgets it
     /// compiles and drops it silently: the message then goes out under the
-    /// configured id and the receiving instance routes it to the wrong
-    /// application. The TypeScript param names it `appId`; `index.ts` must
-    /// list it in the rich-path predicate (only the rich native methods carry
-    /// it) and put it in the options map as `app_id`; each native bridge
-    /// must read `app_id` from that map into the generated `appId` field; and
-    /// the received-event types must declare what the core now emits.
+    /// configured label and the receiving instance routes it to the wrong
+    /// application. The TypeScript param names it `appLabel` (`appId` is its
+    /// deprecated old name, resolved into the same value); `index.ts` must
+    /// list the resolved label in the rich-path predicate (only the rich
+    /// native methods carry it) and put it in the options map as
+    /// `app_label`; each native bridge must read `app_label` from that map
+    /// (falling back to the old `app_id` key) into the generated `appLabel`
+    /// field; and the received-event types must declare what the core now
+    /// emits.
     #[test]
     fn react_native_rich_sends_carry_the_app_id_end_to_end() {
         let region = |label: &str, code: &str, from: &str, to: &str| -> String {
@@ -22703,40 +22706,47 @@ mod tests {
 
         let types = rn_source_code_only("src/types.ts");
         for (interface, field) in [
-            ("export interface SendMessageParams {", "appId?: string;"),
-            ("export interface SendMediaParams {", "appId?: string;"),
+            ("export interface SendMessageParams {", "appLabel?: string;"),
+            ("export interface SendMediaParams {", "appLabel?: string;"),
             (
                 "export interface MessageReceivedEvent extends BaseEvent {",
-                "app_id: string;",
+                "app_label: string;",
             ),
             (
                 "export interface FileReceivedEvent extends BaseEvent {",
-                "app_id?: string;",
+                "app_label?: string;",
             ),
             (
                 "export interface MediaResendRequiredEvent extends BaseEvent {",
-                "app_id?: string;",
+                "app_label?: string;",
             ),
         ] {
             assert_has(interface, &region(interface, &types, interface, "}"), field);
         }
 
         let index = rn_source_code_only("src/index.ts");
-        for (label, from, to) in [
+        for (label, from, to, resolved) in [
             (
                 "index.ts sendMessage",
                 "async sendMessage(params: SendMessageParams)",
                 "OfflineProtocolNativeModule.sendMessageRich(",
+                "sendLabel",
             ),
             (
                 "index.ts sendMedia",
                 "async sendMedia(params: SendMediaParams)",
                 "OfflineProtocolNativeModule.sendMediaRich(",
+                "mediaLabel",
             ),
         ] {
             let code = region(label, &index, from, to);
-            assert_has(label, &code, "params.appId !== undefined");
-            assert_has(label, &code, "app_id: params.appId ?? null");
+            assert_has(
+                label,
+                &code,
+                &format!("const {resolved} = resolveAppLabel(params.appLabel, params.appId,"),
+            );
+            assert_has(label, &code, &format!("{resolved} !== undefined"));
+            assert_has(label, &code, &format!("app_label: {resolved} ?? null"));
         }
 
         let swift_bridge = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");

@@ -14,6 +14,7 @@
  * enables the relay itself after login.
  */
 
+import { resolveAppLabel } from './appLabel';
 import { internetAutoConnects, nostrAutoConnects } from './transportAutoStart';
 import type { ProtocolConfig, TransportsConfig } from './types';
 
@@ -48,13 +49,18 @@ export type DeepPartial<T> = T extends (...args: never[]) => unknown
 /**
  * Fields layered over a preset. Any nested field may be given alone, for
  * example `{ transports: { internet: { serverAddress } } }`; the preset
- * supplies the rest. `appId` and `profile` are parameters of
- * {@link forScenario}, not overrides.
+ * supplies the rest. `appLabel` (or its old name `appId`) and `profile`
+ * are parameters of {@link forScenario}, not overrides.
  */
-export type ScenarioOverrides = DeepPartial<Omit<ProtocolConfig, 'appId' | 'profile'>>;
+export type ScenarioOverrides = DeepPartial<
+  Omit<ProtocolConfig, 'appLabel' | 'appId' | 'profile'>
+>;
 
 export interface ForScenarioParams {
-  appId: string;
+  /** The app label; see {@link ProtocolConfig.appLabel}. */
+  appLabel?: string;
+  /** @deprecated The old name of `appLabel`. */
+  appId?: string;
   profile: string;
   /** Merged over the preset last; use for relay URLs, the internet server and app tuning. */
   overrides?: ScenarioOverrides;
@@ -246,7 +252,7 @@ function assertStartable(
 }
 
 /**
- * Builds a full {@link ProtocolConfig} for `appId`, `profile`, the scenario
+ * Builds a full {@link ProtocolConfig} for `appLabel`, `profile`, the scenario
  * preset, and optional `overrides` (deep-merged last).
  *
  * @throws Error when the result would start without the transport it enables
@@ -254,14 +260,15 @@ function assertStartable(
  *   Nostr without `relayUrls` or with encryption off), when
  *   `connectInternetLater` is set with internet off or with a
  *   `serverAddress`, when a transport entry has no `enabled`, or when
- *   `overrides` names `appId` or `profile`.
+ *   `overrides` names `appLabel`, `appId` or `profile`, or when `appLabel` and
+ *   `appId` disagree.
  */
 export function forScenario(
   scenario: ConfigScenario,
   params: ForScenarioParams
 ): ProtocolConfig {
   const overrides = (params.overrides ?? {}) as PlainRecord;
-  for (const key of ['appId', 'profile']) {
+  for (const key of ['appLabel', 'appId', 'profile']) {
     if (Object.prototype.hasOwnProperty.call(overrides, key)) {
       throw new Error(
         `[OfflineProtocol] forScenario('${scenario}'): pass ${key} as a parameter, ` +
@@ -272,7 +279,7 @@ export function forScenario(
   const merged = deepMerge(scenarioPreset(scenario) as PlainRecord, overrides);
   const config = {
     ...merged,
-    appId: params.appId,
+    appLabel: resolveAppLabel(params.appLabel, params.appId, `forScenario('${scenario}')`),
     profile: params.profile,
   } as ProtocolConfig;
   assertStartable(scenario, config, params.connectInternetLater === true);

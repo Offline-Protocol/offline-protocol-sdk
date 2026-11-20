@@ -81,7 +81,7 @@ const quiet = () => {
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 let OfflineProtocol;
-const newSdk = () => new OfflineProtocol({ appId: 'harness', profile: 'harness-profile' });
+const newSdk = () => new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile' });
 const noop = () => {};
 
 test('a listener registered before start() switches it on at creation', async () => {
@@ -132,7 +132,7 @@ test('advertiseNodeHash reaches the native config, and is absent unless set', as
   // Android reads `transports.ble.advertiseNodeHash`; a transform that drops
   // it leaves the scan response without the hash and no error anywhere.
   await new OfflineProtocol({
-    appId: 'harness',
+    appLabel: 'harness',
     profile: 'harness-profile',
     transports: { ble: { enabled: true, advertiseNodeHash: true } },
   }).start();
