@@ -820,8 +820,8 @@ dictionary ProtocolConfig {
     // the profile selects the storage namespace. Formerly app_id; the wire
     // field keeps that name. It is public and carries no authority: anyone
     // nearby can read it and any app can use the same one. It is not the
-    // portal App ID (app_…), which only turns on telemetry, though a new app
-    // may pass its App ID here and enable_telemetry then falls back to it.
+    // portal App ID (app_…), which only turns on telemetry and goes in
+    // TelemetryConfig.
     // A shipped app must keep its value: changing it means fresh storage, a
     // new identity, and old builds that no longer see new ones.
     string app_label;
@@ -1051,11 +1051,9 @@ enum AppState {
 };
 
 // Configuration for `enable_telemetry`. `api_key` and `app_id` come from the
-// developer portal and are required, except that `app_id` may be empty when
-// the ProtocolConfig's app_label is the portal App ID (app_…), which is then
-// used. This app_id really is the App ID, unlike the mesh app_label, and
-// keeps its name. `os` and `os_major` are filled by the
-// binding. Every other field is optional and falls back to the Rust default
+// developer portal and are required. This app_id really is the App ID,
+// unlike the mesh app_label, and keeps its name. `os` and `os_major` are
+// filled by the binding. Every other field is optional and falls back to the Rust default
 // when null: app_version "0.0.0", debug false, flush_interval_ms 30000,
 // max_batch_bytes 262144, max_buffered_records 4096, include_device_id
 // false, scrub_ids true, mls_verbosity Lifecycle, metrics_cadence_ms 5000,

@@ -31,19 +31,13 @@ tag is derived from it. A new value means fresh storage and a new identity on
 every device, and builds with the old value no longer see builds with the new
 one.
 
-**A new app can use its App ID as its label.** Pass the portal App ID as
-`appLabel`, and `enableTelemetry` then needs only the key: when its config
-names no App ID and the label has the shape `app_…`, the SDK uses the label.
-An app that already shipped with another label keeps that label and passes the
-App ID to `enableTelemetry`.
-
-Do this only if the App ID will stay the app's label for good. The label
-cannot change after the app ships, and an App ID can: the portal has already
-moved from `proj_…` to `app_…` once, and an app that moves to another portal
-app, or uses one App ID for staging and another for production, would split
-its storage and its mesh along the same line. Two builds with two App IDs as
-labels never see each other. When in doubt, choose a label of your own, such
-as a reverse-DNS name, and pass the App ID to `enableTelemetry`.
+**Do not use your App ID as the label.** Choose a label of your own, such as
+a reverse-DNS name (`app.muster`), and pass the App ID to `enableTelemetry`.
+The SDK never reads one from the other. The label cannot change after the app
+ships, and an App ID can: the portal has already moved from `proj_…` to
+`app_…` once, and an app may use one App ID for staging and another for
+production. A label tied to an App ID would split the app's storage and its
+mesh along the same line.
 
 ## Configuration Structure
 

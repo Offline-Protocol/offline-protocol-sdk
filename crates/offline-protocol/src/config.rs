@@ -855,17 +855,6 @@ impl Default for ServiceSubscriptionConfig {
     }
 }
 
-/// Whether `value` has the shape of a developer portal App ID: `app_` (or
-/// the legacy `proj_`) followed by at least one character.
-///
-/// Shape only. Nothing on the device can tell whether the portal issued it;
-/// the telemetry ingest checks that against the key.
-pub fn looks_like_dashboard_app_id(value: &str) -> bool {
-    ["app_", "proj_"]
-        .iter()
-        .any(|prefix| value.len() > prefix.len() && value.starts_with(prefix))
-}
-
 /// Main configuration for the Offline Protocol.
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
@@ -874,10 +863,9 @@ pub struct ProtocolConfig {
     /// `app_id`.
     ///
     /// It is not the App ID the developer portal issues (`app_…`), which
-    /// only turns on telemetry ([`crate::telemetry::TelemetryConfig`]). A new
-    /// app may pass its portal App ID here, and then
-    /// [`crate::OfflineProtocol::enable_telemetry`] can fall back to it, but
-    /// an app that already shipped must keep the label it shipped with.
+    /// only turns on telemetry and goes in
+    /// [`crate::telemetry::TelemetryConfig`]. Keep the two apart: the label
+    /// can never change once an app ships, and an App ID can.
     ///
     /// Two jobs. It is one of the two inputs to the storage namespace, with
     /// [`Self::profile`], so changing it selects fresh storage and a fresh
@@ -1010,17 +998,6 @@ impl ProtocolConfig {
     )]
     pub fn app_id(&self) -> &str {
         &self.app_label
-    }
-
-    /// The developer portal App ID this config was given as its label, if
-    /// the label has that shape (`app_…`, or the legacy `proj_…`).
-    ///
-    /// A new app may pass its portal App ID as the label instead of choosing
-    /// one, so that one value both keeps its peers together and turns on
-    /// telemetry: [`crate::OfflineProtocol::enable_telemetry`] uses this
-    /// when its own config names no App ID.
-    pub fn dashboard_app_id(&self) -> Option<&str> {
-        looks_like_dashboard_app_id(&self.app_label).then_some(self.app_label.as_str())
     }
 
     /// Validates the configuration.
@@ -1732,25 +1709,6 @@ mod tests {
                 .app_label,
             "app.muster"
         );
-    }
-
-    #[test]
-    fn a_portal_app_id_as_the_label_is_recognised_by_shape() {
-        assert_eq!(
-            ProtocolConfig::new("app_8f2k", "default").dashboard_app_id(),
-            Some("app_8f2k")
-        );
-        assert_eq!(
-            ProtocolConfig::new("proj_8f2k", "default").dashboard_app_id(),
-            Some("proj_8f2k")
-        );
-        for label in ["app.muster", "app_", "my-app", "application", "proj"] {
-            assert_eq!(
-                ProtocolConfig::new(label, "default").dashboard_app_id(),
-                None,
-                "{label}"
-            );
-        }
     }
 
     #[test]

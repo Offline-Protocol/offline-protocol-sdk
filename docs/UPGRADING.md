@@ -3213,12 +3213,9 @@ new ones.
 **Events** carry the label under `app_label`, with `app_id` beside it holding
 the same value until the alias is removed. Read `app_label`.
 
-**Telemetry.** A new app may pass its portal App ID as its label, and then
-`enableTelemetry` needs only the key: when its config names no App ID and the
-label has the shape `app_…` (or the legacy `proj_…`), the label is used. An app
-that shipped with another label keeps it and passes the App ID as before. Use
-the App ID as the label only if it will never change: see
-[the configuration guide](configuration.md#the-app-label-and-the-app-id).
+**Telemetry is unchanged.** Pass the portal App ID to `enableTelemetry` as
+before. The SDK never reads it from the label, so keep the two values apart:
+see [the configuration guide](configuration.md#the-app-label-and-the-app-id).
 
 **The label carries no authority.** It is public: anyone nearby can read it and
 any app can use the same one. Nothing should decide whom to trust from it.

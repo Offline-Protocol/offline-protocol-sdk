@@ -2684,8 +2684,7 @@ export class OfflineProtocol {
    * events to the Offline Protocol ingest itself, on a background thread
    * inside the native library. Nothing crosses the bridge per event and
    * nothing reaches JavaScript; the only inputs are the `apiKey` and
-   * `appId` the developer portal issued. `appId` may be left out when this
-   * instance's `appLabel` is that App ID (`app_…`).
+   * `appId` the developer portal issued.
    *
    * The native module fills in the platform (`os`, `osMajor`) and owns the
    * application lifecycle: entering the background closes the telemetry

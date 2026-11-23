@@ -864,8 +864,7 @@ export interface ProtocolConfigFields {
    * any app can use the same one. Never decide whom to trust from it.
    *
    * It is not the App ID (`app_…`) the developer portal issues, which turns
-   * on telemetry. A new app may pass its App ID here, and then
-   * `enableTelemetry` needs only the key.
+   * on telemetry and goes in `enableTelemetry`.
    */
   appLabel?: string;
   /**
@@ -3687,10 +3686,9 @@ export type MlsVerbosity = 'off' | 'lifecycle' | 'diagnostic';
 /**
  * Configuration for `enableTelemetry`.
  *
- * `apiKey` and `appId` come from the developer portal and are required,
- * except that `appId` may be left out when the protocol's `appLabel` is that
- * App ID (`app_…`), which is then used. This `appId` really is the portal
- * App ID, unlike the mesh `appLabel`. The platform (`os`, `osMajor`) is filled in by the native module, never
+ * `apiKey` and `appId` come from the developer portal and are required.
+ * This `appId` really is the portal App ID, unlike the mesh `appLabel`. The
+ * platform (`os`, `osMajor`) is filled in by the native module, never
  * by the app. Every other field is optional and falls back to the Rust
  * default when omitted:
  *   appVersion         = '0.0.0'
@@ -3720,7 +3718,7 @@ export type MlsVerbosity = 'off' | 'lifecycle' | 'diagnostic';
  */
 export interface TelemetryConfig {
   apiKey: string;
-  appId?: string;
+  appId: string;
   appVersion?: string;
   debug?: boolean;
   flushIntervalMs?: number;

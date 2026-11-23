@@ -10,7 +10,7 @@ export interface StartOptions {
    * carrier's channel (required, here or under its old name `appId`). An app
    * that shipped must keep its value. It is public and carries no authority:
    * anyone can read it and any app can use the same one. It is not the App ID
-   * (`app_…`) the developer portal issues, though a new app may pass that.
+   * (`app_…`) the developer portal issues, which goes in telemetry.
    */
   appLabel?: string;
   /**

@@ -977,7 +977,7 @@ class ProtocolManager:
     def enable_telemetry(
         self,
         api_key: str,
-        app_id: str = "",
+        app_id: str,
         app_version: str | None = None,
         *,
         debug: bool | None = None,
@@ -996,9 +996,7 @@ class ProtocolManager:
         events to the Offline Protocol ingest itself, on a background thread
         inside the native library.
 
-        ``api_key`` and ``app_id`` come from the developer portal. ``app_id``
-        may be left out when the config's ``app_label`` is that App ID
-        (``app_…``), which is then used. The host
+        ``api_key`` and ``app_id`` come from the developer portal. The host
         platform is filled in from :mod:`platform`, never by the caller.
         Every keyword argument left ``None`` keeps the Rust default. The
         batch queue is durable from the first batch, because

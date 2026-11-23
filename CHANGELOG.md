@@ -70,8 +70,8 @@ Questions about a release, or about upgrading to one? Ask in the
   Kotlin named arguments, the Java `appId()` accessor, C# `AppId` and Ruby
   `app_id:` take the new name. Events carry
   `app_label`, with `app_id` beside it for now. The docs now say plainly
-  that the label is public and carries no authority. A new app may pass its
-  portal App ID as its label, and `enableTelemetry` then needs only the key.
+  that the label is public and carries no authority. The portal App ID still
+  goes to `enableTelemetry` only, and the SDK never reads it from the label.
   Upgrading: [§33](docs/UPGRADING.md#33-the-mesh-appid-is-now-applabel-unreleased).
 
 ## [0.34.0] — 2026-11-19
