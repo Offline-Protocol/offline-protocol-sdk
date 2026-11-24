@@ -11,9 +11,12 @@ import { checkRelays } from "./nostr-relays.js";
 /// value still scopes the node's traffic, its storage and the tab carrier's
 /// channel, so an app that shipped must keep passing the same string. Both
 /// names with different values is refused rather than one silently winning,
-/// since a wrong guess would start the app on fresh storage.
+/// since a wrong guess would start the app on fresh storage. `null` under
+/// either name counts as not set.
 let warnedAppId = false;
-function resolveAppLabel(appLabel, appId) {
+function resolveAppLabel(rawAppLabel, rawAppId) {
+  const appLabel = rawAppLabel ?? undefined;
+  const appId = rawAppId ?? undefined;
   if (appLabel !== undefined && appId !== undefined && appLabel !== appId) {
     throw new Error(
       `appLabel "${appLabel}" and appId "${appId}" disagree; appId is the old name of appLabel, set only appLabel`,

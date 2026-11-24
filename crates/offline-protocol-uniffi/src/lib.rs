@@ -26639,4 +26639,94 @@ mod tests {
             );
         }
     }
+
+    /// The deprecation message for the label's old name is written by hand
+    /// in every binding that keeps the alias, in seven languages. It must
+    /// say the same thing everywhere: a developer who meets it in one
+    /// binding and its docs in another should never read two stories about
+    /// which value is the App ID.
+    ///
+    /// The failure this catches: one copy reworded, or a new alias added
+    /// with a message of its own. Every source under `bindings/` and
+    /// `crates/` that says the old name "on the mesh is now" the new one
+    /// must go on with the canonical sentence. Quotes, string
+    /// concatenation and comment markers are ignored, so a copy may wrap.
+    #[test]
+    fn every_app_label_deprecation_message_says_the_same_thing() {
+        const CANONICAL: &str =
+            ". Your App ID (app_…) from the dashboard is what turns on telemetry";
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest.join("../..");
+        let mut stack = vec![root.join("bindings"), root.join("crates")];
+        let mut copies = 0;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if path.is_dir() {
+                    if !matches!(
+                        name.as_str(),
+                        "target" | "node_modules" | ".dart_tool" | "pkg" | "build" | ".build"
+                    ) {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                let source = matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some(
+                        "rs" | "ts" | "js" | "py" | "kt" | "swift" | "dart" | "cs" | "java" | "rb"
+                    )
+                );
+                if !source || path.ends_with(file!()) {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if !text.contains("on the mesh is now") {
+                    continue;
+                }
+                let flat: String = text
+                    .replace("///", " ")
+                    .replace("//", " ")
+                    .chars()
+                    .map(|c| {
+                        if matches!(c, '\'' | '"' | '+' | '*') {
+                            ' '
+                        } else {
+                            c
+                        }
+                    })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                for (at, _) in flat.match_indices("on the mesh is now") {
+                    let rest = &flat[at + "on the mesh is now".len()..];
+                    let rest = rest
+                        .strip_prefix(" appLabel")
+                        .or_else(|| rest.strip_prefix(" app_label"))
+                        .unwrap_or_else(|| {
+                            panic!("{}: names neither appLabel nor app_label", path.display())
+                        });
+                    assert!(
+                        rest.starts_with(CANONICAL),
+                        "{}: the deprecation message must go on {CANONICAL:?}, found {:?}",
+                        path.display(),
+                        &rest[..rest.len().min(90)]
+                    );
+                    copies += 1;
+                }
+            }
+        }
+        // Rust, TypeScript, the browser, Python, Kotlin, Swift and Dart.
+        assert!(
+            copies >= 7,
+            "found only {copies} copies; did the walk miss a binding?"
+        );
+    }
 }

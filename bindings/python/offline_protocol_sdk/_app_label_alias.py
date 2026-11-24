@@ -6,7 +6,8 @@ UDL now names it ``app_label``, and the generated classes take only that
 keyword, so code written for 0.34 would fail at the constructor. This keeps
 ``app_id=`` working on the three generated classes that carried it, with a
 ``DeprecationWarning``, and refuses the two names set to different values
-rather than letting one silently win.
+rather than letting one silently win. ``None`` under either name counts as
+not set, so ``app_id=None`` neither warns nor conflicts.
 
 Only the name changed. The value still selects the storage namespace and is
 stamped on every frame, so an app that shipped must keep passing the same
@@ -40,10 +41,10 @@ def _alias(cls: type) -> None:
 
     @functools.wraps(original)
     def __init__(self: Any, *args: Any, app_id: Any = _MISSING, **kwargs: Any) -> None:
-        if app_id is not _MISSING:
+        if app_id is not _MISSING and app_id is not None:
             _warn(2)
-            label = kwargs.get("app_label", _MISSING)
-            if label is not _MISSING and label != app_id:
+            label = kwargs.get("app_label")
+            if label is not None and label != app_id:
                 raise TypeError(
                     f"app_label {label!r} and app_id {app_id!r} disagree; "
                     "app_id is the old name of app_label, pass only app_label"

@@ -116,6 +116,17 @@ fn a_config_from_before_the_app_label_rename_still_decodes() {
         "{err:?}"
     );
 
+    // A null under either name is not set, so it is no conflict.
+    config["app_label"] = serde_json::Value::Null;
+    let decoded = ProtocolConfig::decode(&config, "config").expect("a null new name");
+    assert_eq!(Some(json!(decoded.app_label)), label);
+    let options = crate::SendMessageOptions::decode(
+        &json!({"app_label": "other-app", "app_id": null}),
+        "options",
+    )
+    .expect("a null old name");
+    assert_eq!(options.app_label.as_deref(), Some("other-app"));
+
     // The send options carried the same field.
     let options = crate::SendMessageOptions::decode(&json!({"app_id": "other-app"}), "options")
         .expect("the old name decodes");

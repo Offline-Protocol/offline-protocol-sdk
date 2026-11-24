@@ -37,13 +37,16 @@ export function resetAppLabelWarningForTests(): void {
  * Both set to different values is refused rather than one silently winning,
  * since either could be the one the developer meant, and a wrong guess moves
  * the app to another storage namespace. `appId` alone warns once in
- * development builds.
+ * development builds. `null` under either name counts as not set, as the
+ * native parsers and Flutter read it.
  */
 export function resolveAppLabel(
-  appLabel: string | undefined,
-  appId: string | undefined,
+  rawAppLabel: string | null | undefined,
+  rawAppId: string | null | undefined,
   context: string
 ): string | undefined {
+  const appLabel = rawAppLabel ?? undefined;
+  const appId = rawAppId ?? undefined;
   if (appLabel !== undefined && appId !== undefined && appLabel !== appId) {
     throw new Error(
       `[OfflineProtocol] ${context}: appLabel "${appLabel}" and appId "${appId}" disagree. ` +

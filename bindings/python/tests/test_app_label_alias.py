@@ -52,3 +52,11 @@ def test_send_options_take_the_old_keyword_too(cls):
     with pytest.warns(DeprecationWarning):
         options = cls(app_id="other-app")
     assert options.app_label == "other-app"
+
+
+@pytest.mark.parametrize("cls", [SendMessageOptions, MediaSendOptions])
+def test_an_old_keyword_of_none_is_not_set(cls):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        options = cls(app_label="other-app", app_id=None)
+    assert options.app_label == "other-app"

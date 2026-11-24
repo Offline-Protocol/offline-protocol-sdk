@@ -121,7 +121,10 @@ def _accept_old_app_label_key(raw: object) -> object:
         raise SystemExit(
             "config: app_label and app_id disagree; app_id is the old name of app_label, keep only app_label"
         )
-    logger.warning("config: app_id on the mesh is now app_label; rename the key, the value stays the same")
+    logger.warning(
+        "config: app_id on the mesh is now app_label. Your App ID (app_…) from the dashboard "
+        "is what turns on telemetry. Rename the key; the value stays the same."
+    )
     fixed = {key: value for key, value in raw.items() if key != "app_id"}
     fixed["app_label"] = old
     return fixed

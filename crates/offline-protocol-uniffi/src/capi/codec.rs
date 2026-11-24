@@ -282,7 +282,9 @@ pub fn variant_error(at: &str, type_name: &str, variants: &[&str]) -> CallError 
 /// and C reads it at runtime, so a plain rename would turn a working program
 /// into one refused at engine creation with no compile error first. The old
 /// key is read as the new one; both present with different values is refused
-/// rather than one silently winning. Encoding only ever writes the new name.
+/// rather than one silently winning. A `null` under either name counts as
+/// not set, as it does for every other optional field. Encoding only ever
+/// writes the new name.
 const RENAMED_FIELDS: &[(&str, &str, &str)] = &[
     // 0.35: the mesh app_id is the app label. Same value, so the storage
     // namespace and the wire stamp are unchanged.
@@ -307,10 +309,10 @@ impl<'a> Fields<'a> {
             .cloned()
             .ok_or_else(|| invalid(at, &format!("expected an object shaped as {type_name}")))?;
         for &(_, old, new) in RENAMED_FIELDS.iter().filter(|(t, ..)| *t == type_name) {
-            let Some(old_value) = map.remove(old) else {
+            let Some(old_value) = map.remove(old).filter(|v| !v.is_null()) else {
                 continue;
             };
-            match map.get(new) {
+            match map.get(new).filter(|v| !v.is_null()) {
                 Some(new_value) if *new_value != old_value => {
                     return Err(invalid(
                         &format!("{at}.{old}"),
@@ -320,6 +322,7 @@ impl<'a> Fields<'a> {
                     ));
                 }
                 Some(_) => {}
+                // Absent, or null: the old name supplies it.
                 None => {
                     map.insert(new.to_owned(), old_value);
                 }

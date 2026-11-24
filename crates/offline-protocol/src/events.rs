@@ -3062,6 +3062,14 @@ impl Event {
             // of the derived output, which a round trip through a map would
             // sort.
             debug_assert!(json.ends_with('}'));
+            // A variant that one day derives its own `app_label` would end
+            // up with the key twice, which JSON readers resolve differently.
+            // Every test that emits one of these events checks it.
+            debug_assert!(
+                serde_json::to_value(self).map_or(true, |v| v.get("app_label").is_none()),
+                "{} derives its own app_label; drop it from Event::app_label",
+                self.telemetry_name()
+            );
             json.pop();
             json.push_str(",\"app_label\":");
             json.push_str(&serde_json::to_string(label)?);
@@ -4541,6 +4549,26 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["app_label"], "other-app");
         assert_eq!(value["app_id"], "other-app");
+        // Exactly once, whichever event carries it.
+        assert_eq!(json.matches("\"app_label\":").count(), 1, "{json}");
+        let file = Event::file_received(
+            "file123".to_string(),
+            "photo.jpg".to_string(),
+            4,
+            "alice".to_string(),
+            ContentType::Image,
+            None,
+            vec![1, 2, 3, 4],
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("other-app".to_string()),
+        )
+        .to_json()
+        .unwrap();
+        assert_eq!(file.matches("\"app_label\":").count(), 1, "{file}");
         // The extra key reads back as the same event.
         assert!(matches!(
             Event::from_json(&json).unwrap(),

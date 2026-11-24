@@ -1697,6 +1697,18 @@ mod tests {
         assert_eq!(config.initial_ttl, 8);
     }
 
+    /// The rename must not move a shipped app: the label is still the
+    /// storage namespace input it was as `app_id`, so Muster's 0.34 account
+    /// opens under 0.35. The digest is the one 0.34 derived for these values.
+    #[test]
+    fn the_rename_keeps_the_storage_namespace_of_a_shipped_app() {
+        let config = ProtocolConfig::new("app.muster", "default");
+        assert_eq!(
+            crate::storage_namespace::account_storage_namespace(&config.app_label, &config.profile),
+            "account-cad217f6e056c61207cb8770ecf722f0e873bf1a565332dd92527617dad3ea62"
+        );
+    }
+
     #[test]
     #[allow(deprecated)]
     fn the_old_name_reads_the_label() {

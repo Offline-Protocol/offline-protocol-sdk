@@ -165,6 +165,17 @@ test('appLabel and appId that disagree on a send are refused before native', asy
   assert.equal(calls.filter(([method]) => method.startsWith('send')).length, 0);
 });
 
+test('a null under either name is not set, so it is no conflict', async () => {
+  await newSdk().sendMessage({ recipient: RECIPIENT, content: 'hi', appLabel: 'other-app', appId: null });
+  const [, args] = theSend();
+  assert.equal(args[4].app_label, 'other-app');
+
+  calls.length = 0;
+  await newSdk().sendMessage({ recipient: RECIPIENT, content: 'hi', appLabel: null, appId: 'other-app' });
+  const [, oldArgs] = theSend();
+  assert.equal(oldArgs[4].app_label, 'other-app');
+});
+
 test('a rich sendMessage without a label sends app_label null, not a stale value', async () => {
   await newSdk().sendMessage({
     recipient: RECIPIENT,

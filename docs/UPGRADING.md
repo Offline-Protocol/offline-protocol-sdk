@@ -3198,7 +3198,7 @@ new ones.
 
 | Surface | Old code |
 |---|---|
-| React Native, browser, Flutter | `appId` still works, with a one-time warning in development builds. Setting both names to different values throws. |
+| React Native, browser, Flutter | `appId` still works, with a one-time warning in development builds. Setting both names to different values throws; `null` under either name counts as not set. React Native's `new OfflineProtocol(…)` now throws when neither name gives a label, where it used to fail later at `start()`: an app that builds the instance at module load from an environment value that can be empty should check the value first. |
 | Python | `app_id=` still works on `ProtocolConfig`, `SendMessageOptions` and `MediaSendOptions`, with a `DeprecationWarning`. A local API server config file that still says `app_id` loads with a warning. |
 | Rust | `ProtocolConfig::new` and `builder` keep their arguments. Reading the field is now `config.app_label` (`config.app_id()` is deprecated). The send options' `app_id` fields are deprecated beside `app_label`. |
 | Swift | **Breaks:** the generated initializer is now `ProtocolConfig(appLabel:…)` (and `appLabel:` on the send options). Still compiles, deprecated: reading or setting `.appId` on `ProtocolConfig`, `SendMessageOptions` and `MediaSendOptions`, and the `appId:` overloads of `OfflineProtocolReferenceStorage` and `OfflineProtocolDevelopmentCleartextConfig`. |
