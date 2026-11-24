@@ -44,7 +44,7 @@ cd ios && pod install   # iOS only
 ```typescript
 import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
-const protocol = new OfflineProtocol({ appId: 'my-app', profile: 'default' });
+const protocol = new OfflineProtocol({ appLabel: 'my-app', profile: 'default' });
 
 protocol.on('message_received', (e) => console.log(e.content));
 await protocol.start();

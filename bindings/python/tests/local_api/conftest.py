@@ -26,7 +26,7 @@ def make_config(**overrides: Any) -> ProtocolConfig:
     config with every transport off) and encryption off, so a test never
     needs a key exchange."""
     fields: dict[str, Any] = dict(
-        app_id="server-app",
+        app_label="server-app",
         profile="server-user",
         ble_enabled=False,
         wifi_direct_enabled=False,

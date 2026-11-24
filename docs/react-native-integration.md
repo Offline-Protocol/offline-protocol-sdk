@@ -42,7 +42,7 @@ Create one `OfflineProtocol` instance at app start, configure transports, and re
 import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
-  appId: 'com.example.app',
+  appLabel: 'com.example.app',
   profile: 'default',
   network: { initialTtl: 8 },
   transports: {
@@ -126,7 +126,7 @@ permissions are in place.
 - `wifiDirect: { enabled: true }` starts the transport in `start()`. Grant `NEARBY_WIFI_DEVICES` (or, on 12 and lower, fine location) **before** `start()`: without it the transport runs on the Wi-Fi network only and Wi-Fi Direct stays off for the session. If you ask for the grant later, call `enableTransport('wifiDirect')` once it is given.
 - The same slot also advertises and browses `_offlineprotocol._tcp` on the Wi-Fi network the phone is on, so an Android phone reaches iPhones and Python hosts there with no group at all. It needs no runtime grant (the SDK declares `ACCESS_NETWORK_STATE` and `CHANGE_WIFI_MULTICAST_STATE`) until your app targets Android 17: an app targeting Android 17 (API 37) must declare `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier stays off with a warning diagnostic. The SDK does not declare it, because a declaration revokes the grant apps targeting 36 and lower hold by default. It runs whenever `enabled` is true, and finds nothing on a network that blocks multicast or isolates clients (many guest and office networks).
 - `autoAccept: true` lets the SDK form the Wi-Fi Direct group itself on Android 10 and later: devices of the same app find each other and join one group, with no system dialog. Expect one to two minutes: two phones took 18 to 225 seconds (median about a minute), and Bluetooth, when on, carries traffic meanwhile. Without it, pair the phones once in the system's Wi-Fi Direct settings. `groupOwnerIntent` is not used.
-- **QA checklist:** [troubleshooting.md](troubleshooting.md) (symptom table, multi-app `appId` rules).
+- **QA checklist:** [troubleshooting.md](troubleshooting.md) (symptom table, multi-app `appLabel` rules).
 - Config: `wifiDirect: { enabled: true, autoAccept: true }`. `enableTransport('wifiDirect')` with no configuration keeps the `autoAccept` setting the transport already has.
 
 ### 4.3 Internet
@@ -456,7 +456,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| **sendMessage** | `sendMessage(params: SendMessageParams): Promise<string>` | Sends a message; returns message ID. `params`: `recipient`, `content`, `priority?`, `replyToMsg?`, plus rich params `contentType?`, `replyContext?`, `mediaMetadata?`, `forwardInfo?`, and `appId?` (a per-send application id, see below). |
+| **sendMessage** | `sendMessage(params: SendMessageParams): Promise<string>` | Sends a message; returns message ID. `params`: `recipient`, `content`, `priority?`, `replyToMsg?`, plus rich params `contentType?`, `replyContext?`, `mediaMetadata?`, `forwardInfo?`, and `appLabel?` (a per-send app label, see below; `appId?` is its deprecated old name). |
 | **receiveMessage** | `receiveMessage(): Promise<MessageReceivedEvent \| null>` | Polls for the next received message. |
 | **sendConnectionRequest** | `sendConnectionRequest(params: SendConnectionRequestParams): Promise<string>` | Sends a connection request; returns the message ID that correlates all outcome events. `params`: `recipient` (the target's `off1…` address), `senderName`, `keyPackage?`, `initialMessage?`. |
 | **acceptConnectionRequest** | `acceptConnectionRequest(params): Promise<string>` | Accepts a received request. `params`: `recipient`, `accepterName`, `keyPackage?`. |
@@ -465,7 +465,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 Rich params (`replyContext`, `mediaMetadata`, `forwardInfo`, a non-default `contentType`) only ever travel sealed inside the MLS ciphertext, toward recipients whose SDK advertised rich-payload support; toward anyone else they are silently dropped, never sent cleartext, while `replyToMsg` threading survives. When any rich param is present the call routes to the native `sendMessageRich` method.
 
-`appId` also routes to `sendMessageRich`, because only the rich native method carries it, but it is not sealed. It replaces the configured `appId` as the stamp on that one message, travels in cleartext and unsigned, and reaches every recipient, who reads it as `app_id` on `message_received`. It is for one instance serving several applications behind one identity: route on it, never authorize on it. It never changes the storage namespace, the MLS session or the BLE app tag.
+`appLabel` also routes to `sendMessageRich`, because only the rich native method carries it, but it is not sealed. It replaces the configured `appLabel` as the stamp on that one message, travels in cleartext and unsigned, and reaches every recipient, who reads it as `app_label` on `message_received`. It is for one instance serving several applications behind one identity: route on it, never authorize on it. It never changes the storage namespace, the MLS session or the BLE app tag.
 
 > **Over-the-air JS updates (CodePush-style):** `sendMessageRich` and `sendMediaRich` are native methods. A JS-only update that starts passing rich params against an older native binary fails those calls (method not found); plain `sendMessage`/`sendMedia` calls are unaffected. Gate rich params on your native binary version. `appId` fails differently: a native binary that has `sendMessageRich` but predates per-send `appId` accepts the call and ignores the key, so the message goes out under the configured id with no error. Gate `appId` on a native binary that includes it. Note the routing triggers below: for `sendMedia`, cloud/sticker `mediaMetadata` fields alone are enough to route to the native rich method.
 
@@ -562,7 +562,7 @@ Connection-request failure contract: recipient offline emits `connection_request
 |--------|-----------|-------------|
 | **sendFile** | `sendFile(params: SendFileParams): Promise<string>` | Sends file bytes; returns file ID. `params`: `recipient`, `fileData` (base64), `fileName`. |
 | **sendFileFromPath** | `sendFileFromPath(params: SendFileFromPathParams): Promise<string>` | Sends a file the SDK reads from disk, so no base64 crosses the bridge; returns file ID. `params`: `recipient`, `filePath` (absolute path or `file://` URI, not `content://`), `fileName`. Rejects with `InvalidArgument`, before reading, for a missing file, anything not a regular file, or a file over 100 MiB. |
-| **sendMedia** | `sendMedia(params: SendMediaParams): Promise<string>` | Sends media bytes; returns file ID. `params`: `recipient`, `fileData` (base64), `fileName`, `contentType`, `mediaMetadata?`, plus sealed-only rich params `caption?`, `replyToMsg?`, `replyContext?`, `forwardInfo?`, `fileId?` (for answering `media_resend_required`), and the unsealed `appId?`. `appId` stamps every chunk of the transfer in place of the configured id and arrives as `app_id` on `file_received`, in cleartext and unsigned; it also routes to `sendMediaRich`. Rich params, including the cloud/sticker `mediaMetadata` fields (`mediaId`, `downloadUrl`, `encryptionKey`, …) even with no other rich param, route to the native `sendMediaRich` method (same over-the-air-update caveat as `sendMessageRich`) and travel sealed with chunk 0: dropped, never cleartext, toward non-rich recipients. A transfer the recipient asks to be resent reports its `appId` as `app_id` on `media_resend_required`, so the right application answers. |
+| **sendMedia** | `sendMedia(params: SendMediaParams): Promise<string>` | Sends media bytes; returns file ID. `params`: `recipient`, `fileData` (base64), `fileName`, `contentType`, `mediaMetadata?`, plus sealed-only rich params `caption?`, `replyToMsg?`, `replyContext?`, `forwardInfo?`, `fileId?` (for answering `media_resend_required`), and the unsealed `appLabel?`. `appLabel` stamps every chunk of the transfer in place of the configured label and arrives as `app_label` on `file_received`, in cleartext and unsigned; it also routes to `sendMediaRich`. Rich params, including the cloud/sticker `mediaMetadata` fields (`mediaId`, `downloadUrl`, `encryptionKey`, …) even with no other rich param, route to the native `sendMediaRich` method (same over-the-air-update caveat as `sendMessageRich`) and travel sealed with chunk 0: dropped, never cleartext, toward non-rich recipients. A transfer the recipient asks to be resent reports its `appLabel` as `app_label` on `media_resend_required`, so the right application answers. |
 | **getFileProgress** | `getFileProgress(fileId): Promise<FileProgress \| null>` | Progress for a file transfer. |
 | **cancelFileTransfer** | `cancelFileTransfer(fileId): Promise<boolean>` | Cancels a transfer. |
 | **processFileChunk** | `processFileChunk(fileId, chunkIndex, data: number[]): Promise<void>` | Processes a file chunk (custom handling). |
@@ -699,7 +699,7 @@ bytes. Worked code is in the
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | **initializeMlsWithSecureStorage** | `initializeMlsWithSecureStorage(): Promise<void>` | Initialises MLS key material in iOS Keychain / Android EncryptedSharedPreferences and message-plane state in the app container. Called automatically by `start()` when encryption enabled. |
-| **wipePersistedState** | `wipePersistedState(appId, profile): Promise<void>` | Erases all persisted state for one account — namespaced secure store, protocol-state directory, and the pre-namespace store when this account owns it or nobody does. Call on logout/username switch, **after** `destroy()`; rejects if the account named is the one currently running. Irreversible, and rotates the MLS and Nostr identities. See [UPGRADING §10](./UPGRADING.md#logging-out-and-switching-accounts). |
+| **wipePersistedState** | `wipePersistedState(appLabel, profile): Promise<void>` | Erases all persisted state for one account — namespaced secure store, protocol-state directory, and the pre-namespace store when this account owns it or nobody does. Call on logout/username switch, **after** `destroy()`; rejects if the account named is the one currently running. Irreversible, and rotates the MLS and Nostr identities. See [UPGRADING §10](./UPGRADING.md#logging-out-and-switching-accounts). |
 | **isMlsInitialized** | `isMlsInitialized(): Promise<boolean>` | Whether MLS is ready. |
 | **mlsGenerateKeyPackage** | `mlsGenerateKeyPackage(): Promise<MlsKeyPackage>` | Generates a new key package. |
 | **mlsGetOrCreateKeyPackage** | `mlsGetOrCreateKeyPackage(): Promise<MlsKeyPackage>` | Gets or creates key package. |

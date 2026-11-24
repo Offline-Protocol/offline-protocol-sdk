@@ -26,8 +26,10 @@ import uniffi.offline_protocol.ProtocolConfig
 import uniffi.offline_protocol.ProtocolException
 import uniffi.offline_protocol.ProtocolStateStorageProvider
 import uniffi.offline_protocol.RustBuffer
+import uniffi.offline_protocol.SendMessageOptions
 import uniffi.offline_protocol.TelemetryConfig
 import uniffi.offline_protocol.TelemetryOs
+import uniffi.offline_protocol.appId
 import uniffi.offline_protocol.deriveAddress
 
 // What an application writes first: build the engine, listen to it, start it,
@@ -58,7 +60,7 @@ fun start(config: ProtocolConfig): OfflineProtocol {
 fun startWithReferenceStorage(context: Context, config: ProtocolConfig): OfflineProtocol {
     val protocol = OfflineProtocol(config)
     protocol.setEventCallback(Listener())
-    val adoption = OfflineProtocolReferenceStorage.initializeMls(protocol, context, config.appId, config.profile)
+    val adoption = OfflineProtocolReferenceStorage.initializeMls(protocol, context, config.appLabel, config.profile)
     adoption.warning?.let { Log.e("ConsumerCheck", it) }
     protocol.start()
     return protocol
@@ -71,15 +73,24 @@ fun startWithReferenceStorage(context: Context, config: ProtocolConfig): Offline
 fun signOut(context: Context, protocol: OfflineProtocol, config: ProtocolConfig) {
     protocol.stop()
     protocol.close()
-    OfflineProtocolReferenceStorage.wipe(context, config.appId, config.profile)
+    OfflineProtocolReferenceStorage.wipe(context, config.appLabel, config.profile)
 }
 
 // Verify a protocol-state backend before wiring it in (C11): green means
 // supported. Run it off the main thread, and on a scratch instance: the suite
 // blocks on writes of several megabytes.
+// Code written before 0.35 named the app label `appId`. The deprecated
+// aliases keep it compiling.
+@Suppress("DEPRECATION")
+fun labelUnderItsOldName(config: ProtocolConfig): String {
+    val options = SendMessageOptions()
+    options.appId = config.appId
+    return options.appId ?: config.appId
+}
+
 // Lab-only config factory (compile-checked; do not use in production apps).
-fun labCleartextConfig(appId: String, profile: String): ProtocolConfig =
-    OfflineProtocolDevelopmentCleartextConfig.make(appId, profile)
+fun labCleartextConfig(appLabel: String, profile: String): ProtocolConfig =
+    OfflineProtocolDevelopmentCleartextConfig.make(appLabel, profile)
 
 fun isSupported(backend: ProtocolStateStorageProvider): Boolean {
     val report = StorageConformance.run(backend)

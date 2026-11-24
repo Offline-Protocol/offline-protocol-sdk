@@ -985,7 +985,7 @@ fn a_device_running_another_application_carries_the_message_both_ways() {
     // hand each on with the application id it arrived with.
     let mut net = Neighborhood::new(&["alice", "carol"]);
     let mut bob = default_config("bob");
-    bob.app_id = "another-app".to_string();
+    bob.app_label = "another-app".to_string();
     net.add_node("bob", bob);
     net.link("alice", "bob");
     net.link("bob", "carol");

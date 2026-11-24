@@ -19,7 +19,7 @@ public sealed class TransportExchangeTests
     private static string Config(string profile) =>
         $$"""
         {
-          "app_id": "com.offlineprotocol.csharp.tests",
+          "app_label": "com.offlineprotocol.csharp.tests",
           "profile": "{{profile}}",
           "ble_enabled": false,
           "wifi_direct_enabled": true,

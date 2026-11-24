@@ -5127,18 +5127,18 @@ public struct MediaSendOptions: Equatable, Hashable {
     public var replyContext: ReplyContext?
     public var forwardInfo: ForwardInfo?
     public var fileId: String?
-    public var appId: String?
+    public var appLabel: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mediaMetadata: MediaMetadata? = nil, caption: String? = nil, replyToMsg: String? = nil, replyContext: ReplyContext? = nil, forwardInfo: ForwardInfo? = nil, fileId: String? = nil, appId: String? = nil) {
+    public init(mediaMetadata: MediaMetadata? = nil, caption: String? = nil, replyToMsg: String? = nil, replyContext: ReplyContext? = nil, forwardInfo: ForwardInfo? = nil, fileId: String? = nil, appLabel: String? = nil) {
         self.mediaMetadata = mediaMetadata
         self.caption = caption
         self.replyToMsg = replyToMsg
         self.replyContext = replyContext
         self.forwardInfo = forwardInfo
         self.fileId = fileId
-        self.appId = appId
+        self.appLabel = appLabel
     }
 
     
@@ -5163,7 +5163,7 @@ public struct FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer {
                 replyContext: FfiConverterOptionTypeReplyContext.read(from: &buf), 
                 forwardInfo: FfiConverterOptionTypeForwardInfo.read(from: &buf), 
                 fileId: FfiConverterOptionString.read(from: &buf), 
-                appId: FfiConverterOptionString.read(from: &buf)
+                appLabel: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -5174,7 +5174,7 @@ public struct FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer {
         FfiConverterOptionTypeReplyContext.write(value.replyContext, into: &buf)
         FfiConverterOptionTypeForwardInfo.write(value.forwardInfo, into: &buf)
         FfiConverterOptionString.write(value.fileId, into: &buf)
-        FfiConverterOptionString.write(value.appId, into: &buf)
+        FfiConverterOptionString.write(value.appLabel, into: &buf)
     }
 }
 
@@ -6335,7 +6335,7 @@ public func FfiConverterTypePendingQueueConfig_lower(_ value: PendingQueueConfig
 
 
 public struct ProtocolConfig: Equatable, Hashable {
-    public var appId: String
+    public var appLabel: String
     public var profile: String
     public var bleEnabled: Bool
     public var wifiDirectEnabled: Bool
@@ -6373,8 +6373,8 @@ public struct ProtocolConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, custody: CustodyConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true, encryptServiceMessages: Bool = true) {
-        self.appId = appId
+    public init(appLabel: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, custody: CustodyConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true, encryptServiceMessages: Bool = true) {
+        self.appLabel = appLabel
         self.profile = profile
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
@@ -6427,7 +6427,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProtocolConfig {
         return
             try ProtocolConfig(
-                appId: FfiConverterString.read(from: &buf), 
+                appLabel: FfiConverterString.read(from: &buf), 
                 profile: FfiConverterString.read(from: &buf), 
                 bleEnabled: FfiConverterBool.read(from: &buf), 
                 wifiDirectEnabled: FfiConverterBool.read(from: &buf), 
@@ -6466,7 +6466,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: ProtocolConfig, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.appId, into: &buf)
+        FfiConverterString.write(value.appLabel, into: &buf)
         FfiConverterString.write(value.profile, into: &buf)
         FfiConverterBool.write(value.bleEnabled, into: &buf)
         FfiConverterBool.write(value.wifiDirectEnabled, into: &buf)
@@ -6907,18 +6907,18 @@ public struct SendMessageOptions: Equatable, Hashable {
     public var replyContext: ReplyContext?
     public var mediaMetadata: MediaMetadata?
     public var forwardInfo: ForwardInfo?
-    public var appId: String?
+    public var appLabel: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(priority: MessagePriority? = nil, replyToMsg: String? = nil, contentType: ContentType? = nil, replyContext: ReplyContext? = nil, mediaMetadata: MediaMetadata? = nil, forwardInfo: ForwardInfo? = nil, appId: String? = nil) {
+    public init(priority: MessagePriority? = nil, replyToMsg: String? = nil, contentType: ContentType? = nil, replyContext: ReplyContext? = nil, mediaMetadata: MediaMetadata? = nil, forwardInfo: ForwardInfo? = nil, appLabel: String? = nil) {
         self.priority = priority
         self.replyToMsg = replyToMsg
         self.contentType = contentType
         self.replyContext = replyContext
         self.mediaMetadata = mediaMetadata
         self.forwardInfo = forwardInfo
-        self.appId = appId
+        self.appLabel = appLabel
     }
 
     
@@ -6943,7 +6943,7 @@ public struct FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer {
                 replyContext: FfiConverterOptionTypeReplyContext.read(from: &buf), 
                 mediaMetadata: FfiConverterOptionTypeMediaMetadata.read(from: &buf), 
                 forwardInfo: FfiConverterOptionTypeForwardInfo.read(from: &buf), 
-                appId: FfiConverterOptionString.read(from: &buf)
+                appLabel: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -6954,7 +6954,7 @@ public struct FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer {
         FfiConverterOptionTypeReplyContext.write(value.replyContext, into: &buf)
         FfiConverterOptionTypeMediaMetadata.write(value.mediaMetadata, into: &buf)
         FfiConverterOptionTypeForwardInfo.write(value.forwardInfo, into: &buf)
-        FfiConverterOptionString.write(value.appId, into: &buf)
+        FfiConverterOptionString.write(value.appLabel, into: &buf)
     }
 }
 

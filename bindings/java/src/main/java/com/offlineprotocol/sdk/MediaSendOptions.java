@@ -7,7 +7,7 @@ public class MediaSendOptions {
     private ReplyContext replyContext;
     private ForwardInfo forwardInfo;
     private java.lang.String fileId;
-    private java.lang.String appId;
+    private java.lang.String appLabel;
 
     public MediaSendOptions(
         MediaMetadata mediaMetadata, 
@@ -16,7 +16,7 @@ public class MediaSendOptions {
         ReplyContext replyContext, 
         ForwardInfo forwardInfo, 
         java.lang.String fileId, 
-        java.lang.String appId
+        java.lang.String appLabel
     ) {
         
         this.mediaMetadata = mediaMetadata;
@@ -31,7 +31,7 @@ public class MediaSendOptions {
         
         this.fileId = fileId;
         
-        this.appId = appId;
+        this.appLabel = appLabel;
     }
     
     public MediaMetadata mediaMetadata() {
@@ -58,8 +58,8 @@ public class MediaSendOptions {
         return this.fileId;
     }
     
-    public java.lang.String appId() {
-        return this.appId;
+    public java.lang.String appLabel() {
+        return this.appLabel;
     }
     public void setMediaMetadata(MediaMetadata mediaMetadata) {
         this.mediaMetadata = mediaMetadata;
@@ -79,8 +79,8 @@ public class MediaSendOptions {
     public void setFileId(java.lang.String fileId) {
         this.fileId = fileId;
     }
-    public void setAppId(java.lang.String appId) {
-        this.appId = appId;
+    public void setAppLabel(java.lang.String appLabel) {
+        this.appLabel = appLabel;
     }
 
     
@@ -103,7 +103,7 @@ public class MediaSendOptions {
               
               java.util.Objects.equals(fileId, _uniffiThat.fileId) && 
               
-              java.util.Objects.equals(appId, _uniffiThat.appId)
+              java.util.Objects.equals(appLabel, _uniffiThat.appLabel)
               
             );
         };
@@ -118,7 +118,7 @@ public class MediaSendOptions {
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(replyContext);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(forwardInfo);
         _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(fileId);
-        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(appId);
+        _uniffiHash = 31 * _uniffiHash + java.util.Objects.hashCode(appLabel);
         return _uniffiHash;
     }
 

@@ -90,7 +90,7 @@ if you need human-readable labels. The protocol routes on `off1…` only.
 
 ```typescript
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'default', // local account slot, never the peer address
 });
 
@@ -186,7 +186,7 @@ and **off in production** unless you opt in.
 
 ```typescript
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'default',
   devPeerAddressWarnings: true, // force on in release while debugging
   // devPeerAddressWarnings: false, // silence in development

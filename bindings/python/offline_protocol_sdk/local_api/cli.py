@@ -107,8 +107,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _accept_old_app_label_key(raw: object) -> object:
+    """A config file written before 0.35 names the app label ``app_id``.
+
+    Read it as ``app_label`` with a warning, rather than refusing a file that
+    worked yesterday; the value is unchanged, so the server keeps its storage
+    namespace and its address. Both keys with different values is refused.
+    """
+    if not isinstance(raw, dict) or "app_id" not in raw:
+        return raw
+    old = raw["app_id"]
+    if "app_label" in raw and raw["app_label"] != old:
+        raise SystemExit(
+            "config: app_label and app_id disagree; app_id is the old name of app_label, keep only app_label"
+        )
+    logger.warning(
+        "config: app_id on the mesh is now app_label. Your App ID (app_…) from the dashboard "
+        "is what turns on telemetry. Rename the key; the value stays the same."
+    )
+    fixed = {key: value for key, value in raw.items() if key != "app_id"}
+    fixed["app_label"] = old
+    return fixed
+
+
 def build_manager(args: argparse.Namespace) -> ProtocolManager:
-    raw = _load_json(args.config, "config")
+    raw = _accept_old_app_label_key(_load_json(args.config, "config"))
     try:
         config = codec.decode("ProtocolConfig", raw, "config")
     except codec.RpcError as exc:

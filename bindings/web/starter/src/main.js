@@ -31,7 +31,7 @@ function note(text) {
 
 async function main() {
   const node = await OfflineNode.start({
-    appId: "web-vite-starter",
+    appLabel: "web-vite-starter",
     storage: "memory",
     workerUrl,
   });

@@ -640,7 +640,7 @@ private_constant :UniffiHandleMap
     RustBuffer.check_lower_OptionalTypeReplyContext(v.reply_context)
     RustBuffer.check_lower_OptionalTypeForwardInfo(v.forward_info)
     RustBuffer.check_lower_Optionalstring(v.file_id)
-    RustBuffer.check_lower_Optionalstring(v.app_id)
+    RustBuffer.check_lower_Optionalstring(v.app_label)
   end
 
   def self.alloc_from_TypeMediaSendOptions(v)
@@ -1241,7 +1241,7 @@ private_constant :UniffiHandleMap
     RustBuffer.check_lower_OptionalTypeReplyContext(v.reply_context)
     RustBuffer.check_lower_OptionalTypeMediaMetadata(v.media_metadata)
     RustBuffer.check_lower_OptionalTypeForwardInfo(v.forward_info)
-    RustBuffer.check_lower_Optionalstring(v.app_id)
+    RustBuffer.check_lower_Optionalstring(v.app_label)
   end
 
   def self.alloc_from_TypeSendMessageOptions(v)
@@ -3177,7 +3177,7 @@ class RustBufferStream
       reply_context: read_OptionalTypeReplyContext,
       forward_info: read_OptionalTypeForwardInfo,
       file_id: read_Optionalstring,
-      app_id: read_Optionalstring
+      app_label: read_Optionalstring
     )
   end
 
@@ -3398,7 +3398,7 @@ class RustBufferStream
 
   def read_TypeProtocolConfig
     ProtocolConfig.new(
-      app_id: read_string,
+      app_label: read_string,
       profile: read_string,
       ble_enabled: read_bool,
       wifi_direct_enabled: read_bool,
@@ -3514,7 +3514,7 @@ class RustBufferStream
       reply_context: read_OptionalTypeReplyContext,
       media_metadata: read_OptionalTypeMediaMetadata,
       forward_info: read_OptionalTypeForwardInfo,
-      app_id: read_Optionalstring
+      app_label: read_Optionalstring
     )
   end
 
@@ -5278,7 +5278,7 @@ class RustBufferBuilder
     self.write_OptionalTypeReplyContext(v.reply_context)
     self.write_OptionalTypeForwardInfo(v.forward_info)
     self.write_Optionalstring(v.file_id)
-    self.write_Optionalstring(v.app_id)
+    self.write_Optionalstring(v.app_label)
   end
 
   # The Record type MeshRelayConfig.
@@ -5465,7 +5465,7 @@ class RustBufferBuilder
   # The Record type ProtocolConfig.
 
   def write_TypeProtocolConfig(v)
-    self.write_string(v.app_id)
+    self.write_string(v.app_label)
     self.write_string(v.profile)
     self.write_bool(v.ble_enabled)
     self.write_bool(v.wifi_direct_enabled)
@@ -5567,7 +5567,7 @@ class RustBufferBuilder
     self.write_OptionalTypeReplyContext(v.reply_context)
     self.write_OptionalTypeMediaMetadata(v.media_metadata)
     self.write_OptionalTypeForwardInfo(v.forward_info)
-    self.write_Optionalstring(v.app_id)
+    self.write_Optionalstring(v.app_label)
   end
 
   # The Record type ServicePublishReport.
@@ -10330,16 +10330,16 @@ end
   
   # Record type MediaSendOptions
 class MediaSendOptions
-  attr_reader :media_metadata, :caption, :reply_to_msg, :reply_context, :forward_info, :file_id, :app_id
+  attr_reader :media_metadata, :caption, :reply_to_msg, :reply_context, :forward_info, :file_id, :app_label
 
-  def initialize(media_metadata: nil, caption: nil, reply_to_msg: nil, reply_context: nil, forward_info: nil, file_id: nil, app_id: nil)
+  def initialize(media_metadata: nil, caption: nil, reply_to_msg: nil, reply_context: nil, forward_info: nil, file_id: nil, app_label: nil)
     @media_metadata = media_metadata
     @caption = caption
     @reply_to_msg = reply_to_msg
     @reply_context = reply_context
     @forward_info = forward_info
     @file_id = file_id
-    @app_id = app_id
+    @app_label = app_label
   end
 
   def ==(other)
@@ -10361,7 +10361,7 @@ class MediaSendOptions
     if @file_id != other.file_id
       return false
     end
-    if @app_id != other.app_id
+    if @app_label != other.app_label
       return false
     end
 
@@ -11000,10 +11000,10 @@ end
   
   # Record type ProtocolConfig
 class ProtocolConfig
-  attr_reader :app_id, :profile, :ble_enabled, :wifi_direct_enabled, :internet_enabled, :reticulum_enabled, :nostr_enabled, :prefer_online, :initial_ttl, :encryption_enabled, :auto_key_exchange, :store_pending, :require_encryption, :max_pending_per_peer, :max_pending_global, :pending_ttl_ms, :overflow_policy, :edge_driven_unreachable_dm, :max_group_members, :group_relay_enabled, :group_relay_broadcast_enabled, :group_enforce_admin_commits, :require_transport_identity, :binary_wire_enabled, :nostr_sealing_enabled, :nostr_cold_contact_enabled, :nostr_username_discovery_enabled, :compact_envelope_enabled, :rich_payload_enabled, :crypto_recovery_enabled, :mesh_relay, :custody, :data_enabled, :control_freshness_enforced, :encrypt_service_messages
+  attr_reader :app_label, :profile, :ble_enabled, :wifi_direct_enabled, :internet_enabled, :reticulum_enabled, :nostr_enabled, :prefer_online, :initial_ttl, :encryption_enabled, :auto_key_exchange, :store_pending, :require_encryption, :max_pending_per_peer, :max_pending_global, :pending_ttl_ms, :overflow_policy, :edge_driven_unreachable_dm, :max_group_members, :group_relay_enabled, :group_relay_broadcast_enabled, :group_enforce_admin_commits, :require_transport_identity, :binary_wire_enabled, :nostr_sealing_enabled, :nostr_cold_contact_enabled, :nostr_username_discovery_enabled, :compact_envelope_enabled, :rich_payload_enabled, :crypto_recovery_enabled, :mesh_relay, :custody, :data_enabled, :control_freshness_enforced, :encrypt_service_messages
 
-  def initialize(app_id:, profile:, ble_enabled:, wifi_direct_enabled:, internet_enabled:, reticulum_enabled:, nostr_enabled:, prefer_online:, initial_ttl:, encryption_enabled:, auto_key_exchange:, store_pending:, require_encryption: true, max_pending_per_peer:, max_pending_global:, pending_ttl_ms:, overflow_policy:, edge_driven_unreachable_dm: false, max_group_members: 256, group_relay_enabled: true, group_relay_broadcast_enabled: true, group_enforce_admin_commits: false, require_transport_identity: false, binary_wire_enabled: true, nostr_sealing_enabled: true, nostr_cold_contact_enabled: true, nostr_username_discovery_enabled: false, compact_envelope_enabled: true, rich_payload_enabled: true, crypto_recovery_enabled: true, mesh_relay: nil, custody: nil, data_enabled: true, control_freshness_enforced: true, encrypt_service_messages: true)
-    @app_id = app_id
+  def initialize(app_label:, profile:, ble_enabled:, wifi_direct_enabled:, internet_enabled:, reticulum_enabled:, nostr_enabled:, prefer_online:, initial_ttl:, encryption_enabled:, auto_key_exchange:, store_pending:, require_encryption: true, max_pending_per_peer:, max_pending_global:, pending_ttl_ms:, overflow_policy:, edge_driven_unreachable_dm: false, max_group_members: 256, group_relay_enabled: true, group_relay_broadcast_enabled: true, group_enforce_admin_commits: false, require_transport_identity: false, binary_wire_enabled: true, nostr_sealing_enabled: true, nostr_cold_contact_enabled: true, nostr_username_discovery_enabled: false, compact_envelope_enabled: true, rich_payload_enabled: true, crypto_recovery_enabled: true, mesh_relay: nil, custody: nil, data_enabled: true, control_freshness_enforced: true, encrypt_service_messages: true)
+    @app_label = app_label
     @profile = profile
     @ble_enabled = ble_enabled
     @wifi_direct_enabled = wifi_direct_enabled
@@ -11041,7 +11041,7 @@ class ProtocolConfig
   end
 
   def ==(other)
-    if @app_id != other.app_id
+    if @app_label != other.app_label
       return false
     end
     if @profile != other.profile
@@ -11342,16 +11342,16 @@ end
   
   # Record type SendMessageOptions
 class SendMessageOptions
-  attr_reader :priority, :reply_to_msg, :content_type, :reply_context, :media_metadata, :forward_info, :app_id
+  attr_reader :priority, :reply_to_msg, :content_type, :reply_context, :media_metadata, :forward_info, :app_label
 
-  def initialize(priority: nil, reply_to_msg: nil, content_type: nil, reply_context: nil, media_metadata: nil, forward_info: nil, app_id: nil)
+  def initialize(priority: nil, reply_to_msg: nil, content_type: nil, reply_context: nil, media_metadata: nil, forward_info: nil, app_label: nil)
     @priority = priority
     @reply_to_msg = reply_to_msg
     @content_type = content_type
     @reply_context = reply_context
     @media_metadata = media_metadata
     @forward_info = forward_info
-    @app_id = app_id
+    @app_label = app_label
   end
 
   def ==(other)
@@ -11373,7 +11373,7 @@ class SendMessageOptions
     if @forward_info != other.forward_info
       return false
     end
-    if @app_id != other.app_id
+    if @app_label != other.app_label
       return false
     end
 

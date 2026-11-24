@@ -20,7 +20,7 @@ from offline_protocol_sdk import (
 
 def _config(custody: CustodyConfig | None) -> ProtocolConfig:
     return ProtocolConfig(
-        app_id="test-app",
+        app_label="test-app",
         profile="custody-user",
         ble_enabled=False,
         wifi_direct_enabled=False,

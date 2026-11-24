@@ -143,6 +143,7 @@ import {
   warnIfNoListenersAtStart,
   warnIfSendWithoutMls,
 } from './lifecycleHints';
+import { resolveAppLabel } from './appLabel';
 
 const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
   ? NativeModules.OfflineProtocolModule
@@ -204,7 +205,7 @@ interface InitialRuntimeConfig {
  * This is the transformed version of ProtocolConfig optimized for native consumption.
  */
 interface NativeConfig {
-  appId: string;
+  appLabel: string;
   profile: string;
   bleEnabled: boolean;
   wifiDirectEnabled: boolean;
@@ -436,7 +437,7 @@ function toMlsKeyPackage(raw: any): MlsKeyPackage {
  * @example
  * ```typescript
  * const protocol = new OfflineProtocol({
- *   appId: 'my-app',
+ *   appLabel: 'my-app',
  *   // Selects which stored identity to run as. Local only — never on the
  *   // wire. Your identity to peers is the address derived below.
  *   profile: 'user123',
@@ -660,7 +661,14 @@ export class OfflineProtocol {
    * @param config - Protocol configuration
    */
   constructor(config: ProtocolConfig) {
-    this.config = config;
+    const appLabel = resolveAppLabel(config.appLabel, config.appId, 'new OfflineProtocol');
+    if (appLabel === undefined || appLabel === '') {
+      throw new Error(
+        '[OfflineProtocol] new OfflineProtocol: appLabel is required. It keeps your ' +
+          "app's peers together on the mesh; an app that already shipped must keep the value it shipped with."
+      );
+    }
+    this.config = { ...config, appLabel };
     setDevPeerAddressWarnings(config.devPeerAddressWarnings);
     bindDevLifecycleWarningsFromConfig(config.devLifecycleWarnings);
     bindDevTransportDiagnosticsFromConfig(config.devTransportDiagnostics);
@@ -776,7 +784,8 @@ export class OfflineProtocol {
     };
 
     const nativeConfig: NativeConfig = {
-      appId: this.config.appId,
+      // Resolved in the constructor, so always set.
+      appLabel: this.config.appLabel as string,
       profile: this.config.profile,
       bleEnabled: this.config.transports?.ble?.enabled ?? true,
       wifiDirectEnabled: this.config.transports?.wifiDirect?.enabled ?? false,
@@ -1865,19 +1874,20 @@ export class OfflineProtocol {
     // Rich params route to the rich native method; the plain path is left
     // untouched. Rich fields only ever travel inside the MLS-sealed rich
     // payload (recipients that support it), or are dropped — never cleartext.
-    // `appId` is on this list because only the rich native method carries
-    // it: an appId-only send on the plain path would go out under the
-    // configured id without a word.
+    // `appLabel` is on this list because only the rich native method carries
+    // it: a label-only send on the plain path would go out under the
+    // configured label without a word.
+    const sendLabel = resolveAppLabel(params.appLabel, params.appId, 'sendMessage');
     const hasRichOptions =
       params.replyContext !== undefined ||
       params.mediaMetadata !== undefined ||
       params.forwardInfo !== undefined ||
       params.contentType !== undefined ||
-      params.appId !== undefined;
+      sendLabel !== undefined;
     if (hasRichOptions) {
       const meta = params.mediaMetadata;
       const options = {
-        app_id: params.appId ?? null,
+        app_label: sendLabel ?? null,
         content_type: params.contentType ?? null,
         reply_context: params.replyContext
           ? {
@@ -2197,18 +2207,19 @@ export class OfflineProtocol {
         meta.stickerProvider !== undefined ||
         meta.stickerRemoteId !== undefined ||
         meta.stickerKind !== undefined);
+    const mediaLabel = resolveAppLabel(params.appLabel, params.appId, 'sendMedia');
     const hasRichOptions =
       params.caption !== undefined ||
       params.replyToMsg !== undefined ||
       params.replyContext !== undefined ||
       params.forwardInfo !== undefined ||
       params.fileId !== undefined ||
-      params.appId !== undefined ||
+      mediaLabel !== undefined ||
       hasExtendedMetadata;
 
     if (hasRichOptions) {
       const options = {
-        app_id: params.appId ?? null,
+        app_label: mediaLabel ?? null,
         media_metadata: meta
           ? {
               mime_type: meta.mimeType,
@@ -4337,7 +4348,7 @@ export class OfflineProtocol {
    * survive an uninstall and are adopted again after a reinstall.
    *
    * The account is named explicitly because `destroy()` clears the config the
-   * namespace would otherwise be derived from. Pass the same `appId` and
+   * namespace would otherwise be derived from. Pass the same `appLabel` and
    * `profile` the protocol was created with; any other pair names a different
    * account and wipes nothing.
    *
@@ -4349,13 +4360,13 @@ export class OfflineProtocol {
    * Applications that supply their own storage providers must erase their own
    * containers: this only knows about the built-in ones.
    *
-   * @param appId - The `appId` the protocol was created with
+   * @param appLabel - The `appLabel` (formerly `appId`) the protocol was created with
    * @param profile - The `profile` the protocol was created with. The
    *   namespace hash is unchanged from before the rename, so passing a
    *   pre-migration `userId` here reaches that account's old container.
    */
-  async wipePersistedState(appId: string, profile: string): Promise<void> {
-    await OfflineProtocolNativeModule.wipePersistedState(appId, profile);
+  async wipePersistedState(appLabel: string, profile: string): Promise<void> {
+    await OfflineProtocolNativeModule.wipePersistedState(appLabel, profile);
   }
 
   // ─── Presence, Typing, Read Receipts ────────────────────────

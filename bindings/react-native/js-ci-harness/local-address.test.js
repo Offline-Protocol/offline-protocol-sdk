@@ -115,7 +115,7 @@ const ADDRESS_A = 'off1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqa';
 const ADDRESS_B = 'off1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzb';
 
 function newSdk(config = {}) {
-  return new OfflineProtocol({ appId: 'harness', profile: 'harness-profile', ...config });
+  return new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile', ...config });
 }
 
 let OfflineProtocol;

@@ -9,7 +9,7 @@ using OfflineProtocol.Sdk.Telemetry;
 // definition's defaults. An example program's values, as in bindings/c/README.md, never the SDK's.
 var config = new ProtocolConfig
 {
-    AppId = "com.offlineprotocol.csharp.consumer",
+    AppLabel = "com.offlineprotocol.csharp.consumer",
     Profile = "csharp-consumer",
     BleEnabled = false,
     WifiDirectEnabled = false,

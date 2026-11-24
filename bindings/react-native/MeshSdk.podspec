@@ -22,6 +22,7 @@ Pod::Spec.new do |s|
   s.source_files = [
     "ios/OfflineProtocolModule.{m,swift}",
     "ios/ProtocolConfigParser.swift",
+    "ios/AppLabelReader.swift",
     "ios/InitialRuntimeConfigApplier.swift",
     "ios/EncryptionConfigReader.swift",
     "ios/MeshRelayConfigReader.swift",
@@ -86,6 +87,7 @@ Pod::Spec.new do |s|
     "ios/StorageNamespace.swift",
     "ios/ReferenceStorage.swift",
     "ios/DevelopmentCleartextConfig.swift",
+    "ios/AppLabelAliases.swift",
     "ios/StorageConformance.swift",
     "ios/ble/**/*.swift",
     "ios/mesh/**/*.swift",

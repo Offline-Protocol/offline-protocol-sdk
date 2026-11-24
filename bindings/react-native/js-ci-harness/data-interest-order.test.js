@@ -97,7 +97,7 @@ let OfflineProtocol;
 let DataStore;
 
 const newSdk = (config = {}) =>
-  new OfflineProtocol({ appId: 'harness', profile: 'harness-profile', ...config });
+  new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile', ...config });
 
 const methods = () => nativeCalls.map((c) => c.method);
 const callsTo = (method) => nativeCalls.filter((c) => c.method === method);

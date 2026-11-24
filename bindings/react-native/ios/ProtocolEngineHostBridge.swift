@@ -236,7 +236,7 @@ enum ProtocolEngineHostBridge {
             replyContext: replyContext(options?["reply_context"] as? [String: Any]),
             forwardInfo: forwardInfo(options?["forward_info"] as? [String: Any]),
             fileId: options?["file_id"] as? String,
-            appId: options?["app_id"] as? String
+            appLabel: (options?["app_label"] ?? options?["app_id"]) as? String
         )
         return try host.requireProtocol().sendMediaRich(
             recipient: try A.requireString(m, "recipient"),
@@ -299,7 +299,7 @@ enum ProtocolEngineHostBridge {
             replyContext: replyContext(options?["reply_context"] as? [String: Any]),
             mediaMetadata: richMediaMetadata(options?["media_metadata"] as? [String: Any]),
             forwardInfo: forwardInfo(options?["forward_info"] as? [String: Any]),
-            appId: options?["app_id"] as? String
+            appLabel: (options?["app_label"] ?? options?["app_id"]) as? String
         )
         return try host.sendMessageRich(
             recipient: try A.requireString(m, "recipient"),
@@ -380,14 +380,15 @@ enum ProtocolEngineHostBridge {
 
     static func wipePersistedState(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "wipePersistedState")
-        let appId = try A.requireString(m, "appId")
+        // `appId` is the old name of `appLabel`, still read (Flutter passes the app's map).
+        let appLabel = try (m["appLabel"] as? String) ?? (m["appId"] as? String) ?? A.requireString(m, "appLabel")
         let profile = try A.requireString(m, "profile")
-        let namespace = StorageNamespace.account(appId: appId, profile: profile)
+        let namespace = StorageNamespace.account(appId: appLabel, profile: profile)
         if let live = host.currentConfig,
-           StorageNamespace.account(appId: live.appId, profile: live.profile) == namespace {
+           StorageNamespace.account(appId: live.appLabel, profile: live.profile) == namespace {
             throw HostError.illegalState("Refusing to wipe storage for the running account; call destroy() first")
         }
-        try OfflineProtocolReferenceStorage.wipe(appId: appId, profile: profile)
+        try OfflineProtocolReferenceStorage.wipe(appLabel: appLabel, profile: profile)
         return nil
     }
 

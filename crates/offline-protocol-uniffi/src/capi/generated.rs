@@ -693,7 +693,7 @@ impl Codec for crate::SendMessageOptions {
             reply_context: f.take_or("reply_context", None)?,
             media_metadata: f.take_or("media_metadata", None)?,
             forward_info: f.take_or("forward_info", None)?,
-            app_id: f.take_or("app_id", None)?,
+            app_label: f.take_or("app_label", None)?,
         };
         f.finish()?;
         Ok(out)
@@ -706,7 +706,7 @@ impl Codec for crate::SendMessageOptions {
             ("reply_context", self.reply_context.encode()),
             ("media_metadata", self.media_metadata.encode()),
             ("forward_info", self.forward_info.encode()),
-            ("app_id", self.app_id.encode()),
+            ("app_label", self.app_label.encode()),
         ])
     }
 }
@@ -730,7 +730,7 @@ impl Codec for crate::MediaSendOptions {
             reply_context: f.take_or("reply_context", None)?,
             forward_info: f.take_or("forward_info", None)?,
             file_id: f.take_or("file_id", None)?,
-            app_id: f.take_or("app_id", None)?,
+            app_label: f.take_or("app_label", None)?,
         };
         f.finish()?;
         Ok(out)
@@ -743,7 +743,7 @@ impl Codec for crate::MediaSendOptions {
             ("reply_context", self.reply_context.encode()),
             ("forward_info", self.forward_info.encode()),
             ("file_id", self.file_id.encode()),
-            ("app_id", self.app_id.encode()),
+            ("app_label", self.app_label.encode()),
         ])
     }
 }
@@ -1554,7 +1554,7 @@ impl Codec for crate::ProtocolConfig {
     fn decode(value: &Value, at: &str) -> Decoded<Self> {
         let mut f = Fields::new(value, at, "ProtocolConfig")?;
         let out = Self {
-            app_id: f.take("app_id")?,
+            app_label: f.take("app_label")?,
             profile: f.take("profile")?,
             ble_enabled: f.take("ble_enabled")?,
             wifi_direct_enabled: f.take("wifi_direct_enabled")?,
@@ -1595,7 +1595,7 @@ impl Codec for crate::ProtocolConfig {
     }
     fn encode(&self) -> Value {
         object(vec![
-            ("app_id", self.app_id.encode()),
+            ("app_label", self.app_label.encode()),
             ("profile", self.profile.encode()),
             ("ble_enabled", self.ble_enabled.encode()),
             ("wifi_direct_enabled", self.wifi_direct_enabled.encode()),

@@ -24,12 +24,12 @@ async def until(predicate, timeout: float = 15.0) -> None:
 
 async def two_servers(harness):
     """Two engines over loopback streams: B keeps a stream to A."""
-    config_a = make_config(profile="alice", app_id="server-app", wifi_direct_enabled=True, internet_enabled=False)
+    config_a = make_config(profile="alice", app_label="server-app", wifi_direct_enabled=True, internet_enabled=False)
     manager_a = ProtocolManager(config_a)
     manager_a.peer_stream.configure(listen_host="127.0.0.1", listen_port=0)
     server_a = await harness.server(manager=manager_a)
     port_a = manager_a.peer_stream.listen_port
-    config_b = make_config(profile="bob", app_id="server-app", wifi_direct_enabled=True, internet_enabled=False)
+    config_b = make_config(profile="bob", app_label="server-app", wifi_direct_enabled=True, internet_enabled=False)
     manager_b = ProtocolManager(config_b)
     manager_b.peer_stream.configure(listen_host="127.0.0.1", listen_port=0, peers=[f"127.0.0.1:{port_a}"])
     server_b = await harness.server(manager=manager_b)
@@ -115,6 +115,6 @@ async def test_send_message_rich_is_stamped_too(harness):
     with pytest.raises(RpcFailure) as err:
         await sender.call(
             "send_message_rich",
-            {"recipient": server_b.manager.local_address, "content": "x", "options": {"app_id": "mail"}},
+            {"recipient": server_b.manager.local_address, "content": "x", "options": {"app_label": "mail"}},
         )
     assert err.value.variant == "InvalidArgument"

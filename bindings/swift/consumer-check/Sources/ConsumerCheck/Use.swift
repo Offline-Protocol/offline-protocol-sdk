@@ -26,7 +26,7 @@ public func startWithReferenceStorage(config: ProtocolConfig) throws -> OfflineP
     engine.setEventCallback(callback: Listener())
     let adoption = try OfflineProtocolReferenceStorage.initializeMls(
         on: engine,
-        appId: config.appId,
+        appLabel: config.appLabel,
         profile: config.profile
     )
     if let warning = adoption.warning {
@@ -44,22 +44,32 @@ public func startWithReferenceStorage(config: ProtocolConfig) throws -> OfflineP
 public func signOut(engine: inout OfflineProtocol?, config: ProtocolConfig) throws {
     try engine?.stop()
     engine = nil
-    try OfflineProtocolReferenceStorage.wipe(appId: config.appId, profile: config.profile)
+    try OfflineProtocolReferenceStorage.wipe(appLabel: config.appLabel, profile: config.profile)
 }
 
 // Verify a protocol-state backend before wiring it in (C11): green means
 // supported. Here it is the built-in store, opened for a scratch account and
 // wiped after. Run it off the main thread: the suite blocks on writes of
 // several megabytes.
-/// Lab-only config factory (compile-checked; do not use in production apps).
-public func labCleartextConfig(appId: String, profile: String) -> ProtocolConfig {
-    OfflineProtocolDevelopmentCleartextConfig.make(appId: appId, profile: profile)
+// Code written before 0.35 named the app label `appId`. The deprecated
+// aliases keep it compiling; deprecated itself, so the check stays quiet.
+@available(*, deprecated, message: "compiles the pre-0.35 names of the app label")
+public func labelUnderItsOldName(config: ProtocolConfig) -> String {
+    var options = SendMessageOptions()
+    options.appId = config.appId
+    _ = try? OfflineProtocolReferenceStorage.makeSecureStorage(appId: config.appId, profile: config.profile)
+    return options.appId ?? config.appId
 }
 
-public func referenceStateStoreIsSupported(appId: String, scratchProfile: String) throws -> Bool {
-    defer { try? OfflineProtocolReferenceStorage.wipe(appId: appId, profile: scratchProfile) }
+/// Lab-only config factory (compile-checked; do not use in production apps).
+public func labCleartextConfig(appLabel: String, profile: String) -> ProtocolConfig {
+    OfflineProtocolDevelopmentCleartextConfig.make(appLabel: appLabel, profile: profile)
+}
+
+public func referenceStateStoreIsSupported(appLabel: String, scratchProfile: String) throws -> Bool {
+    defer { try? OfflineProtocolReferenceStorage.wipe(appLabel: appLabel, profile: scratchProfile) }
     let store = try OfflineProtocolReferenceStorage.makeProtocolStateStorage(
-        appId: appId,
+        appLabel: appLabel,
         profile: scratchProfile
     )
     let report = try StorageConformance.run(on: store)

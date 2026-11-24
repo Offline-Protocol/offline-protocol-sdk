@@ -65,7 +65,7 @@ from offline_protocol_sdk import ProtocolManager
 from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
 
 config = ProtocolConfig(
-    app_id="my-app",
+    app_label="my-app",
     profile="alice",
     ble_enabled=False,
     wifi_direct_enabled=False,
@@ -413,7 +413,7 @@ What the stores guarantee, and what a copied directory reveals, is in the
 
 Restartable message-plane state is kept separately by `AppStateStorage`, outside
 the credential store. The built-in stores derive an opaque account namespace
-from both `app_id` and `user_id`, so multiple `ProtocolManager` instances do
+from both `app_label` and `user_id`, so multiple `ProtocolManager` instances do
 not share keys, outboxes, or retry state.
 
 Upgrading an install that predates namespacing keeps both halves of its state,
@@ -489,7 +489,7 @@ pm = ProtocolManager(
 `ProtocolManager` keeps both callback objects alive for the protocol lifetime.
 Protocol state must live in application data rather than Keychain, Secret
 Service, or Windows Credential Locker. A custom provider shared by multiple
-accounts must apply the same `(app_id, user_id)` isolation itself.
+accounts must apply the same `(app_label, user_id)` isolation itself.
 
 ## Telemetry
 

@@ -847,7 +847,7 @@ group info does.
 
 ## What the host owes
 
-- One worker per node, started through `OfflineNode.start({ appId })`, and
+- One worker per node, started through `OfflineNode.start({ appLabel })`, and
   one node per account per origin: a second tab gets its own `profile`, or
   the page uses `storage: "memory"` (W8).
 - A secure context. OPFS, Web Locks and WebRTC exist only there: HTTPS, or

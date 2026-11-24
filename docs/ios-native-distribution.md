@@ -69,7 +69,7 @@ It needs 0.34.0 or later: `OfflineProtocolReferenceStorage` and
 3. `let engine = try OfflineProtocol(config: config)`
 4. `engine.setEventCallback(callback: …)` **before** `start()` (events emitted
    during startup are lost if the callback is registered late)
-5. `let adoption = try OfflineProtocolReferenceStorage.initializeMls(on: engine, appId: config.appId, profile: config.profile)`
+5. `let adoption = try OfflineProtocolReferenceStorage.initializeMls(on: engine, appLabel: config.appLabel, profile: config.profile)`
    opens the built-in stores. Report `adoption.warning` when it is set: it is
    the only signal that this account started from a fresh MLS identity.
 6. `try engine.start()`

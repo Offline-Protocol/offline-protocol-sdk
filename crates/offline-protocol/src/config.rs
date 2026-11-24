@@ -858,29 +858,39 @@ impl Default for ServiceSubscriptionConfig {
 /// Main configuration for the Offline Protocol.
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
-    /// Application identifier (required).
+    /// App label (required): the name that keeps this app's peers together
+    /// on the mesh. Formerly `app_id`; the wire field is still named
+    /// `app_id`.
+    ///
+    /// It is not the App ID the developer portal issues (`app_…`), which
+    /// only turns on telemetry and goes in
+    /// [`crate::telemetry::TelemetryConfig`]. Keep the two apart: the label
+    /// can never change once an app ships, and an App ID can.
     ///
     /// Two jobs. It is one of the two inputs to the storage namespace, with
     /// [`Self::profile`], so changing it selects fresh storage and a fresh
     /// identity. And it is the id stamped on every frame this instance
     /// originates: messages, media chunks, acknowledgements and control
-    /// traffic. A rich send may name another id for its own frame
-    /// ([`crate::SendMessageOptions::app_id`]), which is how one instance
+    /// traffic. A rich send may name another label for its own frame
+    /// ([`crate::SendMessageOptions::app_label`]), which is how one instance
     /// serves several local applications behind one identity; the
     /// acknowledgements and control frames the engine sends always carry
-    /// this one. The bindings also derive the BLE app tag from it.
+    /// this one. The bindings also derive the BLE app tag from it. That is
+    /// why renaming the field changed nothing on the wire or on disk, and
+    /// why the value of a shipped app must never change.
     ///
-    /// It is cleartext on the wire and covered by no signature, so every
-    /// carrier and hop can read it and rewrite it (threat model R17). It
-    /// names an application, so it is not secret, but treat it as routing
-    /// metadata only: the receive path delivers a message whatever id it
-    /// carries.
-    pub app_id: String,
+    /// It is public and carries no authority. It is cleartext on the wire
+    /// and covered by no signature, so every carrier and hop can read it and
+    /// rewrite it (threat model R17), and any app can choose the same one.
+    /// Treat it as routing metadata only: the receive path delivers a
+    /// message whatever label it carries, and nothing may decide whom to
+    /// trust from it. Identity assertions and MLS sessions do that.
+    pub app_label: String,
 
     /// Local profile selector (required).
     ///
     /// Selects which stored identity this instance runs as — one namespace per
-    /// `(app_id, profile)` pair — so an app hosting several accounts gives each
+    /// `(app_label, profile)` pair — so an app hosting several accounts gives each
     /// its own value, and an app hosting one can pass a constant like
     /// `"default"`.
     ///
@@ -952,11 +962,11 @@ impl ProtocolConfig {
     ///
     /// # Arguments
     ///
-    /// * `app_id` - Application identifier
+    /// * `app_label` - App label (see [`Self::app_label`])
     /// * `profile` - Local profile selector (storage namespace, never on the wire)
-    pub fn new(app_id: impl Into<String>, profile: impl Into<String>) -> Self {
+    pub fn new(app_label: impl Into<String>, profile: impl Into<String>) -> Self {
         Self {
-            app_id: app_id.into(),
+            app_label: app_label.into(),
             profile: profile.into(),
             transport: TransportConfig::default(),
             dors: DorsConfig::default(),
@@ -974,8 +984,20 @@ impl ProtocolConfig {
     }
 
     /// Creates a builder for more granular configuration.
-    pub fn builder(app_id: impl Into<String>, profile: impl Into<String>) -> ProtocolConfigBuilder {
-        ProtocolConfigBuilder::new(app_id, profile)
+    pub fn builder(
+        app_label: impl Into<String>,
+        profile: impl Into<String>,
+    ) -> ProtocolConfigBuilder {
+        ProtocolConfigBuilder::new(app_label, profile)
+    }
+
+    /// The app label, under its old name.
+    #[deprecated(
+        since = "0.35.0",
+        note = "app_id on the mesh is now app_label. Your App ID (app_…) from the dashboard is what turns on telemetry"
+    )]
+    pub fn app_id(&self) -> &str {
+        &self.app_label
     }
 
     /// Validates the configuration.
@@ -984,14 +1006,14 @@ impl ProtocolConfig {
     ///
     /// Returns `Ok(())` if valid, `Err` with a description of the problem if invalid.
     pub fn validate(&self) -> crate::Result<()> {
-        // Both become storage keys — `app_id` and `profile` are the two inputs
+        // Both become storage keys — `app_label` and `profile` are the two inputs
         // to the account namespace — so hold them to the same length cap and
         // charset ban as every other identifier rather than only rejecting the
         // empty string. Going through the core constructors keeps one policy
         // instead of a second copy that can drift. Catching this here turns a
         // later failure deep inside a storage backend into one clear
         // configuration error.
-        offline_protocol_core::AppId::new(self.app_id.as_str())
+        offline_protocol_core::AppId::new(self.app_label.as_str())
             .map_err(|e| crate::Error::InvalidConfiguration(e.to_string()))?;
 
         offline_protocol_core::UserId::new(self.profile.as_str())
@@ -1442,9 +1464,9 @@ pub struct ProtocolConfigBuilder {
 
 impl ProtocolConfigBuilder {
     /// Creates a new builder.
-    pub fn new(app_id: impl Into<String>, profile: impl Into<String>) -> Self {
+    pub fn new(app_label: impl Into<String>, profile: impl Into<String>) -> Self {
         Self {
-            config: ProtocolConfig::new(app_id, profile),
+            config: ProtocolConfig::new(app_label, profile),
         }
     }
 
@@ -1670,9 +1692,35 @@ mod tests {
     #[test]
     fn test_config_creation() {
         let config = ProtocolConfig::new("test-app", "user123");
-        assert_eq!(config.app_id, "test-app");
+        assert_eq!(config.app_label, "test-app");
         assert_eq!(config.profile, "user123");
         assert_eq!(config.initial_ttl, 8);
+    }
+
+    /// The rename must not move a shipped app: the label is still the
+    /// storage namespace input it was as `app_id`, so Muster's 0.34 account
+    /// opens under 0.35. The digest is the one 0.34 derived for these values.
+    #[test]
+    fn the_rename_keeps_the_storage_namespace_of_a_shipped_app() {
+        let config = ProtocolConfig::new("app.muster", "default");
+        assert_eq!(
+            crate::storage_namespace::account_storage_namespace(&config.app_label, &config.profile),
+            "account-cad217f6e056c61207cb8770ecf722f0e873bf1a565332dd92527617dad3ea62"
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn the_old_name_reads_the_label() {
+        let config = ProtocolConfig::new("app.muster", "default");
+        assert_eq!(config.app_id(), "app.muster");
+        assert_eq!(
+            ProtocolConfig::builder("app.muster", "default")
+                .build()
+                .unwrap()
+                .app_label,
+            "app.muster"
+        );
     }
 
     #[test]
@@ -1682,7 +1730,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_validation_empty_app_id() {
+    fn test_config_validation_empty_app_label() {
         let config = ProtocolConfig::new("", "user123");
         assert!(config.validate().is_err());
     }
@@ -1721,7 +1769,7 @@ mod tests {
             );
             assert!(
                 ProtocolConfig::new(hostile, "user123").validate().is_err(),
-                "app_id {hostile:?} must be rejected"
+                "app_label {hostile:?} must be rejected"
             );
         }
     }
@@ -1799,7 +1847,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(config.app_id, "test-app");
+        assert_eq!(config.app_label, "test-app");
         assert!(config.transport.ble_enabled);
         assert!(!config.transport.wifi_direct_enabled);
         assert!(config.dors.prefer_online);

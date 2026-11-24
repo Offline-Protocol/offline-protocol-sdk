@@ -2192,8 +2192,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * `destroy()` first.
      */
     @ReactMethod
-    fun wipePersistedState(appId: String, profile: String, promise: Promise) {
-        ProtocolEngineHostBridgeReactNative.wipePersistedState(this, appId, profile, promise)
+    fun wipePersistedState(appLabel: String, profile: String, promise: Promise) {
+        ProtocolEngineHostBridgeReactNative.wipePersistedState(this, appLabel, profile, promise)
     }
 
     // ========================================================================
@@ -2706,7 +2706,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val adoption = OfflineProtocolReferenceStorage.initializeMls(
                 proto,
                 reactApplicationContext,
-                config.appId,
+                config.appLabel,
                 config.profile
             )
             // A warning means this account is starting from a fresh MLS

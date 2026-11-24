@@ -682,8 +682,9 @@ pub enum Event {
         /// `require_encryption = false` opt-out.
         #[serde(default)]
         encrypted: bool,
-        /// Application id the sender stamped on this message: its configured
-        /// id, or the per-send id of a rich send.
+        /// App label the sender stamped on this message: its configured
+        /// label, or the per-send label of a rich send. In JSON it is under
+        /// both `app_label` and, deprecated, `app_id`.
         ///
         /// For an instance serving several local applications, this is what
         /// routes the message to the right client. It is cleartext and
@@ -3048,8 +3049,46 @@ impl Event {
     }
 
     /// Converts the event to JSON.
+    ///
+    /// An event that names an app label carries it under both keys,
+    /// `app_label` and the older `app_id`, with the same value, so a binding
+    /// can read the new name while apps that read the old one keep working.
+    /// The Rust field stays `app_id` until the alias is removed.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
+        let mut json = serde_json::to_string(self)?;
+        if let Some(label) = self.app_label() {
+            // Every variant is a struct variant under an internal tag, so the
+            // JSON is an object ending in `}`. Splicing keeps the key order
+            // of the derived output, which a round trip through a map would
+            // sort.
+            debug_assert!(json.ends_with('}'));
+            // A variant that one day derives its own `app_label` would end
+            // up with the key twice, which JSON readers resolve differently.
+            // Every test that emits one of these events checks it.
+            debug_assert!(
+                serde_json::to_value(self).map_or(true, |v| v.get("app_label").is_none()),
+                "{} derives its own app_label; drop it from Event::app_label",
+                self.telemetry_name()
+            );
+            json.pop();
+            json.push_str(",\"app_label\":");
+            json.push_str(&serde_json::to_string(label)?);
+            json.push('}');
+        }
+        Ok(json)
+    }
+
+    /// The app label this event reports, for the events that report one:
+    /// what the sender stamped on a received message or transfer, or the
+    /// per-send label of a transfer to resend.
+    pub fn app_label(&self) -> Option<&str> {
+        match self {
+            Self::MessageReceived { app_id, .. } => Some(app_id.as_str()),
+            Self::FileReceived { app_id, .. } | Self::MediaResendRequired { app_id, .. } => {
+                app_id.as_deref()
+            }
+            _ => None,
+        }
     }
 
     /// Parses an event from JSON.
@@ -4495,6 +4534,60 @@ mod tests {
         ] {
             assert!(json.get(key).is_none(), "{} must be absent when unset", key);
         }
+    }
+
+    #[test]
+    fn an_app_label_is_in_the_json_under_both_names() {
+        let event = Event::media_resend_required(
+            "file123".to_string(),
+            "bob".to_string(),
+            "f.bin".to_string(),
+            4,
+            Some("other-app".to_string()),
+        );
+        let json = event.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["app_label"], "other-app");
+        assert_eq!(value["app_id"], "other-app");
+        // Exactly once, whichever event carries it.
+        assert_eq!(json.matches("\"app_label\":").count(), 1, "{json}");
+        let file = Event::file_received(
+            "file123".to_string(),
+            "photo.jpg".to_string(),
+            4,
+            "alice".to_string(),
+            ContentType::Image,
+            None,
+            vec![1, 2, 3, 4],
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("other-app".to_string()),
+        )
+        .to_json()
+        .unwrap();
+        assert_eq!(file.matches("\"app_label\":").count(), 1, "{file}");
+        // The extra key reads back as the same event.
+        assert!(matches!(
+            Event::from_json(&json).unwrap(),
+            Event::MediaResendRequired { app_id: Some(ref id), .. } if id == "other-app"
+        ));
+
+        // No label, no new key: a transfer on the configured label
+        // serializes exactly as it did before.
+        let plain = Event::media_resend_required(
+            "file123".to_string(),
+            "bob".to_string(),
+            "f.bin".to_string(),
+            4,
+            None,
+        );
+        assert_eq!(
+            plain.to_json().unwrap(),
+            serde_json::to_string(&plain).unwrap()
+        );
     }
 
     #[test]

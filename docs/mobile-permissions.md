@@ -402,7 +402,7 @@ Simulators do not validate BLE or Wi‑Fi Direct behaviour. Use hardware for mes
 ```typescript
 import { OfflineProtocol, requestMeshPermissionsForConfig } from '@offline-protocol/mesh-sdk';
 
-const config = { appId: 'my-app', profile: 'default', transports: { ble: { enabled: true } } };
+const config = { appLabel: 'my-app', profile: 'default', transports: { ble: { enabled: true } } };
 
 const permissions = await requestMeshPermissionsForConfig(config);
 if (!permissions.granted) {

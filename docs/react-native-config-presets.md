@@ -11,7 +11,7 @@ change behind it, and it does not replace reading
 import { OfflineProtocol, forScenario } from '@offline-protocol/mesh-sdk';
 
 const config = forScenario('proximityMesh', {
-  appId: 'my-chat',
+  appLabel: 'my-chat',
   profile: 'default',
 });
 
@@ -28,7 +28,7 @@ import { forScenario } from '@offline-protocol/mesh-sdk';
 declare const relayToken: string;
 
 const config = forScenario('internetRelay', {
-  appId: 'my-chat',
+  appLabel: 'my-chat',
   profile: 'default',
   overrides: {
     transports: {
@@ -45,7 +45,7 @@ const config = forScenario('internetRelay', {
 import { forScenario } from '@offline-protocol/mesh-sdk';
 
 const config = forScenario('nostrMesh', {
-  appId: 'my-chat',
+  appLabel: 'my-chat',
   profile: 'default',
   overrides: {
     transports: {
@@ -103,7 +103,7 @@ declare function loggedInRelay(): Promise<{ serverAddress: string; authToken: st
 async function startMesh(): Promise<OfflineProtocol> {
   const protocol = new OfflineProtocol(
     forScenario('internetRelay', {
-      appId: 'my-chat',
+      appLabel: 'my-chat',
       profile: 'default',
       connectInternetLater: true,
     })

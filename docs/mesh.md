@@ -736,7 +736,7 @@ The native `MeshController` emits connection-related events that can be observed
 
 ```typescript
 const config = {
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: userId,
   network: {
     initialTtl: 8,  // Default message TTL

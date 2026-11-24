@@ -6,12 +6,45 @@ The TypeScript examples below target the React Native package. Desktop apps on
 macOS, Linux, and Windows can use the Python binding's snake_case
 `ProtocolConfig`; see the [Python binding guide](../bindings/python/README.md).
 
+## The app label, and the App ID
+
+Two values with similar names do different jobs. Keep them apart.
+
+| | Where it goes | What it does |
+|---|---|---|
+| **App label** (`appLabel`, `app_label`) | `ProtocolConfig` | Keeps your app's peers together on the mesh. Every install of your app uses the same string. You choose it, and nothing checks it. |
+| **App ID** (`app_…`) | `TelemetryConfig.appId` | Issued by the developer portal. Turns on telemetry, so your app's devices are counted. |
+
+The app label was called `appId` (`app_id`) before 0.35. The old name still
+works and gives the same value, with a deprecation warning; see
+[UPGRADING](UPGRADING.md#33-the-mesh-appid-is-now-applabel-unreleased).
+
+**The label is public and carries no authority.** It travels in the clear on
+every frame and in the Bluetooth advert, so anyone nearby can read it, and any
+app can choose the same one. Use it to keep peers together and to route a
+message to the right application, never to decide whom to trust. Identity
+assertions and MLS sessions do that.
+
+**Never change the label of an app that shipped.** With `profile` it selects
+the storage namespace, it is stamped on every message, and the Bluetooth app
+tag is derived from it. A new value means fresh storage and a new identity on
+every device, and builds with the old value no longer see builds with the new
+one.
+
+**Do not use your App ID as the label.** Choose a label of your own, such as
+a reverse-DNS name (`app.muster`), and pass the App ID to `enableTelemetry`.
+The SDK never reads one from the other. The label cannot change after the app
+ships, and an App ID can: the portal has already moved from `proj_…` to
+`app_…` once, and an app may use one App ID for staging and another for
+production. A label tied to an App ID would split the app's storage and its
+mesh along the same line.
+
 ## Configuration Structure
 
 ```typescript
 {
   // Required fields
-  appId: string,
+  appLabel: string,
   profile: string,        // Local namespace selector — NOT your identity.
                           // Your address is derived; read it with localAddress().
   
@@ -44,7 +77,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 
 ```typescript
 {
-  appId: 'emergency-responder',
+  appLabel: 'emergency-responder',
   profile: profile,
   
   transports: {
@@ -89,7 +122,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 
 ```typescript
 {
-  appId: 'chat-app',
+  appLabel: 'chat-app',
   profile: profile,
   
   transports: {
@@ -131,7 +164,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 
 ```typescript
 {
-  appId: 'file-share',
+  appLabel: 'file-share',
   profile: profile,
   
   transports: {
@@ -164,7 +197,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 
 ```typescript
 {
-  appId: 'disaster-response',
+  appLabel: 'disaster-response',
   profile: profile,
 
   transports: {
@@ -198,7 +231,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 
 ```typescript
 {
-  appId: 'battery-saver-app',
+  appLabel: 'battery-saver-app',
   profile: profile,
 
   transports: {
@@ -231,7 +264,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 
 ```typescript
 {
-  appId: 'event-app',
+  appLabel: 'event-app',
   profile: profile,
   
   transports: {
@@ -551,7 +584,7 @@ ever flips it.
 
 ```typescript
 const config: ProtocolConfig = {
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'default',
   custody: { enabled: true },
 };
@@ -766,7 +799,7 @@ synced events; this is synced state.
 
 ```typescript
 const config: ProtocolConfig = {
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'default',
   data: { enabled: true },
 };
@@ -857,7 +890,7 @@ work. Nothing is partially applied.
 
 **Identity and routing**
 
-1. `appId` must not be empty
+1. `appLabel` must not be empty
 2. `profile` must not be empty
 3. `initialTtl` must be > 0
 4. At least one transport must be enabled
@@ -1012,7 +1045,7 @@ Configuration uses the generated snake_case fields:
 from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
 
 config = ProtocolConfig(
-    app_id="desktop-app",
+    app_label="desktop-app",
     profile="alice",
     ble_enabled=True,
     wifi_direct_enabled=False,

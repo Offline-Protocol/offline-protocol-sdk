@@ -75,7 +75,7 @@ def _stub_default_storage(
 def default_config() -> ProtocolConfig:
     """A minimal ProtocolConfig with only Internet enabled."""
     return ProtocolConfig(
-        app_id="test-app",
+        app_label="test-app",
         profile="test-user-1",
         ble_enabled=False,
         wifi_direct_enabled=False,

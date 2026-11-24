@@ -53,6 +53,7 @@ on `v0.24.1`, for example, §17 and §18 are already behind you. The tags:
 | `v0.32.0` | [§30](#30-behaviour-that-changes-without-a-compile-error-v0320) |
 | `v0.33.0` | [§31](#31-behaviour-that-changes-without-a-compile-error-v0330) |
 | `v0.34.0` | [§32](#32-behaviour-that-changes-without-a-compile-error-v0340) |
+| unreleased | [§33](#33-the-mesh-appid-is-now-applabel-unreleased) |
 
 Every other part of sections 1–13 covers the `v0.17.0` storage split, apart
 from paragraphs labelled inline with a later release, and §13 is the test
@@ -1540,7 +1541,7 @@ identity this instance runs as. It never leaves the device.
 
 ```diff
   const protocol = new OfflineProtocol({
-    appId: 'my-app',
+    appLabel: 'my-app',
 -   userId: currentUserId,
 +   profile: currentUserId,
   });
@@ -1850,7 +1851,7 @@ tombstone: see the storage section below.
 
 ```typescript
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'default',
   data: { enabled: true },
 });
@@ -3170,6 +3171,54 @@ the engine wrote the Lamport clock even when `stop()` had just written the
 same value. It now writes only a value the store does not already hold, so
 an engine dropped after `stop()` makes no storage call. This is what stops a
 Python program panicking at interpreter exit.
+
+---
+
+## 33. The mesh `appId` is now `appLabel` *(unreleased)*
+
+The mesh value in `ProtocolConfig` was called `appId` (`app_id`), and it was
+easy to mistake for the App ID (`app_…`) the developer portal issues. It is now
+the **app label**: `appLabel` in TypeScript, Swift, Kotlin and Java,
+`app_label` in Rust, Python, Ruby and the C API. `TelemetryConfig.appId` keeps
+its name, because that one is the portal App ID.
+
+**Only the name changed. Keep your value.** The label selects the storage
+namespace with `profile`, is stamped on every frame and derives the Bluetooth
+app tag. The wire field is still `app_id`, so old and new builds talk to each
+other as long as they pass the same string. Changing the value of a shipped app
+gives every device fresh storage and a new identity, and splits old builds from
+new ones.
+
+```diff
+- new OfflineProtocol({ appId: 'app.muster', profile: 'default' })
++ new OfflineProtocol({ appLabel: 'app.muster', profile: 'default' })
+```
+
+**What keeps working, and what needs an edit:**
+
+| Surface | Old code |
+|---|---|
+| React Native, browser, Flutter | `appId` still works, with a one-time warning in development builds. Setting both names to different values throws; `null` under either name counts as not set. React Native's `new OfflineProtocol(…)` now throws when neither name gives a label, where it used to fail later at `start()`: an app that builds the instance at module load from an environment value that can be empty should check the value first. |
+| Python | `app_id=` still works on `ProtocolConfig`, `SendMessageOptions` and `MediaSendOptions`, with a `DeprecationWarning`. A local API server config file that still says `app_id` loads with a warning. |
+| Rust | `ProtocolConfig::new` and `builder` keep their arguments. Reading the field is now `config.app_label` (`config.app_id()` is deprecated). The send options' `app_id` fields are deprecated beside `app_label`. |
+| Swift | **Breaks:** the generated initializer is now `ProtocolConfig(appLabel:…)` (and `appLabel:` on the send options). Still compiles, deprecated: reading or setting `.appId` on `ProtocolConfig`, `SendMessageOptions` and `MediaSendOptions`, and the `appId:` overloads of `OfflineProtocolReferenceStorage` and `OfflineProtocolDevelopmentCleartextConfig`. |
+| Kotlin | **Breaks:** the named argument `ProtocolConfig(appId = …)` (and on the send options, `OfflineProtocolReferenceStorage` and `OfflineProtocolDevelopmentCleartextConfig.make`) is now `appLabel = …`; positional calls are unaffected. Still compiles, deprecated: `.appId` on the three records, through `import uniffi.offline_protocol.*` or `import uniffi.offline_protocol.appId`. |
+| Java | **Breaks:** the accessor `appId()` is now `appLabel()` on the three records. The field kept its position, so the positional constructor is unaffected. |
+| C# | **Breaks:** `AppId =` becomes `AppLabel =`. |
+| C | The config JSON key is `app_label`. A key `app_id` is still read as the label, on `ProtocolConfig` and both send options, so a config file written for 0.34 loads unchanged; both keys with different values is refused. |
+| Ruby | **Breaks:** `app_id:` becomes `app_label:`. |
+| Per-send override | The generated send options take `app_label` / `appLabel`. |
+| Config JSON read by the native bridges | `appLabel`, `appId` and `app_id` are all read. Two of them with different values is now refused rather than `appLabel` silently winning. |
+
+**Events** carry the label under `app_label`, with `app_id` beside it holding
+the same value until the alias is removed. Read `app_label`.
+
+**Telemetry is unchanged.** Pass the portal App ID to `enableTelemetry` as
+before. The SDK never reads it from the label, so keep the two values apart:
+see [the configuration guide](configuration.md#the-app-label-and-the-app-id).
+
+**The label carries no authority.** It is public: anyone nearby can read it and
+any app can use the same one. Nothing should decide whom to trust from it.
 
 ---
 

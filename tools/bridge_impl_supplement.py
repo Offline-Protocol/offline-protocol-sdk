@@ -73,7 +73,7 @@ _m("sendMediaRich", """
             replyContext = parseReplyContext(options?.get("reply_context") as? Map<String, Any?>),
             forwardInfo = parseForwardInfo(options?.get("forward_info") as? Map<String, Any?>),
             fileId = options?.get("file_id") as? String,
-            appId = options?.get("app_id") as? String,
+            appLabel = (options?.get("app_label") ?: options?.get("app_id")) as? String,
         )
         return host.requireProtocolBridge().sendMediaRich(
             requireString(map, "recipient"),
@@ -653,14 +653,15 @@ _m("mlsListSessions", """
 
 _m("wipePersistedState", """
         val map = mapFromAny(arguments)
-        val appId = requireString(map, "appId")
+        // `appId` is the old name of `appLabel`, still read (Flutter passes the app's map).
+        val appLabel = (map["appLabel"] as? String) ?: (map["appId"] as? String) ?: requireString(map, "appLabel")
         val profile = requireString(map, "profile")
         val context = ctx ?: throw IllegalStateException("Context required")
-        val namespace = StorageNamespace.account(appId, profile)
+        val namespace = StorageNamespace.account(appLabel, profile)
         val live = host.currentConfig
-        if (live != null && StorageNamespace.account(live.appId, live.profile) == namespace) {
+        if (live != null && StorageNamespace.account(live.appLabel, live.profile) == namespace) {
             throw IllegalStateException("Refusing to wipe storage for the running account; call destroy() first")
         }
-        OfflineProtocolReferenceStorage.wipe(context, appId, profile)
+        OfflineProtocolReferenceStorage.wipe(context, appLabel, profile)
         return null
 """)

@@ -53,7 +53,7 @@ def test_records_take_the_definition_defaults_for_omitted_fields():
     options = codec.decode("SendMessageOptions", {"priority": "High"}, "p")
     assert isinstance(options, generated.SendMessageOptions)
     assert options.priority is generated.MessagePriority.HIGH
-    assert options.app_id is None
+    assert options.app_label is None
     assert options.reply_to_msg is None
     # An optional field with no default is passed as null.
     metadata = codec.decode(

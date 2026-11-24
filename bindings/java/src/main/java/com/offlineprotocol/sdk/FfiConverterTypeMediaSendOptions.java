@@ -26,7 +26,7 @@ public enum FfiConverterTypeMediaSendOptions implements FfiConverterRustBuffer<M
             FfiConverterOptionalTypeReplyContext.INSTANCE.allocationSize(value.replyContext()) +
             FfiConverterOptionalTypeForwardInfo.INSTANCE.allocationSize(value.forwardInfo()) +
             FfiConverterOptionalString.INSTANCE.allocationSize(value.fileId()) +
-            FfiConverterOptionalString.INSTANCE.allocationSize(value.appId())
+            FfiConverterOptionalString.INSTANCE.allocationSize(value.appLabel())
       );
   }
 
@@ -38,6 +38,6 @@ public enum FfiConverterTypeMediaSendOptions implements FfiConverterRustBuffer<M
       FfiConverterOptionalTypeReplyContext.INSTANCE.write(value.replyContext(), buf);
       FfiConverterOptionalTypeForwardInfo.INSTANCE.write(value.forwardInfo(), buf);
       FfiConverterOptionalString.INSTANCE.write(value.fileId(), buf);
-      FfiConverterOptionalString.INSTANCE.write(value.appId(), buf);
+      FfiConverterOptionalString.INSTANCE.write(value.appLabel(), buf);
   }
 }

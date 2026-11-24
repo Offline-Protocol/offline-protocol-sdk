@@ -112,7 +112,7 @@ npm install @offline-protocol/mesh-sdk
 import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'user123',
   // Encryption is enabled by default!
 });
@@ -145,7 +145,7 @@ from offline_protocol_sdk import ProtocolManager
 from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
 
 config = ProtocolConfig(
-    app_id="my-app",
+    app_label="my-app",
     profile="user123",
     ble_enabled=False,
     wifi_direct_enabled=False,
@@ -182,7 +182,7 @@ still being established are queued and delivered encrypted once it is ready.
 
 ```typescript
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'user123',
   encryption: {
     enabled: true,           // Auto-encrypt (default)

@@ -4,7 +4,7 @@ import 'package:offline_protocol/offline_protocol.dart';
 void main() {
   test('minimalFootprintConfig defaults to BLE-only transports', () {
     final config = OfflineProtocol.minimalFootprintConfig(
-      appId: 'app',
+      appLabel: 'app',
       profile: 'profile',
     );
     expect(config['bleEnabled'], isTrue);
@@ -15,14 +15,25 @@ void main() {
 
   test('smokeTestConfig enables Internet flag only', () {
     final config = OfflineProtocol.smokeTestConfig(
-      appId: 'com.test.app',
+      appLabel: 'com.test.app',
       profile: 'user',
     );
-    expect(config['appId'], 'com.test.app');
+    expect(config['appLabel'], 'com.test.app');
     expect(config['profile'], 'user');
     expect(config['bleEnabled'], isFalse);
     expect(config['internetEnabled'], isTrue);
     expect(config['nostrEnabled'], isFalse);
+  });
+
+  test('the old appId name still sets the label, and must agree', () {
+    // ignore: deprecated_member_use_from_same_package
+    final config = OfflineProtocol.smokeTestConfig(appId: 'app.muster', profile: 'p');
+    expect(config['appLabel'], 'app.muster');
+    expect(
+      // ignore: deprecated_member_use_from_same_package
+      () => OfflineProtocol.smokeTestConfig(appLabel: 'a', appId: 'b', profile: 'p'),
+      throwsArgumentError,
+    );
   });
 
   test('resolveInternetAutoEnableConfig nested transports.internet', () {

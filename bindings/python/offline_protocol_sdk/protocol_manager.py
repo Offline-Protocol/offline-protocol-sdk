@@ -442,7 +442,7 @@ class ProtocolManager:
         self._event_handler = event_handler
 
         profile = config.profile  # type: ignore[union-attr]
-        app_id = config.app_id  # type: ignore[union-attr]
+        app_id = config.app_label  # type: ignore[union-attr]
 
         # The built-in file stores, when a store key was given. Opened by
         # the core in `start()`; nothing on this side holds them.

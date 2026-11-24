@@ -24,9 +24,9 @@ public enum OfflineProtocolDevelopmentCleartextConfig {
     /// Builds a `ProtocolConfig` with the same encryption posture React Native's
     /// `forScenario(\"developmentCleartext\")` reaches after `create()`:
     /// encryption off, `requireEncryption` off, and sibling MLS flags off.
-    public static func make(appId: String, profile: String) -> ProtocolConfig {
+    public static func make(appLabel: String, profile: String) -> ProtocolConfig {
         ProtocolConfig(
-            appId: appId,
+            appLabel: appLabel,
             profile: profile,
             bleEnabled: true,
             wifiDirectEnabled: false,
@@ -44,6 +44,12 @@ public enum OfflineProtocolDevelopmentCleartextConfig {
             pendingTtlMs: 86_400_000,
             overflowPolicy: .dropOldest
         )
+    }
+
+    /// The old name of `make(appLabel:profile:)`.
+    @available(*, deprecated, message: "appId on the mesh is now appLabel. Your App ID (app_…) from the dashboard is what turns on telemetry")
+    public static func make(appId: String, profile: String) -> ProtocolConfig {
+        make(appLabel: appId, profile: profile)
     }
 }
 

@@ -12,7 +12,7 @@ A call is decoded by the declared parameter types, checked against the
 server-side rules, executed against the binding, and encoded by the declared
 result type. Two methods are stamped: ``send_message`` and ``send_media``
 are executed through their rich twins with the connection's application id
-set, and the rich twins refuse an ``app_id`` the client sent.
+as the app label, and the rich twins refuse an ``app_label`` the client sent.
 """
 
 from __future__ import annotations
@@ -564,7 +564,7 @@ class Dispatcher:
         assert app_id is not None
         if method == "send_message":
             options = generated.SendMessageOptions(
-                priority=args["priority"], reply_to_msg=args["reply_to_msg"], app_id=app_id
+                priority=args["priority"], reply_to_msg=args["reply_to_msg"], app_label=app_id
             )
             return (
                 self._engine,
@@ -574,7 +574,7 @@ class Dispatcher:
             )
         if method == "send_media":
             options = generated.MediaSendOptions(
-                media_metadata=args["media_metadata"], app_id=app_id
+                media_metadata=args["media_metadata"], app_label=app_id
             )
             return (
                 self._engine,
@@ -590,12 +590,12 @@ class Dispatcher:
             )
         if method in ("send_message_rich", "send_media_rich"):
             options = args["options"]
-            if options.app_id is not None:
+            if options.app_label is not None:
                 raise taxonomy_error(
                     "InvalidArgument",
-                    "options.app_id is set by the server from the connection's hello",
+                    "options.app_label is set by the server from the connection's hello",
                 )
-            options.app_id = app_id
+            options.app_label = app_id
         return self._engine, declaration, args, result_type
 
     # -- after the call -------------------------------------------------------

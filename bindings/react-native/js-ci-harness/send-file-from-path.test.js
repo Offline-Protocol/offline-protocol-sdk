@@ -107,7 +107,7 @@ const FILE_NAME = 'training-crdt-abc-def.lora.json';
 let OfflineProtocol;
 
 function newSdk() {
-  return new OfflineProtocol({ appId: 'harness', profile: 'harness-profile' });
+  return new OfflineProtocol({ appLabel: 'harness', profile: 'harness-profile' });
 }
 
 function theSend() {

@@ -655,7 +655,7 @@ def _private_ipv4() -> str | None:
 
 def _config() -> ProtocolConfig:
     return ProtocolConfig(
-        app_id="test-app",
+        app_label="test-app",
         profile="webrtc-direct-host",
         ble_enabled=False,
         wifi_direct_enabled=True,

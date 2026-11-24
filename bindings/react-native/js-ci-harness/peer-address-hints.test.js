@@ -89,7 +89,7 @@ const sdk = require(path.join(outDir, 'index.js'));
 function fresh(config) {
   hints.resetPeerAddressWarningsForTests();
   delete globalThis.__DEV__;
-  return new sdk.OfflineProtocol({ appId: 'harness', profile: 'harness', ...config });
+  return new sdk.OfflineProtocol({ appLabel: 'harness', profile: 'harness', ...config });
 }
 
 test('the shape rule matches core', () => {

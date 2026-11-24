@@ -1516,7 +1516,7 @@ pub struct SendMessageOptions {
     pub reply_context: Option<ReplyContext>,
     pub media_metadata: Option<MediaMetadata>,
     pub forward_info: Option<ForwardInfo>,
-    pub app_id: Option<String>,
+    pub app_label: Option<String>,
 }
 
 /// Options for `send_media_rich`, mirroring the core `MediaSendOptions`.
@@ -1528,7 +1528,7 @@ pub struct MediaSendOptions {
     pub reply_context: Option<ReplyContext>,
     pub forward_info: Option<ForwardInfo>,
     pub file_id: Option<String>,
-    pub app_id: Option<String>,
+    pub app_label: Option<String>,
 }
 
 /// File transfer progress
@@ -1993,7 +1993,7 @@ impl Default for PendingQueueConfig {
 /// Protocol configuration (simplified)
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
-    pub app_id: String,
+    pub app_label: String,
     /// Local profile selector: which stored identity this instance runs as.
     /// Never on the wire — see `OfflineProtocol::local_address`.
     pub profile: String,
@@ -2451,7 +2451,7 @@ impl From<CoreMeshRelayStats> for MeshRelayStats {
 
 impl From<ProtocolConfig> for CoreConfig {
     fn from(config: ProtocolConfig) -> Self {
-        let mut core_config = CoreConfig::new(config.app_id, config.profile);
+        let mut core_config = CoreConfig::new(config.app_label, config.profile);
         core_config.transport.ble_enabled = config.ble_enabled;
         core_config.transport.wifi_direct_enabled = config.wifi_direct_enabled;
         core_config.transport.internet_enabled = config.internet_enabled;
@@ -3755,10 +3755,13 @@ impl OfflineProtocol {
             media_metadata: options.media_metadata.map(CoreMediaMetadata::from),
             forward_info,
             via_transport,
-            app_id: options.app_id,
+            app_label: options.app_label,
             // Ephemeral sends reach the browser binding only so far; the UDL
             // record gains the field when a native binding needs it (ADR 0032).
             ephemeral: false,
+            // The deprecated `app_id` alias exists for Rust callers; the UDL
+            // field kept its position under the new name instead.
+            ..Default::default()
         };
 
         let message_id = protocol
@@ -6410,7 +6413,8 @@ impl OfflineProtocol {
             reply_context,
             forward_info,
             file_id: options.file_id,
-            app_id: options.app_id,
+            app_label: options.app_label,
+            ..Default::default()
         };
 
         let mut protocol = self.lock_inner()?;
@@ -7003,7 +7007,7 @@ impl OfflineProtocol {
         let (app_id, profile) = {
             let protocol = self.lock_inner()?;
             let config = protocol.config();
-            (config.app_id.clone(), config.profile.clone())
+            (config.app_label.clone(), config.profile.clone())
         };
         self.initialize_mls_over(
             "initialize_mls_with_file_stores",
@@ -9400,7 +9404,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            app_id: "test-app".to_string(),
+            app_label: "test-app".to_string(),
             profile: "user123".to_string(),
             ble_enabled: true,
             wifi_direct_enabled: true,
@@ -9440,7 +9444,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            app_id: "test-app".to_string(),
+            app_label: "test-app".to_string(),
             profile: "user123".to_string(),
             ble_enabled: true,
             wifi_direct_enabled: false,
@@ -9965,7 +9969,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            app_id: "test-app".to_string(),
+            app_label: "test-app".to_string(),
             profile: "user123".to_string(),
             ble_enabled: false,
             wifi_direct_enabled: false,
@@ -10273,14 +10277,14 @@ mod tests {
         protocol.reticulum_status_changed(true).unwrap();
         protocol.force_transport(TransportType::Reticulum).unwrap();
 
-        let options = |app_id: &str| SendMessageOptions {
+        let options = |app_label: &str| SendMessageOptions {
             priority: None,
             reply_to_msg: None,
             content_type: None,
             reply_context: None,
             media_metadata: None,
             forward_info: None,
-            app_id: Some(app_id.to_string()),
+            app_label: Some(app_label.to_string()),
         };
 
         let refused = protocol.send_message_rich(
@@ -10289,7 +10293,7 @@ mod tests {
             options("bad/app"),
         );
         assert!(
-            matches!(refused, Err(ProtocolError::InvalidArgument(ref m)) if m.contains("app_id")),
+            matches!(refused, Err(ProtocolError::InvalidArgument(ref m)) if m.contains("app_label")),
             "an invalid per-send app id is the caller's defect, got {refused:?}"
         );
         assert!(protocol.reticulum_get_next_message().is_none());
@@ -22666,19 +22670,22 @@ mod tests {
         }
     }
 
-    /// The per-send application id crosses every hand-written layer of the
-    /// React Native binding under one spelling.
+    /// The per-send app label crosses every hand-written layer of the React
+    /// Native binding under one spelling.
     ///
     /// The field is optional everywhere, so each layer that forgets it
     /// compiles and drops it silently: the message then goes out under the
-    /// configured id and the receiving instance routes it to the wrong
-    /// application. The TypeScript param names it `appId`; `index.ts` must
-    /// list it in the rich-path predicate (only the rich native methods carry
-    /// it) and put it in the options map as `app_id`; each native bridge
-    /// must read `app_id` from that map into the generated `appId` field; and
-    /// the received-event types must declare what the core now emits.
+    /// configured label and the receiving instance routes it to the wrong
+    /// application. The TypeScript param names it `appLabel` (`appId` is its
+    /// deprecated old name, resolved into the same value); `index.ts` must
+    /// list the resolved label in the rich-path predicate (only the rich
+    /// native methods carry it) and put it in the options map as
+    /// `app_label`; each native bridge must read `app_label` from that map
+    /// (falling back to the old `app_id` key) into the generated `appLabel`
+    /// field; and the received-event types must declare what the core now
+    /// emits.
     #[test]
-    fn react_native_rich_sends_carry_the_app_id_end_to_end() {
+    fn react_native_rich_sends_carry_the_app_label_end_to_end() {
         let region = |label: &str, code: &str, from: &str, to: &str| -> String {
             let start = code
                 .find(from)
@@ -22699,40 +22706,47 @@ mod tests {
 
         let types = rn_source_code_only("src/types.ts");
         for (interface, field) in [
-            ("export interface SendMessageParams {", "appId?: string;"),
-            ("export interface SendMediaParams {", "appId?: string;"),
+            ("export interface SendMessageParams {", "appLabel?: string;"),
+            ("export interface SendMediaParams {", "appLabel?: string;"),
             (
                 "export interface MessageReceivedEvent extends BaseEvent {",
-                "app_id: string;",
+                "app_label: string;",
             ),
             (
                 "export interface FileReceivedEvent extends BaseEvent {",
-                "app_id?: string;",
+                "app_label?: string;",
             ),
             (
                 "export interface MediaResendRequiredEvent extends BaseEvent {",
-                "app_id?: string;",
+                "app_label?: string;",
             ),
         ] {
             assert_has(interface, &region(interface, &types, interface, "}"), field);
         }
 
         let index = rn_source_code_only("src/index.ts");
-        for (label, from, to) in [
+        for (label, from, to, resolved) in [
             (
                 "index.ts sendMessage",
                 "async sendMessage(params: SendMessageParams)",
                 "OfflineProtocolNativeModule.sendMessageRich(",
+                "sendLabel",
             ),
             (
                 "index.ts sendMedia",
                 "async sendMedia(params: SendMediaParams)",
                 "OfflineProtocolNativeModule.sendMediaRich(",
+                "mediaLabel",
             ),
         ] {
             let code = region(label, &index, from, to);
-            assert_has(label, &code, "params.appId !== undefined");
-            assert_has(label, &code, "app_id: params.appId ?? null");
+            assert_has(
+                label,
+                &code,
+                &format!("const {resolved} = resolveAppLabel(params.appLabel, params.appId,"),
+            );
+            assert_has(label, &code, &format!("{resolved} !== undefined"));
+            assert_has(label, &code, &format!("app_label: {resolved} ?? null"));
         }
 
         let swift_bridge = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");
@@ -22742,14 +22756,14 @@ mod tests {
                 &swift_bridge,
                 "static func sendMessageRich(",
                 "host.sendMessageRich(",
-                "appId: options?[\"app_id\"] as? String",
+                "appLabel: (options?[\"app_label\"] ?? options?[\"app_id\"]) as? String",
             ),
             (
                 "Swift sendMediaRich",
                 &swift_bridge,
                 "static func sendMediaRich(",
                 "host.requireProtocol().sendMediaRich(",
-                "appId: options?[\"app_id\"] as? String",
+                "appLabel: (options?[\"app_label\"] ?? options?[\"app_id\"]) as? String",
             ),
             (
                 "Kotlin sendMessageRich",
@@ -22758,7 +22772,7 @@ mod tests {
                 ),
                 "fun sendMessageRich(",
                 "host.sendMessageRich(",
-                "appId = optionsMap?.get(\"app_id\")",
+                "appLabel = (optionsMap?.get(\"app_label\") ?: optionsMap?.get(\"app_id\"))",
             ),
             (
                 "Kotlin sendMediaRich",
@@ -22767,7 +22781,7 @@ mod tests {
                 ),
                 "fun sendMediaRich(",
                 "host.requireProtocolBridge().sendMediaRich(",
-                "appId = options?.get(\"app_id\")",
+                "appLabel = (options?.get(\"app_label\") ?: options?.get(\"app_id\"))",
             ),
         ] {
             assert_has(label, &region(label, code, from, to), read);
@@ -26624,5 +26638,95 @@ mod tests {
                 "{label} must link licensing-decision-tree.md"
             );
         }
+    }
+
+    /// The deprecation message for the label's old name is written by hand
+    /// in every binding that keeps the alias, in seven languages. It must
+    /// say the same thing everywhere: a developer who meets it in one
+    /// binding and its docs in another should never read two stories about
+    /// which value is the App ID.
+    ///
+    /// The failure this catches: one copy reworded, or a new alias added
+    /// with a message of its own. Every source under `bindings/` and
+    /// `crates/` that says the old name "on the mesh is now" the new one
+    /// must go on with the canonical sentence. Quotes, string
+    /// concatenation and comment markers are ignored, so a copy may wrap.
+    #[test]
+    fn every_app_label_deprecation_message_says_the_same_thing() {
+        const CANONICAL: &str =
+            ". Your App ID (app_…) from the dashboard is what turns on telemetry";
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest.join("../..");
+        let mut stack = vec![root.join("bindings"), root.join("crates")];
+        let mut copies = 0;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if path.is_dir() {
+                    if !matches!(
+                        name.as_str(),
+                        "target" | "node_modules" | ".dart_tool" | "pkg" | "build" | ".build"
+                    ) {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                let source = matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some(
+                        "rs" | "ts" | "js" | "py" | "kt" | "swift" | "dart" | "cs" | "java" | "rb"
+                    )
+                );
+                if !source || path.ends_with(file!()) {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if !text.contains("on the mesh is now") {
+                    continue;
+                }
+                let flat: String = text
+                    .replace("///", " ")
+                    .replace("//", " ")
+                    .chars()
+                    .map(|c| {
+                        if matches!(c, '\'' | '"' | '+' | '*') {
+                            ' '
+                        } else {
+                            c
+                        }
+                    })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                for (at, _) in flat.match_indices("on the mesh is now") {
+                    let rest = &flat[at + "on the mesh is now".len()..];
+                    let rest = rest
+                        .strip_prefix(" appLabel")
+                        .or_else(|| rest.strip_prefix(" app_label"))
+                        .unwrap_or_else(|| {
+                            panic!("{}: names neither appLabel nor app_label", path.display())
+                        });
+                    assert!(
+                        rest.starts_with(CANONICAL),
+                        "{}: the deprecation message must go on {CANONICAL:?}, found {:?}",
+                        path.display(),
+                        &rest[..rest.len().min(90)]
+                    );
+                    copies += 1;
+                }
+            }
+        }
+        // Rust, TypeScript, the browser, Python, Kotlin, Swift and Dart.
+        assert!(
+            copies >= 7,
+            "found only {copies} copies; did the walk miss a binding?"
+        );
     }
 }
