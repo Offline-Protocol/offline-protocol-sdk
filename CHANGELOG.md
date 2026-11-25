@@ -82,6 +82,14 @@ Questions about a release, or about upgrading to one? Ask in the
 
 ### Changed
 
+- **Media on the `reticulum` (gateway) transport is chunked at 64 KiB, the
+  peer-stream size, instead of 4 KiB.** The slot is a stream to a gateway
+  daemon over local IP, and the device never sizes frames to the backbone
+  behind it (ADR 0026). At 4 KiB every chunk slipped under a scarce
+  gateway's frame bound, so media crossed a LoRa backbone, which the gateway
+  contract says it MUST NOT; now every full chunk is refused
+  `frame_too_large` there, and a broad gateway carries transfers in fewer,
+  larger frames.
 - **The mesh `appId` is now `appLabel`** (`app_label` in Rust, Python, Ruby
   and the C API), so it is no longer mistaken for the App ID (`app_…`) the
   developer portal issues for telemetry. Only the name changed: the value

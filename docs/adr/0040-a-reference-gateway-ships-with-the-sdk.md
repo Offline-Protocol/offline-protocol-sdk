@@ -80,12 +80,18 @@ Three things made a gateway more than a weekend's port of the relay:
   through one gateway, across two gateways in one process, and across two
   daemon processes joined by a real Reticulum backbone over TCP. Swapping TCP
   for an RNode changes the Reticulum configuration, not the daemon.
-- A first contact over LoRa is expensive, about 20 frames each way at about
-  472 bytes and up. That is the SDK's session setup, not the gateway's, and
+- A first contact over LoRa is expensive, about 20 frames each way, from
+  about 200 bytes (an acknowledgement) to about 4 KB, about 16 KB in all. That is the SDK's session setup, not the gateway's, and
   the gateway now makes the number visible instead of hiding it in a
   hypothetical. By arithmetic from the radio settings, it is several minutes
   on the example radio and hours at the 1 % duty cycle most of the EU
   868 MHz band allows. Nothing has been measured over radios yet.
+- Media stays off a scarce backbone by size, the gateway's one signal. The
+  device now chunks the gateway slot at the peer-stream size (64 KiB), so
+  every full chunk is refused `frame_too_large`; at the Bluetooth size it
+  used before, every chunk slipped under the bound. A file small enough to
+  be one frame under the bound is indistinguishable from a message and
+  crosses.
 - Reticulum 1.6 mints a proof-of-work stamp before a destination's first
   announce. A new gateway is unreachable for seconds on a laptop and minutes
   on a small board, once per identity. The daemon logs it; the README says it.

@@ -21,6 +21,7 @@ if not hasattr(sdk, "verify_gateway_address_proof"):  # pragma: no cover
     pytest.skip("this SDK build has no verify_gateway_address_proof", allow_module_level=True)
 
 from offline_protocol_sdk.offline_protocol import (  # noqa: E402
+    ContentType,
     MessagePriority,
     OverflowPolicy,
     ProtocolConfig,
@@ -163,6 +164,67 @@ async def test_two_engines_talk_across_two_gateways(rate_class: str) -> None:
         await _attached(a, [alice])
         await _attached(b, [bob])
         await _pair_and_talk(alice, bob)
+    finally:
+        for d in (alice, bob):
+            await d.stop()
+        await a.stop()
+        await b.stop()
+
+
+class _Recording(InMemoryBackbone):
+    """Records the size of every frame handed to the backbone."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.carried: list[int] = []
+
+    async def forward(self, frame, timeout):
+        self.carried.append(len(frame.content))
+        return await super().forward(frame, timeout)
+
+
+@pytest.mark.parametrize("rate_class", ["broad", "scarce"])
+async def test_media_crosses_a_broad_backbone_and_never_a_scarce_one(rate_class: str, caplog) -> None:
+    """The contract: media MUST be excluded from a scarce backbone. The
+    gateway sees only ciphertext, so the exclusion is by size: the device
+    chunks the gateway slot at 64 KiB, and every full chunk is past the
+    scarce frame bound and refused `frame_too_large`. A broad backbone
+    carries the same transfer to the end."""
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="offline_gateway.gateway")
+    network = InMemoryNetwork()
+    backbone_a = _Recording(network, "a", rate_class)
+    a = Gateway(GatewayConfig(listen_port=0), backbone=backbone_a)
+    b = Gateway(GatewayConfig(listen_port=0), backbone=InMemoryBackbone(network, "b", rate_class))
+    port_a, port_b = await a.start(), await b.start()
+    alice, bob = Device(f"e2e-media-alice-{rate_class}", port_a), Device(f"e2e-media-bob-{rate_class}", port_b)
+    try:
+        for d in (alice, bob):
+            await d.start()
+        await _attached(a, [alice])
+        await _attached(b, [bob])
+        await _pair_and_talk(alice, bob)
+        photo = bytes(range(256)) * 80  # 20 KB, one chunk at the slot's size
+        alice.pm.protocol.send_media(bob.address, list(photo), "photo.jpg", ContentType.IMAGE, None)
+
+        def received() -> list[dict]:
+            return bob.events("file_received")
+
+        if rate_class == "broad":
+            await settle([alice, bob], received, "media over a broad backbone")
+        else:
+            await settle(
+                [alice, bob],
+                lambda: any("frame_too_large" in r.getMessage() for r in caplog.records),
+                "a scarce gateway refusing the chunk",
+            )
+            await asyncio.sleep(1)
+            for d in (alice, bob):
+                d.handle_events()
+            assert not received()
+            bound = GatewayConfig().max_backbone_frame_bytes
+            assert max(backbone_a.carried) <= bound
     finally:
         for d in (alice, bob):
             await d.stop()

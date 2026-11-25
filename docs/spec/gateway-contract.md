@@ -433,6 +433,13 @@ provides three of the four fails in a way the device cannot see.
    transfer fails on its retry ladder; the device does not know the class
    (invariant 3), and that cost is the price of not knowing.
 
+   A gateway sees ciphertext only, so size is its one signal. The device
+   chunks media on the daemon link at the peer-stream size (64 KiB), far
+   above any scarce frame bound, so every full chunk is refused. A file
+   small enough to travel as one frame under the bound is indistinguishable
+   from a message and crosses; a scarce gateway cannot exclude it, and its
+   budgets are what bound the cost.
+
 ### The backbone token
 
 A gateway advertises each backbone it can reach as one capability token of

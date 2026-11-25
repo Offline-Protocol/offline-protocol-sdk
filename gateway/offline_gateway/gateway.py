@@ -455,7 +455,9 @@ class Gateway:
                 )
             )
             return
-        if len(content) > self.config.max_backbone_frame_bytes:
+        # The scarce class's bound, which is also how media stays off it. A
+        # broad backbone carries whatever the device link accepted.
+        if self.backbone.rate_class != "broad" and len(content) > self.config.max_backbone_frame_bytes:
             session.send(wire.delivery_error(message_id, recipient, wire.FRAME_TOO_LARGE))
             return
         # The scarce class's own budgets, in bytes. A broad backbone carries
@@ -559,7 +561,10 @@ class Gateway:
     async def deliver_from_backbone(self, frame: BackboneFrame, peer: str) -> tuple[ForwardResult, str]:
         if not self._peer_budget.take(peer):
             return ForwardResult.REFUSED, wire.BUDGET_EXCEEDED
-        if len(frame.content) > self.config.max_backbone_frame_bytes:
+        bound = self.config.max_frame_bytes
+        if self.backbone is not None and self.backbone.rate_class != "broad":
+            bound = self.config.max_backbone_frame_bytes
+        if len(frame.content) > bound:
             return ForwardResult.REFUSED, wire.FRAME_TOO_LARGE
         target = self.bound.get(frame.recipient)
         if target is None:

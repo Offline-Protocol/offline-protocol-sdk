@@ -70,8 +70,12 @@ class GatewayConfig:
     max_queued_frames: int = 512
     #: Largest frame a device may submit, in bytes, before base64.
     max_frame_bytes: int = 256 * 1024
-    #: Largest frame carried over the backbone, refused ``frame_too_large``
-    #: past it, which is also how media stays off a LoRa-class link. It has
+    #: Largest frame carried over a scarce backbone, refused
+    #: ``frame_too_large`` past it. It is also how media stays off: the
+    #: device chunks media on this link at 64 KiB, so every full chunk is
+    #: past the bound (a file small enough to be one frame under it cannot be
+    #: told from a message, and crosses). A broad backbone carries anything
+    #: up to ``max_frame_bytes``. It has
     #: to cross inside ``backbone_verdict_timeout``: roughly bitrate / 8 x
     #: the short airtime cap x 45 s x about 0.7 for Reticulum's overhead,
     #: which on the example radio (3.1 kbps, 50 % short cap) is about 6 KB.

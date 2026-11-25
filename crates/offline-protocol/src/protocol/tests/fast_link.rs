@@ -312,6 +312,61 @@ fn a_transfer_on_the_peer_stream_slot_keeps_512_kib_in_flight() {
     );
 }
 
+/// A transfer pinned to the gateway slot is chunked like the peer stream, at
+/// 64 KiB, not like Bluetooth. At 4 KiB every chunk slipped under a scarce
+/// gateway's frame bound and media crossed a LoRa backbone, which the gateway
+/// contract says it MUST NOT. Three chunks of 64 KiB leave together; at
+/// 4 KiB the same file would be 48 chunks, two at a time.
+#[test]
+fn a_transfer_on_the_gateway_slot_is_chunked_like_a_stream() {
+    use offline_protocol_core::ContentType;
+
+    use crate::constants::{CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM};
+
+    let (mut alice, bob) = pair();
+    let gateway = MockTransport::new(TransportType::Reticulum);
+    gateway.start().unwrap();
+    alice
+        .protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Reticulum, Box::new(gateway.clone()));
+    // The case that matters: a device whose current carrier is the gateway,
+    // which is where media pins (the slot is left out of the fallback order).
+    alice
+        .protocol
+        .transport_manager_mut()
+        .send_via_transport(
+            &Message::new(
+                offline_protocol_core::UserId::new(&alice.address).unwrap(),
+                offline_protocol_core::UserId::new(&bob.address).unwrap(),
+                offline_protocol_core::AppId::new("test-app").unwrap(),
+                "warm",
+            ),
+            TransportType::Reticulum,
+        )
+        .unwrap();
+    assert_eq!(
+        alice.protocol.transport_manager().current_transport(),
+        Some(TransportType::Reticulum)
+    );
+    gateway.sent_messages();
+    alice.take_sent();
+
+    let file = vec![0x5a; CHUNK_SIZE_PEER_STREAM * 3];
+    alice
+        .protocol
+        .send_media(&bob.address, file, "photo.jpg", ContentType::Image, None)
+        .unwrap();
+
+    let chunks = gateway
+        .sent_messages()
+        .into_iter()
+        .filter(|message| message.content_type == ContentType::FileChunk)
+        .count();
+    assert_eq!(chunks, 3);
+    assert!(chunks < MEDIA_WINDOW_SIZE_PEER_STREAM);
+}
+
 /// A fast-link frame goes over Bluetooth LE when the peer is linked there,
 /// even though the engine prefers a peer stream for a direct link: the frame
 /// may be ending that very stream, and on two phones a close sent down it

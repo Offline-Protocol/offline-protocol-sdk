@@ -318,15 +318,15 @@ Reticulum will **not** be selected when:
 
 ## File Transfer Behavior
 
-Reticulum uses BLE-like chunk sizes for file transfers due to its low bandwidth:
+The daemon link is a stream over local IP, so a transfer on it is chunked like the peer stream, whatever stands behind the gateway:
 
-| Parameter | Value | Comparison |
-|-----------|-------|------------|
-| Chunk size | BLE chunk size | Same as BLE (smaller chunks for low throughput) |
-| Media window | BLE media window | Same as BLE |
-| Media transfer eligibility | Excluded | Reticulum is not in the preferred transport list for media transfers |
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| Chunk size | 64 KiB (`CHUNK_SIZE_PEER_STREAM`) | The device never sizes frames to a backbone it cannot see ([ADR 0026](adr/0026-the-backbone-is-a-gateway-property.md)) |
+| Media window | 8 (`MEDIA_WINDOW_SIZE_PEER_STREAM`) | As the peer stream |
+| Media transfer eligibility | Only while the daemon link is the current carrier | It is absent from the media fallback order |
 
-Large file transfers over Reticulum are technically possible but will be very slow. The SDK automatically excludes Reticulum from the preferred media transfer transport list. If Reticulum is the only available transport, transfers will still work but at LoRa speeds.
+Media MUST NOT cross a scarce backbone, and size is how a gateway tells: every full 64 KiB chunk is past a scarce gateway's frame bound, so it is refused `frame_too_large` and the transfer fails on its retry ladder. A broad gateway, or one delivering to a device attached to it, carries the transfer. A file small enough to be one frame under the scarce bound cannot be told from a message and crosses. Until this release the slot used Bluetooth-sized 4 KiB chunks, which slipped under a scarce bound, so media crossed.
 
 ## Reticulum Setup
 

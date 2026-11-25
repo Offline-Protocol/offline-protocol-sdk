@@ -102,7 +102,10 @@ async def test_a_slow_peer_is_backbone_timeout_a_plain_failure(pair):
     assert not reason.startswith("recipient_unreachable")
 
 
-async def test_the_backbone_frame_bound_keeps_media_off_the_backbone():
+async def test_the_scarce_frame_bound_applies_to_backbone_frames_only():
+    """The bound is per backbone frame on a scarce backbone; a frame to a
+    device on the same gateway never meets it. Real media against the real
+    default is test_end_to_end's."""
     network = InMemoryNetwork()
     gws = []
     try:
@@ -113,7 +116,7 @@ async def test_the_backbone_frame_bound_keeps_media_off_the_backbone():
                     host_backbone_burst_bytes=64,
                 ),
                 verifier=fake_verify,
-                backbone=InMemoryBackbone(network, name),
+                backbone=InMemoryBackbone(network, name, rate_class="scarce"),
             )
             gw.port = await gw.start()  # type: ignore[attr-defined]
             gws.append(gw)
