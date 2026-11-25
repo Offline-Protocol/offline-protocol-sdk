@@ -300,3 +300,58 @@ async def test_a_slow_reader_is_dropped_rather_than_buffered(gateway):
         if not session.send({"type": "Filler", "x": "y" * 1000}):
             break
     assert session.closed or session._queue.qsize() <= 512
+
+
+async def test_idle_sockets_cannot_lock_a_device_out():
+    """Anyone on the network can open sockets that never attach. Past the
+    unbound pool, the oldest of them is evicted, and a device still attaches."""
+    gw = Gateway(
+        GatewayConfig(listen_port=0, attach_grace=0, max_sessions=6, max_unbound_sessions=3, max_sessions_per_host=64),
+        verifier=fake_verify,
+    )
+    port = await gw.start()
+    try:
+        idle = [await Client.connect(port) for _ in range(10)]
+        await asyncio.sleep(0.1)
+        assert sum(1 for s in gw.sessions if not s.closed) <= 3
+        assert await idle[0].closed()
+        device = await Client.connect(port)
+        frames = await device.attach(address(1))
+        assert frames[0]["type"] == "AddressDeclared"
+    finally:
+        await gw.stop()
+
+
+async def test_bound_devices_are_never_evicted_for_newcomers():
+    gw = Gateway(
+        GatewayConfig(listen_port=0, attach_grace=0, max_sessions=2, max_unbound_sessions=1, max_sessions_per_host=64),
+        verifier=fake_verify,
+    )
+    port = await gw.start()
+    try:
+        a = await Client.connect(port)
+        await a.attach(address(1))
+        b = await Client.connect(port)
+        await b.attach(address(2))
+        late = await Client.connect(port)
+        assert await late.closed()
+        await a.submit(address(2), b"still here")
+        await a.expect("MessageSent")
+    finally:
+        await gw.stop()
+
+
+async def test_one_host_cannot_hold_more_than_its_share():
+    gw = Gateway(
+        GatewayConfig(listen_port=0, attach_grace=0, max_sessions_per_host=2),
+        verifier=fake_verify,
+    )
+    port = await gw.start()
+    try:
+        first, second = await Client.connect(port), await Client.connect(port)
+        await first.attach(address(1))
+        await second.attach(address(2))
+        third = await Client.connect(port)
+        assert await third.closed()
+    finally:
+        await gw.stop()

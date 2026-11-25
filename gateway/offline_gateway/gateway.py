@@ -82,6 +82,7 @@ class Session:
         self.gateway = gateway
         self.writer = writer
         self.peer_name = writer.get_extra_info("peername")
+        self.host = self.peer_name[0] if isinstance(self.peer_name, tuple) and self.peer_name else None
         #: Minted at connect and spent by the one declaration it binds.
         self.challenge = os.urandom(wire.CHALLENGE_LENGTH)
         self.challenge_sent = False
@@ -245,8 +246,7 @@ class Gateway:
         if task is not None:
             self._connections.add(task)
         try:
-            if len(self.sessions) >= self.config.max_sessions:
-                logger.warning("refusing a connection: %d sessions open", len(self.sessions))
+            if not self._admit(writer):
                 writer.close()
                 return
             session = Session(self, writer, self.config.max_queued_frames)
@@ -265,6 +265,39 @@ class Gateway:
         finally:
             if task is not None:
                 self._connections.discard(task)
+
+    def _admit(self, writer: asyncio.StreamWriter) -> bool:
+        """Whether a new connection may open, making room for it if it can.
+
+        A session that has proved nothing must not be able to hold a slot a
+        device needs: anyone on the venue network can open sockets, and the
+        verdict-only grace keeps an idle one alive indefinitely. So unbound
+        sessions have their own, smaller pool, and when it or the whole table
+        is full a newcomer evicts the oldest unbound session rather than
+        being refused. A device that attaches leaves that pool. Each host is
+        also capped, since every device on a hotspot has an address of its
+        own and one host holding many sessions is not many devices.
+        """
+        peer = writer.get_extra_info("peername")
+        host = peer[0] if isinstance(peer, tuple) and peer else None
+        if host is not None:
+            from_host = sum(1 for s in self.sessions if s.host == host and not s.closed)
+            if from_host >= self.config.max_sessions_per_host:
+                logger.warning("refusing a connection from %s: %d sessions open from it", host, from_host)
+                return False
+        unbound = sorted((s for s in self.sessions if s.address is None and not s.closed), key=lambda s: s.id)
+        open_sessions = sum(1 for s in self.sessions if not s.closed)
+        while unbound and (
+            len(unbound) >= self.config.max_unbound_sessions or open_sessions >= self.config.max_sessions
+        ):
+            oldest = unbound.pop(0)
+            logger.info("evicting %r to make room", oldest)
+            oldest.close()
+            open_sessions -= 1
+        if open_sessions >= self.config.max_sessions:
+            logger.warning("refusing a connection: %d bound sessions open", open_sessions)
+            return False
+        return True
 
     async def _read_loop(self, session: Session, reader: asyncio.StreamReader) -> None:
         while not session.closed:

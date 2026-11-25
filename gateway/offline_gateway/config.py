@@ -57,6 +57,14 @@ class GatewayConfig:
     attach_grace: float = 15.0
     #: Concurrent device connections.
     max_sessions: int = 256
+    #: Of those, sessions that have not proved an address. A newcomer evicts
+    #: the oldest of them when this or ``max_sessions`` is full, so sockets
+    #: that never attach cannot lock devices out.
+    max_unbound_sessions: int = 32
+    #: Sessions from one source address. Each device on a hotspot or venue
+    #: network has its own; a device reconnecting while its old socket is
+    #: still open needs two.
+    max_sessions_per_host: int = 8
     #: Frames waiting to be written to one device before it is dropped as
     #: too slow to serve.
     max_queued_frames: int = 512
@@ -92,6 +100,10 @@ class GatewayConfig:
             raise ConfigError(
                 f"attach_grace must be 0 or at least {CLIENT_ATTACH_TIMEOUT:g} s, the clients' attach timeout"
             )
+        if not 1 <= self.max_unbound_sessions <= self.max_sessions:
+            raise ConfigError("max_unbound_sessions must be 1 to max_sessions")
+        if self.max_sessions_per_host < 1:
+            raise ConfigError("max_sessions_per_host must be at least 1")
         if self.max_frame_bytes <= 0 or self.max_backbone_frame_bytes <= 0:
             raise ConfigError("frame limits must be positive")
         # A MessageReceived carries the frame base64-encoded inside JSON, and
