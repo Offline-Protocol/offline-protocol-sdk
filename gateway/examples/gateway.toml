@@ -15,21 +15,22 @@ listen_port = 4242
 
 # Largest frame a device may hand this gateway, and the smaller bound for a
 # frame that has to cross the backbone. A frame past the second is refused
-# `frame_too_large`, which is how media stays off a LoRa-class link.
+# `frame_too_large`, which is how media stays off a LoRa-class link. The
+# backbone bound has to cross the radio inside the 45 s verdict timeout and
+# still pass the largest frame of a pairing (about 4 KB).
 max_frame_bytes = 262144
-max_backbone_frame_bytes = 16384
-
-# Frames per minute each device may send across the backbone, and the burst
-# it may spend at once. The burst has to cover a first contact between two
-# devices (about 20 frames each, measured), or their pairing stalls.
-backbone_per_minute = 6.0
-backbone_burst = 24.0
+max_backbone_frame_bytes = 6144
 
 # Frame bytes per minute toward each peer gateway, shared by every device
-# attached here. This is the budget that has to match the radio: the
-# defaults fit rns/config (10 % airtime at SF8); divide by ten at 1 %.
+# attached here, and what each source host may spend of it. These are the
+# budgets that have to match the radio: the defaults fit rns/config (10 %
+# airtime at SF8); divide the rates by ten at 1 %. Each burst has to hold a
+# first contact between two devices (about 16 KB each way, measured), or
+# their pairing stalls.
 peer_egress_bytes_per_minute = 1500.0
-peer_egress_burst_bytes = 16384.0
+peer_egress_burst_bytes = 24576.0
+host_backbone_bytes_per_minute = 500.0
+host_backbone_burst_bytes = 20480.0
 
 [reticulum]
 # Reticulum's own configuration: interfaces, the RNode's port and radio.

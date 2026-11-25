@@ -38,8 +38,8 @@
     codingrate = 5
     # Airtime caps, in percent: over the last hour, and over the last 15
     # seconds. Reticulum holds traffic back past them. The long cap is the
-    # duty-cycle rule; the short one lets a frame's few packets go out
-    # together instead of one per 15 s window, which would push a single
-    # frame past the gateway's 45 s verdict timeout.
+    # duty-cycle rule, which is measured over an hour. The short one only
+    # paces bursts: at 50 % a 6 KB frame (the gateway's backbone bound)
+    # crosses in about 35 s, inside the gateway's 45 s verdict timeout.
     airtime_limit_long = 10
-    airtime_limit_short = 25
+    airtime_limit_short = 50

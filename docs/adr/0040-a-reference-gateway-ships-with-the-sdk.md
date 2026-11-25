@@ -53,16 +53,26 @@ Three things made a gateway more than a weekend's port of the relay:
    hand-off alone: a frame the peer gateway never confirmed is one the device
    must still retry, and the retry costs only a duplicate the core already
    removes.
-5. **The scarce class's per-device budget is sized from a measurement**, not
-   a guess: two SDK engines pairing over MLS and exchanging one message spend
-   18 to 20 backbone frames each, so the default burst is 24. A broad backbone
-   skips that budget.
-6. **The airtime toward a peer is budgeted in bytes, once for every device.**
-   The per-device budget stops one device taking the link; it cannot stop
-   many devices together asking for more than the radio carries, and on a
-   scarce link that is the failure that matters. The default is sized to the
-   example radio (SF8 at 125 kHz, 10 % airtime: about three frames a minute),
-   and a deployment on another radio resizes it.
+5. **The scarce class's budgets are sized from a measurement**, not a
+   guess: two SDK engines pairing over MLS and exchanging one message send
+   18 to 20 backbone frames each, about 16 KB, the largest about 4 KB. Every
+   burst holds that first contact, and the backbone frame bound (6 KiB)
+   passes its largest frame. A broad backbone skips these budgets.
+6. **The airtime toward a peer is budgeted in bytes, twice.** Once per peer
+   gateway, shared by every device, because the airtime toward a peer is the
+   scarce thing and many devices together can ask for more than the radio
+   carries. And once per source host, held below the shared budget by
+   validation, so one device cannot hold the shared budget at zero. The
+   second is per host rather than per address because addresses cost
+   nothing to mint: a host that re-keys would otherwise get a fresh burst
+   each time. The defaults fit the example radio (SF8 at 125 kHz, 10 %
+   airtime: about 1.5 KB a minute toward a peer), and a deployment on
+   another radio resizes them.
+7. **Requests to a peer go one at a time, queued in the daemon.** Reticulum
+   sends one outgoing resource per link and cannot withdraw one it has
+   queued, so a frame left to queue there goes on air after its device has
+   been told it failed. Queued in the daemon, a frame whose time runs out
+   first is refused without reaching the radio.
 
 ## Consequences
 
@@ -74,7 +84,7 @@ Three things made a gateway more than a weekend's port of the relay:
   472 bytes and up. That is the SDK's session setup, not the gateway's, and
   the gateway now makes the number visible instead of hiding it in a
   hypothetical. By arithmetic from the radio settings, it is several minutes
-  on the example radio and over an hour at the 1 % duty cycle most of the EU
+  on the example radio and hours at the 1 % duty cycle most of the EU
   868 MHz band allows. Nothing has been measured over radios yet.
 - Reticulum 1.6 mints a proof-of-work stamp before a destination's first
   announce. A new gateway is unreachable for seconds on a laptop and minutes
@@ -110,6 +120,11 @@ verifier exists so that there is none.
 
 A verdict reported `MessageSent` before the peer gateway answered.
 
-A scarce-class burst smaller than a first contact. It looks like a tighter
-budget and is a pairing that stalls on its own frames, intermittently,
-depending on timing.
+A scarce-class burst smaller than a first contact, or a backbone frame bound
+smaller than a first contact's largest frame. Either looks like a tighter
+budget and is a pairing that stalls on its own frames: intermittently for
+the burst, always for the bound.
+
+Handing Reticulum a second request on a link before the first resolves. It
+works on TCP, where transfers finish before anything times out, and on a
+radio it puts frames on air that their devices were told had failed.

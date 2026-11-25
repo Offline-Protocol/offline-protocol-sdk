@@ -70,32 +70,38 @@ class GatewayConfig:
     max_queued_frames: int = 512
     #: Largest frame a device may submit, in bytes, before base64.
     max_frame_bytes: int = 256 * 1024
-    #: Largest frame carried over the backbone. Smaller, because the backbone
-    #: is scarce: a frame past this is refused ``frame_too_large``, which is
-    #: how media stays off a LoRa-class link.
-    max_backbone_frame_bytes: int = 16 * 1024
+    #: Largest frame carried over the backbone, refused ``frame_too_large``
+    #: past it, which is also how media stays off a LoRa-class link. It has
+    #: to cross inside ``backbone_verdict_timeout``: roughly bitrate / 8 x
+    #: the short airtime cap x 45 s x about 0.7 for Reticulum's overhead,
+    #: which on the example radio (3.1 kbps, 50 % short cap) is about 6 KB.
+    #: It also has to pass the largest frame of a first contact, measured at
+    #: about 4 KB (``test_end_to_end.py``), or two devices cannot pair.
+    max_backbone_frame_bytes: int = 6 * 1024
     #: Submissions per minute per device, and the burst it may spend at once.
     device_per_minute: float = 120.0
     device_burst: float = 30.0
-    #: Backbone frames per minute per device, on a scarce backbone only. The
-    #: one that matters: it is what stops one device from spending the whole
-    #: link. The burst has to cover a first contact: two SDK engines pairing
-    #: over MLS and exchanging one message cost 18 to 20 frames each
-    #: (measured by ``test_end_to_end.py``), and a burst smaller than that
-    #: refuses the pairing's own frames and stalls it on the retry ladder.
-    backbone_per_minute: float = 6.0
-    backbone_burst: float = 24.0
+    #: Frame bytes per minute each source host may send across the backbone,
+    #: on a scarce backbone only. Per host rather than per address, because
+    #: addresses cost nothing to mint and a host that re-keys would get a
+    #: fresh burst each time; each device on a hotspot has an address of its
+    #: own. Below the shared per-peer budget, so one device cannot hold it at
+    #: zero. The burst has to cover a first contact: two SDK engines pairing
+    #: over MLS and exchanging one message send 18 to 20 frames, about 16 KB
+    #: each (measured), and a smaller burst refuses the pairing's own frames
+    #: and stalls it on the retry ladder.
+    host_backbone_bytes_per_minute: float = 500.0
+    host_backbone_burst_bytes: float = 20480.0
     #: Frame bytes per minute this gateway sends toward each peer gateway,
     #: shared by every device attached here, on a scarce backbone only. The
     #: budget that matches the radio: size it to what the link carries.
-    #: The defaults fit the example RNode (EU868 869.525 MHz, SF8/125 kHz at
-    #: about 3.1 kbps, 10 % airtime): a sealed frame of about 500 bytes is
-    #: three or so transmissions of about 1.3 s, so roughly three frames a
-    #: minute leave sustained. The burst holds one first contact (about 20
-    #: frames) and must hold the largest backbone frame. At 1 % airtime,
+    #: The default fits the example RNode (EU868 869.525 MHz, SF8/125 kHz at
+    #: about 3.1 kbps, 10 % airtime): about 6 minutes on air an hour is about
+    #: 140 KB, roughly 1.5 KB a minute once Reticulum's overhead is paid. The
+    #: burst holds a first contact with room to spare. At 1 % airtime,
     #: divide the rate by ten.
     peer_egress_bytes_per_minute: float = 1500.0
-    peer_egress_burst_bytes: float = 16384.0
+    peer_egress_burst_bytes: float = 24576.0
     #: Frames per minute each peer gateway may hand this one. The burst
     #: covers two first contacts arriving at once.
     peer_per_minute: float = 60.0
@@ -127,17 +133,29 @@ class GatewayConfig:
                 f"backbone_verdict_timeout must be under {CLIENT_VERDICT_TIMEOUT - 5:g} s, "
                 "or the client fails the frame before the verdict arrives"
             )
-        for name in ("device_burst", "backbone_burst", "peer_burst", "peer_egress_burst_bytes"):
+        for name in ("device_burst", "host_backbone_burst_bytes", "peer_burst", "peer_egress_burst_bytes"):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"{name} must be positive")
-        for name in ("device_per_minute", "backbone_per_minute", "peer_per_minute", "peer_egress_bytes_per_minute"):
+        for name in (
+            "device_per_minute",
+            "host_backbone_bytes_per_minute",
+            "peer_per_minute",
+            "peer_egress_bytes_per_minute",
+        ):
             if getattr(self, name) < 0:
                 # A bucket is made on first use, so a bad rate would surface
                 # as an exception on some device's first frame, which drops
                 # that connection without the verdict the frame is owed.
                 raise ConfigError(f"{name} must not be negative")
-        if self.peer_egress_burst_bytes < self.max_backbone_frame_bytes:
-            raise ConfigError("peer_egress_burst_bytes must hold at least one max_backbone_frame_bytes frame")
+        if min(self.peer_egress_burst_bytes, self.host_backbone_burst_bytes) < self.max_backbone_frame_bytes:
+            raise ConfigError("the backbone bursts must each hold at least one max_backbone_frame_bytes frame")
+        if (
+            self.host_backbone_bytes_per_minute > self.peer_egress_bytes_per_minute
+            or self.host_backbone_burst_bytes > self.peer_egress_burst_bytes
+        ):
+            # Otherwise one device can hold the shared budget at zero and
+            # every other device behind this gateway is refused.
+            raise ConfigError("the per-host backbone budget must not exceed the per-peer egress budget")
         if self.reticulum is not None:
             for peer in self.reticulum.peers:
                 try:

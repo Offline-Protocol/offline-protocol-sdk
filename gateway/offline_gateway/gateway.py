@@ -189,7 +189,7 @@ class Gateway:
         self._presence_seq = 0
         self._bound_seq: dict[str, int] = {}
         self._device_budget = BucketMap(config.device_per_minute / 60.0, config.device_burst)
-        self._backbone_budget = BucketMap(config.backbone_per_minute / 60.0, config.backbone_burst)
+        self._backbone_budget = BucketMap(config.host_backbone_bytes_per_minute / 60.0, config.host_backbone_burst_bytes)
         self._peer_budget = BucketMap(config.peer_per_minute / 60.0, config.peer_burst)
         self._egress_budget = BucketMap(config.peer_egress_bytes_per_minute / 60.0, config.peer_egress_burst_bytes)
         self._server: asyncio.base_events.Server | None = None
@@ -449,19 +449,21 @@ class Gateway:
         if len(content) > self.config.max_backbone_frame_bytes:
             session.send(wire.delivery_error(message_id, recipient, wire.FRAME_TOO_LARGE))
             return
-        # The scarce class's own budgets. A broad backbone carries what the
-        # device budget above already admitted. Two of them, because the
-        # scarce thing is the airtime toward one peer, which every device
-        # here shares: the per-device budget stops one device taking all of
-        # it, and the per-peer byte budget stops all of them together asking
-        # for more than the link carries. Both are checked before either is
-        # charged, so a refusal costs the device nothing.
+        # The scarce class's own budgets, in bytes. A broad backbone carries
+        # what the device budget above already admitted. Two of them, because
+        # the scarce thing is the airtime toward one peer, which every device
+        # here shares: the per-host budget, which validation keeps below the
+        # per-peer one, stops one device taking all of it, and the per-peer
+        # budget stops all of them together asking for more than the link
+        # carries. Both are checked before either is charged, so a refusal
+        # costs the device nothing.
         if self.backbone.rate_class != "broad":
-            sender, peer, size = session.address, claim.peer, len(content)
-            if not (self._backbone_budget.has(sender) and self._egress_budget.has(peer, size)):
+            sender = session.host or session.address
+            peer, size = claim.peer, len(content)
+            if not (self._backbone_budget.has(sender, size) and self._egress_budget.has(peer, size)):
                 session.send(wire.delivery_error(message_id, recipient, wire.BUDGET_EXCEEDED))
                 return
-            self._backbone_budget.take(sender)
+            self._backbone_budget.take(sender, size)
             self._egress_budget.take(peer, size)
         backbone_frame = BackboneFrame(recipient, session.address, content, message_id, reply_to)
         session.spawn(self._forward(session, backbone_frame))

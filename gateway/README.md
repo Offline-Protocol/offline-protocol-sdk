@@ -36,12 +36,16 @@ These are the contract's rules, and the tests in `tests/` pin each one.
   nothing it does not do: it sets neither `pushed` nor `stored`.
 - **Ciphertext only.** The daemon sees MLS ciphertext and routing metadata,
   on the device link and on the backbone.
-- **Budgets.** As token buckets: per device, per device across the
-  backbone, per peer gateway in bytes on the way out (shared by every device,
-  since the airtime toward a peer is the scarce thing), and per peer gateway
-  on the way in. The backbone budgets apply to a scarce backbone only. The
-  bursts cover a first contact (two engines pairing and exchanging one
-  message spend 18 to 20 frames each).
+- **Budgets.** As token buckets: submissions per device; on a scarce
+  backbone, bytes per source host and bytes per peer gateway on the way out
+  (shared by every device, since the airtime toward a peer is the scarce
+  thing, and validated to stay above the per-host one); and frames per peer
+  gateway on the way in. Every burst holds a first contact (two engines
+  pairing and exchanging one message send 18 to 20 frames, about 16 KB, the
+  largest about 4 KB).
+- **One request per peer at a time.** Reticulum cannot withdraw a transfer
+  it has queued, so the daemon queues instead: a frame whose time runs out
+  before its turn is answered `backbone_timeout` without reaching the radio.
 - **Sessions.** Sockets that never attach have their own pool, and a
   newcomer evicts the oldest of them, so they cannot lock devices out. One
   host may hold at most 8 sessions.
@@ -127,14 +131,17 @@ kbps, on the EU sub-band that allows 10 % airtime):
 
 - a full packet is about 1.3 s on air, and a sealed frame is three or so
   transmissions from the sender, plus the peer's answers on its own airtime;
-- 10 % is about 6 minutes of airtime an hour, so a gateway sustains roughly
-  three frames a minute toward a peer, which is what the default
-  `peer_egress_bytes_per_minute` allows;
-- a first contact (about 20 frames each way) takes several minutes, and a
-  later message tens of seconds.
+- 10 % is about 6 minutes of airtime an hour, so a gateway sustains about
+  1.5 KB a minute toward a peer once Reticulum's overhead is paid, which is
+  what the default `peer_egress_bytes_per_minute` allows;
+- a frame has to cross inside the 45 s verdict timeout, which the 50 % short
+  airtime cap allows up to about 6 KB: the default
+  `max_backbone_frame_bytes`, and enough for the largest frame of a pairing;
+- a first contact (about 16 KB each way) takes a few minutes, and a later
+  message tens of seconds.
 
 At 1 % airtime, the rule on most of the EU 868 MHz band, everything is ten
-times slower: a first contact takes over an hour. Divide the egress budget
+times slower: a first contact takes hours. Divide the egress budget
 by ten there, or the device's frames are accepted faster than the radio can
 carry them.
 

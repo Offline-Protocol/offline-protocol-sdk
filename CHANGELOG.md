@@ -33,8 +33,8 @@ Questions about a release, or about upgrading to one? Ask in the
   exchange a message across two daemon processes joined by a Reticulum
   backbone in its tests; it has not yet been run over radios. Expect a first
   contact between two devices to cost about 20 backbone frames each: by
-  arithmetic, several minutes on the example radio (SF8, 10 % airtime) and
-  over an hour at 1 %. A new gateway is unreachable while Reticulum mints its
+  arithmetic, a few minutes on the example radio (SF8, 10 % airtime) and
+  hours at 1 %. A new gateway is unreachable while Reticulum mints its
   one-time announce stamp.
 - **A gateway daemon can verify a device's attach proof without building
   it: `verify_gateway_address_proof(address, public_key, signature,
