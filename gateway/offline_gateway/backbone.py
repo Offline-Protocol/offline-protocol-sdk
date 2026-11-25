@@ -189,10 +189,12 @@ class PresenceTable:
         held = self._claims.get(address, {}).get(peer)
         if held is not None and held.seq >= seq:
             return changed
-        # A snapshot's own entries are current by definition, whatever their
-        # number: one listing a device that attached long ago must restore it
-        # after its claim was forgotten.
-        if held is None and not _in_snapshot and seq <= self._floors.get(peer, 0):
+        # A change numbered at or below the newest snapshot happened before
+        # that snapshot was taken, and the snapshot already says where it
+        # led, whether or not a claim is held. A snapshot's own entries are
+        # exempt: they are that statement, and one listing a device that
+        # attached long ago must restore it after its claim was forgotten.
+        if not _in_snapshot and seq <= self._floors.get(peer, 0):
             return changed
         before = self.claim(address)
         by_peer = self._claims.pop(address, {})
@@ -209,6 +211,11 @@ class PresenceTable:
         number of the change that attached it, taken at ``snapshot_seq``.
         Returns the addresses whose best claim changed."""
         changed = self._enter_epoch(peer, epoch)
+        # Snapshots come by two paths (the peer pushes one, this gateway
+        # pulls one) and can cross. An older one than the newest applied says
+        # nothing new and would undo what that one said.
+        if snapshot_seq < self._floors.get(peer, 0):
+            return changed
         for address in [a for a, by in self._claims.items() if peer in by and a not in online]:
             claim = self._claims[address][peer]
             # Newer than the snapshot: the change it reflects happened after

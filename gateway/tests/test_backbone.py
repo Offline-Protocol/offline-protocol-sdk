@@ -370,3 +370,20 @@ def test_a_snapshot_restores_a_long_attached_device_after_a_dropped_link():
     table.drop_peer("p")
     assert table.snapshot("p", {address(3): 3}, 7, "e") == [address(3)]
     assert table.claim(address(3)).online
+
+
+def test_a_change_older_than_a_snapshot_is_refused_even_over_a_held_claim():
+    table = PresenceTable()
+    table.update("p", address(8), False, 100, 2, "e")
+    table.snapshot("p", {}, 4, "e")
+    assert table.update("p", address(8), True, None, 3, "e") == []
+    assert not table.claim(address(8)).online
+
+
+def test_a_stale_snapshot_does_not_undo_a_newer_one():
+    table = PresenceTable()
+    table.snapshot("p", {address(9): 1}, 5, "e")
+    table.snapshot("p", {}, 9, "e")
+    table.drop_peer("p")
+    assert table.snapshot("p", {address(9): 1}, 5, "e") == []
+    assert table.claim(address(9)) is None
