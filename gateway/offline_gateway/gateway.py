@@ -194,6 +194,13 @@ class Gateway:
         self._egress_budget = BucketMap(config.peer_egress_bytes_per_minute / 60.0, config.peer_egress_burst_bytes)
         self._server: asyncio.base_events.Server | None = None
         self._connections: set[asyncio.Task[Any]] = set()
+        #: Backbone forwards in flight. Held by the gateway, not the session:
+        #: a device that disconnects mid-forward does not cancel it. The frame
+        #: is partly on air already, finishing it is what reaches the
+        #: recipient, and the device's retry of it is a duplicate the core
+        #: removes. Cancelling would throw that airtime away and spend it
+        #: again on the retry.
+        self._forwards: set[asyncio.Task[Any]] = set()
 
     # -- Lifecycle -------------------------------------------------------
 
@@ -230,6 +237,8 @@ class Gateway:
             self._server.close()
         for session in list(self.sessions):
             session.close()
+        for task in list(self._forwards):
+            task.cancel()
         for task in list(self._connections):
             task.cancel()
         if self._connections:
@@ -466,7 +475,9 @@ class Gateway:
             self._backbone_budget.take(sender, size)
             self._egress_budget.take(peer, size)
         backbone_frame = BackboneFrame(recipient, session.address, content, message_id, reply_to)
-        session.spawn(self._forward(session, backbone_frame))
+        task = asyncio.ensure_future(self._forward(session, backbone_frame))
+        self._forwards.add(task)
+        task.add_done_callback(self._forwards.discard)
 
     async def _forward(self, session: Session, frame: BackboneFrame) -> None:
         assert self.backbone is not None

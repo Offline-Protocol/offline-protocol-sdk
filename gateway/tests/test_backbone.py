@@ -3,6 +3,7 @@ rules every backbone shares, without a radio."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 
 import pytest
@@ -319,3 +320,18 @@ def test_one_host_may_not_be_allowed_more_than_the_link_toward_a_peer():
         GatewayConfig(host_backbone_bytes_per_minute=2000, peer_egress_bytes_per_minute=1500).validate()
     with pytest.raises(ConfigError):
         GatewayConfig(host_backbone_burst_bytes=30000, peer_egress_burst_bytes=24576).validate()
+
+
+async def test_a_forward_outlives_the_device_that_sent_it(pair):
+    """A device that disconnects mid-forward does not cancel a frame already
+    on its way: finishing it is what reaches the recipient."""
+    _, a, b = pair
+    b.backbone.delay = 0.3
+    alice, bob = await Client.connect(a.port), await Client.connect(b.port)
+    await alice.attach(address(1))
+    await bob.attach(address(2))
+    await alice.submit(address(2), b"in flight", message_id="orphan")
+    await asyncio.sleep(0.05)
+    alice.close()
+    got = await bob.expect("MessageReceived", timeout=2)
+    assert base64.b64decode(got["content"]) == b"in flight"
