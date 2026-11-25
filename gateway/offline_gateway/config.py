@@ -80,7 +80,10 @@ class GatewayConfig:
     #: the short airtime cap x 45 s x about 0.7 for Reticulum's overhead,
     #: which on the example radio (3.1 kbps, 50 % short cap) is about 6 KB.
     #: It also has to pass the largest frame of a first contact, measured at
-    #: about 4 KB (``test_end_to_end.py``), or two devices cannot pair.
+    #: about 4 KB (``test_end_to_end.py``), or two devices cannot pair, and
+    #: it caps the group that can form across the backbone: a new member's
+    #: MLS Welcome is about 2 KB plus 560 bytes per member (measured), so
+    #: 6 KiB is about nine members.
     max_backbone_frame_bytes: int = 6 * 1024
     #: Submissions per minute per device, and the burst it may spend at once.
     device_per_minute: float = 120.0

@@ -440,6 +440,13 @@ provides three of the four fails in a way the device cannot see.
    from a message and crosses; a scarce gateway cannot exclude it, and its
    budgets are what bound the cost.
 
+   The same bound refuses any frame past it, media or not, on every retry,
+   so a scarce gateway states what it cannot carry. The MLS Welcome for a
+   new group member grows with the group (on the wire, measured: about
+   2 KB for a second member, plus about 560 bytes per member after), so a
+   bound also caps the group size that can form across that backbone, and
+   a text message past it never crosses.
+
 ### The backbone token
 
 A gateway advertises each backbone it can reach as one capability token of

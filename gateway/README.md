@@ -143,6 +143,15 @@ kbps, on the EU sub-band that allows 10 % airtime):
 - a first contact (about 16 KB each way) takes a few minutes, and a later
   message tens of seconds.
 
+The frame bound is also a ceiling on what is not media. A group's MLS
+Welcome grows with the group, about 560 bytes per member on the wire
+(measured), so at the default 6 KiB a group of up to about nine members can
+form across the backbone; a tenth member's Welcome is refused
+`frame_too_large`, as is any text message past the bound. Raising
+`max_backbone_frame_bytes` raises the ceiling only if the radio can still
+carry a frame that size inside 45 s: a faster setting, or a higher
+`airtime_limit_short`.
+
 At 1 % airtime, the rule on most of the EU 868 MHz band, everything is ten
 times slower: a first contact takes hours. Divide the egress budget
 by ten there, or the device's frames are accepted faster than the radio can

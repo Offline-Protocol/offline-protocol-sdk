@@ -87,6 +87,15 @@ Three things made a gateway more than a weekend's port of the relay:
   hypothetical. By arithmetic from the radio settings, it is several minutes
   on the example radio and hours at the 1 % duty cycle most of the EU
   868 MHz band allows. Nothing has been measured over radios yet.
+- The scarce frame bound also caps what can cross that is not media. A
+  group's MLS Welcome grows about 560 bytes per member on the wire
+  (measured, 2,041 bytes for a second member), so with the 6 KiB default a
+  group of up to about nine members can form across a scarce backbone, and
+  a tenth member's Welcome is refused `frame_too_large` on every retry. A
+  wider bound needs a faster radio or a higher short airtime cap to cross
+  inside the verdict timeout. The Welcome travels at about 2.3 times its
+  raw size, so a more compact encoding of it would raise the ceiling more
+  cheaply than either.
 - Media stays off a scarce backbone by size, the gateway's one signal. The
   device now chunks the gateway slot at the peer-stream size (64 KiB), so
   every full chunk is refused `frame_too_large`; at the Bluetooth size it
