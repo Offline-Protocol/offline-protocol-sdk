@@ -37,10 +37,10 @@ These are the contract's rules, and the tests in `tests/` pin each one.
 - **Ciphertext only.** The daemon sees MLS ciphertext and routing metadata,
   on the device link and on the backbone.
 - **Budgets.** As token buckets: submissions per device; on a scarce
-  backbone, bytes per source host and bytes per peer gateway on the way out
-  (shared by every device, since the airtime toward a peer is the scarce
-  thing, and validated to stay above the per-host one); and frames per peer
-  gateway on the way in. Every burst holds a first contact (two engines
+  backbone, bytes per source host and bytes across the backbone as a whole
+  (shared by every device and every peer, since the airtime belongs to this
+  gateway's one radio, and validated to stay above the per-host one); and
+  frames per peer gateway on the way in. Every burst holds a first contact (two engines
   pairing and exchanging one message send 18 to 20 frames, about 16 KB, the
   largest about 4 KB).
 - **One request per peer at a time.** Reticulum cannot withdraw a transfer
@@ -134,8 +134,9 @@ kbps, on the EU sub-band that allows 10 % airtime):
 - a full packet is about 1.3 s on air, and a sealed frame is three or so
   transmissions from the sender, plus the peer's answers on its own airtime;
 - 10 % is about 6 minutes of airtime an hour, so a gateway sustains about
-  1.5 KB a minute toward a peer once Reticulum's overhead is paid, which is
-  what the default `peer_egress_bytes_per_minute` allows;
+  1.5 KB a minute across the backbone, to all peers together, once
+  Reticulum's overhead is paid, which is
+  what the default `backbone_egress_bytes_per_minute` allows;
 - a frame has to cross inside the 45 s verdict timeout, which the 50 % short
   airtime cap allows up to about 6 KB: the default
   `max_backbone_frame_bytes`, and enough for the largest frame of a pairing;

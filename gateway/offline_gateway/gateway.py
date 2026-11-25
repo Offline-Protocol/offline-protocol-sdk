@@ -51,6 +51,9 @@ MAX_DECLARE_FAILURES = 3
 MAX_WATCHED = 256
 #: Addresses whose last-seen time is remembered after they leave.
 MAX_LAST_SEEN = 65536
+#: The one key of the egress budget: the airtime belongs to this gateway's
+#: transmitter, which every peer shares, not to any one peer.
+EGRESS = "egress"
 #: Frame types logged at debug level as they are queued: the routing trail.
 _TRACED = frozenset({"MessageSent", "DeliveryError", "MessageReceived"})
 
@@ -216,7 +219,7 @@ class Gateway:
         self._device_budget = BucketMap(config.device_per_minute / 60.0, config.device_burst)
         self._backbone_budget = BucketMap(config.host_backbone_bytes_per_minute / 60.0, config.host_backbone_burst_bytes)
         self._peer_budget = BucketMap(config.peer_per_minute / 60.0, config.peer_burst)
-        self._egress_budget = BucketMap(config.peer_egress_bytes_per_minute / 60.0, config.peer_egress_burst_bytes)
+        self._egress_budget = BucketMap(config.backbone_egress_bytes_per_minute / 60.0, config.backbone_egress_burst_bytes)
         self._server: asyncio.base_events.Server | None = None
         self._connections: set[asyncio.Task[Any]] = set()
         #: Backbone forwards in flight. Held by the gateway, not the session:
@@ -501,15 +504,15 @@ class Gateway:
         if self.backbone.rate_class != "broad":
             sender = session.host or session.address
             size = len(content)
-            if not (self._backbone_budget.has(sender, size) and self._egress_budget.has(claim.peer, size)):
+            if not (self._backbone_budget.has(sender, size) and self._egress_budget.has(EGRESS, size)):
                 session.send(wire.delivery_error(message_id, recipient, wire.BUDGET_EXCEEDED))
                 return
 
             def admit(peer: str, sender: str = sender, size: int = size) -> bool:
-                if not (self._backbone_budget.has(sender, size) and self._egress_budget.has(peer, size)):
+                if not (self._backbone_budget.has(sender, size) and self._egress_budget.has(EGRESS, size)):
                     return False
                 self._backbone_budget.take(sender, size)
-                self._egress_budget.take(peer, size)
+                self._egress_budget.take(EGRESS, size)
                 return True
 
         backbone_frame = BackboneFrame(recipient, session.address, content, message_id, reply_to)

@@ -112,7 +112,7 @@ async def test_the_scarce_frame_bound_applies_to_backbone_frames_only():
         for name in ("a", "b"):
             gw = Gateway(
                 GatewayConfig(
-                    listen_port=0, attach_grace=0, max_backbone_frame_bytes=64, peer_egress_burst_bytes=64,
+                    listen_port=0, attach_grace=0, max_backbone_frame_bytes=64, backbone_egress_burst_bytes=64,
                     host_backbone_burst_bytes=64,
                 ),
                 verifier=fake_verify,
@@ -247,13 +247,13 @@ async def _scarce_pair(**budgets):
     return gws
 
 
-async def test_the_egress_budget_toward_a_peer_is_shared_by_every_device():
+async def test_the_egress_budget_is_shared_by_every_device():
     """The scarce thing is the airtime toward one peer. Two devices each well
     inside their own budget still share that one."""
     gws = await _scarce_pair(
         max_backbone_frame_bytes=100,
-        peer_egress_bytes_per_minute=0.0001,
-        peer_egress_burst_bytes=150,
+        backbone_egress_bytes_per_minute=0.0001,
+        backbone_egress_burst_bytes=150,
         host_backbone_bytes_per_minute=0.0001,
         host_backbone_burst_bytes=150,
     )
@@ -283,8 +283,8 @@ async def test_the_egress_budget_toward_a_peer_is_shared_by_every_device():
 async def test_a_frame_the_egress_budget_refuses_costs_the_device_nothing():
     gws = await _scarce_pair(
         max_backbone_frame_bytes=100,
-        peer_egress_bytes_per_minute=0.0001,
-        peer_egress_burst_bytes=100,
+        backbone_egress_bytes_per_minute=0.0001,
+        backbone_egress_burst_bytes=100,
         host_backbone_bytes_per_minute=0.0001,
         host_backbone_burst_bytes=100,
     )
@@ -311,7 +311,7 @@ async def test_a_frame_the_egress_budget_refuses_costs_the_device_nothing():
 def test_negative_rates_are_refused_at_load():
     from offline_gateway import ConfigError
 
-    for name in ("device_per_minute", "host_backbone_bytes_per_minute", "peer_per_minute", "peer_egress_bytes_per_minute"):
+    for name in ("device_per_minute", "host_backbone_bytes_per_minute", "peer_per_minute", "backbone_egress_bytes_per_minute"):
         with pytest.raises(ConfigError):
             GatewayConfig(**{name: -1}).validate()
 
@@ -320,9 +320,9 @@ def test_one_host_may_not_be_allowed_more_than_the_link_toward_a_peer():
     from offline_gateway import ConfigError
 
     with pytest.raises(ConfigError):
-        GatewayConfig(host_backbone_bytes_per_minute=2000, peer_egress_bytes_per_minute=1500).validate()
+        GatewayConfig(host_backbone_bytes_per_minute=2000, backbone_egress_bytes_per_minute=1500).validate()
     with pytest.raises(ConfigError):
-        GatewayConfig(host_backbone_burst_bytes=30000, peer_egress_burst_bytes=24576).validate()
+        GatewayConfig(host_backbone_burst_bytes=30000, backbone_egress_burst_bytes=24576).validate()
 
 
 async def test_a_forward_outlives_the_device_that_sent_it(pair):
@@ -387,3 +387,42 @@ def test_a_stale_snapshot_does_not_undo_a_newer_one():
     table.drop_peer("p")
     assert table.snapshot("p", {address(9): 1}, 5, "e") == []
     assert table.claim(address(9)) is None
+
+
+async def test_the_egress_budget_is_shared_by_every_peer():
+    """The duty cycle is this gateway's transmitter's. Frames toward two
+    different peers draw on one budget, not one each."""
+    network = InMemoryNetwork()
+    gws = []
+    try:
+        for name in ("a", "b", "c"):
+            gw = Gateway(
+                GatewayConfig(
+                    listen_port=0,
+                    attach_grace=0,
+                    max_backbone_frame_bytes=100,
+                    backbone_egress_bytes_per_minute=0.0001,
+                    backbone_egress_burst_bytes=150,
+                    host_backbone_bytes_per_minute=0.0001,
+                    host_backbone_burst_bytes=150,
+                ),
+                verifier=fake_verify,
+                backbone=InMemoryBackbone(network, name, rate_class="scarce"),
+            )
+            gw.port = await gw.start()  # type: ignore[attr-defined]
+            gws.append(gw)
+        from offline_gateway.budget import BucketMap
+
+        gws[0]._backbone_budget = BucketMap(1000.0, 100000.0)
+        alice = await Client.connect(gws[0].port)
+        bob, carol = await Client.connect(gws[1].port), await Client.connect(gws[2].port)
+        await alice.attach(address(1))
+        await bob.attach(address(2))
+        await carol.attach(address(3))
+        await alice.submit(address(2), b"x" * 100, message_id="to-b")
+        assert (await alice.expect("MessageSent"))["message_id"] == "to-b"
+        await alice.submit(address(3), b"x" * 100, message_id="to-c")
+        assert (await alice.expect("DeliveryError"))["reason"] == "budget_exceeded"
+    finally:
+        for gw in gws:
+            await gw.stop()

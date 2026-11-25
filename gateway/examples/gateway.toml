@@ -21,14 +21,15 @@ listen_port = 4242
 max_frame_bytes = 262144
 max_backbone_frame_bytes = 6144
 
-# Frame bytes per minute toward each peer gateway, shared by every device
-# attached here, and what each source host may spend of it. These are the
+# Frame bytes per minute this gateway sends across the backbone, to all peers
+# together (the airtime is this radio's), shared by every device attached
+# here, and what each source host may spend of it. These are the
 # budgets that have to match the radio: the defaults fit rns/config (10 %
 # airtime at SF8); divide the rates by ten at 1 %. Each burst has to hold a
 # first contact between two devices (about 16 KB each way, measured), or
 # their pairing stalls.
-peer_egress_bytes_per_minute = 1500.0
-peer_egress_burst_bytes = 24576.0
+backbone_egress_bytes_per_minute = 1500.0
+backbone_egress_burst_bytes = 24576.0
 host_backbone_bytes_per_minute = 500.0
 host_backbone_burst_bytes = 20480.0
 

@@ -96,16 +96,18 @@ class GatewayConfig:
     #: and stalls it on the retry ladder.
     host_backbone_bytes_per_minute: float = 500.0
     host_backbone_burst_bytes: float = 20480.0
-    #: Frame bytes per minute this gateway sends toward each peer gateway,
-    #: shared by every device attached here, on a scarce backbone only. The
-    #: budget that matches the radio: size it to what the link carries.
+    #: Frame bytes per minute this gateway sends across the backbone, to all
+    #: peers together and shared by every device attached here, on a scarce
+    #: backbone only. Not per peer: the duty cycle belongs to this gateway's
+    #: transmitter, so N peers would otherwise be allowed N times the radio.
+    #: The budget that matches the radio: size it to what the link carries.
     #: The default fits the example RNode (EU868 869.525 MHz, SF8/125 kHz at
     #: about 3.1 kbps, 10 % airtime): about 6 minutes on air an hour is about
     #: 140 KB, roughly 1.5 KB a minute once Reticulum's overhead is paid. The
     #: burst holds a first contact with room to spare. At 1 % airtime,
     #: divide the rate by ten.
-    peer_egress_bytes_per_minute: float = 1500.0
-    peer_egress_burst_bytes: float = 24576.0
+    backbone_egress_bytes_per_minute: float = 1500.0
+    backbone_egress_burst_bytes: float = 24576.0
     #: Frames per minute each peer gateway may hand this one. The burst
     #: covers two first contacts arriving at once.
     peer_per_minute: float = 60.0
@@ -140,29 +142,29 @@ class GatewayConfig:
                 f"backbone_verdict_timeout must be under {CLIENT_VERDICT_TIMEOUT - 5:g} s, "
                 "or the client fails the frame before the verdict arrives"
             )
-        for name in ("device_burst", "host_backbone_burst_bytes", "peer_burst", "peer_egress_burst_bytes"):
+        for name in ("device_burst", "host_backbone_burst_bytes", "peer_burst", "backbone_egress_burst_bytes"):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"{name} must be positive")
         for name in (
             "device_per_minute",
             "host_backbone_bytes_per_minute",
             "peer_per_minute",
-            "peer_egress_bytes_per_minute",
+            "backbone_egress_bytes_per_minute",
         ):
             if getattr(self, name) < 0:
                 # A bucket is made on first use, so a bad rate would surface
                 # as an exception on some device's first frame, which drops
                 # that connection without the verdict the frame is owed.
                 raise ConfigError(f"{name} must not be negative")
-        if min(self.peer_egress_burst_bytes, self.host_backbone_burst_bytes) < self.max_backbone_frame_bytes:
+        if min(self.backbone_egress_burst_bytes, self.host_backbone_burst_bytes) < self.max_backbone_frame_bytes:
             raise ConfigError("the backbone bursts must each hold at least one max_backbone_frame_bytes frame")
         if (
-            self.host_backbone_bytes_per_minute > self.peer_egress_bytes_per_minute
-            or self.host_backbone_burst_bytes > self.peer_egress_burst_bytes
+            self.host_backbone_bytes_per_minute > self.backbone_egress_bytes_per_minute
+            or self.host_backbone_burst_bytes > self.backbone_egress_burst_bytes
         ):
             # Otherwise one device can hold the shared budget at zero and
             # every other device behind this gateway is refused.
-            raise ConfigError("the per-host backbone budget must not exceed the per-peer egress budget")
+            raise ConfigError("the per-host backbone budget must not exceed the backbone egress budget")
         if self.reticulum is not None:
             for peer in self.reticulum.peers:
                 try:

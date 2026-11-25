@@ -58,15 +58,16 @@ Three things made a gateway more than a weekend's port of the relay:
    18 to 20 backbone frames each, about 16 KB, the largest about 4 KB. Every
    burst holds that first contact, and the backbone frame bound (6 KiB)
    passes its largest frame. A broad backbone skips these budgets.
-6. **The airtime toward a peer is budgeted in bytes, twice.** Once per peer
-   gateway, shared by every device, because the airtime toward a peer is the
-   scarce thing and many devices together can ask for more than the radio
-   carries. And once per source host, held below the shared budget by
+6. **The airtime is budgeted in bytes, twice.** Once for the backbone as a
+   whole, shared by every device and every peer, because the duty cycle
+   belongs to this gateway's transmitter and many devices, or many peers,
+   together can ask for more than the radio carries. (It was per peer
+   first, which allowed N peers N times the radio.) And once per source host, held below the shared budget by
    validation, so one device cannot hold the shared budget at zero. The
    second is per host rather than per address because addresses cost
    nothing to mint: a host that re-keys would otherwise get a fresh burst
    each time. The defaults fit the example radio (SF8 at 125 kHz, 10 %
-   airtime: about 1.5 KB a minute toward a peer), and a deployment on
+   airtime: about 1.5 KB a minute in all), and a deployment on
    another radio resizes them.
 7. **Requests to a peer go one at a time, queued in the daemon.** Reticulum
    sends one outgoing resource per link and cannot withdraw one it has
