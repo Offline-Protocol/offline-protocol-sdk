@@ -48,7 +48,8 @@ These are the contract's rules, and the tests in `tests/` pin each one.
   before its turn is answered `backbone_timeout` without reaching the radio.
 - **Sessions.** Sockets that never attach have their own pool, and a
   newcomer evicts the oldest of them, so they cannot lock devices out. One
-  host may hold at most 8 sessions.
+  host may hold at most 8 sessions; an IPv6 host is its /64, since a device
+  can hold as many addresses in its prefix as it likes.
 
 What it does not do yet: hold frames for an absent recipient (no
 `mailbox_v1`), push to a sleeping phone, or re-originate backbone frames into

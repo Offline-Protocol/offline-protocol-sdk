@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import os
 import time
@@ -71,6 +72,28 @@ def sdk_verifier() -> Verifier:
     return verify
 
 
+def host_key(peer_name: Any) -> str | None:
+    """What the per-host caps and budgets are keyed by.
+
+    An IPv4 address as it is. An IPv6 address by its /64, because a device
+    may hold as many addresses in its prefix as it likes (privacy addresses
+    rotate by design), and keyed by the exact address one device would be
+    as many hosts as it cared to be. An IPv4-mapped IPv6 address is its IPv4.
+    """
+    if not isinstance(peer_name, tuple) or not peer_name:
+        return None
+    host = str(peer_name[0]).split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
+
+
 class Session:
     """One device connection."""
 
@@ -82,7 +105,7 @@ class Session:
         self.gateway = gateway
         self.writer = writer
         self.peer_name = writer.get_extra_info("peername")
-        self.host = self.peer_name[0] if isinstance(self.peer_name, tuple) and self.peer_name else None
+        self.host = host_key(self.peer_name)
         #: Minted at connect and spent by the one declaration it binds.
         self.challenge = os.urandom(wire.CHALLENGE_LENGTH)
         self.challenge_sent = False
@@ -288,8 +311,7 @@ class Gateway:
         also capped, since every device on a hotspot has an address of its
         own and one host holding many sessions is not many devices.
         """
-        peer = writer.get_extra_info("peername")
-        host = peer[0] if isinstance(peer, tuple) and peer else None
+        host = host_key(writer.get_extra_info("peername"))
         if host is not None:
             from_host = sum(1 for s in self.sessions if s.host == host and not s.closed)
             if from_host >= self.config.max_sessions_per_host:

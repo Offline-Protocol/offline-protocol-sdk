@@ -16,8 +16,10 @@ authors = [{ name = "Offline Protocol, Inc." }]
 dependencies = ["offline-protocol-sdk"]
 
 [project.optional-dependencies]
-# The Reticulum backbone, and with it LoRa through an RNode.
-reticulum = ["rns>=1.0,<2"]
+# The Reticulum backbone, and with it LoRa through an RNode. Pinned to the
+# series reticulum.py was checked against (TESTED_RNS_SERIES): it relies on
+# how that series queues and times resources.
+reticulum = ["rns>=1.6,<1.7"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 
 [project.scripts]

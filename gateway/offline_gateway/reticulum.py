@@ -57,6 +57,9 @@ logger = logging.getLogger(__name__)
 rns_logger = logging.getLogger("RNS")
 
 APP_NAME = "offline_gateway"
+#: The Reticulum release series this module's assumptions were checked
+#: against (see :meth:`ReticulumBackbone.start`). pyproject pins the same.
+TESTED_RNS_SERIES = "1.6."
 ASPECTS = ("backbone", "v1")
 
 PATH_FORWARD = "/forward"
@@ -132,6 +135,18 @@ class ReticulumBackbone(Backbone):
         self.hooks = hooks
         self._loop = asyncio.get_running_loop()
         self._running = True
+        version = getattr(RNS, "__version__", "")
+        if not version.startswith(TESTED_RNS_SERIES):
+            # This module leans on Reticulum internals that only this series
+            # was checked against: a resource parked on a busy link cannot be
+            # withdrawn, a request's resource hangs off its receipt, and a
+            # request's response clock starts when its resource completes.
+            logger.warning(
+                "this gateway was tested with rns %sx, and rns %s is installed; "
+                "check reticulum.py's assumptions about resource queueing before trusting it",
+                TESTED_RNS_SERIES,
+                version or "(unknown)",
+            )
         RNS.Reticulum(
             configdir=self.config.configdir,
             loglevel=self.config.loglevel,
