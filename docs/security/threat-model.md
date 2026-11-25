@@ -566,6 +566,18 @@ domain separation is what stops a proof harvested here being replayed against
 the relay. It does **not** make any verdict trustworthy, which is the
 enumeration above and is unchanged.
 
+**The reference gateway** ([`gateway/`](../../gateway/README.md),
+[ADR 0040](../adr/0040-a-reference-gateway-ships-with-the-sdk.md)) applies
+those budgets: submissions per device, and on a scarce backbone bytes per
+source host and bytes across the backbone as a whole, charged when a frame
+goes on air. A device still cannot tell whether the gateway it attaches to
+is that one, so this changes what a deployment can do, not what a device may
+assume. It also adds a credential: the gateway's backbone identity file. Its
+holder can announce as that gateway and make presence claims and re-originate
+frames for every device attached there (claims, never settlement, so the
+cost is the one above), so the daemon creates it readable by its owner only
+and it belongs off shared storage.
+
 **Mitigations specified but not enforceable from here**: the per-device and
 per-peer token-bucket budgets against backbone exhaustion are the gateway's own
 to apply, so a device cannot verify that its gateway applies them. They are
