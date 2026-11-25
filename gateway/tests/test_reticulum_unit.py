@@ -444,3 +444,44 @@ def test_one_host_may_not_fill_the_unbound_pool():
     with pytest.raises(ConfigError):
         GatewayConfig(max_unbound_sessions=8, max_sessions_per_host=8).validate()
     GatewayConfig(max_unbound_sessions=8, max_sessions_per_host=7).validate()
+
+
+async def test_a_one_packet_request_does_not_wait_behind_a_transfer():
+    """A presence update is one packet, which Reticulum sends at once. It
+    must not queue behind a frame on the lane, or a lost one would hold the
+    lane for its whole timeout and time out every frame behind it."""
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+    handed_over: list = []
+
+    class Link:
+        mdu = 400
+
+        def request(self, path, data, response_callback, failed_callback, timeout):
+            handed_over.append(path)
+            receipt = _Receipt(None)
+            receipt.response = True
+            if path == "/presence":
+                response_callback(receipt)
+            return receipt
+
+    link = Link()
+    big = asyncio.ensure_future(backbone._request(link, "/forward", {"c": b"x" * 2000}, 30))
+    await asyncio.sleep(0.05)
+    answer = await asyncio.wait_for(backbone._request(link, "/presence", {"on": [[address(1), 1]]}, 5), 1)
+    assert answer is True
+    assert handed_over == ["/forward", "/presence"]
+    big.cancel()
+    await asyncio.gather(big, return_exceptions=True)
+
+
+def test_the_one_packet_test_matches_reticulums_own():
+    from offline_gateway.reticulum import _fits_one_packet
+
+    class Link:
+        mdu = 400
+
+    assert _fits_one_packet(Link(), "/presence", {"on": [[address(1), 1]]})
+    assert not _fits_one_packet(Link(), "/forward", {"c": b"x" * 500})
+    assert not _fits_one_packet(object(), "/presence", None)  # no mdu: assume not

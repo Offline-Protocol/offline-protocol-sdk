@@ -447,6 +447,12 @@ class ReticulumBackbone(Backbone):
         """
         loop = self._loop
         assert loop is not None
+        if _fits_one_packet(link, path, data):
+            # Reticulum sends a one-packet request at once and never queues
+            # it, so it needs no turn. Made to wait anyway, a presence update
+            # whose packet was lost would hold the lane for its whole timeout
+            # and fail every frame queued behind it.
+            return await self._send_request(link, path, data, timeout)
         deadline = loop.time() + timeout
         lane = self._lanes.setdefault(id(link), asyncio.Lock())
         try:
@@ -586,6 +592,20 @@ class ReticulumBackbone(Backbone):
             return
         for address in dict.fromkeys(addresses):
             self.hooks.remote_presence_changed(address)
+
+
+def _fits_one_packet(link: Any, path: str, data: Any) -> bool:
+    """Whether Reticulum will send this request as a single packet rather
+    than as a resource: the same packing and the same test as
+    ``RNS.Link.request``."""
+    mdu = getattr(link, "mdu", None)
+    if not isinstance(mdu, int):
+        return False
+    import RNS
+    from RNS.vendor import umsgpack
+
+    path_hash = RNS.Identity.truncated_hash(path.encode("utf-8"))
+    return len(umsgpack.packb([time.time(), path_hash, data])) <= mdu
 
 
 def _cancel_transfer(receipt: Any) -> None:
