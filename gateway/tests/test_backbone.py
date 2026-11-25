@@ -338,3 +338,35 @@ async def test_a_forward_outlives_the_device_that_sent_it(pair):
     alice.close()
     got = await bob.expect("MessageReceived", timeout=2)
     assert base64.b64decode(got["content"]) == b"in flight"
+
+
+def test_a_forgotten_address_is_not_revived_by_a_late_resend():
+    """Our link to the peer dropped and its claims were forgotten. The new
+    snapshot no longer lists X, which left meanwhile. A resend of X's old
+    attach, still in flight on the peer's own link, must not bring it back."""
+    table = PresenceTable()
+    table.update("p", address(7), True, None, 2, "e")
+    table.drop_peer("p")
+    table.snapshot("p", {}, 9, "e")
+    assert table.update("p", address(7), True, None, 2, "e") == []
+    assert table.claim(address(7)) is None
+    # A change newer than the snapshot is still news.
+    assert table.update("p", address(7), True, None, 10, "e") == [address(7)]
+
+
+def test_a_snapshot_still_applies_its_own_entries():
+    table = PresenceTable()
+    table.snapshot("p", {address(1): 3}, 5, "e")
+    table.snapshot("p", {address(1): 3, address(2): 6}, 8, "e")
+    assert table.claim(address(1)).online and table.claim(address(2)).online
+
+
+def test_a_snapshot_restores_a_long_attached_device_after_a_dropped_link():
+    """X attached at 3 and is still attached. The link dropped (claims
+    forgotten) after a snapshot at 5; the next snapshot lists X at 3 again
+    and must bring it back, floor or no floor."""
+    table = PresenceTable()
+    table.snapshot("p", {address(3): 3}, 5, "e")
+    table.drop_peer("p")
+    assert table.snapshot("p", {address(3): 3}, 7, "e") == [address(3)]
+    assert table.claim(address(3)).online

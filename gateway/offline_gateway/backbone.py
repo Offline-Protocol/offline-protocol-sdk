@@ -163,17 +163,36 @@ class PresenceTable:
     def __init__(self, capacity: int = 65536, clock: Callable[[], float] = time.monotonic) -> None:
         self._claims: OrderedDict[str, dict[str, Claim]] = OrderedDict()
         self._epochs: dict[str, str] = {}
+        #: Per peer, the newest snapshot applied. A snapshot speaks for every
+        #: address, including ones it holds no claim about (forgotten when a
+        #: link dropped, or never heard of), so nothing older than it may
+        #: create a claim: a late resend of an old attach would otherwise
+        #: bring back a device that has since left.
+        self._floors: dict[str, int] = {}
         self._capacity = capacity
         self._clock = clock
 
     def update(
-        self, peer: str, address: str, online: bool, last_seen_ms: int | None, seq: int, epoch: str = ""
+        self,
+        peer: str,
+        address: str,
+        online: bool,
+        last_seen_ms: int | None,
+        seq: int,
+        epoch: str = "",
+        *,
+        _in_snapshot: bool = False,
     ) -> list[str]:
         """Records a claim unless one at least as new is held. Returns the
         addresses whose best claim changed as a result."""
         changed = self._enter_epoch(peer, epoch)
         held = self._claims.get(address, {}).get(peer)
         if held is not None and held.seq >= seq:
+            return changed
+        # A snapshot's own entries are current by definition, whatever their
+        # number: one listing a device that attached long ago must restore it
+        # after its claim was forgotten.
+        if held is None and not _in_snapshot and seq <= self._floors.get(peer, 0):
             return changed
         before = self.claim(address)
         by_peer = self._claims.pop(address, {})
@@ -201,7 +220,10 @@ class PresenceTable:
             if _differs(before, self.claim(address)):
                 changed.append(address)
         for address, seq in online.items():
-            changed += self.update(peer, address, True, None, seq, epoch)
+            changed += self.update(peer, address, True, None, seq, epoch, _in_snapshot=True)
+        # Raised after the snapshot's own entries, which are all numbered at
+        # or below it, are in.
+        self._floors[peer] = max(self._floors.get(peer, 0), snapshot_seq)
         return changed
 
     def drop_peer(self, peer: str) -> list[str]:
@@ -232,6 +254,7 @@ class PresenceTable:
         if self._epochs.get(peer) == epoch:
             return []
         self._epochs[peer] = epoch
+        self._floors.pop(peer, None)
         return self.drop_peer(peer)
 
 
