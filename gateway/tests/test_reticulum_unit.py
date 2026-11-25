@@ -258,3 +258,21 @@ async def test_a_finished_transfer_is_left_alone():
     _cancel_transfer(_Receipt(done))
     _cancel_transfer(_Receipt(None))
     assert not done.cancelled
+
+
+async def test_an_inbound_link_that_never_identifies_is_closed():
+    identity, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+
+    class Link:
+        torn = False
+
+        def teardown(self):
+            self.torn = True
+
+    anonymous, known = Link(), Link()
+    backbone._in[bytes.fromhex(peer_hex)] = known
+    backbone._drop_if_anonymous(anonymous)
+    backbone._drop_if_anonymous(known)
+    assert anonymous.torn and not known.torn

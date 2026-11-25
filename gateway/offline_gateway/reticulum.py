@@ -73,6 +73,12 @@ LINK_ESTABLISH_WAIT = 90.0
 PRESENCE_COALESCE = 2.0
 #: Seconds a request handler waits for the event loop to answer it.
 HANDLER_WAIT = 10.0
+#: Longest wait between attempts to reach a peer that stays away.
+MAX_DIAL_BACKOFF = 600.0
+#: Seconds an inbound link has to identify as a provisioned peer before it
+#: is closed. As long as a link takes to come up, since the identify is one
+#: more packet on the same path.
+IDENTIFY_WAIT = LINK_ESTABLISH_WAIT
 #: A forward's refusal reason when the caller has not identified as a
 #: provisioned peer on this link.
 NOT_A_PEER = "not a provisioned peer"
@@ -246,8 +252,13 @@ class ReticulumBackbone(Backbone):
         requests to it."""
         import RNS
 
+        # Every attempt is a path request or a link request on the air, so a
+        # peer that stays away is asked less and less often, not every few
+        # seconds forever on a duty-cycled link.
+        backoff = self.config.reconnect_interval
         while self._running:
             if self._active_out(peer) is not None:
+                backoff = self.config.reconnect_interval
                 await asyncio.sleep(self.config.reconnect_interval)
                 continue
             if not RNS.Transport.has_path(peer):
@@ -257,8 +268,9 @@ class ReticulumBackbone(Backbone):
                     await asyncio.sleep(0.5)
             identity = RNS.Identity.recall(peer)
             if identity is None:
-                logger.info("no path to peer gateway %s yet", peer.hex())
-                await asyncio.sleep(self.config.reconnect_interval)
+                logger.info("no path to peer gateway %s yet; next try in %.0f s", peer.hex(), backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, MAX_DIAL_BACKOFF)
                 continue
             destination = RNS.Destination(identity, RNS.Destination.OUT, RNS.Destination.SINGLE, APP_NAME, *ASPECTS)
             established = asyncio.Event()
@@ -275,9 +287,10 @@ class ReticulumBackbone(Backbone):
             try:
                 await asyncio.wait_for(established.wait(), LINK_ESTABLISH_WAIT)
             except asyncio.TimeoutError:
-                logger.info("link to peer gateway %s did not come up", peer.hex())
+                logger.info("link to peer gateway %s did not come up; next try in %.0f s", peer.hex(), backoff)
                 link.teardown()
-                await asyncio.sleep(self.config.reconnect_interval)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, MAX_DIAL_BACKOFF)
                 continue
             link.identify(self._identity)
             self._out[peer] = link
@@ -321,6 +334,14 @@ class ReticulumBackbone(Backbone):
 
         link.set_remote_identified_callback(on_identified)
         link.set_link_closed_callback(on_closed)
+        # Every request on a link that never identifies is refused, but the
+        # link itself would stay open for as long as its keepalives answer.
+        loop.call_soon_threadsafe(loop.call_later, IDENTIFY_WAIT, self._drop_if_anonymous, link)
+
+    def _drop_if_anonymous(self, link: Any) -> None:
+        if not any(held is link for held in self._in.values()):
+            logger.info("an inbound link never identified as a provisioned peer; closing it")
+            link.teardown()
 
     def _inbound_identified(self, link: Any, identity: Any) -> None:
         peer = self._peer_of(identity)

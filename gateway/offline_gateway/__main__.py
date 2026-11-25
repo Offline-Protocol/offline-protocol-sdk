@@ -17,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="offline-gateway",
         description="The Offline Protocol reference gateway daemon (docs/spec/gateway-contract.md).",
     )
-    parser.add_argument("--config", help="a TOML file; see gateway/example.toml")
+    parser.add_argument("--config", help="a TOML file; see gateway/examples/gateway.toml")
     parser.add_argument("--listen", help="HOST:PORT to listen on, overriding the file")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     parser.add_argument(
