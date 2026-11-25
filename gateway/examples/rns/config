@@ -1,0 +1,36 @@
+# Reticulum configuration for a gateway with an RNode (a LoRa radio running
+# RNode firmware, e.g. a Heltec LoRa32 V3 or a LilyGO T3S3 flashed with
+# `rnodeconf --autoinstall`).
+#
+# The radio parameters MUST match on every gateway that should hear each
+# other, and MUST be legal where you transmit. The values below are an EU868
+# example; check your region's frequencies, power and duty-cycle rules before
+# you key up a transmitter.
+
+[reticulum]
+  # A powered, stationary gateway is the kind of node Reticulum expects to
+  # route for others. Turn this off for a two-gateway deployment if you like.
+  enable_transport = Yes
+  # The daemon owns this Reticulum instance. If you already run rnsd on the
+  # box, point `configdir` at its configuration instead and the daemon
+  # attaches to it as a client.
+  share_instance = No
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+  [[RNode LoRa Interface]]
+    type = RNodeInterface
+    enabled = Yes
+    port = /dev/ttyUSB0
+    frequency = 867200000
+    bandwidth = 125000
+    txpower = 7
+    spreadingfactor = 8
+    codingrate = 5
+    # Airtime caps, in percent: over the last hour, and over the last 15
+    # seconds. Reticulum holds traffic back past them. Set them to what
+    # your region's duty-cycle rule allows on this sub-band.
+    airtime_limit_long = 1.0
+    airtime_limit_short = 10

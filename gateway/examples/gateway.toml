@@ -1,0 +1,39 @@
+# A gateway with a LoRa backbone. Copy this directory to the gateway box,
+# fill in `peers`, and run:
+#
+#   offline-gateway --config gateway.toml
+#
+# Relative paths are relative to this file.
+
+# Phones reach the gateway over Wi-Fi, so it listens on the box's LAN or
+# hotspot address. 127.0.0.1 would serve only an SDK running on the box.
+listen_host = "0.0.0.0"
+listen_port = 4242
+
+# Every bound below has a default sized for a scarce backbone; these are the
+# ones most deployments look at first.
+
+# Largest frame a device may hand this gateway, and the smaller bound for a
+# frame that has to cross the backbone. A frame past the second is refused
+# `frame_too_large`, which is how media stays off a LoRa-class link.
+max_frame_bytes = 262144
+max_backbone_frame_bytes = 16384
+
+# Frames per minute each device may send across the backbone, and the burst
+# it may spend at once. The burst has to cover a first contact between two
+# devices (about 20 frames each, measured), or their pairing stalls.
+backbone_per_minute = 6.0
+backbone_burst = 24.0
+
+[reticulum]
+# Reticulum's own configuration: interfaces, the RNode's port and radio.
+configdir = "rns"
+# This gateway's Reticulum identity, created on first run. Keep it: peers
+# provision the destination it derives, and whoever holds it can answer for
+# every device attached here.
+identity_path = "gateway.identity"
+# Each peer gateway's destination hash. Get one by running
+# `offline-gateway --config gateway.toml --print-destination` on that peer.
+peers = [
+  # "0123456789abcdef0123456789abcdef",
+]

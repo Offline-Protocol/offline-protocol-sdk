@@ -116,9 +116,18 @@ class GatewayConfig:
 
 
 def load(path: str | Path) -> GatewayConfig:
+    """Reads a config file. Relative paths in it are relative to the file, so
+    a gateway's directory can be moved whole."""
     with open(path, "rb") as f:
         data = tomllib.load(f)
-    return from_dict(data)
+    config = from_dict(data)
+    base = Path(path).resolve().parent
+    if config.reticulum is not None:
+        r = config.reticulum
+        r.identity_path = str(base / r.identity_path)
+        if r.configdir is not None:
+            r.configdir = str(base / r.configdir)
+    return config
 
 
 def from_dict(data: dict[str, Any]) -> GatewayConfig:

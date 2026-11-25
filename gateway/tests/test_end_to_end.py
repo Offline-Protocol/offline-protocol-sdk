@@ -114,7 +114,7 @@ async def _attached(gateway: Gateway, devices: list[Device]) -> None:
     await settle(devices, lambda: all(d.address in gateway.bound for d in devices), "attach", secs=10)
 
 
-async def _pair_and_talk(alice: Device, bob: Device) -> None:
+async def _pair_and_talk(alice: Device, bob: Device, secs: int = 30) -> None:
     devices = [alice, bob]
     alice.pm.protocol.send_connection_request(bob.address, alice.profile, alice.key_package(), None)
     await settle(
@@ -122,13 +122,14 @@ async def _pair_and_talk(alice: Device, bob: Device) -> None:
         lambda: alice.events("connection_accepted")
         and alice.pm.protocol.has_pending_key_package(bob.address),
         "pairing",
+        secs,
     )
     alice.pm.protocol.send_message(bob.address, "over the gateway", MessagePriority.HIGH, None)
 
     def received() -> list[dict]:
         return [e for e in bob.events("message_received") if e.get("content") == "over the gateway"]
 
-    await settle(devices, received, "delivery")
+    await settle(devices, received, "delivery", secs)
     assert received()[0]["sender"] == alice.address
 
 

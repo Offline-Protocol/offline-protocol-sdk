@@ -20,6 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", help="a TOML file; see gateway/example.toml")
     parser.add_argument("--listen", help="HOST:PORT to listen on, overriding the file")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    parser.add_argument(
+        "--print-destination",
+        action="store_true",
+        help="print this gateway's Reticulum destination hash (what its peers provision) and exit",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -36,6 +41,14 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError, ValueError) as exc:
         print(f"offline-gateway: {exc}", file=sys.stderr)
         return 2
+    if args.print_destination:
+        if config.reticulum is None:
+            print("offline-gateway: the config has no [reticulum] section", file=sys.stderr)
+            return 2
+        from .reticulum import destination_hash_for
+
+        print(destination_hash_for(config.reticulum.identity_path))
+        return 0
     return asyncio.run(_run(config))
 
 
@@ -44,7 +57,7 @@ async def _run(config: GatewayConfig) -> int:
     if config.reticulum is not None:
         from .reticulum import ReticulumBackbone
 
-        backbone = ReticulumBackbone(config.reticulum)
+        backbone = ReticulumBackbone(config.reticulum, max_frame_bytes=config.max_backbone_frame_bytes)
     gateway = Gateway(config, backbone=backbone)
     await gateway.start()
     stop = asyncio.Event()
