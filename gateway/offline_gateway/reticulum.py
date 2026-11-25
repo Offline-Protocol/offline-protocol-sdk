@@ -247,11 +247,24 @@ class ReticulumBackbone(Backbone):
                 self._spawn(self._send_presence(link, peer, update))
 
     async def _send_presence(self, link: Any, peer: bytes, update: dict[str, Any]) -> None:
-        try:
-            await self._request(link, PATH_PRESENCE, update, LINK_ESTABLISH_WAIT)
-        except asyncio.TimeoutError:
-            # The next snapshot, on the next link, carries what this missed.
-            logger.warning("presence update to %s went unanswered", peer.hex())
+        """Delivers one presence update, resending it while the link lasts.
+
+        A presence update is usually a single packet, which Reticulum does not
+        retransmit and a radio may lose. Lost and left alone, an attach would
+        stay unknown to the peer, which would answer recipient_unreachable for
+        a device attached here for as long as the link stays up, possibly
+        days. Resending is harmless: the numbering drops anything not newer
+        than what the peer holds. A new link re-snapshots instead.
+        """
+        delay = self.config.reconnect_interval
+        while self._active_out(peer) is link:
+            try:
+                await self._request(link, PATH_PRESENCE, update, LINK_ESTABLISH_WAIT)
+                return
+            except asyncio.TimeoutError:
+                logger.warning("presence update to %s went unanswered; resending in %.0f s", peer.hex(), delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, MAX_DIAL_BACKOFF)
 
     # -- Links -----------------------------------------------------------
 
@@ -271,7 +284,6 @@ class ReticulumBackbone(Backbone):
         backoff = self.config.reconnect_interval
         while self._running:
             if self._active_out(peer) is not None:
-                backoff = self.config.reconnect_interval
                 await asyncio.sleep(self.config.reconnect_interval)
                 continue
             if not RNS.Transport.has_path(peer):
@@ -308,9 +320,18 @@ class ReticulumBackbone(Backbone):
             link.identify(self._identity)
             self._out[peer] = link
             logger.info("backbone link to %s established", peer.hex())
-            await self._exchange_snapshots(link, peer)
+            if await self._exchange_snapshots(link, peer):
+                backoff = self.config.reconnect_interval
+            else:
+                # A peer that takes the link and answers nothing, most often
+                # one that has not provisioned this gateway yet, would
+                # otherwise be redialled at once, every time, indefinitely:
+                # half a dozen packets on air per attempt.
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, MAX_DIAL_BACKOFF)
 
-    async def _exchange_snapshots(self, link: Any, peer: bytes) -> None:
+    async def _exchange_snapshots(self, link: Any, peer: bytes) -> bool:
+        """Swaps snapshots on a new link. Returns whether the peer answered."""
         assert self.hooks is not None
         mine = self._snapshot_message()
         try:
@@ -323,9 +344,10 @@ class ReticulumBackbone(Backbone):
             # opens a fresh one that identifies again.
             logger.warning("snapshot exchange with %s went unanswered; redialling", peer.hex())
             link.teardown()
-            return
+            return False
         if isinstance(theirs, dict):
             self._apply(peer, {**theirs, "snap": True, "off": []})
+        return True
 
     def _out_link_closed(self, peer: bytes, link: Any) -> None:
         self._lanes.pop(id(link), None)

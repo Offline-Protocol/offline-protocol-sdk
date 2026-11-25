@@ -339,3 +339,80 @@ async def test_a_frame_queued_too_long_is_a_backbone_timeout():
     backbone._request = queued  # type: ignore[method-assign]
     result, reason = await backbone.forward(BackboneFrame(address(2), address(1), b"x", "m", None), 5)
     assert result is ForwardResult.TIMEOUT and "queued" in reason
+
+
+async def test_a_lost_presence_update_is_resent_while_the_link_lasts():
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone.config.reconnect_interval = 0.01
+    backbone._loop = asyncio.get_running_loop()
+    link = object()
+    active = {"link": link}
+    backbone._active_out = lambda peer: active["link"]  # type: ignore[method-assign]
+    attempts: list = []
+
+    async def lossy(l, path, data, timeout):
+        attempts.append(data)
+        if len(attempts) < 3:
+            raise asyncio.TimeoutError()
+        return True
+
+    backbone._request = lossy  # type: ignore[method-assign]
+    await backbone._send_presence(link, bytes.fromhex(peer_hex), {"on": []})
+    assert len(attempts) == 3
+
+    # A link that has gone is not retried on; the next one re-snapshots.
+    attempts.clear()
+
+    async def silent(l, path, data, timeout):
+        attempts.append(data)
+        active["link"] = None
+        raise asyncio.TimeoutError()
+
+    backbone._request = silent  # type: ignore[method-assign]
+    await backbone._send_presence(link, bytes.fromhex(peer_hex), {"on": []})
+    assert len(attempts) == 1
+
+
+async def test_a_peer_that_never_answers_is_redialled_less_and_less_often(monkeypatch):
+    """One-sided provisioning: the peer takes the link and refuses everything.
+    Without backoff that is a redial, and half a dozen packets, every time."""
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone.config.reconnect_interval = 0.01
+    backbone._identity = RNS.Identity()
+    backbone._loop = asyncio.get_running_loop()
+    backbone._running = True
+    dials: list[float] = []
+
+    class FakeLink:
+        def __init__(self, destination, established_callback, closed_callback):
+            dials.append(asyncio.get_running_loop().time())
+            self.status = RNS.Link.ACTIVE
+            established_callback(self)
+
+        def identify(self, identity):
+            pass
+
+        def teardown(self):
+            self.status = RNS.Link.CLOSED
+
+    monkeypatch.setattr(RNS.Transport, "has_path", staticmethod(lambda h: True))
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(lambda h: object()))
+    monkeypatch.setattr(RNS, "Destination", type("D", (), {"OUT": 0, "SINGLE": 0, "__init__": lambda self, *a: None}))
+    monkeypatch.setattr(RNS, "Link", type("L", (FakeLink,), {"ACTIVE": RNS.Link.ACTIVE, "CLOSED": RNS.Link.CLOSED}))
+
+    async def refused(link, peer):
+        link.teardown()
+        return False
+
+    backbone._exchange_snapshots = refused  # type: ignore[method-assign]
+    task = asyncio.ensure_future(backbone._dial_loop(bytes.fromhex(peer_hex)))
+    await asyncio.sleep(0.4)
+    backbone._running = False
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    # 0.01, 0.02, 0.04, 0.08, 0.16 s apart: a handful, not hundreds.
+    assert 3 <= len(dials) <= 7
+    gaps = [b - a for a, b in zip(dials, dials[1:])]
+    assert gaps == sorted(gaps)
