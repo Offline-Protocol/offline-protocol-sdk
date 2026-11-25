@@ -367,16 +367,24 @@ class ReticulumBackbone(Backbone):
             else:
                 future.set_result(value)
 
+        def failed(r: Any) -> None:
+            _cancel_transfer(r)
+            loop.call_soon_threadsafe(settle, None, True)
+
         receipt = link.request(
             path,
             data=data,
             response_callback=lambda r: loop.call_soon_threadsafe(settle, r.response, False),
-            failed_callback=lambda r: loop.call_soon_threadsafe(settle, None, True),
+            failed_callback=failed,
             timeout=timeout,
         )
         if receipt is False:
             raise asyncio.TimeoutError()
-        return await asyncio.wait_for(future, timeout + 1)
+        try:
+            return await asyncio.wait_for(future, timeout + 1)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _cancel_transfer(receipt)
+            raise
 
     def _spawn(self, coro: Any) -> None:
         task = asyncio.ensure_future(coro)
@@ -453,6 +461,25 @@ class ReticulumBackbone(Backbone):
             return
         for address in dict.fromkeys(addresses):
             self.hooks.remote_presence_changed(address)
+
+
+def _cancel_transfer(receipt: Any) -> None:
+    """Stops the resource a request travels as, if it is still moving.
+
+    Reticulum's own request timeout marks the receipt failed and leaves the
+    resource transferring. A frame the device has already been told failed
+    would keep spending airtime, and the device's retry would start a second
+    transfer of it beside the first: on a scarce link, timeouts would breed
+    the traffic that causes them.
+    """
+    import RNS
+
+    resource = getattr(receipt, "resource", None)
+    if resource is not None and resource.status < RNS.Resource.COMPLETE:
+        try:
+            resource.cancel()
+        except Exception:  # pragma: no cover - best effort on a dying link
+            logger.debug("cancelling a backbone transfer failed", exc_info=True)
 
 
 def _load_identity(RNS: Any, path: str) -> Any:

@@ -179,3 +179,60 @@ async def test_a_link_the_peer_cannot_attribute_is_torn_down_for_a_redial():
     result, _ = await backbone.forward(BackboneFrame(address(2), address(1), b"x", "m", None), 5)
     assert result is ForwardResult.TIMEOUT
     assert link.torn
+
+
+class _Resource:
+    def __init__(self, status):
+        self.status = status
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class _Receipt:
+    def __init__(self, resource):
+        self.resource = resource
+
+
+async def test_a_request_that_times_out_cancels_its_transfer():
+    """A frame the device was told failed must stop spending airtime, or its
+    retry runs a second transfer beside the first."""
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+    resource = _Resource(RNS.Resource.TRANSFERRING)
+
+    class SilentLink:
+        def request(self, path, data, response_callback, failed_callback, timeout):
+            return _Receipt(resource)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await backbone._request(SilentLink(), "/forward", {}, 0.05)
+    assert resource.cancelled
+
+
+async def test_reticulums_own_timeout_also_cancels_the_transfer():
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+    resource = _Resource(RNS.Resource.TRANSFERRING)
+
+    class FailingLink:
+        def request(self, path, data, response_callback, failed_callback, timeout):
+            receipt = _Receipt(resource)
+            failed_callback(receipt)
+            return receipt
+
+    with pytest.raises(asyncio.TimeoutError):
+        await backbone._request(FailingLink(), "/forward", {}, 5)
+    assert resource.cancelled
+
+
+async def test_a_finished_transfer_is_left_alone():
+    from offline_gateway.reticulum import _cancel_transfer
+
+    done = _Resource(RNS.Resource.COMPLETE)
+    _cancel_transfer(_Receipt(done))
+    _cancel_transfer(_Receipt(None))
+    assert not done.cancelled
