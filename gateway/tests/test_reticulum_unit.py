@@ -217,7 +217,10 @@ class _Receipt:
         self.resource = resource
 
 
-async def test_a_request_that_times_out_cancels_its_transfer():
+async def test_a_request_that_times_out_cancels_its_transfer(monkeypatch):
+    import offline_gateway.reticulum as module
+
+    monkeypatch.setattr(module, "MIN_TRANSFER_WINDOW", 0.0)
     """A frame the device was told failed must stop spending airtime, or its
     retry runs a second transfer beside the first."""
     _, peer_hex = _peer()
@@ -234,7 +237,10 @@ async def test_a_request_that_times_out_cancels_its_transfer():
     assert resource.cancelled
 
 
-async def test_reticulums_own_timeout_also_cancels_the_transfer():
+async def test_reticulums_own_timeout_also_cancels_the_transfer(monkeypatch):
+    import offline_gateway.reticulum as module
+
+    monkeypatch.setattr(module, "MIN_TRANSFER_WINDOW", 0.0)
     _, peer_hex = _peer()
     backbone, _ = _backbone([peer_hex])
     backbone._loop = asyncio.get_running_loop()
@@ -276,3 +282,60 @@ async def test_an_inbound_link_that_never_identifies_is_closed():
     backbone._drop_if_anonymous(anonymous)
     backbone._drop_if_anonymous(known)
     assert anonymous.torn and not known.torn
+
+
+async def test_requests_on_a_link_go_one_at_a_time_and_a_late_one_never_reaches_reticulum(monkeypatch):
+    """Reticulum parks a second resource on a link and cannot withdraw it.
+    The daemon holds it instead: a frame whose time runs out before its turn
+    is refused without ever being handed over."""
+    import offline_gateway.reticulum as module
+    from offline_gateway.reticulum import QueuedTooLong
+
+    monkeypatch.setattr(module, "MIN_TRANSFER_WINDOW", 0.0)
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+    handed_over: list[str] = []
+    answers: list = []
+
+    class OneAtATimeLink:
+        def request(self, path, data, response_callback, failed_callback, timeout):
+            handed_over.append(data)
+            receipt = _Receipt(_Resource(RNS.Resource.TRANSFERRING))
+            receipt.response = "ok"
+            answers.append(lambda: response_callback(receipt))
+            return receipt
+
+    link = OneAtATimeLink()
+    first = asyncio.ensure_future(backbone._request(link, "/forward", "first", 5))
+    await asyncio.sleep(0.05)
+    with pytest.raises(QueuedTooLong):
+        await backbone._request(link, "/forward", "late", 0.1)
+    assert handed_over == ["first"]
+
+    # Once the first is answered the lane frees, and the next one goes.
+    answers[0]()
+    assert await first == "ok"
+    second = asyncio.ensure_future(backbone._request(link, "/forward", "second", 5))
+    await asyncio.sleep(0.05)
+    assert handed_over == ["first", "second"]
+    answers[1]()
+    assert await second == "ok"
+
+
+async def test_a_frame_queued_too_long_is_a_backbone_timeout():
+    from offline_gateway.backbone import BackboneFrame
+    from offline_gateway.reticulum import QueuedTooLong
+
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+    backbone.table.update(peer_hex, address(2), True, None, 1)
+    backbone._active_out = lambda peer: object()  # type: ignore[method-assign]
+
+    async def queued(link, path, data, timeout):
+        raise QueuedTooLong()
+
+    backbone._request = queued  # type: ignore[method-assign]
+    result, reason = await backbone.forward(BackboneFrame(address(2), address(1), b"x", "m", None), 5)
+    assert result is ForwardResult.TIMEOUT and "queued" in reason

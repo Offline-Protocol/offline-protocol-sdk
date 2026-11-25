@@ -73,6 +73,10 @@ LINK_ESTABLISH_WAIT = 90.0
 PRESENCE_COALESCE = 2.0
 #: Seconds a request handler waits for the event loop to answer it.
 HANDLER_WAIT = 10.0
+#: Seconds a request must still have when its turn on a link comes, or it is
+#: refused unsent: a frame handed to the radio with less than this cannot
+#: be answered in time and would only spend airtime.
+MIN_TRANSFER_WINDOW = 5.0
 #: Longest wait between attempts to reach a peer that stays away.
 MAX_DIAL_BACKOFF = 600.0
 #: Seconds an inbound link has to identify as a provisioned peer before it
@@ -82,6 +86,11 @@ IDENTIFY_WAIT = LINK_ESTABLISH_WAIT
 #: A forward's refusal reason when the caller has not identified as a
 #: provisioned peer on this link.
 NOT_A_PEER = "not a provisioned peer"
+
+
+class QueuedTooLong(asyncio.TimeoutError):
+    """A request's time ran out while it waited for its turn on a link. It
+    never reached Reticulum, so nothing of it is on air."""
 
 
 class ReticulumBackbone(Backbone):
@@ -103,6 +112,8 @@ class ReticulumBackbone(Backbone):
         #: Links peers dialled to this gateway, by the peer they identified as.
         self._in: dict[bytes, Any] = {}
         self._tasks: list[asyncio.Task[Any]] = []
+        #: One lane per outbound link; see :meth:`_request`.
+        self._lanes: dict[int, asyncio.Lock] = {}
         self._pending_on: dict[str, int] = {}
         self._pending_off: dict[str, tuple[int | None, int]] = {}
         self._flush: asyncio.TimerHandle | None = None
@@ -190,6 +201,8 @@ class ReticulumBackbone(Backbone):
         }
         try:
             response = await self._request(link, PATH_FORWARD, request, timeout)
+        except QueuedTooLong:
+            return ForwardResult.TIMEOUT, "queued behind other frames to the peer gateway"
         except asyncio.TimeoutError:
             return ForwardResult.TIMEOUT, "no answer from the peer gateway"
         if not isinstance(response, dict):
@@ -315,6 +328,7 @@ class ReticulumBackbone(Backbone):
             self._apply(peer, {**theirs, "snap": True, "off": []})
 
     def _out_link_closed(self, peer: bytes, link: Any) -> None:
+        self._lanes.pop(id(link), None)
         if self._out.get(peer) is link:
             del self._out[peer]
             logger.info("backbone link to %s closed", peer.hex())
@@ -382,6 +396,33 @@ class ReticulumBackbone(Backbone):
     # -- Requests --------------------------------------------------------
 
     async def _request(self, link: Any, path: str, data: Any, timeout: float) -> Any:
+        """One request on ``link``, answered within ``timeout`` seconds.
+
+        Requests on a link go one at a time. Reticulum sends one outgoing
+        resource per link and parks the rest in a loop that never looks at
+        whether they were cancelled, so a request queued there cannot be
+        withdrawn: cancelled or not, it goes on air once the link frees up.
+        Queued here instead, a request whose time runs out before its turn
+        is refused without ever reaching Reticulum, and one that does reach
+        it is the only transfer on the link, which a cancel actually stops.
+        """
+        loop = self._loop
+        assert loop is not None
+        deadline = loop.time() + timeout
+        lane = self._lanes.setdefault(id(link), asyncio.Lock())
+        try:
+            await asyncio.wait_for(lane.acquire(), timeout)
+        except asyncio.TimeoutError:
+            raise QueuedTooLong() from None
+        try:
+            remaining = deadline - loop.time()
+            if remaining < MIN_TRANSFER_WINDOW:
+                raise QueuedTooLong()
+            return await self._send_request(link, path, data, remaining)
+        finally:
+            lane.release()
+
+    async def _send_request(self, link: Any, path: str, data: Any, timeout: float) -> Any:
         loop = self._loop
         assert loop is not None
         future: asyncio.Future[Any] = loop.create_future()
