@@ -270,12 +270,29 @@ class ReticulumBackbone(Backbone):
 
     async def _announce_loop(self) -> None:
         while self._running:
-            self._destination.announce()
+            try:
+                self._destination.announce()
+            except Exception:
+                logger.exception("announcing this gateway's destination failed; trying again later")
             await asyncio.sleep(self.config.announce_interval)
 
     async def _dial_loop(self, peer: bytes) -> None:
-        """Keeps one outbound link to ``peer`` open, for this gateway's own
-        requests to it."""
+        """Keeps one outbound link to ``peer`` open, and keeps doing so.
+
+        An unexpected error from Reticulum would otherwise end the task, and
+        with it every attempt to reach this peer, silently, for the life of
+        the process.
+        """
+        while self._running:
+            try:
+                await self._dial(peer)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("dialling peer gateway %s failed; starting over", peer.hex())
+                await asyncio.sleep(MAX_DIAL_BACKOFF / 10)
+
+    async def _dial(self, peer: bytes) -> None:
         import RNS
 
         # Every attempt is a path request or a link request on the air, so a

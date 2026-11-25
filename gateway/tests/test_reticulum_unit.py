@@ -416,3 +416,31 @@ async def test_a_peer_that_never_answers_is_redialled_less_and_less_often(monkey
     assert 3 <= len(dials) <= 7
     gaps = [b - a for a, b in zip(dials, dials[1:])]
     assert gaps == sorted(gaps)
+
+
+async def test_an_unexpected_error_does_not_end_the_dial_loop(monkeypatch):
+    import offline_gateway.reticulum as module
+
+    monkeypatch.setattr(module, "MAX_DIAL_BACKOFF", 0.01)
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._running = True
+    calls: list[int] = []
+
+    async def flaky(peer):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("reticulum had a bad day")
+        backbone._running = False
+
+    backbone._dial = flaky  # type: ignore[method-assign]
+    await asyncio.wait_for(backbone._dial_loop(bytes.fromhex(peer_hex)), 2)
+    assert len(calls) == 2
+
+
+def test_one_host_may_not_fill_the_unbound_pool():
+    from offline_gateway import ConfigError, GatewayConfig
+
+    with pytest.raises(ConfigError):
+        GatewayConfig(max_unbound_sessions=8, max_sessions_per_host=8).validate()
+    GatewayConfig(max_unbound_sessions=8, max_sessions_per_host=7).validate()

@@ -306,9 +306,12 @@ async def test_idle_sockets_cannot_lock_a_device_out():
     """Anyone on the network can open sockets that never attach. Past the
     unbound pool, the oldest of them is evicted, and a device still attaches."""
     gw = Gateway(
-        GatewayConfig(listen_port=0, attach_grace=0, max_sessions=6, max_unbound_sessions=3, max_sessions_per_host=64),
+        GatewayConfig(listen_port=0, attach_grace=0, max_sessions=6, max_unbound_sessions=3, max_sessions_per_host=2),
         verifier=fake_verify,
     )
+    # Every test client is 127.0.0.1, so the per-host cap is lifted past
+    # validation to exercise the unbound pool from one host.
+    gw.config.max_sessions_per_host = 64
     port = await gw.start()
     try:
         idle = [await Client.connect(port) for _ in range(10)]
@@ -324,9 +327,11 @@ async def test_idle_sockets_cannot_lock_a_device_out():
 
 async def test_bound_devices_are_never_evicted_for_newcomers():
     gw = Gateway(
-        GatewayConfig(listen_port=0, attach_grace=0, max_sessions=2, max_unbound_sessions=1, max_sessions_per_host=64),
+        GatewayConfig(listen_port=0, attach_grace=0, max_sessions=2, max_unbound_sessions=2, max_sessions_per_host=1),
         verifier=fake_verify,
     )
+    gw.config.max_sessions_per_host = 64
+    gw.config.max_unbound_sessions = 1
     port = await gw.start()
     try:
         a = await Client.connect(port)

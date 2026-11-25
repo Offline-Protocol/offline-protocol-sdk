@@ -120,8 +120,11 @@ class GatewayConfig:
             )
         if not 1 <= self.max_unbound_sessions <= self.max_sessions:
             raise ConfigError("max_unbound_sessions must be 1 to max_sessions")
-        if self.max_sessions_per_host < 1:
-            raise ConfigError("max_sessions_per_host must be at least 1")
+        if not 1 <= self.max_sessions_per_host < self.max_unbound_sessions:
+            # Equal or larger, one host can fill the unbound pool alone and,
+            # by reconnecting, keep evicting every device partway through its
+            # attach.
+            raise ConfigError("max_sessions_per_host must be at least 1 and below max_unbound_sessions")
         if self.max_frame_bytes <= 0 or self.max_backbone_frame_bytes <= 0:
             raise ConfigError("frame limits must be positive")
         # A MessageReceived carries the frame base64-encoded inside JSON, and
