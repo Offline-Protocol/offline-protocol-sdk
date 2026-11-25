@@ -426,3 +426,28 @@ async def test_the_egress_budget_is_shared_by_every_peer():
     finally:
         for gw in gws:
             await gw.stop()
+
+
+async def test_refused_media_does_not_spend_the_devices_budget():
+    """Every chunk of a media transfer, and every retry of it, meets the
+    scarce bound. Charged, they would leave the device no budget for the
+    messages it can send."""
+    gws = await _scarce_pair(
+        max_backbone_frame_bytes=100,
+        backbone_egress_burst_bytes=1000,
+        host_backbone_burst_bytes=1000,
+        device_per_minute=0.0001,
+        device_burst=2,
+    )
+    try:
+        alice, bob = await Client.connect(gws[0].port), await Client.connect(gws[1].port)
+        await alice.attach(address(1))
+        await bob.attach(address(2))
+        for i in range(5):
+            await alice.submit(address(2), b"m" * 500, message_id=f"chunk{i}")
+            assert (await alice.expect("DeliveryError"))["reason"] == "frame_too_large"
+        await alice.submit(address(2), b"hello", message_id="text")
+        assert (await alice.expect("MessageSent"))["message_id"] == "text"
+    finally:
+        for gw in gws:
+            await gw.stop()

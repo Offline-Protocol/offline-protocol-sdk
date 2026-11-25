@@ -484,7 +484,9 @@ class ReticulumBackbone(Backbone):
         """
         loop = self._loop
         assert loop is not None
-        if _fits_one_packet(link, path, data):
+        size = _packed_request_size(path, data)
+        mdu = getattr(link, "mdu", None)
+        if isinstance(mdu, int) and size <= mdu:
             # Reticulum sends a one-packet request at once and never queues
             # it, so it needs no turn. Made to wait anyway, a presence update
             # whose packet was lost would hold the lane for its whole timeout
@@ -500,7 +502,7 @@ class ReticulumBackbone(Backbone):
             raise QueuedTooLong() from None
         try:
             remaining = deadline - loop.time()
-            if remaining < MIN_TRANSFER_WINDOW:
+            if remaining < _transfer_window(link, size):
                 raise QueuedTooLong()
             # Charged here, at the moment it goes to the radio, and not when
             # it was submitted: a frame that waited out its time above was
@@ -654,18 +656,38 @@ def max_request_bytes(max_frame_bytes: int, max_sessions: int) -> int:
     return max(max_frame_bytes + 1024, snapshot)
 
 
-def _fits_one_packet(link: Any, path: str, data: Any) -> bool:
-    """Whether Reticulum will send this request as a single packet rather
-    than as a resource: the same packing and the same test as
-    ``RNS.Link.request``."""
-    mdu = getattr(link, "mdu", None)
-    if not isinstance(mdu, int):
-        return False
+def _packed_request_size(path: str, data: Any) -> int:
+    """The size of a request as ``RNS.Link.request`` packs it, which is what
+    it compares with the link's MDU to choose a packet or a resource."""
     import RNS
     from RNS.vendor import umsgpack
 
     path_hash = RNS.Identity.truncated_hash(path.encode("utf-8"))
-    return len(umsgpack.packb([time.time(), path_hash, data])) <= mdu
+    return len(umsgpack.packb([time.time(), path_hash, data]))
+
+
+def _fits_one_packet(link: Any, path: str, data: Any) -> bool:
+    """Whether Reticulum will send this request as a single packet."""
+    mdu = getattr(link, "mdu", None)
+    return isinstance(mdu, int) and _packed_request_size(path, data) <= mdu
+
+
+def _transfer_window(link: Any, size: int) -> float:
+    """Seconds a request of ``size`` bytes must still have when its turn
+    comes. At least ``MIN_TRANSFER_WINDOW``, and for a link that has carried
+    a resource, the time this one would take at that rate with half again as
+    margin: a frame put on air with less than that cannot finish, and only
+    spends airtime before it is cancelled."""
+    rate = None
+    getter = getattr(link, "get_expected_rate", None)
+    if callable(getter):
+        try:
+            rate = getter()
+        except Exception:  # pragma: no cover - a link going away
+            rate = None
+    if isinstance(rate, (int, float)) and rate > 0:
+        return max(MIN_TRANSFER_WINDOW, size * 8 / rate * 1.5)
+    return MIN_TRANSFER_WINDOW
 
 
 def _cancel_transfer(receipt: Any) -> None:
@@ -696,9 +718,15 @@ def _load_identity(RNS: Any, path: str) -> Any:
     identity = RNS.Identity()
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
-    identity.to_file(path)
     # The private key of this gateway's backbone identity: whoever holds it
-    # can answer for every device attached here.
+    # can answer for every device attached here. Written under a umask that
+    # leaves it private from the first byte, not chmodded after a window in
+    # which the default umask may have left it readable.
+    previous = os.umask(0o077)
+    try:
+        identity.to_file(path)
+    finally:
+        os.umask(previous)
     os.chmod(path, 0o600)
     logger.info("created a new gateway identity at %s", path)
     return identity

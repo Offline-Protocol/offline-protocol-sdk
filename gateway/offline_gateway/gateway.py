@@ -461,19 +461,36 @@ class Gateway:
         if len(content) > self.config.max_frame_bytes:
             session.send(wire.delivery_error(message_id, recipient, wire.FRAME_TOO_LARGE))
             return
+        reply_to = wire.message_id_field(frame.get("reply_to_msg"))
+        target = self.bound.get(recipient)
+        local = target is not None and target.address is not None
+        claim = self.backbone.claim(recipient) if self.backbone is not None else None
+
+        # The scarce class's bound, which is also how media stays off it, is
+        # applied before the device is charged: a device sending media hits
+        # it on every chunk and every retry, and charging those would leave it
+        # no budget for the messages it can send. A broad backbone carries
+        # whatever the device link accepted.
+        if (
+            not local
+            and self.backbone is not None
+            and self.backbone.rate_class != "broad"
+            and claim is not None
+            and claim.online
+            and len(content) > self.config.max_backbone_frame_bytes
+        ):
+            session.send(wire.delivery_error(message_id, recipient, wire.FRAME_TOO_LARGE))
+            return
         if not self._device_budget.take(session.address):
             session.send(wire.delivery_error(message_id, recipient, wire.BUDGET_EXCEEDED))
             return
-        reply_to = wire.message_id_field(frame.get("reply_to_msg"))
 
-        target = self.bound.get(recipient)
-        if target is not None and target.address is not None:
+        if local:
             delivered = target.send(wire.message_received(session.address, content, message_id, reply_to))
             if delivered:
                 session.send(wire.message_sent(message_id, recipient))
                 return
 
-        claim = self.backbone.claim(recipient) if self.backbone is not None else None
         if self.backbone is None or claim is None or not claim.online:
             where = "this gateway" if self.backbone is None else "this gateway or its peers"
             session.send(
@@ -482,17 +499,12 @@ class Gateway:
                 )
             )
             return
-        # The scarce class's bound, which is also how media stays off it. A
-        # broad backbone carries whatever the device link accepted.
-        if self.backbone.rate_class != "broad" and len(content) > self.config.max_backbone_frame_bytes:
-            session.send(wire.delivery_error(message_id, recipient, wire.FRAME_TOO_LARGE))
-            return
         # The scarce class's own budgets, in bytes. A broad backbone carries
         # what the device budget above already admitted. Two of them, because
-        # the scarce thing is the airtime toward one peer, which every device
-        # here shares: the per-host budget, which validation keeps below the
-        # per-peer one, stops one device taking all of it, and the per-peer
-        # budget stops all of them together asking for more than the link
+        # the scarce thing is this gateway's airtime, which every device and
+        # every peer share: the per-host budget, which validation keeps below
+        # the egress one, stops one device taking all of it, and the egress
+        # budget stops all of them together asking for more than the radio
         # carries. Both are checked before either is charged, so a refusal
         # costs the device nothing.
         #

@@ -572,3 +572,35 @@ def test_a_full_gateways_snapshot_fits_the_request_limit():
         assert len(packed) <= limit, (sessions, len(packed), limit)
     # And a frame at the bound still fits.
     assert config.max_backbone_frame_bytes + 1024 <= limit
+
+
+def test_a_large_frame_needs_more_time_left_on_a_slow_link():
+    from offline_gateway.reticulum import MIN_TRANSFER_WINDOW, _transfer_window
+
+    class Slow:
+        def get_expected_rate(self):
+            return 1000.0  # bits a second
+
+    class Unmeasured:
+        def get_expected_rate(self):
+            return None
+
+    assert _transfer_window(Slow(), 6000) == pytest.approx(6000 * 8 / 1000 * 1.5)
+    assert _transfer_window(Slow(), 100) == MIN_TRANSFER_WINDOW
+    assert _transfer_window(Unmeasured(), 6000) == MIN_TRANSFER_WINDOW
+    assert _transfer_window(object(), 6000) == MIN_TRANSFER_WINDOW
+
+
+def test_a_new_gateway_identity_is_private_from_the_start(tmp_path):
+    import os
+    import stat
+
+    from offline_gateway.reticulum import _load_identity
+
+    previous = os.umask(0o022)
+    try:
+        path = tmp_path / "gw.identity"
+        _load_identity(RNS, str(path))
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
