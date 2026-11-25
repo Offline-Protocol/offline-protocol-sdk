@@ -554,6 +554,10 @@ with **zero** gateways is a state the policy MUST be able to surface rather than
 hide: absent facts mean today's behaviour (invariant 3), which is exactly what a
 zone with no gateway should experience.
 
+The reference gateway is [`gateway/`](../../gateway/README.md)
+([ADR 0040](../adr/0040-a-reference-gateway-ships-with-the-sdk.md)), with
+Reticulum as its backbone.
+
 Operational guidance for anyone deploying: install two. One gateway per zone is
 a chokepoint, and nothing in this contract prevents a second.
 

@@ -50,6 +50,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0037](0037-an-applications-users-are-visible-only-to-that-application.md) | An application's users are visible only to that application | Proposed |
 | [0038](0038-a-fast-link-is-offered-inside-the-session.md) | Two devices that meet over Bluetooth bring up Wi-Fi through their session | Accepted |
 | [0039](0039-a-browser-dials-a-native-device-from-a-code.md) | A browser dials a native device on its network from a code the device shows | Proposed |
+| [0040](0040-a-reference-gateway-ships-with-the-sdk.md) | A reference gateway ships with the SDK | Proposed |
 
 ## Format
 

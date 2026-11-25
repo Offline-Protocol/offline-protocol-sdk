@@ -18,6 +18,23 @@ Questions about a release, or about upgrading to one? Ask in the
 
 ### Added
 
+- **A reference gateway daemon, and with it LoRa**
+  ([ADR 0040](docs/adr/0040-a-reference-gateway-ships-with-the-sdk.md)).
+  The `reticulum` transport's device half has spoken the
+  [gateway contract](docs/spec/gateway-contract.md) since 0.25, but nothing in
+  the SDK answered it, so the transport never became available.
+  [`gateway/`](gateway/README.md) is the other half, in Python: devices attach
+  over local IP with a proof it checks through
+  `verify_gateway_address_proof`, and every submission gets exactly one
+  verdict. With a `[reticulum]` section it also carries frames and presence to
+  provisioned peer gateways over Reticulum, which is how an RNode's LoRa radio
+  reaches the SDK. No device-side change is needed: enable `reticulum` and
+  point its daemon address at the gateway. Two real engines pair over MLS and
+  exchange a message across two daemon processes joined by a Reticulum
+  backbone in its tests; it has not yet been run over radios. Expect a first
+  contact between two devices to cost about 20 backbone frames each, which
+  over LoRa is minutes, and a new gateway to be unreachable while Reticulum
+  mints its one-time announce stamp.
 - **A gateway daemon can verify a device's attach proof without building
   it: `verify_gateway_address_proof(address, public_key, signature,
   challenge)`**, instance-less, in every binding and over the C API's
