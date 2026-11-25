@@ -149,3 +149,33 @@ def test_the_example_config_loads():
     assert config.reticulum is not None
     assert config.reticulum.configdir.endswith("examples/rns")
     assert config.reticulum.identity_path.endswith("examples/gateway.identity")
+
+
+async def test_a_link_the_peer_cannot_attribute_is_torn_down_for_a_redial():
+    """A lost identify packet leaves a link every request on which is
+    refused. A forward refused for that reason drops the link rather than
+    failing every frame on it from then on."""
+    from offline_gateway.backbone import BackboneFrame
+    from offline_gateway.reticulum import NOT_A_PEER
+
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+    backbone.table.update(peer_hex, address(2), True, None)
+
+    class Link:
+        torn = False
+
+        def teardown(self):
+            self.torn = True
+
+    link = Link()
+    backbone._active_out = lambda peer: link  # type: ignore[method-assign]
+
+    async def refused(link, path, data, timeout):
+        return {"o": "refused", "w": NOT_A_PEER}
+
+    backbone._request = refused  # type: ignore[method-assign]
+    result, _ = await backbone.forward(BackboneFrame(address(2), address(1), b"x", "m", None), 5)
+    assert result is ForwardResult.TIMEOUT
+    assert link.torn

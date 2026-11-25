@@ -68,6 +68,9 @@ LINK_ESTABLISH_WAIT = 90.0
 PRESENCE_COALESCE = 2.0
 #: Seconds a request handler waits for the event loop to answer it.
 HANDLER_WAIT = 10.0
+#: A forward's refusal reason when the caller has not identified as a
+#: provisioned peer on this link.
+NOT_A_PEER = "not a provisioned peer"
 
 
 class ReticulumBackbone(Backbone):
@@ -182,6 +185,10 @@ class ReticulumBackbone(Backbone):
             return ForwardResult.TIMEOUT, "unreadable answer from the peer gateway"
         outcome = response.get("o")
         reason = response.get("w") if isinstance(response.get("w"), str) else ""
+        if outcome == ForwardResult.REFUSED.value and reason == NOT_A_PEER:
+            # The peer does not know who this link is: the identify was lost.
+            link.teardown()
+            return ForwardResult.TIMEOUT, "the peer gateway did not recognise this link; redialling"
         for result in ForwardResult:
             if result.value == outcome and result is not ForwardResult.TIMEOUT:
                 return result, reason
@@ -277,7 +284,12 @@ class ReticulumBackbone(Backbone):
             await self._request(link, PATH_PRESENCE, mine, LINK_ESTABLISH_WAIT)
             theirs = await self._request(link, PATH_SNAPSHOT, None, LINK_ESTABLISH_WAIT)
         except asyncio.TimeoutError:
-            logger.warning("snapshot exchange with %s went unanswered", peer.hex())
+            # Most likely the identify packet was lost, and the peer refuses
+            # every request on a link it cannot attribute. Nothing on this
+            # link would ever be answered, so it goes, and the dial loop
+            # opens a fresh one that identifies again.
+            logger.warning("snapshot exchange with %s went unanswered; redialling", peer.hex())
+            link.teardown()
             return
         if isinstance(theirs, list):
             online = [a for a in theirs if wire.address_field(a) is not None]
@@ -377,7 +389,7 @@ class ReticulumBackbone(Backbone):
     def _handle_forward(self, path, data, request_id, link_id, remote_identity, requested_at):
         peer = self._peer_of(remote_identity)
         if peer is None:
-            return {"o": ForwardResult.REFUSED.value, "w": "not a provisioned peer"}
+            return {"o": ForwardResult.REFUSED.value, "w": NOT_A_PEER}
         frame = _frame_from(data)
         if frame is None:
             return {"o": ForwardResult.REFUSED.value, "w": wire.MALFORMED_REQUEST}
