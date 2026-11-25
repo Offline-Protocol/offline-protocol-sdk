@@ -11751,6 +11751,17 @@ public func runStorageConformance(storage: ProtocolStateStorageProvider) -> Stri
     )
 })
 }
+public func verifyGatewayAddressProof(address: String, publicKey: [UInt8], signature: [UInt8], challenge: [UInt8])throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_func_verify_gateway_address_proof(
+        FfiConverterString.lower(address),
+        FfiConverterSequenceUInt8.lower(publicKey),
+        FfiConverterSequenceUInt8.lower(signature),
+        FfiConverterSequenceUInt8.lower(challenge),uniffiCallStatus
+    )
+})
+}
 public func verifyIdentityAssertion(assertion: [UInt8])throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
         uniffiCallStatus in
@@ -11782,6 +11793,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_func_verify_gateway_address_proof() != 21016) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 61480) {

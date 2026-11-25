@@ -186,6 +186,7 @@ EXPOSED: frozenset[str] = frozenset(
         "derive_address",
         "parse_invite",
         "verify_identity_assertion",
+        "verify_gateway_address_proof",
     }
 )
 
@@ -338,7 +339,12 @@ SESSION_METHODS: frozenset[str] = frozenset({"hello", "subscribe", "unsubscribe"
 #: The one group a client may call before ``hello``: nothing to stamp,
 #: nothing to route.
 BEFORE_HELLO: frozenset[str] = frozenset(
-    {"derive_address", "parse_invite", "verify_identity_assertion"}
+    {
+        "derive_address",
+        "parse_invite",
+        "verify_identity_assertion",
+        "verify_gateway_address_proof",
+    }
 )
 
 #: Methods whose result is an identifier (or a list of them) that later

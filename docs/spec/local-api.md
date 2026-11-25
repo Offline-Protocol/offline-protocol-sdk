@@ -550,6 +550,7 @@ nothing to route.
 | `derive_address` | `public_key b64` | string |
 | `parse_invite` | `blob` | `{InviteInfo}` |
 | `verify_identity_assertion` | `assertion b64` | string (the proved address) |
+| `verify_gateway_address_proof` | `address`, `public_key b64`, `signature b64`, `challenge b64` | string (the bound address) |
 
 ## Platform operations
 

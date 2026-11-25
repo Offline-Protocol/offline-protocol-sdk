@@ -18,6 +18,33 @@ Questions about a release, or about upgrading to one? Ask in the
 
 ### Added
 
+- **A reference gateway daemon, and with it LoRa**
+  ([ADR 0040](docs/adr/0040-a-reference-gateway-ships-with-the-sdk.md)).
+  The `reticulum` transport's device half has spoken the
+  [gateway contract](docs/spec/gateway-contract.md) since 0.25, but nothing in
+  the SDK answered it, so the transport never became available.
+  [`gateway/`](gateway/README.md) is the other half, in Python: devices attach
+  over local IP with a proof it checks through
+  `verify_gateway_address_proof`, and every submission gets exactly one
+  verdict. With a `[reticulum]` section it also carries frames and presence to
+  provisioned peer gateways over Reticulum, which is how an RNode's LoRa radio
+  reaches the SDK. No device-side change is needed: enable `reticulum` and
+  point its daemon address at the gateway. Two real engines pair over MLS and
+  exchange a message across two daemon processes joined by a Reticulum
+  backbone in its tests; it has not yet been run over radios. Expect a first
+  contact between two devices to cost about 20 backbone frames each: by
+  arithmetic, a few minutes on the example radio (SF8, 10 % airtime) and
+  hours at 1 %. A new gateway is unreachable while Reticulum mints its
+  one-time announce stamp.
+- **A gateway daemon can verify a device's attach proof without building
+  it: `verify_gateway_address_proof(address, public_key, signature,
+  challenge)`**, instance-less, in every binding and over the C API's
+  instance-less call. It is the gateway half of
+  `gateway_address_declaration`: it checks the signature over the one
+  canonical payload ([the gateway contract](docs/spec/gateway-contract.md#attach))
+  and that the key derives to the claimed address, and returns that address
+  or throws. A daemon still owns the third check, that the challenge is the
+  one it minted for this connection and has not been accepted before.
 - **A browser page can dial a native app on the same Wi-Fi network, or on
   the phone's own hotspot, from one code the app shows: WebRTC Direct**
   ([ADR 0039](docs/adr/0039-a-browser-dials-a-native-device-from-a-code.md)).
@@ -55,6 +82,14 @@ Questions about a release, or about upgrading to one? Ask in the
 
 ### Changed
 
+- **Media on the `reticulum` (gateway) transport is chunked at 64 KiB, the
+  peer-stream size, instead of 4 KiB.** The slot is a stream to a gateway
+  daemon over local IP, and the device never sizes frames to the backbone
+  behind it (ADR 0026). At 4 KiB every chunk slipped under a scarce
+  gateway's frame bound, so media crossed a LoRa backbone, which the gateway
+  contract says it MUST NOT; now every full chunk is refused
+  `frame_too_large` there, and a broad gateway carries transfers in fewer,
+  larger frames.
 - **The mesh `appId` is now `appLabel`** (`app_label` in Rust, Python, Ruby
   and the C API), so it is no longer mistaken for the App ID (`app_…`) the
   developer portal issues for telemetry. Only the name changed: the value

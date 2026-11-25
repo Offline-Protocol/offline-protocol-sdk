@@ -218,6 +218,13 @@ Both ends have something to verify, and neither check substitutes for the other.
    been accepted before. A challenge honoured twice turns one captured
    `DeclareAddress` into a reusable credential.
 
+The SDK exposes the first two as one instance-less call,
+`verify_gateway_address_proof(address, public_key, signature, challenge)`,
+which returns the bound address or throws. A gateway built on the SDK calls it
+rather than building the payload itself, because the payload has one home
+([ADR 0022](../adr/0022-one-sealed-layer-shared-with-the-leaf.md)). The third
+check is connection state and stays the gateway's.
+
 A gateway that skips these attaches sessions under addresses the attaching
 device does not control, which is how a hostile device draws another device's
 inbound traffic to itself and poisons the presence answers given about it.
@@ -426,6 +433,13 @@ provides three of the four fails in a way the device cannot see.
    transfer fails on its retry ladder; the device does not know the class
    (invariant 3), and that cost is the price of not knowing.
 
+   A gateway sees ciphertext only, so size is its one signal. The device
+   chunks media on the daemon link at the peer-stream size (64 KiB), far
+   above any scarce frame bound, so every full chunk is refused. A file
+   small enough to travel as one frame under the bound is indistinguishable
+   from a message and crosses; a scarce gateway cannot exclude it, and its
+   budgets are what bound the cost.
+
 ### The backbone token
 
 A gateway advertises each backbone it can reach as one capability token of
@@ -546,6 +560,10 @@ A zone MAY have any number of gateways and a device treats them as a set. A zone
 with **zero** gateways is a state the policy MUST be able to surface rather than
 hide: absent facts mean today's behaviour (invariant 3), which is exactly what a
 zone with no gateway should experience.
+
+The reference gateway is [`gateway/`](../../gateway/README.md)
+([ADR 0040](../adr/0040-a-reference-gateway-ships-with-the-sdk.md)), with
+Reticulum as its backbone.
 
 Operational guidance for anyone deploying: install two. One gateway per zone is
 a chokepoint, and nothing in this contract prevents a second.

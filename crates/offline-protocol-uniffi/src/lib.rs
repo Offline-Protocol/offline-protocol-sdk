@@ -166,6 +166,39 @@ pub fn verify_identity_assertion(assertion: Vec<u8>) -> Result<String, ProtocolE
         .map_err(|e| ProtocolError::MlsError(e.to_string()))
 }
 
+/// Verifies a gateway address declaration and returns the address it binds.
+///
+/// The gateway half of [`OfflineProtocol::gateway_address_declaration`]. The
+/// payload has one home (`offline_protocol_sealed::gateway_address_proof_payload`)
+/// and one verifier (`offline_protocol_mls::verify_gateway_address_proof`);
+/// this is that verifier over the FFI, so a gateway daemon in any language
+/// checks a declaration without building the payload itself.
+///
+/// Instance-less like [`derive_address`]: a gateway daemon runs no engine.
+/// The challenge-freshness check the contract also requires is the caller's,
+/// because only the gateway holds connection state.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::MlsError`] for a malformed key or signature, a
+/// signature that does not verify, or a key that derives to another address.
+/// Every case means the gateway answers `AddressError` and binds nothing.
+pub fn verify_gateway_address_proof(
+    address: String,
+    public_key: Vec<u8>,
+    signature: Vec<u8>,
+    challenge: Vec<u8>,
+) -> Result<String, ProtocolError> {
+    offline_protocol_mls::verify_gateway_address_proof(
+        &address,
+        &public_key,
+        &signature,
+        &challenge,
+    )
+    .map(|bound| bound.to_string())
+    .map_err(|e| ProtocolError::MlsError(e.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Poison-recovery utilities for non-Result methods.
 //

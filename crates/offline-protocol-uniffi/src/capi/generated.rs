@@ -2488,6 +2488,15 @@ pub fn call_namespace(method: &str, mut args: Fields<'_>) -> Result<Value, CallE
             let result = crate::verify_identity_assertion(arg_assertion)?;
             Ok(result.encode())
         }
+        "verify_gateway_address_proof" => {
+            let arg_address = args.take("address")?;
+            let arg_public_key = args.take("public_key")?;
+            let arg_signature = args.take("signature")?;
+            let arg_challenge = args.take("challenge")?;
+            args.finish()?;
+            let result = crate::verify_gateway_address_proof(arg_address, arg_public_key, arg_signature, arg_challenge)?;
+            Ok(result.encode())
+        }
         _ => Err(CallError::MethodNotFound(format!("no method {}{method}", ""))),
     }
 }
@@ -4081,6 +4090,7 @@ pub const NAMESPACE: &[&str] = &[
     "derive_address",
     "parse_invite",
     "verify_identity_assertion",
+    "verify_gateway_address_proof",
 ];
 
 /// Declarations `call` does not dispatch, because a parameter is a callback

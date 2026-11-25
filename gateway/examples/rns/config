@@ -1,0 +1,45 @@
+# Reticulum configuration for a gateway with an RNode (a LoRa radio running
+# RNode firmware, e.g. a Heltec LoRa32 V3 or a LilyGO T3S3 flashed with
+# `rnodeconf --autoinstall`).
+#
+# The radio parameters MUST match on every gateway that should hear each
+# other, and MUST be legal where you transmit. The values below are an EU868
+# example on the 869.40-869.65 MHz sub-band, where EU rules allow a 10 % duty
+# cycle (the rest of the 868 MHz band mostly allows 1 %). Check your region's
+# frequencies, power and duty-cycle rules before you key up a transmitter.
+#
+# What this carries: SF8 at 125 kHz is about 3.1 kbps, so a full 500-byte
+# packet is about 1.3 s on air, and 10 % is about 6 minutes of airtime an
+# hour. A sealed frame crosses as three or so packets. The gateway's default
+# peer_egress budget (gateway.toml) is sized to this; at 1 % airtime, divide
+# it by ten.
+
+[reticulum]
+  # A powered, stationary gateway is the kind of node Reticulum expects to
+  # route for others. Turn this off for a two-gateway deployment if you like.
+  enable_transport = Yes
+  # The daemon owns this Reticulum instance. If you already run rnsd on the
+  # box, point `configdir` at its configuration instead and the daemon
+  # attaches to it as a client.
+  share_instance = No
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+  [[RNode LoRa Interface]]
+    type = RNodeInterface
+    enabled = Yes
+    port = /dev/ttyUSB0
+    frequency = 869525000
+    bandwidth = 125000
+    txpower = 14
+    spreadingfactor = 8
+    codingrate = 5
+    # Airtime caps, in percent: over the last hour, and over the last 15
+    # seconds. Reticulum holds traffic back past them. The long cap is the
+    # duty-cycle rule, which is measured over an hour. The short one only
+    # paces bursts: at 50 % a 6 KB frame (the gateway's backbone bound)
+    # crosses in about 35 s, inside the gateway's 45 s verdict timeout.
+    airtime_limit_long = 10
+    airtime_limit_short = 50

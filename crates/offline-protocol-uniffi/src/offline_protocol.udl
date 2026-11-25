@@ -52,6 +52,25 @@ namespace offline_protocol {
     [Throws=ProtocolError]
     string verify_identity_assertion(sequence<u8> assertion);
 
+    // Verify the address declaration a device attaches to a gateway with
+    // (docs/spec/gateway-contract.md, Attach) and return the address it binds.
+    //
+    // The gateway half of gateway_address_declaration. Instance-less, because
+    // a gateway daemon runs no engine: it checks the signature over the one
+    // canonical payload (offline-gateway-addr-v1, the claimed address and the
+    // challenge) and that the key derives to the claimed address. A daemon in
+    // any language calls this rather than building the payload itself.
+    //
+    // The third check, that the challenge is the one the gateway minted for
+    // this connection and has not been accepted before, is the caller's: only
+    // the gateway holds connection state.
+    //
+    // Throws for a key that is not 32 bytes or not on the curve, a signature
+    // that is not 64 bytes or does not verify, and a key that derives to
+    // another address. Every case means the gateway answers AddressError.
+    [Throws=ProtocolError]
+    string verify_gateway_address_proof(string address, sequence<u8> public_key, sequence<u8> signature, sequence<u8> challenge);
+
     // Run the storage adapter conformance suite against a provider and return
     // the report as JSON: {"passed":[...],"failures":[{"check","detail"}]}.
     //

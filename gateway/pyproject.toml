@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "offline-protocol-gateway"
+version = "0.1.0"
+description = "Reference gateway daemon for the Offline Protocol SDK: the gateway contract, with an optional Reticulum (LoRa) backbone"
+readme = "README.md"
+license = "AGPL-3.0-only"
+requires-python = ">=3.11"
+authors = [{ name = "Offline Protocol, Inc." }]
+# The SDK supplies verify_gateway_address_proof, the one verifier of the
+# attach proof. It is imported on first use, so the daemon's unit tests run
+# without the native library.
+dependencies = ["offline-protocol-sdk"]
+
+[project.optional-dependencies]
+# The Reticulum backbone, and with it LoRa through an RNode. Pinned to the
+# series reticulum.py was checked against (TESTED_RNS_SERIES): it relies on
+# how that series queues and times resources.
+reticulum = ["rns>=1.6,<1.7"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+
+[project.scripts]
+offline-gateway = "offline_gateway.__main__:main"
+
+[tool.setuptools]
+packages = ["offline_gateway"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

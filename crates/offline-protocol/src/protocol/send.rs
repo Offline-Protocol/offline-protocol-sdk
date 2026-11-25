@@ -2926,9 +2926,16 @@ impl OfflineProtocol {
                 (CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM)
             }
             TransportType::Reticulum => {
-                // Reticulum is low-bandwidth (LoRa); use BLE-like chunk sizes.
-                use crate::constants::{CHUNK_SIZE_BLE, MEDIA_WINDOW_SIZE_BLE};
-                (CHUNK_SIZE_BLE, MEDIA_WINDOW_SIZE_BLE)
+                // The gateway slot is a stream to a daemon over local IP, so
+                // it is sized like the peer stream. Not like Bluetooth, as it
+                // was when the slot meant "LoRa": the device never sees the
+                // backbone (ADR 0026), and BLE-sized chunks slipped under a
+                // scarce gateway's frame bound, so media crossed a LoRa link
+                // the contract says it MUST NOT. A full chunk at this size is
+                // refused `frame_too_large` by every scarce gateway, and the
+                // pinned transfer fails, as the gateway contract describes.
+                use crate::constants::{CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM};
+                (CHUNK_SIZE_PEER_STREAM, MEDIA_WINDOW_SIZE_PEER_STREAM)
             }
             TransportType::Nostr => {
                 // Nostr relays have decent bandwidth; use Internet-like chunk sizes.

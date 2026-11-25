@@ -150,7 +150,8 @@ impl Engine {
 }
 
 /// Calls one of the definition's instance-less functions (`derive_address`,
-/// `parse_invite`, `verify_identity_assertion`), which need no engine.
+/// `parse_invite`, `verify_identity_assertion`,
+/// `verify_gateway_address_proof`), which need no engine.
 pub fn call_static(method: &str, params_json: Option<&str>) -> Result<String, CallError> {
     refuse_hand_written(method)?;
     let args = Fields::params(parse_json(params_json, "the parameters")?, method)?;

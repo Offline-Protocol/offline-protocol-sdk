@@ -6,7 +6,7 @@ The Reticulum transport provides long-range, resilient mesh networking via the [
 
 Reticulum is one of five transports in the Offline Protocol SDK, alongside BLE, Wi-Fi Direct, Internet and Nostr. It is disabled by default because it requires external infrastructure (a running Reticulum instance, an RNode radio, or a gateway).
 
-> **This repository ships the device half.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the confirmation loop, and expects the platform to bridge to a real Reticulum stack. The two mobile managers and the Python `GatewayManager` speak [the gateway daemon contract](spec/gateway-contract.md) to a configurable address: they attach with a signed address declaration, settle each send on the gateway's verdict, and watch presence. What answers on the other end is a gateway daemon built to that contract, which is a deployment rather than something this SDK ships. With nothing listening at the daemon address, enabling Reticulum gives you a transport that never becomes available. The transport is named after its reference backbone, and that is all the name means: the daemon contract does not require Reticulum behind the daemon, the backbone is [the gateway's property](spec/gateway-contract.md#the-backbone), and this device learns of it only as a `backbone_<kind>_v1` capability token that nothing in the SDK reads ([ADR 0026](adr/0026-the-backbone-is-a-gateway-property.md)).
+> **This repository ships both halves.** The device half is the Rust transport, which opens no Reticulum link of its own (it manages queues, metrics and the confirmation loop), and the two mobile managers and the Python `GatewayManager`, which speak [the gateway daemon contract](spec/gateway-contract.md) to a configurable address: they attach with a signed address declaration, settle each send on the gateway's verdict, and watch presence. The gateway half is the reference daemon in [`gateway/`](../gateway/README.md) ([ADR 0040](adr/0040-a-reference-gateway-ships-with-the-sdk.md)), which runs Reticulum and carries frames between gateways over it, LoRa included. With nothing listening at the daemon address, enabling Reticulum gives you a transport that never becomes available. The transport is named after its reference backbone, and that is all the name means: the daemon contract does not require Reticulum behind the daemon, the backbone is [the gateway's property](spec/gateway-contract.md#the-backbone), and this device learns of it only as a `backbone_<kind>_v1` capability token that nothing in the SDK reads ([ADR 0026](adr/0026-the-backbone-is-a-gateway-property.md)).
 
 ## When to Use Reticulum
 
@@ -25,99 +25,36 @@ Reticulum is **not** suitable for:
 
 ## Architecture
 
-The Offline Protocol SDK's `ReticulumTransport` manages message queues, delivery metrics, and the confirmation loop on the Rust side. The **platform layer** is responsible for bridging to an actual Reticulum instance. There are several ways to achieve this bridge, each with different trade-offs (see [Integration Strategies](#integration-strategies) below).
+Reticulum runs on the gateway, never on the device. A device speaks newline-delimited JSON to a gateway daemon over local IP (venue Wi-Fi, or a hotspot the gateway box provides), and the daemon owns everything past that: its Reticulum identity, its links to other gateways, and the radio.
 
 ```
-┌──────────────────────┐
-│  Offline Protocol    │
-│  (Rust Core)         │
-│                      │
-│  ReticulumTransport  │◄── Transport trait implementation
-│  - send_queue        │    (same interface as BLE, WiFi, Internet)
-│  - receive_queue     │
-│  - pending_confirm   │
-│  - metrics           │
-└──────────┬───────────┘
-           │ Platform Bridge (UniFFI)
-           ▼
-┌──────────────────────┐
-│  Platform Layer      │
-│  (iOS/Android)       │
-│                      │
-│  Integration via:    │
-│  - Embedded Python   │◄── Most proven (Sideband pattern)
-│  - reticulum-rs      │◄── Pure Rust (emerging)
-│  - HDLC IPC bridge   │◄── Desktop/server only
-│  - TCP gateway       │◄── Via TCPClientInterface
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│  Reticulum Stack     │
-│                      │
-│  Interfaces:         │
-│  - RNode (LoRa)      │
-│  - TCP / UDP         │
-│  - I2P               │
-│  - Serial / KISS     │
-│  - AutoInterface     │
-└──────────────────────┘
+┌──────────────────────┐      local IP       ┌──────────────────────┐   Reticulum   ┌──────────────────┐
+│  Device (any SDK)    │  gateway contract   │  Gateway daemon      │  (RNode/LoRa, │  Peer gateway    │
+│                      │ ──────────────────► │  gateway/            │ ◄───────────► │  and the devices │
+│  ReticulumTransport  │  attach, submit,    │  - attach proof      │   TCP, I2P,   │  attached to it  │
+│  + platform manager  │  verdict, deliver,  │  - verdicts          │   serial...)  │                  │
+│                      │  presence           │  - budgets           │               │                  │
+└──────────────────────┘                     │  - Reticulum (RNS)   │               └──────────────────┘
+                                             └──────────────────────┘
 ```
 
-## Important: Reticulum Integration Reality
+On the device, `ReticulumTransport` manages message queues, delivery metrics, and the confirmation loop on the Rust side, and the platform manager holds the socket to the daemon. That is the whole device half, whatever stands behind the daemon.
 
-Reticulum is a Python-first project. The [reference implementation](https://github.com/markqvist/Reticulum) (`pip install rns`) is the authoritative definition of the protocol. There is **no stable C API or documented wire protocol spec** for external programs to use. This has important implications for mobile integration.
+## Where Reticulum runs
 
-**How existing Reticulum apps work:** Every production Reticulum mobile app (notably [Sideband](https://github.com/markqvist/Sideband)) embeds the full Python runtime and RNS library into the app using frameworks like python-for-android. They do not connect to an external daemon via TCP.
+Reticulum is a Python-first project. The [reference implementation](https://github.com/markqvist/Reticulum) (`pip install rns`) is the authoritative definition of the protocol, and there is no stable C API or documented wire protocol for other programs. Every production Reticulum mobile app (notably [Sideband](https://github.com/markqvist/Sideband)) embeds the Python runtime.
 
-**The shared instance IPC** (`rnsd` daemon on port 37428) uses an internal protocol (HDLC-framed Reticulum packets over a Unix domain socket, with TCP as fallback). This is designed for multiple Python programs on the same host to share one Reticulum instance — not as a general-purpose API for non-Python apps.
+That is why the SDK keeps Reticulum off the device: a phone would carry a Python runtime, and a per-device Reticulum destination would need either a Reticulum stack on every device or gateways holding device keys, which [the contract](spec/gateway-contract.md#gateway-owned-destinations) forbids. The reference gateway runs the Python reference in its own process. See [its README](../gateway/README.md) for flashing an RNode, provisioning peers and what to expect over LoRa.
 
-This means the platform bridge you implement must choose one of the strategies described below, depending on your deployment target.
+### Building a gateway another way
 
-## Integration Strategies
+A gateway is anything that speaks the contract, so the reference daemon is one choice. If you build your own, it still needs a Reticulum stack, and these are the ways to reach one:
 
-### Strategy 1: Embedded Python (Most Proven — Mobile)
+- **The Python reference, in process.** What the reference gateway does. Proven, and the only option with full protocol support.
+- **`reticulum-rs`.** The [`reticulum`](https://crates.io/crates/reticulum) crate is a Rust port. Wire compatibility with the Python reference is not yet guaranteed, which is the property a backbone needs.
+- **A shared `rnsd` instance.** A program on the same host can exchange HDLC-framed raw packets with `rnsd` over its shared-instance socket (`\0rns/default`, or TCP `127.0.0.1:37428`). This is packet-level access only: you would reimplement Reticulum's identities, links and cryptography yourself.
 
-Embed the Python runtime and RNS library directly in your mobile app. This is how Sideband works and is the most battle-tested approach.
-
-**Android:** Use [Chaquopy](https://chaquo.com/chaquopy/) or [python-for-android](https://github.com/kivy/python-for-android) to embed a Python interpreter. Call `import RNS` from embedded Python and bridge to your native code.
-
-**iOS:** Use [Kivy-iOS](https://github.com/kivy/kivy-ios) or a similar Python embedding framework. Note that iOS Reticulum support is still maturing — currently limited to TCP and multicast UDP interfaces (no BLE/serial yet).
-
-**Pros:** Full Reticulum protocol support, proven by Sideband
-**Cons:** Adds ~30MB+ for the Python runtime, complex build setup
-
-### Strategy 2: reticulum-rs Crate (Emerging — Pure Rust)
-
-The [`reticulum`](https://crates.io/crates/reticulum) crate by BeechatNetworkSystemsLtd is a Rust port of the Reticulum protocol stack. It was presented at FOSDEM 2026 and is under active development.
-
-If `reticulum-rs` achieves full wire-format compatibility with the Python reference, it could be linked directly into the Offline Protocol SDK with zero Python dependency. This is the ideal long-term path.
-
-**Pros:** Native Rust, no Python dependency, small binary (<1MB)
-**Cons:** Still maturing; wire-format interoperability with the Python reference is not yet guaranteed
-
-### Strategy 3: HDLC Shared Instance Bridge (Desktop/Server)
-
-On desktop/server platforms where `rnsd` is running, a non-Python app can connect to the shared instance socket and exchange HDLC-framed raw Reticulum packets:
-
-- **Linux/macOS:** Unix domain socket (abstract socket `\0rns/default`)
-- **TCP fallback:** `127.0.0.1:37428` (used when domain sockets are unavailable, or when `shared_instance_type = tcp` is set in config)
-
-The HDLC framing uses `0x7E` flag bytes with `0x7D` escape byte-stuffing. The payloads are raw Reticulum wire-format packets.
-
-**Critical caveat:** This gives you raw packet-level access only. You still need to implement Reticulum's cryptography (X25519, Ed25519, AES-256-CBC, HMAC-SHA256), identity management, destination resolution, and link establishment yourself. The shared instance is a packet relay, not a high-level messaging API.
-
-**Pros:** Lightweight, no Python in your process, uses system daemon
-**Cons:** Desktop only, requires reimplementing Reticulum protocol logic, undocumented IPC protocol
-
-### Strategy 4: TCP Gateway (Simplest — Any Platform)
-
-Connect to a remote Reticulum transport node using Reticulum's `TCPClientInterface`. In this model, a Reticulum gateway server handles the protocol complexity, and your app communicates with it over a standard TCP connection.
-
-This requires a Reticulum node configured as a TCP server that your app connects to as a client. The Reticulum transport node handles identity, routing, and encryption.
-
-**Pros:** Standard TCP, works on any platform, no local daemon required
-**Cons:** Requires a remote gateway server, adds network dependency
+Whichever you pick, verify each device's attach proof with the SDK's `verify_gateway_address_proof` rather than building the signed payload yourself ([ADR 0022](adr/0022-one-sealed-layer-shared-with-the-leaf.md)).
 
 ## Configuration
 
@@ -171,7 +108,7 @@ The longer timeouts reflect the high-latency reality of LoRa multi-hop paths.
 
 ## Platform Bridge Lifecycle
 
-Regardless of which integration strategy you choose, the platform bridge interacts with `ReticulumTransport` through the same UniFFI API:
+Whatever gateway answers on the daemon address, the platform bridge interacts with `ReticulumTransport` through the same UniFFI API:
 
 1. **Initialize** your Reticulum integration (embedded Python, `reticulum-rs`, a gateway daemon connection, and so on)
 2. **Attach**, if you speak the gateway contract: `gatewayAddressDeclaration(challenge)` builds the proof, `reticulumAddressDeclared(address)` and `reticulumAddressDeclarationRefused(reason)` report the answer, and `reticulumGatewayCapabilities(tokens)` hands over the advertisement
@@ -193,9 +130,10 @@ Regardless of which integration strategy you choose, the platform bridge interac
 >
 > Note what this section does not say: **`rnsd` does not speak this protocol.**
 > Its own shared-instance IPC is HDLC-framed Reticulum packets over a Unix
-> domain socket (Strategy 3 above), not this. A gateway daemon is a separate
-> program that attaches to a Reticulum stack on one side and speaks this
-> contract to devices on the other.
+> domain socket (see [Building a gateway another way](#building-a-gateway-another-way)),
+> not this. A gateway daemon is a separate program that attaches to a
+> Reticulum stack on one side and speaks this contract to devices on the
+> other; [`gateway/`](../gateway/README.md) is the reference one.
 
 The built-in clients, `ReticulumManager` on iOS and Android and `GatewayManager` in Python (`bindings/python/offline_protocol_sdk/gateway_manager.py`, configured with `daemon_address`), speak a newline-delimited JSON protocol over TCP to a configurable daemon address (default `localhost:4242`). All three implement the same message types, and the Rust guards that read the attach constants read all three sources.
 
@@ -268,7 +206,7 @@ Unconfirmed messages expire after 120 seconds and are counted as failures. The b
 
 ### Example: Platform Bridge Skeleton (Android/Kotlin)
 
-This shows the SDK-facing bridge logic. The actual Reticulum communication (`sendViaReticulum` / `receiveFromReticulum`) depends on your chosen integration strategy.
+This shows the SDK-facing bridge logic, for a bridge written from scratch rather than one of the bundled managers. `sendViaReticulum` / `receiveFromReticulum` stand for the daemon socket: what the bridge writes is the gateway contract's JSON, never Reticulum packets.
 
 ```kotlin
 class ReticulumBridge(
@@ -380,19 +318,19 @@ Reticulum will **not** be selected when:
 
 ## File Transfer Behavior
 
-Reticulum uses BLE-like chunk sizes for file transfers due to its low bandwidth:
+The daemon link is a stream over local IP, so a transfer on it is chunked like the peer stream, whatever stands behind the gateway:
 
-| Parameter | Value | Comparison |
-|-----------|-------|------------|
-| Chunk size | BLE chunk size | Same as BLE (smaller chunks for low throughput) |
-| Media window | BLE media window | Same as BLE |
-| Media transfer eligibility | Excluded | Reticulum is not in the preferred transport list for media transfers |
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| Chunk size | 64 KiB (`CHUNK_SIZE_PEER_STREAM`) | The device never sizes frames to a backbone it cannot see ([ADR 0026](adr/0026-the-backbone-is-a-gateway-property.md)) |
+| Media window | 8 (`MEDIA_WINDOW_SIZE_PEER_STREAM`) | As the peer stream |
+| Media transfer eligibility | Only while the daemon link is the current carrier | It is absent from the media fallback order |
 
-Large file transfers over Reticulum are technically possible but will be very slow. The SDK automatically excludes Reticulum from the preferred media transfer transport list. If Reticulum is the only available transport, transfers will still work but at LoRa speeds.
+Media MUST NOT cross a scarce backbone, and size is how a gateway tells: every full 64 KiB chunk is past a scarce gateway's frame bound, so it is refused `frame_too_large` and the transfer fails on its retry ladder. A broad gateway, or one delivering to a device attached to it, carries the transfer. A file small enough to be one frame under the scarce bound cannot be told from a message and crosses. Until this release the slot used Bluetooth-sized 4 KiB chunks, which slipped under a scarce bound, so media crossed.
 
 ## Reticulum Setup
 
-The Offline Protocol SDK does not include a Reticulum stack — you must provide one via your chosen integration strategy. Below is reference information for setting up the Python Reticulum daemon, which is useful for desktop deployments and as a gateway for mobile apps.
+The SDK itself includes no Reticulum stack; the reference gateway runs one. Below is reference information for the Python Reticulum tools, which you also use to flash and inspect an RNode.
 
 ### Installing Reticulum
 
