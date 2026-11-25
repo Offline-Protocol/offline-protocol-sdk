@@ -70,7 +70,7 @@ offline-protocol-sealed = { path = "../offline-protocol-sealed", version = "0.34
 # can carry. `rfc_compliant` is deliberately absent: it pulls X.509 in for
 # about 12 KiB of flash this protocol never uses, since credentials here are
 # basic ones carrying an address.
-mls-rs = { version = "=0.56.0", default-features = false, features = [
+mls-rs = { version = "=0.57.1", default-features = false, features = [
     "private_message",
     "out_of_order",
     "prior_epoch",

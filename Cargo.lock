@@ -2592,15 +2592,15 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mls-rs"
-version = "0.56.0"
+version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4392c3b3ed7d835ca8f318f85ca65d3f0d3e879538d6e70679827a2f3af72029"
+checksum = "6984a087d2ead053fea4fed450bee63a3480aa50e1c3f3d21c7c677b058716a0"
 dependencies = [
  "async-trait",
  "cfg-if",
  "debug_tree",
  "futures",
- "getrandom 0.2.16",
+ "getrandom 0.4.2",
  "hex",
  "itertools 0.14.0",
  "maybe-async",
@@ -2609,7 +2609,7 @@ dependencies = [
  "mls-rs-identity-x509",
  "portable-atomic",
  "portable-atomic-util",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "serde",
  "spin 0.10.1",
  "subtle",
@@ -2716,9 +2716,9 @@ dependencies = [
 
 [[package]]
 name = "mls-rs-identity-x509"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec1ecb6a61a296b8240cea19171477293663dcc6540353dc8cbcda2d9f61039b"
+checksum = "f50eeca93cbede255ded62621f8765e23a7652259ad5f95af74b10ecb353f8af"
 dependencies = [
  "async-trait",
  "maybe-async",
