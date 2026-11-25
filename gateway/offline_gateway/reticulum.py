@@ -47,9 +47,9 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 
-from .backbone import Backbone, BackboneFrame, BackboneHooks, Claim, ForwardResult, PresenceTable
+from .backbone import Admit, Backbone, BackboneFrame, BackboneHooks, Claim, ForwardResult, PresenceTable
 from .config import ReticulumConfig
 from . import wire
 
@@ -86,6 +86,11 @@ IDENTIFY_WAIT = LINK_ESTABLISH_WAIT
 #: A forward's refusal reason when the caller has not identified as a
 #: provisioned peer on this link.
 NOT_A_PEER = "not a provisioned peer"
+
+
+class BudgetRefused(Exception):
+    """The scarce budgets had no room for a frame when its turn came. Nothing
+    of it went on air."""
 
 
 class QueuedTooLong(asyncio.TimeoutError):
@@ -185,7 +190,9 @@ class ReticulumBackbone(Backbone):
     def claim(self, address: str) -> Claim | None:
         return self.table.claim(address)
 
-    async def forward(self, frame: BackboneFrame, timeout: float) -> tuple[ForwardResult, str]:
+    async def forward(
+        self, frame: BackboneFrame, timeout: float, admit: Admit | None = None
+    ) -> tuple[ForwardResult, str]:
         claim = self.table.claim(frame.recipient)
         if claim is None or not claim.online:
             return ForwardResult.UNREACHABLE, "no peer gateway claims the recipient"
@@ -200,7 +207,15 @@ class ReticulumBackbone(Backbone):
             "p": frame.reply_to_msg,
         }
         try:
-            response = await self._request(link, PATH_FORWARD, request, timeout)
+            response = await self._request(
+                link,
+                PATH_FORWARD,
+                request,
+                timeout,
+                admit=(lambda: admit(claim.peer)) if admit is not None else None,
+            )
+        except BudgetRefused:
+            return ForwardResult.REFUSED, wire.BUDGET_EXCEEDED
         except QueuedTooLong:
             return ForwardResult.TIMEOUT, "queued behind other frames to the peer gateway"
         except asyncio.TimeoutError:
@@ -434,7 +449,9 @@ class ReticulumBackbone(Backbone):
 
     # -- Requests --------------------------------------------------------
 
-    async def _request(self, link: Any, path: str, data: Any, timeout: float) -> Any:
+    async def _request(
+        self, link: Any, path: str, data: Any, timeout: float, admit: Callable[[], bool] | None = None
+    ) -> Any:
         """One request on ``link``, answered within ``timeout`` seconds.
 
         Requests on a link go one at a time. Reticulum sends one outgoing
@@ -452,6 +469,8 @@ class ReticulumBackbone(Backbone):
             # it, so it needs no turn. Made to wait anyway, a presence update
             # whose packet was lost would hold the lane for its whole timeout
             # and fail every frame queued behind it.
+            if admit is not None and not admit():
+                raise BudgetRefused()
             return await self._send_request(link, path, data, timeout)
         deadline = loop.time() + timeout
         lane = self._lanes.setdefault(id(link), asyncio.Lock())
@@ -463,6 +482,12 @@ class ReticulumBackbone(Backbone):
             remaining = deadline - loop.time()
             if remaining < MIN_TRANSFER_WINDOW:
                 raise QueuedTooLong()
+            # Charged here, at the moment it goes to the radio, and not when
+            # it was submitted: a frame that waited out its time above was
+            # never sent, and charging it would spend the budget twice once
+            # the device retries.
+            if admit is not None and not admit():
+                raise BudgetRefused()
             return await self._send_request(link, path, data, remaining)
         finally:
             lane.release()

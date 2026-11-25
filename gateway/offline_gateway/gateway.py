@@ -468,24 +468,36 @@ class Gateway:
         # budget stops all of them together asking for more than the link
         # carries. Both are checked before either is charged, so a refusal
         # costs the device nothing.
+        #
+        # Checked here, charged by ``admit`` only when the frame is about to
+        # go on the backbone: a frame that never gets there (queued past its
+        # time, the link gone) costs nothing, and its retry is not charged
+        # twice.
+        admit = None
         if self.backbone.rate_class != "broad":
             sender = session.host or session.address
-            peer, size = claim.peer, len(content)
-            if not (self._backbone_budget.has(sender, size) and self._egress_budget.has(peer, size)):
+            size = len(content)
+            if not (self._backbone_budget.has(sender, size) and self._egress_budget.has(claim.peer, size)):
                 session.send(wire.delivery_error(message_id, recipient, wire.BUDGET_EXCEEDED))
                 return
-            self._backbone_budget.take(sender, size)
-            self._egress_budget.take(peer, size)
+
+            def admit(peer: str, sender: str = sender, size: int = size) -> bool:
+                if not (self._backbone_budget.has(sender, size) and self._egress_budget.has(peer, size)):
+                    return False
+                self._backbone_budget.take(sender, size)
+                self._egress_budget.take(peer, size)
+                return True
+
         backbone_frame = BackboneFrame(recipient, session.address, content, message_id, reply_to)
-        task = asyncio.ensure_future(self._forward(session, backbone_frame))
+        task = asyncio.ensure_future(self._forward(session, backbone_frame, admit))
         self._forwards.add(task)
         task.add_done_callback(self._forwards.discard)
 
-    async def _forward(self, session: Session, frame: BackboneFrame) -> None:
+    async def _forward(self, session: Session, frame: BackboneFrame, admit: Any = None) -> None:
         assert self.backbone is not None
         message_id = frame.message_id or uuid.uuid4().hex
         try:
-            result, reason = await self.backbone.forward(frame, self.config.backbone_verdict_timeout)
+            result, reason = await self.backbone.forward(frame, self.config.backbone_verdict_timeout, admit)
         except asyncio.CancelledError:
             raise
         except Exception:

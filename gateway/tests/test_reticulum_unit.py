@@ -194,7 +194,7 @@ async def test_a_link_the_peer_cannot_attribute_is_torn_down_for_a_redial():
     link = Link()
     backbone._active_out = lambda peer: link  # type: ignore[method-assign]
 
-    async def refused(link, path, data, timeout):
+    async def refused(link, path, data, timeout, admit=None):
         return {"o": "refused", "w": NOT_A_PEER}
 
     backbone._request = refused  # type: ignore[method-assign]
@@ -333,7 +333,7 @@ async def test_a_frame_queued_too_long_is_a_backbone_timeout():
     backbone.table.update(peer_hex, address(2), True, None, 1)
     backbone._active_out = lambda peer: object()  # type: ignore[method-assign]
 
-    async def queued(link, path, data, timeout):
+    async def queued(link, path, data, timeout, admit=None):
         raise QueuedTooLong()
 
     backbone._request = queued  # type: ignore[method-assign]
@@ -485,3 +485,64 @@ def test_the_one_packet_test_matches_reticulums_own():
     assert _fits_one_packet(Link(), "/presence", {"on": [[address(1), 1]]})
     assert not _fits_one_packet(Link(), "/forward", {"c": b"x" * 500})
     assert not _fits_one_packet(object(), "/presence", None)  # no mdu: assume not
+
+
+async def test_a_frame_that_never_reaches_the_radio_is_never_charged(monkeypatch):
+    """Charging at submission spent the budgets on frames that then waited out
+    their time in the queue, and charged their retries again."""
+    import offline_gateway.reticulum as module
+    from offline_gateway.backbone import BackboneFrame
+
+    monkeypatch.setattr(module, "MIN_TRANSFER_WINDOW", 0.0)
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+    backbone.table.update(peer_hex, address(2), True, None, 1)
+    charged: list[str] = []
+
+    class Link:
+        status = RNS.Link.ACTIVE
+        mdu = 400
+
+        def request(self, path, data, response_callback, failed_callback, timeout):
+            return _Receipt(_Resource(RNS.Resource.TRANSFERRING))  # never answers
+
+    link = Link()
+    backbone._active_out = lambda peer: link  # type: ignore[method-assign]
+
+    def admit(peer):
+        charged.append(peer)
+        return True
+
+    frame = BackboneFrame(address(2), address(1), b"x" * 1000, "m", None)
+    first = asyncio.ensure_future(backbone.forward(frame, 5, admit))
+    await asyncio.sleep(0.05)
+    result, reason = await backbone.forward(frame, 0.1, admit)
+    assert result is ForwardResult.TIMEOUT and "queued" in reason
+    assert charged == [peer_hex]  # only the frame that went to the radio
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+
+
+async def test_a_frame_the_budgets_refuse_at_its_turn_is_not_sent():
+    from offline_gateway.backbone import BackboneFrame
+
+    _, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    backbone._loop = asyncio.get_running_loop()
+    backbone.table.update(peer_hex, address(2), True, None, 1)
+    sent: list = []
+
+    class Link:
+        status = RNS.Link.ACTIVE
+        mdu = 400
+
+        def request(self, *args, **kwargs):
+            sent.append(args)
+            return False
+
+    backbone._active_out = lambda peer: Link()  # type: ignore[method-assign]
+    frame = BackboneFrame(address(2), address(1), b"x" * 1000, "m", None)
+    result, reason = await backbone.forward(frame, 30, lambda peer: False)
+    assert (result, reason) == (ForwardResult.REFUSED, "budget_exceeded")
+    assert not sent

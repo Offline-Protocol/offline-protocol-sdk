@@ -31,6 +31,10 @@ from enum import Enum
 from typing import Callable, Protocol
 
 
+#: ``admit(peer) -> bool``; see :meth:`Backbone.forward`.
+Admit = Callable[[str], bool]
+
+
 class ForwardResult(Enum):
     """What a peer gateway said about a frame it was handed."""
 
@@ -113,11 +117,20 @@ class Backbone(abc.ABC):
         """The freshest claim any peer gateway has made about ``address``."""
 
     @abc.abstractmethod
-    async def forward(self, frame: BackboneFrame, timeout: float) -> tuple[ForwardResult, str]:
+    async def forward(
+        self, frame: BackboneFrame, timeout: float, admit: Admit | None = None
+    ) -> tuple[ForwardResult, str]:
         """Carry ``frame`` to the peer gateway that claims its recipient.
 
         Answers within ``timeout`` seconds: the daemon owes the device a
         verdict, and the reference clients fail a frame that has none in 60.
+
+        ``admit(peer)`` is called once, at the moment the frame is about to
+        be put on the backbone toward ``peer``, and nowhere else: it charges
+        the scarce budgets, so a frame that never reaches the backbone
+        (queued past its time, no link, no claim) is never charged. When it
+        returns ``False`` the frame is not sent and the answer is
+        ``REFUSED`` with ``budget_exceeded``.
         """
 
     @abc.abstractmethod
@@ -288,10 +301,14 @@ class InMemoryBackbone(Backbone):
     def claim(self, address: str) -> Claim | None:
         return self.table.claim(address)
 
-    async def forward(self, frame: BackboneFrame, timeout: float) -> tuple[ForwardResult, str]:
+    async def forward(
+        self, frame: BackboneFrame, timeout: float, admit: Admit | None = None
+    ) -> tuple[ForwardResult, str]:
         claim = self.table.claim(frame.recipient)
         if claim is None or not claim.online or not self.network.linked(self.name, claim.peer):
             return ForwardResult.UNREACHABLE, "no peer gateway claims the recipient"
+        if admit is not None and not admit(claim.peer):
+            return ForwardResult.REFUSED, "budget_exceeded"
         peer = self.network.members[claim.peer]
         try:
             return await asyncio.wait_for(peer._receive(frame, self.name), timeout)

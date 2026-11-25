@@ -178,9 +178,9 @@ class _Recording(InMemoryBackbone):
         super().__init__(*args, **kwargs)
         self.carried: list[int] = []
 
-    async def forward(self, frame, timeout):
+    async def forward(self, frame, timeout, admit=None):
         self.carried.append(len(frame.content))
-        return await super().forward(frame, timeout)
+        return await super().forward(frame, timeout, admit)
 
 
 @pytest.mark.parametrize("rate_class", ["broad", "scarce"])
