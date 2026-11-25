@@ -28,9 +28,14 @@ Gateway-to-gateway requests (msgpack, by Reticulum):
 
 ``/forward``  ``{"r": recipient, "s": sender, "c": bytes, "m": id, "p": reply_to}``
               -> ``{"o": "delivered" | "unreachable" | "refused", "w": reason}``
-``/presence`` ``{"snap": bool, "on": [address], "off": [[address, last_seen_ms]]}``
-              -> ``True``
-``/snapshot`` ``None`` -> ``[address]``, every address attached at the callee
+``/presence`` ``{"e": epoch, "snap": bool, "q": seq, "on": [[address, seq]],
+              "off": [[address, last_seen_ms, seq]]}`` -> ``True``
+``/snapshot`` ``None`` -> ``{"e": epoch, "q": seq, "on": [[address, seq]]}``,
+              every address attached at the callee
+
+``seq`` numbers the sending gateway's presence changes, and ``q`` is the
+number current when a snapshot was taken. They are what lets a receiver
+apply messages that arrive out of order (``PresenceTable``).
 
 Reticulum calls back on its own threads. Everything that touches the daemon
 or this module's tables hops onto the event loop first.
@@ -92,8 +97,8 @@ class ReticulumBackbone(Backbone):
         #: Links peers dialled to this gateway, by the peer they identified as.
         self._in: dict[bytes, Any] = {}
         self._tasks: list[asyncio.Task[Any]] = []
-        self._pending_on: set[str] = set()
-        self._pending_off: dict[str, int | None] = {}
+        self._pending_on: dict[str, int] = {}
+        self._pending_off: dict[str, tuple[int | None, int]] = {}
         self._flush: asyncio.TimerHandle | None = None
         self._running = False
 
@@ -194,13 +199,13 @@ class ReticulumBackbone(Backbone):
                 return result, reason
         return ForwardResult.TIMEOUT, "unreadable answer from the peer gateway"
 
-    def local_presence_changed(self, address: str, online: bool, last_seen_ms: int | None) -> None:
+    def local_presence_changed(self, address: str, online: bool, last_seen_ms: int | None, seq: int) -> None:
         if online:
             self._pending_off.pop(address, None)
-            self._pending_on.add(address)
+            self._pending_on[address] = seq
         else:
-            self._pending_on.discard(address)
-            self._pending_off[address] = last_seen_ms
+            self._pending_on.pop(address, None)
+            self._pending_off[address] = (last_seen_ms, seq)
         if self._flush is None and self._loop is not None:
             self._flush = self._loop.call_later(PRESENCE_COALESCE, self._flush_presence)
 
@@ -208,10 +213,12 @@ class ReticulumBackbone(Backbone):
         self._flush = None
         if not (self._pending_on or self._pending_off):
             return
+        assert self.hooks is not None
         update = {
+            "e": self.hooks.presence_epoch,
             "snap": False,
-            "on": sorted(self._pending_on),
-            "off": [[a, t] for a, t in sorted(self._pending_off.items())],
+            "on": [[a, q] for a, q in sorted(self._pending_on.items())],
+            "off": [[a, t, q] for a, (t, q) in sorted(self._pending_off.items())],
         }
         self._pending_on.clear()
         self._pending_off.clear()
@@ -279,7 +286,7 @@ class ReticulumBackbone(Backbone):
 
     async def _exchange_snapshots(self, link: Any, peer: bytes) -> None:
         assert self.hooks is not None
-        mine = {"snap": True, "on": self.hooks.local_addresses(), "off": []}
+        mine = self._snapshot_message()
         try:
             await self._request(link, PATH_PRESENCE, mine, LINK_ESTABLISH_WAIT)
             theirs = await self._request(link, PATH_SNAPSHOT, None, LINK_ESTABLISH_WAIT)
@@ -291,9 +298,8 @@ class ReticulumBackbone(Backbone):
             logger.warning("snapshot exchange with %s went unanswered; redialling", peer.hex())
             link.teardown()
             return
-        if isinstance(theirs, list):
-            online = [a for a in theirs if wire.address_field(a) is not None]
-            self._apply(peer, {"snap": True, "on": online, "off": []})
+        if isinstance(theirs, dict):
+            self._apply(peer, {**theirs, "snap": True, "off": []})
 
     def _out_link_closed(self, peer: bytes, link: Any) -> None:
         if self._out.get(peer) is link:
@@ -420,10 +426,21 @@ class ReticulumBackbone(Backbone):
     def _handle_snapshot(self, path, data, request_id, link_id, remote_identity, requested_at):
         if self._peer_of(remote_identity) is None:
             return None
-        return self._on_loop(self._local_addresses(), [])
+        return self._on_loop(self._snapshot_on_loop(), None)
 
-    async def _local_addresses(self) -> list[str]:
-        return self.hooks.local_addresses() if self.hooks is not None else []
+    async def _snapshot_on_loop(self) -> dict[str, Any] | None:
+        return self._snapshot_message() if self.hooks is not None else None
+
+    def _snapshot_message(self) -> dict[str, Any]:
+        assert self.hooks is not None
+        seq, bound = self.hooks.local_snapshot()
+        return {
+            "e": self.hooks.presence_epoch,
+            "snap": True,
+            "q": seq,
+            "on": [[a, q] for a, q in sorted(bound.items())],
+            "off": [],
+        }
 
     def _on_loop(self, coro: Any, fallback: Any) -> Any:
         assert self._loop is not None
@@ -438,19 +455,26 @@ class ReticulumBackbone(Backbone):
 
     def _apply(self, peer: bytes, data: dict[str, Any]) -> None:
         key = peer.hex()
+        epoch = data.get("e") if isinstance(data.get("e"), str) else ""
         changed: list[str] = []
-        online = [a for a in _list(data.get("on")) if wire.address_field(a) is not None]
-        if data.get("snap") is True:
-            changed += self.table.snapshot(key, online)
-        else:
-            for address in online:
-                if self.table.update(key, address, True, None):
-                    changed.append(address)
-        for entry in _list(data.get("off")):
+        online: dict[str, int] = {}
+        for entry in _list(data.get("on")):
             if isinstance(entry, list) and len(entry) == 2 and wire.address_field(entry[0]) is not None:
-                seen = entry[1] if isinstance(entry[1], int) and not isinstance(entry[1], bool) else None
-                if self.table.update(key, entry[0], False, seen):
-                    changed.append(entry[0])
+                if _is_int(entry[1]):
+                    online[entry[0]] = entry[1]
+        if data.get("snap") is True:
+            if not _is_int(data.get("q")):
+                return
+            changed += self.table.snapshot(key, online, data["q"], epoch)
+        else:
+            for address, seq in online.items():
+                changed += self.table.update(key, address, True, None, seq, epoch)
+        for entry in _list(data.get("off")):
+            if isinstance(entry, list) and len(entry) == 3 and wire.address_field(entry[0]) is not None:
+                if not _is_int(entry[2]):
+                    continue
+                seen = entry[1] if _is_int(entry[1]) else None
+                changed += self.table.update(key, entry[0], False, seen, entry[2], epoch)
         self._announce_changes(changed)
 
     def _forget(self, peer: bytes) -> None:
@@ -497,6 +521,10 @@ def _load_identity(RNS: Any, path: str) -> Any:
     os.chmod(path, 0o600)
     logger.info("created a new gateway identity at %s", path)
     return identity
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _list(value: Any) -> list[Any]:

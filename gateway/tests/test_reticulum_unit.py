@@ -25,8 +25,10 @@ class Hooks:
         self.delivered.append((frame, peer))
         return ForwardResult.DELIVERED, ""
 
-    def local_addresses(self):
-        return [address(1)]
+    presence_epoch = "test-epoch"
+
+    def local_snapshot(self):
+        return 1, {address(1): 1}
 
     def remote_presence_changed(self, addr):
         self.changed.append(addr)
@@ -75,24 +77,44 @@ async def test_presence_requests_update_the_table_and_tell_the_daemon():
     backbone._loop = asyncio.get_running_loop()
     peer = bytes.fromhex(peer_hex)
 
-    backbone._apply(peer, {"snap": True, "on": [address(5), "garbage"], "off": []})
+    backbone._apply(peer, {"e": "x", "snap": True, "q": 1, "on": [[address(5), 1], ["garbage", 1]], "off": []})
     assert backbone.claim(address(5)).online
     assert backbone.claim("garbage") is None
     assert hooks.changed == [address(5)]
 
-    backbone._apply(peer, {"snap": False, "on": [], "off": [[address(5), 1234]]})
+    backbone._apply(peer, {"e": "x", "snap": False, "on": [], "off": [[address(5), 1234, 2]]})
     claim = backbone.claim(address(5))
     assert not claim.online and claim.last_seen_ms == 1234
 
-    backbone._apply(peer, {"snap": False, "on": [address(6)], "off": [[address(7), True], "bad"]})
+    backbone._apply(
+        peer,
+        {"e": "x", "snap": False, "on": [[address(6), 3]], "off": [[address(7), True, 4], "bad", [address(8), 1]]},
+    )
     assert backbone.claim(address(6)).online
     assert backbone.claim(address(7)).last_seen_ms is None  # a bool is not a time
+    assert backbone.claim(address(8)) is None  # an entry with no number is dropped
+
+    # A snapshot with no number of its own cannot be ordered, so it is refused.
+    backbone._apply(peer, {"e": "x", "snap": True, "on": [], "off": []})
+    assert backbone.claim(address(6)).online
 
     # Losing the peer's link withdraws everything it claimed.
     hooks.changed.clear()
     backbone._forget(peer)
     assert backbone.claim(address(6)) is None
     assert set(hooks.changed) == {address(5), address(6), address(7)}
+
+
+async def test_the_snapshot_this_gateway_serves_carries_its_numbering():
+    identity, peer_hex = _peer()
+    backbone, _ = _backbone([peer_hex])
+    assert backbone._snapshot_message() == {
+        "e": "test-epoch",
+        "snap": True,
+        "q": 1,
+        "on": [[address(1), 1]],
+        "off": [],
+    }
 
 
 async def test_a_forward_with_no_claim_is_unreachable_without_touching_a_link():
@@ -120,13 +142,13 @@ async def test_presence_changes_are_coalesced_into_one_update():
     original = module.PRESENCE_COALESCE
     module.PRESENCE_COALESCE = 0.05
     try:
-        backbone.local_presence_changed(address(1), True, None)
-        backbone.local_presence_changed(address(2), True, None)
-        backbone.local_presence_changed(address(1), False, 99)
+        backbone.local_presence_changed(address(1), True, None, 1)
+        backbone.local_presence_changed(address(2), True, None, 2)
+        backbone.local_presence_changed(address(1), False, 99, 3)
         await asyncio.sleep(0.2)
     finally:
         module.PRESENCE_COALESCE = original
-    assert sent == [{"snap": False, "on": [address(2)], "off": [[address(1), 99]]}]
+    assert sent == [{"e": "test-epoch", "snap": False, "on": [[address(2), 2]], "off": [[address(1), 99, 3]]}]
 
 
 def test_peers_must_be_destination_hashes():
@@ -161,7 +183,7 @@ async def test_a_link_the_peer_cannot_attribute_is_torn_down_for_a_redial():
     _, peer_hex = _peer()
     backbone, _ = _backbone([peer_hex])
     backbone._loop = asyncio.get_running_loop()
-    backbone.table.update(peer_hex, address(2), True, None)
+    backbone.table.update(peer_hex, address(2), True, None, 1)
 
     class Link:
         torn = False

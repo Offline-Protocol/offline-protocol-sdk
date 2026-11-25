@@ -170,14 +170,43 @@ async def test_a_peer_gateway_over_its_budget_is_refused_as_a_plain_failure(pair
 def test_an_online_claim_beats_an_offline_one_and_a_dropped_peer_forgets():
     clock = [0.0]
     table = PresenceTable(clock=lambda: clock[0])
-    assert table.update("p1", address(5), True, None)
+    assert table.update("p1", address(5), True, None, 1, "e1") == [address(5)]
     clock[0] = 1
-    table.update("p2", address(5), False, 123)
+    table.update("p2", address(5), False, 123, 1, "e2")
     assert table.claim(address(5)).online and table.claim(address(5)).peer == "p1"
     assert table.drop_peer("p1") == [address(5)]
     claim = table.claim(address(5))
     assert claim.online is False and claim.last_seen_ms == 123
-    assert table.snapshot("p2", [address(5)]) == [address(5)]
+    assert table.snapshot("p2", {address(5): 2}, 2, "e2") == [address(5)]
     assert table.claim(address(5)).online
-    assert table.snapshot("p2", []) == [address(5)]
+    assert table.snapshot("p2", {}, 3, "e2") == [address(5)]
     assert not table.claim(address(5)).online
+
+
+def test_a_snapshot_that_lands_late_does_not_undo_a_newer_attach():
+    """The race the numbering exists for: a snapshot taken before X attached
+    (number 4) arrives after the one-packet update that announced X (number
+    5). Applied in arrival order it would mark X offline and close the path."""
+    table = PresenceTable()
+    table.update("p", address(1), True, None, 3, "e")
+    assert table.update("p", address(9), True, None, 5, "e") == [address(9)]
+    assert table.snapshot("p", {address(1): 3}, 4, "e") == []
+    assert table.claim(address(9)).online
+
+
+def test_a_late_update_does_not_undo_a_newer_one():
+    table = PresenceTable()
+    table.update("p", address(2), False, 100, 7, "e")
+    assert table.update("p", address(2), True, None, 6, "e") == []
+    assert not table.claim(address(2)).online
+    # A snapshot taken before the leave does not bring it back either.
+    assert table.snapshot("p", {address(2): 6}, 6, "e") == []
+    assert not table.claim(address(2)).online
+
+
+def test_a_restarted_peer_is_believed_although_its_numbers_start_again():
+    table = PresenceTable()
+    table.update("p", address(3), True, None, 40, "old")
+    assert table.snapshot("p", {address(4): 1}, 1, "new") == [address(3), address(4)]
+    assert table.claim(address(3)) is None
+    assert table.claim(address(4)).online

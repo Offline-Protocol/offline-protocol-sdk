@@ -180,6 +180,13 @@ class Gateway:
         #: Address to the one session bound to it.
         self.bound: dict[str, Session] = {}
         self._last_seen: OrderedDict[str, int] = OrderedDict()
+        #: Presence numbering for the backbone: every bind and unbind is one
+        #: change, numbered in order, so a peer can tell a late message from
+        #: a current one (``PresenceTable``). The epoch tells a peer this
+        #: process's numbering from a previous run's.
+        self.presence_epoch = os.urandom(8).hex()
+        self._presence_seq = 0
+        self._bound_seq: dict[str, int] = {}
         self._device_budget = BucketMap(config.device_per_minute / 60.0, config.device_burst)
         self._backbone_budget = BucketMap(config.backbone_per_minute / 60.0, config.backbone_burst)
         self._peer_budget = BucketMap(config.peer_per_minute / 60.0, config.peer_burst)
@@ -344,9 +351,11 @@ class Gateway:
             logger.info("%s reattached; closing %r", address, previous)
             previous.close()
             return
+        self._presence_seq += 1
+        self._bound_seq[address] = self._presence_seq
         self._presence_changed(address)
         if self.backbone is not None:
-            self.backbone.local_presence_changed(address, True, None)
+            self.backbone.local_presence_changed(address, True, None, self._presence_seq)
 
     def _unbind(self, session: Session) -> None:
         address = session.address
@@ -358,9 +367,11 @@ class Gateway:
         self._last_seen[address] = now
         while len(self._last_seen) > MAX_LAST_SEEN:
             self._last_seen.popitem(last=False)
+        self._presence_seq += 1
+        self._bound_seq.pop(address, None)
         self._presence_changed(address)
         if self.backbone is not None:
-            self.backbone.local_presence_changed(address, False, now)
+            self.backbone.local_presence_changed(address, False, now, self._presence_seq)
 
     # -- Submit and Verdict ----------------------------------------------
 
@@ -505,8 +516,8 @@ class Gateway:
             return ForwardResult.DELIVERED, ""
         return ForwardResult.UNREACHABLE, "the recipient's session closed"
 
-    def local_addresses(self) -> list[str]:
-        return list(self.bound)
+    def local_snapshot(self) -> tuple[int, dict[str, int]]:
+        return self._presence_seq, dict(self._bound_seq)
 
     def remote_presence_changed(self, address: str) -> None:
         self._presence_changed(address)

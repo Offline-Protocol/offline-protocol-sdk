@@ -69,6 +69,9 @@ class Claim:
     online: bool
     last_seen_ms: int | None
     received_at: float
+    #: The claiming gateway's number for the change this claim reflects.
+    #: Later changes carry larger numbers; see :class:`PresenceTable`.
+    seq: int = 0
 
 
 class BackboneHooks(Protocol):
@@ -78,8 +81,13 @@ class BackboneHooks(Protocol):
         """Hand a frame from ``peer`` to a local session. Returns the result
         and, for a refusal, its reason token."""
 
-    def local_addresses(self) -> list[str]:
-        """Every address with a bound session here, for a snapshot."""
+    #: Random per daemon process, so a peer can tell a restarted gateway's
+    #: numbering, which starts again from zero, from a stale message.
+    presence_epoch: str
+
+    def local_snapshot(self) -> tuple[int, dict[str, int]]:
+        """The current presence number, and every address with a bound
+        session here mapped to the number of the change that bound it."""
 
     def remote_presence_changed(self, address: str) -> None:
         """A peer gateway's claim about ``address`` changed."""
@@ -113,12 +121,26 @@ class Backbone(abc.ABC):
         """
 
     @abc.abstractmethod
-    def local_presence_changed(self, address: str, online: bool, last_seen_ms: int | None) -> None:
-        """Tell the peer gateways that ``address`` attached here or left."""
+    def local_presence_changed(self, address: str, online: bool, last_seen_ms: int | None, seq: int) -> None:
+        """Tell the peer gateways that ``address`` attached here or left, as
+        change number ``seq``."""
 
 
 class PresenceTable:
     """Claims received from peer gateways, keyed by address and by peer.
+
+    **Ordering.** Presence messages from one peer can arrive out of order:
+    Reticulum runs each request on a thread of its own, and a snapshot large
+    enough to travel as a resource lands after a one-packet update sent later.
+    Applied in arrival order, a snapshot taken before an attach would erase it
+    and leave an offline claim that closes a path the contract says a gateway
+    may only open. So every change carries the sending gateway's number for
+    it, every snapshot carries the number current when it was taken, and a
+    claim is replaced only by something newer: an entry with a larger number,
+    or, for an address the snapshot omits, a snapshot taken after the change
+    that claim reflects. The numbers restart with the sending process, so
+    each peer's messages also carry an epoch, and a new epoch discards
+    everything that peer said before.
 
     Every claim a peer made is dropped when the link to that peer goes,
     because a claim from a gateway this one can no longer reach opens no path.
@@ -127,35 +149,46 @@ class PresenceTable:
 
     def __init__(self, capacity: int = 65536, clock: Callable[[], float] = time.monotonic) -> None:
         self._claims: OrderedDict[str, dict[str, Claim]] = OrderedDict()
+        self._epochs: dict[str, str] = {}
         self._capacity = capacity
         self._clock = clock
 
-    def update(self, peer: str, address: str, online: bool, last_seen_ms: int | None) -> bool:
-        """Records a claim. Returns whether the best claim for the address
-        changed as a result."""
+    def update(
+        self, peer: str, address: str, online: bool, last_seen_ms: int | None, seq: int, epoch: str = ""
+    ) -> list[str]:
+        """Records a claim unless one at least as new is held. Returns the
+        addresses whose best claim changed as a result."""
+        changed = self._enter_epoch(peer, epoch)
+        held = self._claims.get(address, {}).get(peer)
+        if held is not None and held.seq >= seq:
+            return changed
         before = self.claim(address)
         by_peer = self._claims.pop(address, {})
-        by_peer[peer] = Claim(peer, online, last_seen_ms, self._clock())
+        by_peer[peer] = Claim(peer, online, last_seen_ms, self._clock(), seq)
         self._claims[address] = by_peer
         while len(self._claims) > self._capacity:
             self._claims.popitem(last=False)
-        return _differs(before, self.claim(address))
+        if _differs(before, self.claim(address)):
+            changed.append(address)
+        return changed
 
-    def snapshot(self, peer: str, online: list[str]) -> list[str]:
-        """Replaces everything ``peer`` claims with its full list of attached
-        addresses. Returns the addresses whose best claim changed."""
-        now_online = set(online)
-        changed = []
-        for address in [a for a, by in self._claims.items() if peer in by and a not in now_online]:
-            before = self.claim(address)
+    def snapshot(self, peer: str, online: dict[str, int], snapshot_seq: int, epoch: str = "") -> list[str]:
+        """Applies ``peer``'s full list of attached addresses, each with the
+        number of the change that attached it, taken at ``snapshot_seq``.
+        Returns the addresses whose best claim changed."""
+        changed = self._enter_epoch(peer, epoch)
+        for address in [a for a, by in self._claims.items() if peer in by and a not in online]:
             claim = self._claims[address][peer]
-            if claim.online:
-                self._claims[address][peer] = Claim(peer, False, claim.last_seen_ms, self._clock())
+            # Newer than the snapshot: the change it reflects happened after
+            # the snapshot was taken, so the snapshot's silence says nothing.
+            if not claim.online or claim.seq >= snapshot_seq:
+                continue
+            before = self.claim(address)
+            self._claims[address][peer] = Claim(peer, False, claim.last_seen_ms, self._clock(), snapshot_seq)
             if _differs(before, self.claim(address)):
                 changed.append(address)
-        for address in now_online:
-            if self.update(peer, address, True, None):
-                changed.append(address)
+        for address, seq in online.items():
+            changed += self.update(peer, address, True, None, seq, epoch)
         return changed
 
     def drop_peer(self, peer: str) -> list[str]:
@@ -181,6 +214,12 @@ class PresenceTable:
         online = [c for c in by_peer.values() if c.online]
         pool = online or list(by_peer.values())
         return max(pool, key=lambda c: c.received_at)
+
+    def _enter_epoch(self, peer: str, epoch: str) -> list[str]:
+        if self._epochs.get(peer) == epoch:
+            return []
+        self._epochs[peer] = epoch
+        return self.drop_peer(peer)
 
 
 def _differs(a: Claim | None, b: Claim | None) -> bool:
@@ -259,10 +298,12 @@ class InMemoryBackbone(Backbone):
         except asyncio.TimeoutError:
             return ForwardResult.TIMEOUT, "no answer from the peer gateway"
 
-    def local_presence_changed(self, address: str, online: bool, last_seen_ms: int | None) -> None:
+    def local_presence_changed(self, address: str, online: bool, last_seen_ms: int | None, seq: int) -> None:
+        assert self.hooks is not None
+        epoch = self.hooks.presence_epoch
         for other in list(self.network.members.values()):
             if self.network.linked(self.name, other.name):
-                other._claimed(self.name, address, online, last_seen_ms)
+                other._claimed(self.name, address, online, last_seen_ms, seq, epoch)
 
     async def _receive(self, frame: BackboneFrame, sender: str) -> tuple[ForwardResult, str]:
         if self.delay:
@@ -271,15 +312,19 @@ class InMemoryBackbone(Backbone):
             return ForwardResult.TIMEOUT, "stopped"
         return await self.hooks.deliver_from_backbone(frame, sender)
 
-    def _claimed(self, peer: str, address: str, online: bool, last_seen_ms: int | None) -> None:
-        if self.table.update(peer, address, online, last_seen_ms) and self.hooks is not None:
-            self.hooks.remote_presence_changed(address)
+    def _claimed(
+        self, peer: str, address: str, online: bool, last_seen_ms: int | None, seq: int, epoch: str
+    ) -> None:
+        for changed in self.table.update(peer, address, online, last_seen_ms, seq, epoch):
+            if self.hooks is not None:
+                self.hooks.remote_presence_changed(changed)
 
     def _link_up(self, peer: str) -> None:
         other = self.network.members.get(peer)
         if other is None or other.hooks is None or self.hooks is None:
             return
-        for address in self.table.snapshot(peer, other.hooks.local_addresses()):
+        snapshot_seq, online = other.hooks.local_snapshot()
+        for address in self.table.snapshot(peer, online, snapshot_seq, other.hooks.presence_epoch):
             self.hooks.remote_presence_changed(address)
 
     def _link_lost(self, peer: str) -> None:
