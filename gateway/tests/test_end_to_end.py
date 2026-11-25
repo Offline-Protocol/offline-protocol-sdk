@@ -32,7 +32,7 @@ from offline_gateway import Gateway, GatewayConfig, InMemoryBackbone, InMemoryNe
 
 def _config(profile: str) -> ProtocolConfig:
     return ProtocolConfig(
-        app_id="gateway-e2e",
+        app_label="gateway-e2e",
         profile=profile,
         ble_enabled=False,
         wifi_direct_enabled=False,
