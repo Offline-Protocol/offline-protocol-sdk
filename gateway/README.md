@@ -36,10 +36,15 @@ These are the contract's rules, and the tests in `tests/` pin each one.
   nothing it does not do: it sets neither `pushed` nor `stored`.
 - **Ciphertext only.** The daemon sees MLS ciphertext and routing metadata,
   on the device link and on the backbone.
-- **Budgets.** Per-device submission and backbone budgets, and a per-peer
-  gateway budget, as token buckets. The backbone budget applies to a scarce
-  backbone only, and its default burst covers a first contact (two engines
-  pairing and exchanging one message spend 18 to 20 frames each).
+- **Budgets.** As token buckets: per device, per device across the
+  backbone, per peer gateway in bytes on the way out (shared by every device,
+  since the airtime toward a peer is the scarce thing), and per peer gateway
+  on the way in. The backbone budgets apply to a scarce backbone only. The
+  bursts cover a first contact (two engines pairing and exchanging one
+  message spend 18 to 20 frames each).
+- **Sessions.** Sockets that never attach have their own pool, and a
+  newcomer evicts the oldest of them, so they cannot lock devices out. One
+  host may hold at most 8 sessions.
 
 What it does not do yet: hold frames for an absent recipient (no
 `mailbox_v1`), push to a sleeping phone, or re-originate backbone frames into
@@ -113,14 +118,30 @@ LoRa is slow, and the SDK's messages are not small. One sealed direct message
 is about 472 bytes on the wire at best, already more than one Reticulum
 packet, and a first contact between two devices that have never met is
 about 20 frames each way: connection request, key packages, the MLS Welcome,
-acknowledgements. Expect a first contact to take minutes at long-range
-settings and later messages to take seconds each. The daemon answers each
-submission within 45 seconds (the clients give up at 60), so on a slow link
-a frame may be failed `backbone_timeout` and retried by the device. Nothing
-is lost by that, only repeated.
+acknowledgements. That last number is measured (`test_end_to_end.py`); the
+rest of this section is arithmetic from the radio settings, not a
+measurement over radios.
 
-These numbers come from the tests, over TCP. They have not been measured
-over real radios yet.
+With the example radio (`examples/rns/config`: SF8 at 125 kHz, about 3.1
+kbps, on the EU sub-band that allows 10 % airtime):
+
+- a full packet is about 1.3 s on air, and a sealed frame is three or so
+  transmissions from the sender, plus the peer's answers on its own airtime;
+- 10 % is about 6 minutes of airtime an hour, so a gateway sustains roughly
+  three frames a minute toward a peer, which is what the default
+  `peer_egress_bytes_per_minute` allows;
+- a first contact (about 20 frames each way) takes several minutes, and a
+  later message tens of seconds.
+
+At 1 % airtime, the rule on most of the EU 868 MHz band, everything is ten
+times slower: a first contact takes over an hour. Divide the egress budget
+by ten there, or the device's frames are accepted faster than the radio can
+carry them.
+
+The daemon answers each submission within 45 seconds (the clients give up
+at 60). On a slow or busy link a frame may be failed `backbone_timeout` and
+retried by the device. Nothing is lost by that, only repeated, and the
+timed-out transfer is cancelled, so the retry does not run beside it.
 
 ## Tests
 

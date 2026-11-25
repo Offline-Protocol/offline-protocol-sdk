@@ -25,6 +25,12 @@ max_backbone_frame_bytes = 16384
 backbone_per_minute = 6.0
 backbone_burst = 24.0
 
+# Frame bytes per minute toward each peer gateway, shared by every device
+# attached here. This is the budget that has to match the radio: the
+# defaults fit rns/config (10 % airtime at SF8); divide by ten at 1 %.
+peer_egress_bytes_per_minute = 1500.0
+peer_egress_burst_bytes = 16384.0
+
 [reticulum]
 # Reticulum's own configuration: interfaces, the RNode's port and radio.
 configdir = "rns"

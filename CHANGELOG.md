@@ -32,9 +32,10 @@ Questions about a release, or about upgrading to one? Ask in the
   point its daemon address at the gateway. Two real engines pair over MLS and
   exchange a message across two daemon processes joined by a Reticulum
   backbone in its tests; it has not yet been run over radios. Expect a first
-  contact between two devices to cost about 20 backbone frames each, which
-  over LoRa is minutes, and a new gateway to be unreachable while Reticulum
-  mints its one-time announce stamp.
+  contact between two devices to cost about 20 backbone frames each: by
+  arithmetic, several minutes on the example radio (SF8, 10 % airtime) and
+  over an hour at 1 %. A new gateway is unreachable while Reticulum mints its
+  one-time announce stamp.
 - **A gateway daemon can verify a device's attach proof without building
   it: `verify_gateway_address_proof(address, public_key, signature,
   challenge)`**, instance-less, in every binding and over the C API's

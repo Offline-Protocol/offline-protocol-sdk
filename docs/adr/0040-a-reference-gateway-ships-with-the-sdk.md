@@ -57,6 +57,12 @@ Three things made a gateway more than a weekend's port of the relay:
    a guess: two SDK engines pairing over MLS and exchanging one message spend
    18 to 20 backbone frames each, so the default burst is 24. A broad backbone
    skips that budget.
+6. **The airtime toward a peer is budgeted in bytes, once for every device.**
+   The per-device budget stops one device taking the link; it cannot stop
+   many devices together asking for more than the radio carries, and on a
+   scarce link that is the failure that matters. The default is sized to the
+   example radio (SF8 at 125 kHz, 10 % airtime: about three frames a minute),
+   and a deployment on another radio resizes it.
 
 ## Consequences
 
@@ -67,7 +73,9 @@ Three things made a gateway more than a weekend's port of the relay:
 - A first contact over LoRa is expensive, about 20 frames each way at about
   472 bytes and up. That is the SDK's session setup, not the gateway's, and
   the gateway now makes the number visible instead of hiding it in a
-  hypothetical.
+  hypothetical. By arithmetic from the radio settings, it is several minutes
+  on the example radio and over an hour at the 1 % duty cycle most of the EU
+  868 MHz band allows. Nothing has been measured over radios yet.
 - Reticulum 1.6 mints a proof-of-work stamp before a destination's first
   announce. A new gateway is unreachable for seconds on a laptop and minutes
   on a small board, once per identity. The daemon logs it; the README says it.

@@ -4,8 +4,15 @@
 #
 # The radio parameters MUST match on every gateway that should hear each
 # other, and MUST be legal where you transmit. The values below are an EU868
-# example; check your region's frequencies, power and duty-cycle rules before
-# you key up a transmitter.
+# example on the 869.40-869.65 MHz sub-band, where EU rules allow a 10 % duty
+# cycle (the rest of the 868 MHz band mostly allows 1 %). Check your region's
+# frequencies, power and duty-cycle rules before you key up a transmitter.
+#
+# What this carries: SF8 at 125 kHz is about 3.1 kbps, so a full 500-byte
+# packet is about 1.3 s on air, and 10 % is about 6 minutes of airtime an
+# hour. A sealed frame crosses as three or so packets. The gateway's default
+# peer_egress budget (gateway.toml) is sized to this; at 1 % airtime, divide
+# it by ten.
 
 [reticulum]
   # A powered, stationary gateway is the kind of node Reticulum expects to
@@ -24,13 +31,15 @@
     type = RNodeInterface
     enabled = Yes
     port = /dev/ttyUSB0
-    frequency = 867200000
+    frequency = 869525000
     bandwidth = 125000
-    txpower = 7
+    txpower = 14
     spreadingfactor = 8
     codingrate = 5
     # Airtime caps, in percent: over the last hour, and over the last 15
-    # seconds. Reticulum holds traffic back past them. Set them to what
-    # your region's duty-cycle rule allows on this sub-band.
-    airtime_limit_long = 1.0
-    airtime_limit_short = 10
+    # seconds. Reticulum holds traffic back past them. The long cap is the
+    # duty-cycle rule; the short one lets a frame's few packets go out
+    # together instead of one per 15 s window, which would push a single
+    # frame past the gateway's 45 s verdict timeout.
+    airtime_limit_long = 10
+    airtime_limit_short = 25

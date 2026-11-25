@@ -35,13 +35,18 @@ class TokenBucket:
         self._at = self.clock()
 
     def take(self, amount: float = 1.0) -> bool:
-        now = self.clock()
-        self._tokens = min(self.burst, self._tokens + (now - self._at) * self.rate)
-        self._at = now
-        if amount > self._tokens:
+        if not self.has(amount):
             return False
         self._tokens -= amount
         return True
+
+    def has(self, amount: float = 1.0) -> bool:
+        """Whether ``take(amount)`` would succeed, spending nothing. Lets a
+        caller check two buckets before charging either."""
+        now = self.clock()
+        self._tokens = min(self.burst, self._tokens + (now - self._at) * self.rate)
+        self._at = now
+        return amount <= self._tokens
 
 
 class BucketMap:
@@ -62,6 +67,12 @@ class BucketMap:
         self._buckets: dict[str, TokenBucket] = {}
 
     def take(self, key: str, amount: float = 1.0) -> bool:
+        return self._bucket(key).take(amount)
+
+    def has(self, key: str, amount: float = 1.0) -> bool:
+        return self._bucket(key).has(amount)
+
+    def _bucket(self, key: str) -> TokenBucket:
         bucket = self._buckets.pop(key, None)
         if bucket is None:
             bucket = TokenBucket(self._rate, self._burst, self._clock)
@@ -69,4 +80,4 @@ class BucketMap:
                 self._buckets.pop(next(iter(self._buckets)))
         # Re-inserted at the end: the dict's order is the use order.
         self._buckets[key] = bucket
-        return bucket.take(amount)
+        return bucket

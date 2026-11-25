@@ -85,9 +85,21 @@ class GatewayConfig:
     #: refuses the pairing's own frames and stalls it on the retry ladder.
     backbone_per_minute: float = 6.0
     backbone_burst: float = 24.0
-    #: Frames per minute each peer gateway may hand this one.
+    #: Frame bytes per minute this gateway sends toward each peer gateway,
+    #: shared by every device attached here, on a scarce backbone only. The
+    #: budget that matches the radio: size it to what the link carries.
+    #: The defaults fit the example RNode (EU868 869.525 MHz, SF8/125 kHz at
+    #: about 3.1 kbps, 10 % airtime): a sealed frame of about 500 bytes is
+    #: three or so transmissions of about 1.3 s, so roughly three frames a
+    #: minute leave sustained. The burst holds one first contact (about 20
+    #: frames) and must hold the largest backbone frame. At 1 % airtime,
+    #: divide the rate by ten.
+    peer_egress_bytes_per_minute: float = 1500.0
+    peer_egress_burst_bytes: float = 16384.0
+    #: Frames per minute each peer gateway may hand this one. The burst
+    #: covers two first contacts arriving at once.
     peer_per_minute: float = 60.0
-    peer_burst: float = 20.0
+    peer_burst: float = 48.0
     #: Seconds a backbone forward may take before the device is told
     #: ``backbone_timeout``. Must leave the client's 60 s room for the answer.
     backbone_verdict_timeout: float = 45.0
@@ -115,9 +127,17 @@ class GatewayConfig:
                 f"backbone_verdict_timeout must be under {CLIENT_VERDICT_TIMEOUT - 5:g} s, "
                 "or the client fails the frame before the verdict arrives"
             )
-        for name in ("device_burst", "backbone_burst", "peer_burst"):
+        for name in ("device_burst", "backbone_burst", "peer_burst", "peer_egress_burst_bytes"):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"{name} must be positive")
+        for name in ("device_per_minute", "backbone_per_minute", "peer_per_minute", "peer_egress_bytes_per_minute"):
+            if getattr(self, name) < 0:
+                # A bucket is made on first use, so a bad rate would surface
+                # as an exception on some device's first frame, which drops
+                # that connection without the verdict the frame is owed.
+                raise ConfigError(f"{name} must not be negative")
+        if self.peer_egress_burst_bytes < self.max_backbone_frame_bytes:
+            raise ConfigError("peer_egress_burst_bytes must hold at least one max_backbone_frame_bytes frame")
         if self.reticulum is not None:
             for peer in self.reticulum.peers:
                 try:

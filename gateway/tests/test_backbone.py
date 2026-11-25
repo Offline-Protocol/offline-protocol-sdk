@@ -210,3 +210,72 @@ def test_a_restarted_peer_is_believed_although_its_numbers_start_again():
     assert table.snapshot("p", {address(4): 1}, 1, "new") == [address(3), address(4)]
     assert table.claim(address(3)) is None
     assert table.claim(address(4)).online
+
+
+async def _scarce_pair(**budgets):
+    network = InMemoryNetwork()
+    gws = []
+    for name in ("a", "b"):
+        gw = Gateway(
+            GatewayConfig(listen_port=0, attach_grace=0, **budgets),
+            verifier=fake_verify,
+            backbone=InMemoryBackbone(network, name, rate_class="scarce"),
+        )
+        gw.port = await gw.start()  # type: ignore[attr-defined]
+        gws.append(gw)
+    return gws
+
+
+async def test_the_egress_budget_toward_a_peer_is_shared_by_every_device():
+    """The scarce thing is the airtime toward one peer. Two devices each well
+    inside their own budget still share that one."""
+    gws = await _scarce_pair(
+        max_backbone_frame_bytes=100, peer_egress_bytes_per_minute=0.0001, peer_egress_burst_bytes=150
+    )
+    try:
+        alice, carol = await Client.connect(gws[0].port), await Client.connect(gws[0].port)
+        bob = await Client.connect(gws[1].port)
+        await alice.attach(address(1))
+        await carol.attach(address(3))
+        await bob.attach(address(2))
+        await alice.submit(address(2), b"x" * 100, message_id="a1")
+        assert (await alice.expect("MessageSent"))["message_id"] == "a1"
+        await carol.submit(address(2), b"x" * 100, message_id="c1")
+        assert (await carol.expect("DeliveryError"))["reason"] == "budget_exceeded"
+        # Smaller frames still fit what is left.
+        await carol.submit(address(2), b"x" * 40, message_id="c2")
+        assert (await carol.expect("MessageSent"))["message_id"] == "c2"
+    finally:
+        for gw in gws:
+            await gw.stop()
+
+
+async def test_a_frame_the_egress_budget_refuses_costs_the_device_nothing():
+    gws = await _scarce_pair(
+        max_backbone_frame_bytes=100,
+        peer_egress_bytes_per_minute=0.0001,
+        peer_egress_burst_bytes=100,
+        backbone_per_minute=0.0001,
+        backbone_burst=2,
+    )
+    try:
+        alice, bob = await Client.connect(gws[0].port), await Client.connect(gws[1].port)
+        await alice.attach(address(1))
+        await bob.attach(address(2))
+        await alice.submit(address(2), b"x" * 90, message_id="ok")
+        await alice.expect("MessageSent")
+        await alice.submit(address(2), b"x" * 90, message_id="refused")
+        assert (await alice.expect("DeliveryError"))["reason"] == "budget_exceeded"
+        # The refused frame did not spend the device's second token.
+        assert gws[0]._backbone_budget.has(address(1))
+    finally:
+        for gw in gws:
+            await gw.stop()
+
+
+def test_negative_rates_are_refused_at_load():
+    from offline_gateway import ConfigError
+
+    for name in ("device_per_minute", "backbone_per_minute", "peer_per_minute", "peer_egress_bytes_per_minute"):
+        with pytest.raises(ConfigError):
+            GatewayConfig(**{name: -1}).validate()
