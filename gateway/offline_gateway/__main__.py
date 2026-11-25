@@ -57,7 +57,11 @@ async def _run(config: GatewayConfig) -> int:
     if config.reticulum is not None:
         from .reticulum import ReticulumBackbone
 
-        backbone = ReticulumBackbone(config.reticulum, max_frame_bytes=config.max_backbone_frame_bytes)
+        backbone = ReticulumBackbone(
+            config.reticulum,
+            max_frame_bytes=config.max_backbone_frame_bytes,
+            max_sessions=config.max_sessions,
+        )
     gateway = Gateway(config, backbone=backbone)
     await gateway.start()
     stop = asyncio.Event()

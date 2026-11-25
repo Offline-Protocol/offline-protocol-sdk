@@ -546,3 +546,29 @@ async def test_a_frame_the_budgets_refuse_at_its_turn_is_not_sent():
     result, reason = await backbone.forward(frame, 30, lambda peer: False)
     assert (result, reason) == (ForwardResult.REFUSED, "budget_exceeded")
     assert not sent
+
+
+def test_a_full_gateways_snapshot_fits_the_request_limit():
+    """Sized to the frame alone, the limit refused the snapshot of a gateway
+    with about 140 devices, which then failed every link-up."""
+    import time
+
+    from RNS.vendor import umsgpack
+
+    from offline_gateway.config import GatewayConfig
+    from offline_gateway.reticulum import MIN_SNAPSHOT_SESSIONS, max_request_bytes
+
+    config = GatewayConfig()
+    limit = max_request_bytes(config.max_backbone_frame_bytes, config.max_sessions)
+    for sessions in (config.max_sessions, MIN_SNAPSHOT_SESSIONS):
+        snapshot = {
+            "e": "0123456789abcdef",
+            "snap": True,
+            "q": 10**9,
+            "on": [[f"off1q{i:039d}", 10**9] for i in range(sessions)],
+            "off": [],
+        }
+        packed = umsgpack.packb([time.time(), RNS.Identity.truncated_hash(b"/presence"), snapshot])
+        assert len(packed) <= limit, (sessions, len(packed), limit)
+    # And a frame at the bound still fits.
+    assert config.max_backbone_frame_bytes + 1024 <= limit

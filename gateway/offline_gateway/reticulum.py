@@ -76,6 +76,12 @@ LINK_ESTABLISH_WAIT = 90.0
 PRESENCE_COALESCE = 2.0
 #: Seconds a request handler waits for the event loop to answer it.
 HANDLER_WAIT = 10.0
+#: Bytes one ``[address, seq]`` entry takes in a packed snapshot, with room:
+#: a real one, a 44-character address and its number, measures about 52.
+SNAPSHOT_ENTRY_BYTES = 64
+#: Devices a peer's snapshot is allowed for, at least, whatever this gateway's
+#: own ``max_sessions``.
+MIN_SNAPSHOT_SESSIONS = 1024
 #: Seconds a request must still have when its turn on a link comes, or it is
 #: refused unsent: a frame handed to the radio with less than this cannot
 #: be answered in time and would only spend airtime.
@@ -105,9 +111,10 @@ class ReticulumBackbone(Backbone):
     kind = "reticulum"
     rate_class = "scarce"
 
-    def __init__(self, config: ReticulumConfig, max_frame_bytes: int = 16 * 1024) -> None:
+    def __init__(self, config: ReticulumConfig, max_frame_bytes: int = 6 * 1024, max_sessions: int = 256) -> None:
         self.config = config
         self.max_frame_bytes = max_frame_bytes
+        self.max_sessions = max_sessions
         self.peers: set[bytes] = {bytes.fromhex(p) for p in config.peers}
         self.table = PresenceTable()
         self.hooks: BackboneHooks | None = None
@@ -157,9 +164,7 @@ class ReticulumBackbone(Backbone):
             self._identity, RNS.Destination.IN, RNS.Destination.SINGLE, APP_NAME, *ASPECTS
         )
         self.destination_hash = self._destination.hash
-        # A forward carries one frame and its routing, msgpack-encoded; past
-        # this it is not a frame the daemon would have accepted.
-        self._destination.set_max_request_size(self.max_frame_bytes + 1024)
+        self._destination.set_max_request_size(max_request_bytes(self.max_frame_bytes, self.max_sessions))
         self._destination.set_link_established_callback(self._inbound_link)
         for path, handler in (
             (PATH_FORWARD, self._handle_forward),
@@ -632,6 +637,21 @@ class ReticulumBackbone(Backbone):
             return
         for address in dict.fromkeys(addresses):
             self.hooks.remote_presence_changed(address)
+
+
+def max_request_bytes(max_frame_bytes: int, max_sessions: int) -> int:
+    """The largest request this gateway accepts from a peer.
+
+    One limit covers every path, because Reticulum applies it per
+    destination. It must hold a forward (one frame and its routing) and a
+    presence snapshot (one entry per device attached at the peer). Sized to
+    the frame alone, it refused the snapshot of a gateway with more than
+    about 140 devices, which then failed every link-up and could never carry
+    a frame. Peers may allow more sessions than this one, so the snapshot
+    allowance is for at least ``MIN_SNAPSHOT_SESSIONS``.
+    """
+    snapshot = SNAPSHOT_ENTRY_BYTES * max(max_sessions, MIN_SNAPSHOT_SESSIONS) + 1024
+    return max(max_frame_bytes + 1024, snapshot)
 
 
 def _fits_one_packet(link: Any, path: str, data: Any) -> bool:
