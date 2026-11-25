@@ -73,12 +73,16 @@ def sdk_verifier() -> Verifier:
 
 
 def host_key(peer_name: Any) -> str | None:
-    """What the per-host caps and budgets are keyed by.
+    """What the per-host caps and budgets are keyed by: the source address,
+    with an IPv4-mapped IPv6 address as its IPv4 and any zone dropped.
 
-    An IPv4 address as it is. An IPv6 address by its /64, because a device
-    may hold as many addresses in its prefix as it likes (privacy addresses
-    rotate by design), and keyed by the exact address one device would be
-    as many hosts as it cared to be. An IPv4-mapped IPv6 address is its IPv4.
+    The full address, not an IPv6 /64: a hotspot or venue network gives
+    every client one /64, and link-local addresses share fe80::/64, so keyed
+    by prefix the whole network was one host, eight sessions and one budget
+    between everyone. A device rotating privacy addresses can be several
+    hosts; the shared egress budget still bounds what all of them send.
+    Devices behind NAT or a proxy are one host, which is why that is not a
+    deployment this daemon is meant for.
     """
     if not isinstance(peer_name, tuple) or not peer_name:
         return None
@@ -87,10 +91,8 @@ def host_key(peer_name: Any) -> str | None:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return host
-    if ip.version == 6:
-        if ip.ipv4_mapped is not None:
-            return str(ip.ipv4_mapped)
-        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return str(ip.ipv4_mapped)
     return str(ip)
 
 

@@ -362,15 +362,16 @@ async def test_one_host_cannot_hold_more_than_its_share():
         await gw.stop()
 
 
-def test_hosts_are_keyed_by_ipv4_address_or_ipv6_prefix():
+def test_hosts_are_keyed_by_their_full_address():
+    """Not by an IPv6 /64: a hotspot gives every client one, and keyed by it
+    the whole network shared eight sessions and one budget."""
     from offline_gateway.gateway import host_key
 
     assert host_key(("192.168.4.20", 5000)) == "192.168.4.20"
-    # Two privacy addresses in one /64 are one host.
     a = host_key(("2001:db8:1:2:aaaa::1", 5000, 0, 0))
     b = host_key(("2001:db8:1:2:bbbb::9", 5001, 0, 0))
-    assert a == b == "2001:db8:1:2::/64"
-    assert host_key(("2001:db8:1:3::1", 5000, 0, 0)) != a
+    assert a != b
     assert host_key(("::ffff:10.0.0.5", 5000, 0, 0)) == "10.0.0.5"
-    assert host_key(("fe80::1%en0", 5000, 0, 1)) == "fe80::/64"
+    assert host_key(("fe80::1%en0", 5000, 0, 1)) == "fe80::1"
+    assert host_key(("fe80::1", 5000, 0, 1)) != host_key(("fe80::2", 5000, 0, 1))
     assert host_key(None) is None
