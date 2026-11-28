@@ -14660,3 +14660,173 @@ fn test_leaf_seated_in_local_state_is_reported_on_the_roster_read() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Relay broadcast report tracker persistence
+// ---------------------------------------------------------------------------
+
+/// Sends one relay broadcast for a group that exists only in the member cache
+/// (see [`arm_fake_broadcast`]), through the real arming path so the tracker
+/// entry is persisted.
+fn broadcast_for_fake_group(
+    protocol: &mut OfflineProtocol,
+    group_id: &str,
+    members: &[&str],
+) -> String {
+    protocol.group_mesh.members.insert(
+        group_id.to_string(),
+        members.iter().map(|m| m.to_string()).collect(),
+    );
+    protocol
+        .group_mesh
+        .relay_synced
+        .insert(group_id.to_string());
+    protocol
+        .try_relay_broadcast(
+            group_id,
+            &base64_encode(b"broadcast-ct"),
+            3,
+            None,
+            None,
+            offline_protocol_core::MessagePriority::High,
+        )
+        .unwrap()
+        .as_str()
+}
+
+fn rewind_broadcast(protocol: &mut OfflineProtocol, logical: &str) {
+    protocol
+        .group_mesh
+        .relay_broadcast_pending
+        .get_mut(logical)
+        .unwrap()
+        .armed_at = chrono::Utc::now() - chrono::Duration::seconds(61);
+}
+
+/// A broadcast whose report window spans a process death keeps its backstop:
+/// the tracker entry is written when it is armed and re-armed, comes back on
+/// the next launch, and the first expired tick there downgrades it to
+/// per-member copies under the same logical id. Before persistence the entry
+/// died with the process and members the relay missed got nothing.
+#[test]
+fn test_relay_broadcast_tracker_survives_restart() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let group_id = "grp-restart";
+    let roster = [id("user123"), id("bob"), id("carol")];
+    let roster: Vec<&str> = roster.iter().map(String::as_str).collect();
+
+    let logical = {
+        let mut first = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+        first.initialize_mls_for_test(storage.clone()).unwrap();
+        let internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        first
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        first.start().unwrap();
+        grant_group_delivery_v3(&mut first);
+
+        let logical = broadcast_for_fake_group(&mut first, group_id, &roster);
+        assert_eq!(first.persisted_relay_broadcast_ids(), vec![logical.clone()]);
+
+        // One lost report: the re-armed attempt count is what must persist.
+        rewind_broadcast(&mut first, &logical);
+        first.process_relay_broadcast_report_timeouts();
+        assert_eq!(
+            first.group_mesh.relay_broadcast_pending[&logical].attempts,
+            2
+        );
+        logical
+    };
+
+    // The next launch, with no Internet: the gate cannot hold.
+    let mut second = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    second.initialize_mls_for_test(storage).unwrap();
+    let restored = second
+        .group_mesh
+        .relay_broadcast_pending
+        .get(&logical)
+        .expect("in-flight broadcast restored");
+    assert_eq!(restored.group_id, group_id);
+    assert_eq!(restored.ciphertext_b64, base64_encode(b"broadcast-ct"));
+    assert_eq!(restored.epoch, 3);
+    assert_eq!(restored.attempts, 2);
+    assert_eq!(
+        restored.priority,
+        offline_protocol_core::MessagePriority::High
+    );
+
+    let wifi = MockTransport::new(TransportType::WiFiDirect);
+    wifi.start().unwrap();
+    let wifi_handle = wifi.clone();
+    second
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(wifi));
+    second.start().unwrap();
+    second.group_mesh.members.insert(
+        group_id.to_string(),
+        roster.iter().map(|m| m.to_string()).collect(),
+    );
+
+    rewind_broadcast(&mut second, &logical);
+    second.process_relay_broadcast_report_timeouts();
+
+    assert!(second.group_mesh.relay_broadcast_pending.is_empty());
+    assert!(
+        second.persisted_relay_broadcast_ids().is_empty(),
+        "A downgraded broadcast must not be restored again"
+    );
+    let frames = grp_mls_frames(&wifi_handle);
+    let mut recipients: Vec<&str> = frames.iter().map(|(r, _)| r.as_str()).collect();
+    recipients.sort_unstable();
+    let mut expected = vec![id("bob"), id("carol")];
+    expected.sort_unstable();
+    assert_eq!(
+        recipients,
+        expected.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    for (_, payload) in &frames {
+        assert_eq!(payload["message_id"].as_str(), Some(logical.as_str()));
+    }
+}
+
+/// A settled report owes nothing further, so its record goes with it.
+#[test]
+fn test_settled_broadcast_report_deletes_persisted_tracker_entry() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+    grant_group_delivery_v3(&mut protocol);
+
+    let roster = [id("user123"), id("bob")];
+    let roster: Vec<&str> = roster.iter().map(String::as_str).collect();
+    let logical = broadcast_for_fake_group(&mut protocol, "grp-settle", &roster);
+    assert_eq!(
+        protocol.persisted_relay_broadcast_ids(),
+        vec![logical.clone()]
+    );
+
+    let report = serde_json::json!({
+        "group_id": "grp-settle",
+        "message_id": logical,
+        "delivered": [id("bob")],
+        "pushed": [],
+        "missed": [],
+    });
+    protocol
+        .handle_relay_group_delivery_report(&report.to_string())
+        .unwrap();
+
+    assert!(protocol.group_mesh.relay_broadcast_pending.is_empty());
+    assert!(protocol.persisted_relay_broadcast_ids().is_empty());
+}

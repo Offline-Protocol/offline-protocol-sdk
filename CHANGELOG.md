@@ -74,6 +74,19 @@ Questions about a release, or about upgrading to one? Ask in the
   goes to `enableTelemetry` only, and the SDK never reads it from the label.
   Upgrading: [§33](docs/UPGRADING.md#33-the-mesh-appid-is-now-applabel-unreleased).
 
+### Fixed
+
+- **A group message sent through the relay keeps its delivery backstop across
+  a process death.** A broadcast waiting for the relay's delivery report was
+  tracked in memory only, so an app killed inside the report window (up to
+  60 s per attempt) lost the per-member re-send for members the relay could
+  not reach, and nothing retried on restart. The tracker is now persisted in a
+  new sealed protocol-state category, `relay_broadcast_pending`, and restored
+  by `initialize_mls`: the first tick after `start()` re-sends the broadcast
+  under the same logical id while the relay gate holds, or downgrades it to
+  per-member fan-out. Receivers absorb any duplicate by that id. A
+  `ProtocolStateStorage` adapter needs no change.
+
 ## [0.34.0] — 2026-11-19
 
 > **Two devices that meet over Bluetooth can bring up Wi-Fi between them.**

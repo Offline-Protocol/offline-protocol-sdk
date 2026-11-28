@@ -19,6 +19,9 @@ use super::{
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::events::DecryptionFailureCode;
+use crate::group_mesh::{
+    RelayBroadcastPending, RelayBroadcastRecord, RELAY_BROADCAST_RECORD_VERSION,
+};
 use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::time::Instant;
@@ -58,6 +61,9 @@ pub(crate) enum StateCategory {
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split
     /// data to inherit for it.
     PendingDecryptEntries,
+    /// Group broadcasts awaiting the relay's delivery report. Post-split
+    /// only, like [`Self::PendingDecryptEntries`].
+    RelayBroadcastPending,
     /// Frames held in custody for a neighbour. Sealed for the reason the
     /// pending-decrypt records are: other people's ciphertext plus routing
     /// metadata about them, outliving the process. Post-split only, and
@@ -126,6 +132,7 @@ impl StateCategory {
             storage_keys::PENDING_MESSAGES => Self::PendingMessages,
             storage_keys::PENDING_MESSAGE_ENTRIES => Self::PendingMessageEntries,
             storage_keys::PENDING_DECRYPT_ENTRIES => Self::PendingDecryptEntries,
+            storage_keys::RELAY_BROADCAST_PENDING => Self::RelayBroadcastPending,
             storage_keys::CUSTODY => Self::Custody,
             storage_keys::OUTBOX => Self::Outbox,
             storage_keys::MEDIA_DESCRIPTORS => Self::MediaDescriptors,
@@ -166,6 +173,7 @@ impl StateCategory {
         Self::PendingMessages,
         Self::PendingMessageEntries,
         Self::PendingDecryptEntries,
+        Self::RelayBroadcastPending,
         Self::Custody,
         Self::Outbox,
         Self::MediaDescriptors,
@@ -198,6 +206,7 @@ impl StateCategory {
             Self::PendingMessages => storage_keys::PENDING_MESSAGES,
             Self::PendingMessageEntries => storage_keys::PENDING_MESSAGE_ENTRIES,
             Self::PendingDecryptEntries => storage_keys::PENDING_DECRYPT_ENTRIES,
+            Self::RelayBroadcastPending => storage_keys::RELAY_BROADCAST_PENDING,
             Self::Custody => storage_keys::CUSTODY,
             Self::Outbox => storage_keys::OUTBOX,
             Self::MediaDescriptors => storage_keys::MEDIA_DESCRIPTORS,
@@ -240,6 +249,11 @@ impl StateCategory {
     ///   also the only thing stopping a container write from *substituting*
     ///   a frame — an AEAD makes an edited record unopenable, and unopenable
     ///   is dropped.
+    /// - [`storage_keys::RELAY_BROADCAST_PENDING`]: a group broadcast awaiting
+    ///   the relay's report. The body is MLS ciphertext, but the group id,
+    ///   reply-to id and hop-visible forward attribution are not, and on
+    ///   restore the record is re-sent to every member: a planted record would
+    ///   otherwise make this node fan out frames it never wrote.
     /// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for
     ///   encrypted sends, but plaintext when the app opted out of encryption,
     ///   and its outer `media_metadata` carries the cloud-media secrets on the
@@ -312,6 +326,7 @@ impl StateCategory {
             Self::PendingMessages
             | Self::PendingMessageEntries
             | Self::PendingDecryptEntries
+            | Self::RelayBroadcastPending
             | Self::Custody
             | Self::Outbox
             | Self::MediaDescriptors
@@ -4577,6 +4592,135 @@ impl OfflineProtocol {
             );
         }
         Ok(())
+    }
+
+    // ========================================================================
+    // RELAY BROADCAST REPORT TRACKER PERSISTENCE
+    // ========================================================================
+
+    /// Writes one in-flight relay broadcast under its logical id.
+    ///
+    /// Called whenever an entry is armed or re-armed, so the record carries the
+    /// current attempt count and send time. Best-effort like the outbox: a
+    /// failed write is logged and the entry still lives in memory, it just will
+    /// not survive a restart.
+    pub(crate) fn persist_relay_broadcast_pending(
+        &self,
+        logical_id: &str,
+        entry: &RelayBroadcastPending,
+    ) {
+        let Some(storage) = &self.protocol_state_storage else {
+            return;
+        };
+        let record = RelayBroadcastRecord {
+            version: RELAY_BROADCAST_RECORD_VERSION,
+            logical_id: logical_id.to_string(),
+            entry: entry.clone(),
+        };
+        let data = match serde_json::to_vec(&record) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(msg_id = %logical_id, error = %e, "Failed to serialize relay broadcast tracker entry");
+                return;
+            }
+        };
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::RELAY_BROADCAST_PENDING,
+            logical_id,
+            &data,
+        ) {
+            warn!(msg_id = %logical_id, error = %e, "Failed to persist relay broadcast tracker entry");
+        }
+    }
+
+    /// Removes one persisted relay broadcast.
+    ///
+    /// Callers delete only once the broadcast's outcome is durable elsewhere
+    /// (its per-member copies are in the outbox, or the report said nothing is
+    /// owed), so a process death between the two re-sends copies that receivers
+    /// absorb by the logical id, rather than losing them.
+    pub(crate) fn delete_relay_broadcast_pending_from_storage(&self, logical_id: &str) {
+        let Some(storage) = &self.protocol_state_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::RELAY_BROADCAST_PENDING, logical_id) {
+            warn!(msg_id = %logical_id, error = %e, "Failed to clear persisted relay broadcast tracker entry");
+        }
+    }
+
+    /// Test-only: the logical ids currently persisted for the relay broadcast
+    /// report tracker.
+    #[cfg(test)]
+    pub(crate) fn persisted_relay_broadcast_ids(&self) -> Vec<String> {
+        let Some(storage) = self.protocol_state_storage.as_ref() else {
+            return Vec::new();
+        };
+        Self::list_state_keys(storage.as_ref(), storage_keys::RELAY_BROADCAST_PENDING)
+            .unwrap_or_default()
+    }
+
+    /// Restores the relay broadcast report tracker.
+    ///
+    /// Entries come back with their original send time, so the first tick
+    /// after `start()` finds any whose report window has passed and treats
+    /// them exactly as it would a report lost in this process: re-send under
+    /// the same logical id while the broadcast gate holds, otherwise downgrade
+    /// to per-member fan-out. Nothing is fanned out here, because restore runs
+    /// before the transports are up. More entries than
+    /// `MAX_RELAY_BROADCAST_PENDING` can only come back if earlier deletes
+    /// failed; the next broadcast's eviction downgrades the excess.
+    ///
+    /// Draws its deletes (corrupt, unknown version, filed under the wrong key)
+    /// from the outbox pool: like the outbox, this walk guards delivery, and a
+    /// refused delete only leaves the record for a later launch.
+    pub(crate) fn restore_relay_broadcast_pending(&mut self, allowance: &mut PruneAllowance) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        let key_ids =
+            match Self::list_state_keys(storage.as_ref(), storage_keys::RELAY_BROADCAST_PENDING) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    warn!(error = %e, "Failed to list relay broadcast tracker from storage");
+                    return;
+                }
+            };
+        let mut budget = allowance.refusing_private();
+        for key_id in key_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            let data = match self.read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::RELAY_BROADCAST_PENDING,
+                &key_id,
+                Some(&mut budget),
+            ) {
+                Ok(StateRecord::Present(data)) => data,
+                Ok(StateRecord::Missing | StateRecord::Unreadable | StateRecord::Unavailable)
+                | Err(_) => continue,
+            };
+            match serde_json::from_slice::<RelayBroadcastRecord>(&data) {
+                Ok(record)
+                    if record.version == RELAY_BROADCAST_RECORD_VERSION
+                        && record.logical_id == key_id =>
+                {
+                    self.group_mesh
+                        .relay_broadcast_pending
+                        .insert(key_id, record.entry);
+                }
+                _ => {
+                    warn!(key_id = %key_id, "Dropping unusable relay broadcast tracker record");
+                    if budget.claim() {
+                        self.delete_relay_broadcast_pending_from_storage(&key_id);
+                    }
+                }
+            }
+        }
+        if !self.group_mesh.relay_broadcast_pending.is_empty() {
+            info!(
+                count = self.group_mesh.relay_broadcast_pending.len(),
+                "Restored relay broadcasts awaiting their delivery report"
+            );
+        }
     }
 
     // ========================================================================

@@ -748,7 +748,9 @@ truncate them.
 The SDK seals the record values that can carry message plaintext, media key
 material, or a timeline of when messages arrived: pending session messages,
 outbox entries, media transfer descriptors, parked inbound ciphertext
-(`pending_decrypt_entries`) and the deduplicator's seen set (`dedup_seen_ids`).
+(`pending_decrypt_entries`), group broadcasts awaiting the relay's delivery
+report (`relay_broadcast_pending`) and the deduplicator's seen set
+(`dedup_seen_ids`).
 They are sealed with ChaCha20-Poly1305 under a per-install key kept in
 `MlsStorageProvider` (key type `protocol_state_record_key`). Each record's
 associated data binds it to its `(keyType, keyId)` slot, so a record cannot be

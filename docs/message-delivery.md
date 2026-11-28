@@ -329,19 +329,17 @@ never duplicate messages — at most twice, then the whole message downgrades to
 per-member fan-out, which needs no report to be correct. The same downgrade
 fires immediately if the Internet transport drops while a report is pending.
 
-**The one gap on this path: the report tracker is in memory only.** Unlike an
-outbox entry, a broadcast awaiting its report does not survive process death.
-If the app is killed inside the report window (up to 60 s per attempt) the
-backstop is lost with it — members the relay could not reach get no per-member
-re-send, and nothing retries on restart, even though the send already reported
-`group_message_sent`. The exposure is narrow: it needs a member the relay
-missed *and* a process death in that window, and the relay's own push fan-out
-still covers members who are merely offline with a valid push token. It is
-also strictly smaller than the pre-report broadcast's, which had no backstop at
-all. But it is a real difference from per-member fan-out, where the outbox
-persists for 7 days — so an app that must not lose a group message to a
-mid-flight kill should set `relayBroadcastEnabled: false` and pay the O(N)
-uplink. Persisting the tracker is planned; it is not in this release.
+**The report tracker survives a process death.** A broadcast awaiting its
+report is written to the sealed `relay_broadcast_pending` protocol-state
+category when it is sent, rewritten on each re-send, and deleted only after its
+outcome is durable elsewhere: the report settled it, or its per-member copies
+are in the outbox. `initialize_mls` restores the entries with their original
+send time, so if the app was killed inside the report window (up to 60 s per
+attempt), the first tick after `start()` treats the report as lost: it re-sends
+the broadcast under the same logical id while the gate above holds, and
+otherwise downgrades to per-member fan-out. A process death between writing the
+per-member copies and deleting the record re-sends copies that receivers absorb
+by the logical id, so the failure direction is a duplicate, never a loss.
 
 **Per-member fan-out (the fallback, and the opt-out).** Against a relay that
 did not advertise `group_delivery_v3` — or with `relayBroadcastEnabled: false`
