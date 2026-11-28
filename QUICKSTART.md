@@ -34,7 +34,7 @@ ids, use `off1…` addresses, not `profile`: [identity-for-integrators.md](docs/
 import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
-  appId: 'my-app',
+  appLabel: 'my-app',
   profile: 'default',
 });
 
@@ -173,7 +173,7 @@ mesh.setEventCallback(callback: yourHandler)
 
 let adoption = try OfflineProtocolReferenceStorage.initializeMls(
     on: mesh,
-    appId: config.appId,
+    appLabel: config.appLabel,
     profile: config.profile
 )
 if let warning = adoption.warning {

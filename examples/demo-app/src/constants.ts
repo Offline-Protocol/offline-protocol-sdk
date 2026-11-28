@@ -18,7 +18,7 @@ export const TYPING_INDICATOR_TIMEOUT_MS = 10 * 1000;
 export const NEARBY_THRESHOLD_MS = 30 * 1000;
 
 export const PROTOCOL_CONFIG = {
-  appId: 'offline-demo',
+  appLabel: 'offline-demo',
   // Offline BLE mesh demo: nearby devices discover each other over Bluetooth LE
   // and converge an MLS session directly on the mesh — no internet or relay
   // involved. `requireEncryption: true` keeps the demo fail-closed, so a message

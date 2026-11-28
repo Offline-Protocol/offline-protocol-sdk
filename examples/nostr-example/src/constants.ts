@@ -4,7 +4,7 @@
 export const RELAYS: string[] = [];
 
 export const PROTOCOL_CONFIG = {
-  appId: 'nostr-example',
+  appLabel: 'nostr-example',
   transports: {
     ble: {enabled: false},
     nostr: {
