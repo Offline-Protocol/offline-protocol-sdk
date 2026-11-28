@@ -258,7 +258,7 @@ export function useOfflineProtocol(config: ProtocolConfig) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to initialize');
     }
-  }, [config.appId, config.profile]);
+  }, [config.appLabel, config.profile]);
 
   const start = useCallback(async () => {
     if (!protocolRef.current) return;

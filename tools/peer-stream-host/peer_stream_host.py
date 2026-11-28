@@ -14,7 +14,7 @@ Setup, from the repository root::
     python3 -m venv .venv && . .venv/bin/activate
     pip install -e '.[lan]'
 
-The iPhone runs the example app (appId ``offline-messenger``) with the
+The iPhone runs the example app (app label ``offline-messenger``) with the
 Wi-Fi Direct transport on and Internet off, so nothing reaches it through a
 relay instead. Mac and iPhone join the same Wi-Fi network.
 
@@ -67,9 +67,9 @@ def log(tag: str, text: str = "") -> None:
     print(f"{time.strftime('%H:%M:%S')} {tag:<10} {text}", flush=True)
 
 
-def config(profile: str, app_id: str) -> ProtocolConfig:
+def config(profile: str, app_label: str) -> ProtocolConfig:
     return ProtocolConfig(
-        app_id=app_id,
+        app_label=app_label,
         profile=profile,
         ble_enabled=False,
         wifi_direct_enabled=True,
@@ -89,7 +89,7 @@ def config(profile: str, app_id: str) -> ProtocolConfig:
     )
 
 
-def manager(profile_dir: Path, app_id: str, handler: Any = None) -> ProtocolManager:
+def manager(profile_dir: Path, app_label: str, handler: Any = None) -> ProtocolManager:
     """A manager on the file stores under `profile_dir`, so each identity is a
     directory and nothing touches the login keychain. The peer-stream slot is
     enabled (the core needs one transport) but runs only once started."""
@@ -102,7 +102,7 @@ def manager(profile_dir: Path, app_id: str, handler: Any = None) -> ProtocolMana
         # One profile name for every directory: the name selects the account
         # inside the store, so naming it after the directory would give a
         # renamed candidate a fresh identity.
-        config("peer-stream-host", app_id),
+        config("peer-stream-host", app_label),
         event_handler=handler,
         store_key=key_file.read_bytes(),
         mls_root=profile_dir / "mls",
@@ -110,8 +110,8 @@ def manager(profile_dir: Path, app_id: str, handler: Any = None) -> ProtocolMana
     )
 
 
-async def address_of(profile_dir: Path, app_id: str) -> str:
-    async with manager(profile_dir, app_id) as pm:
+async def address_of(profile_dir: Path, app_label: str) -> str:
+    async with manager(profile_dir, app_label) as pm:
         address = pm.local_address
     if not address:
         raise SystemExit(f"{profile_dir} has no address: MLS did not initialise")
@@ -131,7 +131,7 @@ async def identities(args: argparse.Namespace) -> None:
     for name, fits in wanted.items():
         target = HOME / name
         if target.exists():
-            address = await address_of(target, args.app_id)
+            address = await address_of(target, args.app_label)
             if fits(address):
                 log("KEEP", f"{name}: {address}")
                 continue
@@ -140,7 +140,7 @@ async def identities(args: argparse.Namespace) -> None:
         for attempt in range(1, 33):
             candidate = HOME / f"candidate-{attempt}"
             shutil.rmtree(candidate, ignore_errors=True)
-            address = await address_of(candidate, args.app_id)
+            address = await address_of(candidate, args.app_label)
             if fits(address):
                 candidate.rename(target)
                 log("MADE", f"{name}: {address}")
@@ -222,7 +222,7 @@ class Host:
         if not profile_dir.exists():
             # Fine for a first run, which only learns the iPhone's address.
             log("NEW", f"no identity {profile_dir.name} yet; making one")
-        async with manager(profile_dir, self.args.app_id, handler=self.on_event) as pm:
+        async with manager(profile_dir, self.args.app_label, handler=self.on_event) as pm:
             self.pm = pm
             self.local = pm.local_address or ""
             stream = pm.peer_stream
@@ -329,8 +329,8 @@ def short(address: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--app-id", default="offline-messenger",
-                        help="must match the iPhone app's appId (default: the example app's)")
+    parser.add_argument("--app-label", "--app-id", default="offline-messenger",
+                        help="must match the iPhone app's appLabel (default: the example app's)")
     sub = parser.add_subparsers(dest="command", required=True)
     make = sub.add_parser("identities", help="make a `low` and a `high` identity around the iPhone's address")
     make.add_argument("--iphone", required=True, help="the iPhone's off1... address")
