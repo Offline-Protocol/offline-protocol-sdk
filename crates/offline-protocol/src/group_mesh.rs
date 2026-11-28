@@ -225,7 +225,7 @@ pub(crate) struct RelayRegisterPending {
 /// `__GRP_MLS_MSG__` copies for members the report names as missed or does
 /// not name at all (the relay's roster can be a strict subset of the MLS
 /// roster).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RelayBroadcastPending {
     /// Group the broadcast belongs to.
     pub(crate) group_id: String,
@@ -250,6 +250,23 @@ pub(crate) struct RelayBroadcastPending {
     /// [`RELAY_BROADCAST_MAX_ATTEMPTS`].
     pub(crate) attempts: u32,
 }
+
+/// The persisted form of a [`RelayBroadcastPending`] entry, written under
+/// `storage_keys::RELAY_BROADCAST_PENDING` with its logical id as the key.
+///
+/// `logical_id` repeats the key so a record filed under some other id is
+/// recognisably not one this SDK wrote. `version` is the forward-compatibility
+/// hinge: a reader that does not know it drops the record rather than guessing.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RelayBroadcastRecord {
+    pub(crate) version: u8,
+    pub(crate) logical_id: String,
+    #[serde(flatten)]
+    pub(crate) entry: RelayBroadcastPending,
+}
+
+/// The only [`RelayBroadcastRecord`] version this build writes or reads.
+pub(crate) const RELAY_BROADCAST_RECORD_VERSION: u8 = 1;
 
 /// Which gate refused a leaf, for the `GroupLeafIdentityUnproven` rate-limit
 /// key.
@@ -5208,7 +5225,7 @@ impl OfflineProtocol {
     /// it is a pinned, un-ACKed one-shot: a failure surfaces here
     /// immediately instead of being deferred into a retry ladder that could
     /// never settle — the *report* tracker above is the bounded retry.
-    fn try_relay_broadcast(
+    pub(crate) fn try_relay_broadcast(
         &mut self,
         group_id: &str,
         ciphertext_b64: &str,
@@ -5248,19 +5265,20 @@ impl OfflineProtocol {
             );
             self.downgrade_broadcast_to_per_member(&oldest, stale);
         }
-        self.group_mesh.relay_broadcast_pending.insert(
-            logical_id.as_str(),
-            RelayBroadcastPending {
-                group_id: group_id.to_string(),
-                ciphertext_b64: ciphertext_b64.to_string(),
-                epoch,
-                reply_to: reply_to.map(|s| s.to_string()),
-                forward_info,
-                priority,
-                armed_at: Utc::now(),
-                attempts: 1,
-            },
-        );
+        let entry = RelayBroadcastPending {
+            group_id: group_id.to_string(),
+            ciphertext_b64: ciphertext_b64.to_string(),
+            epoch,
+            reply_to: reply_to.map(|s| s.to_string()),
+            forward_info,
+            priority,
+            armed_at: Utc::now(),
+            attempts: 1,
+        };
+        self.persist_relay_broadcast_pending(&logical_id.as_str(), &entry);
+        self.group_mesh
+            .relay_broadcast_pending
+            .insert(logical_id.as_str(), entry);
         debug!(
             group_id = %group_id,
             msg_id = %logical_id,
@@ -5795,6 +5813,7 @@ impl OfflineProtocol {
             }
         }
 
+        self.delete_relay_broadcast_pending_from_storage(&report.message_id);
         self.emit_event(Event::group_message_delivery_report(
             entry.group_id,
             report.message_id,
@@ -6335,6 +6354,7 @@ impl OfflineProtocol {
                     );
                     entry.attempts += 1;
                     entry.armed_at = Utc::now();
+                    self.persist_relay_broadcast_pending(&logical_id, &entry);
                     self.group_mesh
                         .relay_broadcast_pending
                         .insert(logical_id, entry);
@@ -6385,6 +6405,9 @@ impl OfflineProtocol {
                 "Failed to downgrade group broadcast to per-member fan-out"
             );
         }
+        // After the fan-out, so the per-member copies are in the outbox before
+        // the record that would recreate them is gone.
+        self.delete_relay_broadcast_pending_from_storage(logical_id);
     }
 
     /// Re-registers all unsynced groups with the relay server.

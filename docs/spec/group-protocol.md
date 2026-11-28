@@ -360,8 +360,10 @@ Re-broadcasting under the same identifier is what makes retries safe: the relay
 echoes it, so receiver deduplication and push deduplication both hold across
 attempts.
 
-**Known gap:** the tracker is memory-only, so a process kill inside the report
-window loses the backstop.
+The tracker is persisted (sealed `relay_broadcast_pending` records, restored by
+`initialize_mls`), so a process kill inside the report window does not lose the
+backstop: on the next launch an entry whose window has passed is re-broadcast
+under the same identifier or downgraded, as if its report had been lost.
 
 #### Receiver-side identifier discipline
 

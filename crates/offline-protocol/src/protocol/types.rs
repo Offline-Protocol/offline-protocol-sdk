@@ -2203,6 +2203,14 @@ pub(crate) mod storage_keys {
     /// absent from [`ADOPTABLE_STATE_KEY_TYPES`] for the same reason as
     /// [`PENDING_DECRYPT_ENTRIES`].
     pub const CUSTODY: &str = "custody_entries";
+    /// Group broadcasts sent through the relay that are still waiting for
+    /// its delivery report, one record per broadcast keyed by its logical
+    /// message id (`RelayBroadcastRecord`). Persisted so the per-member
+    /// backstop survives a process death inside the report window. Sealed:
+    /// the record holds group ciphertext and routing metadata. Post-split
+    /// only, and absent from [`ADOPTABLE_STATE_KEY_TYPES`] for the same
+    /// reason as [`PENDING_DECRYPT_ENTRIES`].
+    pub const RELAY_BROADCAST_PENDING: &str = "relay_broadcast_pending";
     /// Key type for persisted per-peer MLS session confirmation state.
     pub const SESSION_STATES: &str = "session_states";
     /// Key type for persisted per-peer received key packages (survives restart).

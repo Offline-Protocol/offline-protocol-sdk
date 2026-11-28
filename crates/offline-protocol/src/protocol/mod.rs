@@ -1563,6 +1563,7 @@ impl OfflineProtocol {
         let previous_last_persisted_lamport = self.last_persisted_lamport;
         let previous_blocked_users = self.blocked_users.clone();
         let previous_outbox = self.outbox.clone();
+        let previous_relay_broadcast_pending = self.group_mesh.relay_broadcast_pending.clone();
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
         let previous_peer_ctrl_freshness = self.peer_ctrl_freshness.clone();
         let previous_peer_undecryptable_ack = self.peer_undecryptable_ack.clone();
@@ -1671,7 +1672,9 @@ impl OfflineProtocol {
         //   settlement-paired walks, because being starved there defers a
         //   diagnostic or a *delivery* rather than a cache eviction, and
         //   neither may be held hostage to a key-package flood in a category it
-        //   has nothing to do with.
+        //   has nothing to do with. The relay broadcast tracker walk draws on
+        //   the outbox pool after the outbox: it guards delivery too, and its
+        //   only deletes are of records it cannot use.
         // - `inbound_prunes` is private to the two receive-side walks for the
         //   same reason: the pending-decryption walk holds ciphertext the app
         //   is told about when it is lost. It draws first, and the seen-set
@@ -1700,6 +1703,7 @@ impl OfflineProtocol {
             self.restore_peer_capabilities(&manager, &mut advisory_prunes);
             self.restore_welcome_lifecycles(&mut advisory_prunes)?;
             self.restore_outbox(&mut outbox_prunes)?;
+            self.restore_relay_broadcast_pending(&mut outbox_prunes);
             self.restore_media_descriptors(&mut advisory_prunes)?;
             self.restore_both_create_awaiting_decrypt();
             Ok(())
@@ -1737,6 +1741,7 @@ impl OfflineProtocol {
             self.last_persisted_lamport = previous_last_persisted_lamport;
             self.blocked_users = previous_blocked_users;
             self.outbox = previous_outbox;
+            self.group_mesh.relay_broadcast_pending = previous_relay_broadcast_pending;
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_ctrl_freshness = previous_peer_ctrl_freshness;
             self.peer_undecryptable_ack = previous_peer_undecryptable_ack;
@@ -1838,6 +1843,7 @@ impl OfflineProtocol {
         self.restore_encryption_capable_peers();
         self.restore_blocked_users()?;
         self.restore_outbox(&mut outbox_prunes)?;
+        self.restore_relay_broadcast_pending(&mut outbox_prunes);
         self.restore_media_descriptors(&mut advisory_prunes)?;
         Ok(())
     }

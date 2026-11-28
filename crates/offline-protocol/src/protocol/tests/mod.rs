@@ -46479,3 +46479,54 @@ fn a_heal_held_by_the_rekey_floor_asks_again() {
         "a held heal must ask again once the floor opens"
     );
 }
+/// A record that does not parse, or sits under a key other than its own
+/// logical id, is not restored and is deleted rather than walked every launch.
+#[test]
+fn test_unusable_relay_broadcast_records_are_dropped_on_restore() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let good = {
+        let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+        first.initialize_mls_for_test(storage.clone()).unwrap();
+        let entry = crate::group_mesh::RelayBroadcastPending {
+            group_id: "grp".to_string(),
+            ciphertext_b64: "Y3Q=".to_string(),
+            epoch: 1,
+            reply_to: None,
+            forward_info: None,
+            priority: offline_protocol_core::MessagePriority::Medium,
+            armed_at: chrono::Utc::now(),
+            attempts: 1,
+        };
+        first.persist_relay_broadcast_pending("good", &entry);
+        let bytes = first.protocol_state_storage.clone().unwrap();
+        // Misfiled: a well-formed record whose logical id is not its key.
+        let record = crate::group_mesh::RelayBroadcastRecord {
+            version: crate::group_mesh::RELAY_BROADCAST_RECORD_VERSION,
+            logical_id: "good".to_string(),
+            entry,
+        };
+        first
+            .write_state_record(
+                bytes.as_ref(),
+                storage_keys::RELAY_BROADCAST_PENDING,
+                "misfiled",
+                &serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+        first
+            .write_state_record(
+                bytes.as_ref(),
+                storage_keys::RELAY_BROADCAST_PENDING,
+                "garbage",
+                b"not json",
+            )
+            .unwrap();
+        "good".to_string()
+    };
+
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls_for_test(storage).unwrap();
+    let restored: Vec<&String> = second.group_mesh.relay_broadcast_pending.keys().collect();
+    assert_eq!(restored, vec![&good]);
+    assert_eq!(second.persisted_relay_broadcast_ids(), vec![good]);
+}
